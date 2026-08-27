@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { BusinessDocumentV1 } from "../src/index.js";
+import type { PrintPacketV1 } from "../src/index.js";
 
-describe("business-document expression contract", () => {
+describe("PrintPacket expression contract", () => {
   it("types root and current-item paths", () => {
     const specification = {
-      format: "piqae.business-document/v1",
+      format: "printpacket/v1",
       media: { kind: "paged", size: "a4" },
       body: [
         {
@@ -18,7 +18,7 @@ describe("business-document expression contract", () => {
           ],
         },
       ],
-    } satisfies BusinessDocumentV1;
+    } satisfies PrintPacketV1;
 
     const [repeat] = specification.body;
     if (!repeat) throw new Error("repeat fixture is missing");

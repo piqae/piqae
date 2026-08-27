@@ -846,7 +846,7 @@ mod tests {
             sqlite_integrity_ok: None,
             executor_crashes: 0,
             last_error_code: None,
-            document_render: Default::default(),
+            document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
         };
         assert!(agent_is_connected_at(&agent, now));
         agent.last_seen_at = now - TimeDelta::seconds(91);

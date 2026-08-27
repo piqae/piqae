@@ -1097,7 +1097,7 @@ impl ContentMaterializer for EmbeddedMaterializer {
             ContentDescriptor::EncryptedDownload { .. } => {
                 Err(CloudWorkerError::new("embedded_content_key_required"))
             }
-            ContentDescriptor::Uri { .. } | ContentDescriptor::BusinessDocument { .. } => {
+            ContentDescriptor::Uri { .. } | ContentDescriptor::PrintPacket { .. } => {
                 Err(CloudWorkerError::new("embedded_content_unsupported"))
             }
         }

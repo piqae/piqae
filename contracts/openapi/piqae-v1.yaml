@@ -31,8 +31,8 @@ tags:
     description: Inspect canonical Cloud entitlements, reported-complete usage, and Stripe projections.
   - name: Jobs
     description: Register and observe durable print jobs.
-  - name: Documents
-    description: Optionally publish declarative templates and asynchronously render immutable PDF artifacts.
+  - name: PrintPacket
+    description: Publish PrintPacket templates and asynchronously render immutable PDF artifacts.
   - name: Printers
     description: Inspect installed printer queues and driver capabilities.
   - name: Routing
@@ -3110,37 +3110,37 @@ paths:
           $ref: "#/components/responses/Error"
         "503":
           $ref: "#/components/responses/Error"
-  /v1/business-document-templates:
+  /v1/printpacket/templates:
     post:
-      summary: Create a draft document template
-      tags: [Documents]
-      operationId: createBusinessDocumentTemplate
+      summary: Create a draft PrintPacket template
+      tags: [PrintPacket]
+      operationId: createPrintPacketTemplate
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/CreateBusinessDocumentTemplate" }
+            schema: { $ref: "#/components/schemas/CreatePrintPacketTemplate" }
       responses:
         "200":
           description: Existing idempotent draft template.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/BusinessDocumentTemplate" }
+              schema: { $ref: "#/components/schemas/PrintPacketTemplate" }
         "201":
           description: Draft template created.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/BusinessDocumentTemplate" }
+              schema: { $ref: "#/components/schemas/PrintPacketTemplate" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
-  /v1/business-document-templates/{template_id}:
+  /v1/printpacket/templates/{template_id}:
     get:
-      summary: Retrieve a document template
-      tags: [Documents]
-      operationId: retrieveBusinessDocumentTemplate
+      summary: Retrieve a PrintPacket template
+      tags: [PrintPacket]
+      operationId: retrievePrintPacketTemplate
       parameters:
         - name: template_id
           in: path
@@ -3151,14 +3151,14 @@ paths:
           description: Current template metadata and draft specification.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/BusinessDocumentTemplate" }
+              schema: { $ref: "#/components/schemas/PrintPacketTemplate" }
         "401": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
-  /v1/business-document-templates/{template_id}/publish:
+  /v1/printpacket/templates/{template_id}/publish:
     post:
-      summary: Publish an immutable document template revision
-      tags: [Documents]
-      operationId: publishBusinessDocumentTemplate
+      summary: Publish an immutable PrintPacket template revision
+      tags: [PrintPacket]
+      operationId: publishPrintPacketTemplate
       parameters:
         - name: template_id
           in: path
@@ -3169,26 +3169,26 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/PublishBusinessDocumentTemplate" }
+            schema: { $ref: "#/components/schemas/PublishPrintPacketTemplate" }
       responses:
         "200":
           description: Existing idempotent immutable revision.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/BusinessDocumentTemplateRevision" }
+              schema: { $ref: "#/components/schemas/PrintPacketTemplateRevision" }
         "201":
           description: Immutable revision published.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/BusinessDocumentTemplateRevision" }
+              schema: { $ref: "#/components/schemas/PrintPacketTemplateRevision" }
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
-  /v1/business-document-template-revisions/{revision_id}:
+  /v1/printpacket/template-revisions/{revision_id}:
     get:
-      summary: Retrieve an immutable document template revision
-      tags: [Documents]
-      operationId: retrieveBusinessDocumentTemplateRevision
+      summary: Retrieve an immutable PrintPacket template revision
+      tags: [PrintPacket]
+      operationId: retrievePrintPacketTemplateRevision
       parameters:
         - name: revision_id
           in: path
@@ -3199,40 +3199,40 @@ paths:
           description: Published immutable template revision.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/BusinessDocumentTemplateRevision" }
+              schema: { $ref: "#/components/schemas/PrintPacketTemplateRevision" }
         "401": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
-  /v1/business-document-renders:
+  /v1/printpacket/renders:
     post:
-      summary: Register an asynchronous document render
-      tags: [Documents]
-      operationId: createBusinessDocumentRender
+      summary: Register an asynchronous PrintPacket render
+      tags: [PrintPacket]
+      operationId: createPrintPacketRender
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/CreateBusinessDocumentRender" }
+            schema: { $ref: "#/components/schemas/CreatePrintPacketRender" }
       responses:
         "200":
           description: Existing idempotent render registration.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/BusinessDocumentRender" }
+              schema: { $ref: "#/components/schemas/PrintPacketRender" }
         "202":
           description: Render durably registered.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/BusinessDocumentRender" }
+              schema: { $ref: "#/components/schemas/PrintPacketRender" }
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
-  /v1/business-document-resources/{digest}:
+  /v1/printpacket/resources/{digest}:
     put:
-      summary: Store an immutable content-addressed business-document resource
-      tags: [Documents]
-      operationId: putBusinessDocumentResource
+      summary: Store an immutable content-addressed PrintPacket resource
+      tags: [PrintPacket]
+      operationId: putPrintPacketResource
       parameters:
         - name: digest
           in: path
@@ -3247,11 +3247,11 @@ paths:
         "204": { description: Resource verified and stored idempotently. }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
-  /v1/business-document-renders/{render_id}:
+  /v1/printpacket/renders/{render_id}:
     get:
-      summary: Retrieve a document render
-      tags: [Documents]
-      operationId: retrieveBusinessDocumentRender
+      summary: Retrieve a PrintPacket render
+      tags: [PrintPacket]
+      operationId: retrievePrintPacketRender
       parameters:
         - name: render_id
           in: path
@@ -3262,13 +3262,13 @@ paths:
           description: Render lifecycle and artifact metadata.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/BusinessDocumentRender" }
+              schema: { $ref: "#/components/schemas/PrintPacketRender" }
         "404": { $ref: "#/components/responses/Error" }
-  /v1/business-document-renders/{render_id}/render-readiness:
+  /v1/printpacket/renders/{render_id}/readiness:
     post:
       summary: Evaluate exact destination readiness and render policy
-      tags: [Documents]
-      operationId: evaluateBusinessDocumentRenderReadiness
+      tags: [PrintPacket]
+      operationId: evaluatePrintPacketRenderReadiness
       parameters:
         - name: render_id
           in: path
@@ -3278,22 +3278,22 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/EvaluateBusinessDocumentRenderReadiness" }
+            schema: { $ref: "#/components/schemas/EvaluatePrintPacketRenderReadiness" }
       responses:
         "200":
           description: Auditable policy decision using the destination's last authenticated capability report.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/BusinessDocumentRenderReadiness" }
+              schema: { $ref: "#/components/schemas/PrintPacketRenderReadiness" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
-  /v1/business-document-renders/{render_id}/artifact:
+  /v1/printpacket/renders/{render_id}/artifact:
     get:
-      summary: Download a completed document render artifact
+      summary: Download a completed PrintPacket render artifact
       description: Authenticated same-origin PDF download. The response never exposes an object-store key or signed URL.
-      tags: [Documents]
-      operationId: downloadBusinessDocumentRenderArtifact
+      tags: [PrintPacket]
+      operationId: downloadPrintPacketRenderArtifact
       parameters:
         - name: render_id
           in: path
@@ -3317,11 +3317,11 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
-  /v1/business-document-renders/{render_id}/print:
+  /v1/printpacket/renders/{render_id}/print:
     post:
-      summary: Register a print job for a completed document render
-      tags: [Documents]
-      operationId: printBusinessDocumentRender
+      summary: Register a print job for a completed PrintPacket render
+      tags: [PrintPacket]
+      operationId: printPacketRender
       parameters:
         - name: render_id
           in: path
@@ -3332,7 +3332,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/PrintBusinessDocumentRender" }
+            schema: { $ref: "#/components/schemas/PrintPacketPrintRequest" }
       responses:
         "200":
           description: Existing idempotent print job; this is not proof of physical delivery.
@@ -3347,12 +3347,12 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
-  /v1/business-document-renders/{render_id}/previews:
+  /v1/printpacket/renders/{render_id}/previews:
     post:
       summary: Create an expiring approval gate for a completed render
       description: Retains the exact rendered artifact. No print job is created before approval.
-      tags: [Documents]
-      operationId: createBusinessDocumentPreview
+      tags: [PrintPacket]
+      operationId: createPrintPacketPreview
       parameters:
         - name: render_id
           in: path
@@ -3363,33 +3363,33 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/CreateBusinessDocumentPreview" }
+            schema: { $ref: "#/components/schemas/CreatePrintPacketPreview" }
       responses:
-        "200": { description: Existing idempotent preview, content: { application/json: { schema: { $ref: "#/components/schemas/BusinessDocumentPreview" } } } }
-        "201": { description: Preview awaiting approval, content: { application/json: { schema: { $ref: "#/components/schemas/BusinessDocumentPreview" } } } }
+        "200": { description: Existing idempotent preview, content: { application/json: { schema: { $ref: "#/components/schemas/PrintPacketPreview" } } } }
+        "201": { description: Preview awaiting approval, content: { application/json: { schema: { $ref: "#/components/schemas/PrintPacketPreview" } } } }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
-  /v1/business-document-previews/{preview_id}:
+  /v1/printpacket/previews/{preview_id}:
     get:
-      summary: Retrieve a document preview approval gate
-      tags: [Documents]
-      operationId: retrieveBusinessDocumentPreview
+      summary: Retrieve a PrintPacket preview approval gate
+      tags: [PrintPacket]
+      operationId: retrievePrintPacketPreview
       parameters:
         - name: preview_id
           in: path
           required: true
           schema: { type: string }
       responses:
-        "200": { description: Preview lifecycle, content: { application/json: { schema: { $ref: "#/components/schemas/BusinessDocumentPreview" } } } }
+        "200": { description: Preview lifecycle, content: { application/json: { schema: { $ref: "#/components/schemas/PrintPacketPreview" } } } }
         "401": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
-  /v1/business-document-previews/{preview_id}/artifact:
+  /v1/printpacket/previews/{preview_id}/artifact:
     get:
       summary: Download the exact artifact held by a live preview
-      tags: [Documents]
-      operationId: downloadBusinessDocumentPreviewArtifact
+      tags: [PrintPacket]
+      operationId: downloadPrintPacketPreviewArtifact
       parameters:
         - name: preview_id
           in: path
@@ -3401,11 +3401,11 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
-  /v1/business-document-previews/{preview_id}/approve:
+  /v1/printpacket/previews/{preview_id}/approve:
     post:
       summary: Approve a preview and idempotently create exactly one print job
-      tags: [Documents]
-      operationId: approveBusinessDocumentPreview
+      tags: [PrintPacket]
+      operationId: approvePrintPacketPreview
       parameters:
         - name: preview_id
           in: path
@@ -3416,19 +3416,19 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/PrintBusinessDocumentRender" }
+            schema: { $ref: "#/components/schemas/PrintPacketPrintRequest" }
       responses:
-        "200": { description: Approved preview and idempotent job, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovedBusinessDocumentPreview" } } } }
-        "201": { description: Approved preview and newly registered job, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovedBusinessDocumentPreview" } } } }
+        "200": { description: Approved preview and idempotent job, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovedPrintPacketPreview" } } } }
+        "201": { description: Approved preview and newly registered job, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovedPrintPacketPreview" } } } }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
-  /v1/business-document-previews/{preview_id}/cancel:
+  /v1/printpacket/previews/{preview_id}/cancel:
     post:
       summary: Cancel a preview before approval
-      tags: [Documents]
-      operationId: cancelBusinessDocumentPreview
+      tags: [PrintPacket]
+      operationId: cancelPrintPacketPreview
       parameters:
         - name: preview_id
           in: path
@@ -3436,7 +3436,7 @@ paths:
           schema: { type: string }
         - $ref: "#/components/parameters/IdempotencyKey"
       responses:
-        "200": { description: Cancelled preview, content: { application/json: { schema: { $ref: "#/components/schemas/BusinessDocumentPreview" } } } }
+        "200": { description: Cancelled preview, content: { application/json: { schema: { $ref: "#/components/schemas/PrintPacketPreview" } } } }
         "401": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
@@ -4807,7 +4807,7 @@ components:
           description: >-
             Version 2 print-packet negotiation. Missing means the node predates
             print-packet negotiation and is treated as unsupported_old_node;
-            legacy renderer fields never imply support for this contract.
+            standalone renderer fields never imply support for this contract.
           oneOf:
             - { $ref: "#/components/schemas/PrintPacketCapabilitiesV2" }
             - { type: "null" }
@@ -4833,7 +4833,7 @@ components:
           minItems: 1
           maxItems: 16
           uniqueItems: true
-          items: { type: string, minLength: 1, maxLength: 128 }
+          items: { type: string, pattern: '^printpacket/v[1-9][0-9]*$', maxLength: 128 }
         feature_ids:
           type: array
           maxItems: 256
@@ -4873,8 +4873,9 @@ components:
     PrintPacketLimits:
       type: object
       additionalProperties: false
-      required: [max_input_bytes, max_output_bytes, max_pages, max_resource_count, max_resource_bytes, max_total_resource_bytes]
+      required: [max_template_bytes, max_input_bytes, max_output_bytes, max_pages, max_resource_count, max_resource_bytes, max_total_resource_bytes]
       properties:
+        max_template_bytes: { type: integer, format: int64, minimum: 1, maximum: 52428800 }
         max_input_bytes: { type: integer, format: int64, minimum: 1, maximum: 52428800 }
         max_output_bytes: { type: integer, format: int64, minimum: 1, maximum: 524288000 }
         max_pages: { type: integer, format: int64, minimum: 1, maximum: 100000 }
@@ -5022,8 +5023,8 @@ components:
           additionalProperties: false
           required: [type, policy, render, fallback, fallback_allowed, decision_reason]
           properties:
-            type: { const: business_document }
-            policy: { $ref: "#/components/schemas/BusinessDocumentRenderPolicy" }
+            type: { const: print_packet }
+            policy: { $ref: "#/components/schemas/PrintPacketRenderPolicy" }
             render:
               type: object
               additionalProperties: false
@@ -5038,14 +5039,14 @@ components:
                   items: { type: string, pattern: '^[a-z][a-z0-9._-]{0,127}$' }
                 conformance_profile: { type: string, const: printpacket.conformance/core-v1 }
                 output_profile: { type: string, const: printpacket.pdf-base14/v1 }
-                renderer_abi: { type: string, const: piqae.business-document-pdf/v1 }
-                resource_abi: { type: string, const: piqae.document-resources/v1 }
-                specification: { $ref: "#/components/schemas/BusinessDocumentV1" }
+                renderer_abi: { type: string, const: printpacket.pdf-renderer/v1 }
+                resource_abi: { type: string, const: printpacket.resources/v1 }
+                specification: { $ref: "#/components/schemas/PrintPacketV1" }
                 input: { type: object, additionalProperties: true }
                 resources:
                   type: array
                   maxItems: 64
-                  items: { $ref: "#/components/schemas/BusinessDocumentResourceDescriptor" }
+                  items: { $ref: "#/components/schemas/PrintPacketResourceDescriptor" }
                 expected_pdf_sha256: { $ref: "#/components/schemas/Sha256Hex" }
                 expected_pdf_bytes: { type: integer, format: int64, minimum: 1 }
                 expected_page_count: { type: integer, format: int64, minimum: 1, maximum: 100000 }
@@ -5222,11 +5223,17 @@ components:
       type: object
       additionalProperties: false
       required: [title, content_type, content]
-      oneOf:
-        - required: [printer_id]
-          not: { required: [target_id] }
-        - required: [target_id]
-          not: { required: [printer_id] }
+      allOf:
+        - oneOf:
+            - required: [printer_id]
+              not: { required: [target_id] }
+            - required: [target_id]
+              not: { required: [printer_id] }
+        - oneOf:
+            - properties: { content_type: { const: pdf } }
+              not: { required: [printer_native] }
+            - required: [printer_native]
+              properties: { content_type: { const: raw } }
       properties:
         printer_id:
           type: string
@@ -6628,7 +6635,7 @@ components:
         last_error_code: { type: [string, "null"] }
         document_render:
           $ref: "#/components/schemas/DocumentRenderCapabilities"
-          description: Last authenticated print-packet capability report; missing on legacy API deployments.
+          description: Last authenticated PrintPacket capability report; missing means node_update_required.
     Webhook:
       type: object
       required: [id, url, events, enabled, created_at]
@@ -6670,7 +6677,7 @@ components:
         dead_lettered_at:
           type: [string, "null"]
           format: date-time
-    BusinessDocumentEdges:
+    PrintPacketEdges:
       type: object
       additionalProperties: false
       required: [top_mm, right_mm, bottom_mm, left_mm]
@@ -6679,23 +6686,23 @@ components:
         right_mm: { type: number, minimum: 0, maximum: 100 }
         bottom_mm: { type: number, minimum: 0, maximum: 100 }
         left_mm: { type: number, minimum: 0, maximum: 100 }
-    BusinessDocumentExpression:
+    PrintPacketExpression:
       oneOf:
         - { type: object, additionalProperties: false, required: [type, value], properties: { type: { const: literal }, value: {} } }
         - { type: object, additionalProperties: false, required: [type, path], properties: { type: { enum: [path, current_path] }, path: { type: array, maxItems: 64, items: { type: string, maxLength: 120 } } } }
-        - { type: object, additionalProperties: false, required: [type, values], properties: { type: { enum: [coalesce, concat] }, values: { type: array, minItems: 1, maxItems: 100, items: { $ref: "#/components/schemas/BusinessDocumentExpression" } } } }
-        - { type: object, additionalProperties: false, required: [type, operator, left, right], properties: { type: { const: compare }, operator: { enum: [equal, not_equal, less, less_or_equal, greater, greater_or_equal] }, left: { $ref: "#/components/schemas/BusinessDocumentExpression" }, right: { $ref: "#/components/schemas/BusinessDocumentExpression" } } }
-        - { type: object, additionalProperties: false, required: [type, operator, values], properties: { type: { const: boolean }, operator: { enum: [and, or] }, values: { type: array, minItems: 1, maxItems: 100, items: { $ref: "#/components/schemas/BusinessDocumentExpression" } } } }
-        - { type: object, additionalProperties: false, required: [type, value], properties: { type: { const: not }, value: { $ref: "#/components/schemas/BusinessDocumentExpression" } } }
-        - { type: object, additionalProperties: false, required: [type, value], properties: { type: { const: exists }, value: { $ref: "#/components/schemas/BusinessDocumentExpression" } } }
-        - { type: object, additionalProperties: false, required: [type, collection, value], properties: { type: { const: contains }, collection: { $ref: "#/components/schemas/BusinessDocumentExpression" }, value: { $ref: "#/components/schemas/BusinessDocumentExpression" } } }
+        - { type: object, additionalProperties: false, required: [type, values], properties: { type: { enum: [coalesce, concat] }, values: { type: array, minItems: 1, maxItems: 100, items: { $ref: "#/components/schemas/PrintPacketExpression" } } } }
+        - { type: object, additionalProperties: false, required: [type, operator, left, right], properties: { type: { const: compare }, operator: { enum: [equal, not_equal, less, less_or_equal, greater, greater_or_equal] }, left: { $ref: "#/components/schemas/PrintPacketExpression" }, right: { $ref: "#/components/schemas/PrintPacketExpression" } } }
+        - { type: object, additionalProperties: false, required: [type, operator, values], properties: { type: { const: boolean }, operator: { enum: [and, or] }, values: { type: array, minItems: 1, maxItems: 100, items: { $ref: "#/components/schemas/PrintPacketExpression" } } } }
+        - { type: object, additionalProperties: false, required: [type, value], properties: { type: { const: not }, value: { $ref: "#/components/schemas/PrintPacketExpression" } } }
+        - { type: object, additionalProperties: false, required: [type, value], properties: { type: { const: exists }, value: { $ref: "#/components/schemas/PrintPacketExpression" } } }
+        - { type: object, additionalProperties: false, required: [type, collection, value], properties: { type: { const: contains }, collection: { $ref: "#/components/schemas/PrintPacketExpression" }, value: { $ref: "#/components/schemas/PrintPacketExpression" } } }
         - { type: object, additionalProperties: false, required: [type], properties: { type: { enum: [page_number, page_count] } } }
-        - { type: object, additionalProperties: false, required: [type, operator, left, right], properties: { type: { const: arithmetic }, operator: { enum: [add, subtract, multiply, divide] }, left: { $ref: "#/components/schemas/BusinessDocumentExpression" }, right: { $ref: "#/components/schemas/BusinessDocumentExpression" } } }
-        - { type: object, additionalProperties: false, required: [type, value], properties: { type: { const: format_number }, value: { $ref: "#/components/schemas/BusinessDocumentExpression" }, decimals: { type: integer, minimum: 0, maximum: 12, default: 0 } } }
-        - { type: object, additionalProperties: false, required: [type, amount, currency], properties: { type: { const: format_money }, amount: { $ref: "#/components/schemas/BusinessDocumentExpression" }, currency: { $ref: "#/components/schemas/BusinessDocumentExpression" }, decimals: { type: integer, minimum: 0, maximum: 6, default: 2 } } }
-        - { type: object, additionalProperties: false, required: [type, value, format], properties: { type: { const: format_date }, value: { $ref: "#/components/schemas/BusinessDocumentExpression" }, format: { enum: [iso_date, day_month_year, month_day_year] } } }
-        - { type: object, additionalProperties: false, required: [type, value, operation], properties: { type: { const: format_string }, value: { $ref: "#/components/schemas/BusinessDocumentExpression" }, operation: { enum: [trim, uppercase_ascii, lowercase_ascii] } } }
-    BusinessDocumentTextStyle:
+        - { type: object, additionalProperties: false, required: [type, operator, left, right], properties: { type: { const: arithmetic }, operator: { enum: [add, subtract, multiply, divide] }, left: { $ref: "#/components/schemas/PrintPacketExpression" }, right: { $ref: "#/components/schemas/PrintPacketExpression" } } }
+        - { type: object, additionalProperties: false, required: [type, value], properties: { type: { const: format_number }, value: { $ref: "#/components/schemas/PrintPacketExpression" }, decimals: { type: integer, minimum: 0, maximum: 12, default: 0 } } }
+        - { type: object, additionalProperties: false, required: [type, amount, currency], properties: { type: { const: format_money }, amount: { $ref: "#/components/schemas/PrintPacketExpression" }, currency: { $ref: "#/components/schemas/PrintPacketExpression" }, decimals: { type: integer, minimum: 0, maximum: 6, default: 2 } } }
+        - { type: object, additionalProperties: false, required: [type, value, format], properties: { type: { const: format_date }, value: { $ref: "#/components/schemas/PrintPacketExpression" }, format: { enum: [iso_date, day_month_year, month_day_year] } } }
+        - { type: object, additionalProperties: false, required: [type, value, operation], properties: { type: { const: format_string }, value: { $ref: "#/components/schemas/PrintPacketExpression" }, operation: { enum: [trim, uppercase_ascii, lowercase_ascii] } } }
+    PrintPacketTextStyle:
       type: object
       additionalProperties: false
       properties:
@@ -6704,8 +6711,8 @@ components:
         underline: { type: boolean, default: false }
         font_size_pt: { type: [number, "null"], minimum: 4, maximum: 72 }
         align: { enum: [left, center, right], default: left }
-        color: { $ref: "#/components/schemas/BusinessDocumentColor" }
-    BusinessDocumentColor:
+        color: { $ref: "#/components/schemas/PrintPacketColor" }
+    PrintPacketColor:
       type: object
       additionalProperties: false
       required: [red, green, blue]
@@ -6713,77 +6720,74 @@ components:
         red: { type: integer, minimum: 0, maximum: 255 }
         green: { type: integer, minimum: 0, maximum: 255 }
         blue: { type: integer, minimum: 0, maximum: 255 }
-    BusinessDocumentBoxStyle:
+    PrintPacketBoxStyle:
       type: object
       additionalProperties: false
       properties:
         padding_mm: { type: number, minimum: 0, maximum: 50, default: 0 }
-        background: { $ref: "#/components/schemas/BusinessDocumentColor" }
-        border_color: { $ref: "#/components/schemas/BusinessDocumentColor" }
+        background: { $ref: "#/components/schemas/PrintPacketColor" }
+        border_color: { $ref: "#/components/schemas/PrintPacketColor" }
         border_width_pt: { type: number, minimum: 0, maximum: 10, default: 0 }
-    BusinessDocumentTableStyle:
+    PrintPacketTableStyle:
       type: object
       additionalProperties: false
       properties:
         cell_padding_mm: { type: number, minimum: 0, maximum: 20, default: 1 }
-        header_background: { $ref: "#/components/schemas/BusinessDocumentColor" }
-        header_text_color: { $ref: "#/components/schemas/BusinessDocumentColor" }
-        border_color: { $ref: "#/components/schemas/BusinessDocumentColor" }
+        header_background: { $ref: "#/components/schemas/PrintPacketColor" }
+        header_text_color: { $ref: "#/components/schemas/PrintPacketColor" }
+        border_color: { $ref: "#/components/schemas/PrintPacketColor" }
         border_width_pt: { type: number, minimum: 0, maximum: 10, default: 0.25 }
-    BusinessDocumentInline:
+    PrintPacketInline:
       oneOf:
-        - { type: object, additionalProperties: false, required: [type, value], properties: { type: { const: text }, value: { type: string, maxLength: 100000 }, style: { $ref: "#/components/schemas/BusinessDocumentTextStyle" } } }
-        - { type: object, additionalProperties: false, required: [type, value], properties: { type: { const: value }, value: { $ref: "#/components/schemas/BusinessDocumentExpression" }, style: { $ref: "#/components/schemas/BusinessDocumentTextStyle" } } }
+        - { type: object, additionalProperties: false, required: [type, value], properties: { type: { const: text }, value: { type: string, maxLength: 100000 }, style: { $ref: "#/components/schemas/PrintPacketTextStyle" } } }
+        - { type: object, additionalProperties: false, required: [type, value], properties: { type: { const: value }, value: { $ref: "#/components/schemas/PrintPacketExpression" }, style: { $ref: "#/components/schemas/PrintPacketTextStyle" } } }
         - { type: object, additionalProperties: false, required: [type], properties: { type: { const: line_break } } }
-    BusinessDocumentNode:
+    PrintPacketNode:
       oneOf:
-        - { type: object, additionalProperties: false, required: [type, children], properties: { type: { enum: [section, stack, row] }, children: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } }, gap_mm: { type: number, minimum: 0, maximum: 100, default: 0 } } }
-        - { type: object, additionalProperties: false, required: [type, children], properties: { type: { const: box }, children: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } }, style: { $ref: "#/components/schemas/BusinessDocumentBoxStyle" } } }
-        - { type: object, additionalProperties: false, required: [type, content], properties: { type: { const: paragraph }, content: { type: array, maxItems: 10000, items: { $ref: "#/components/schemas/BusinessDocumentInline" } }, style: { $ref: "#/components/schemas/BusinessDocumentTextStyle" } } }
-        - { type: object, additionalProperties: false, required: [type, content], properties: { type: { const: heading }, content: { type: array, maxItems: 10000, items: { $ref: "#/components/schemas/BusinessDocumentInline" } }, level: { type: integer, minimum: 1, maximum: 6, default: 1 }, style: { $ref: "#/components/schemas/BusinessDocumentTextStyle" } } }
-        - { type: object, additionalProperties: false, required: [type, columns, children], properties: { type: { const: grid }, columns: { type: array, minItems: 1, maxItems: 32, items: { type: number, exclusiveMinimum: 0, maximum: 1000 } }, children: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } }, gap_mm: { type: number, minimum: 0, maximum: 100, default: 0 } } }
-        - { type: object, additionalProperties: false, required: [type, items, columns], properties: { type: { const: table }, items: { $ref: "#/components/schemas/BusinessDocumentExpression" }, columns: { type: array, minItems: 1, maxItems: 32, items: { $ref: "#/components/schemas/BusinessDocumentTableColumn" } }, repeat_header: { type: boolean, default: false }, empty: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } }, style: { $ref: "#/components/schemas/BusinessDocumentTableStyle" } } }
-        - { type: object, additionalProperties: false, required: [type, items, children], properties: { type: { const: repeat }, items: { $ref: "#/components/schemas/BusinessDocumentExpression" }, children: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } }, gap_mm: { type: number, minimum: 0, maximum: 100, default: 0 } } }
-        - { type: object, additionalProperties: false, required: [type, items, item], properties: { type: { const: data_list }, items: { $ref: "#/components/schemas/BusinessDocumentExpression" }, header: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } }, item: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } }, empty: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } }, repeat_header: { type: boolean, default: true }, gap_mm: { type: number, minimum: 0, maximum: 100, default: 0 } } }
-        - { type: object, additionalProperties: false, required: [type, condition, then], properties: { type: { const: conditional }, condition: { $ref: "#/components/schemas/BusinessDocumentExpression" }, then: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } }, else: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } } } }
+        - { type: object, additionalProperties: false, required: [type, children], properties: { type: { enum: [section, stack, row] }, children: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/PrintPacketNode" } }, gap_mm: { type: number, minimum: 0, maximum: 100, default: 0 } } }
+        - { type: object, additionalProperties: false, required: [type, children], properties: { type: { const: box }, children: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/PrintPacketNode" } }, style: { $ref: "#/components/schemas/PrintPacketBoxStyle" } } }
+        - { type: object, additionalProperties: false, required: [type, content], properties: { type: { const: paragraph }, content: { type: array, maxItems: 10000, items: { $ref: "#/components/schemas/PrintPacketInline" } }, style: { $ref: "#/components/schemas/PrintPacketTextStyle" } } }
+        - { type: object, additionalProperties: false, required: [type, content], properties: { type: { const: heading }, content: { type: array, maxItems: 10000, items: { $ref: "#/components/schemas/PrintPacketInline" } }, level: { type: integer, minimum: 1, maximum: 6, default: 1 }, style: { $ref: "#/components/schemas/PrintPacketTextStyle" } } }
+        - { type: object, additionalProperties: false, required: [type, columns, children], properties: { type: { const: grid }, columns: { type: array, minItems: 1, maxItems: 32, items: { type: number, exclusiveMinimum: 0, maximum: 1000 } }, children: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/PrintPacketNode" } }, gap_mm: { type: number, minimum: 0, maximum: 100, default: 0 } } }
+        - { type: object, additionalProperties: false, required: [type, items, columns], properties: { type: { const: table }, items: { $ref: "#/components/schemas/PrintPacketExpression" }, columns: { type: array, minItems: 1, maxItems: 32, items: { $ref: "#/components/schemas/PrintPacketTableColumn" } }, repeat_header: { type: boolean, default: false }, empty: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/PrintPacketNode" } }, style: { $ref: "#/components/schemas/PrintPacketTableStyle" } } }
+        - { type: object, additionalProperties: false, required: [type, items, children], properties: { type: { const: repeat }, items: { $ref: "#/components/schemas/PrintPacketExpression" }, children: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/PrintPacketNode" } }, gap_mm: { type: number, minimum: 0, maximum: 100, default: 0 } } }
+        - { type: object, additionalProperties: false, required: [type, items, item], properties: { type: { const: data_list }, items: { $ref: "#/components/schemas/PrintPacketExpression" }, header: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/PrintPacketNode" } }, item: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/PrintPacketNode" } }, empty: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/PrintPacketNode" } }, repeat_header: { type: boolean, default: true }, gap_mm: { type: number, minimum: 0, maximum: 100, default: 0 } } }
+        - { type: object, additionalProperties: false, required: [type, condition, then], properties: { type: { const: conditional }, condition: { $ref: "#/components/schemas/PrintPacketExpression" }, then: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/PrintPacketNode" } }, else: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/PrintPacketNode" } } } }
         - { type: object, additionalProperties: false, required: [type, height_mm], properties: { type: { const: spacer }, height_mm: { type: number, minimum: 0, maximum: 2000 } } }
         - { type: object, additionalProperties: false, required: [type], properties: { type: { const: divider }, width_pt: { type: number, exclusiveMinimum: 0, maximum: 10, default: 0.5 } } }
         - { type: object, additionalProperties: false, required: [type], properties: { type: { const: page_break } } }
-        - { type: object, additionalProperties: false, required: [type, children], properties: { type: { const: keep_together }, children: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } } } }
+        - { type: object, additionalProperties: false, required: [type, children], properties: { type: { const: keep_together }, children: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/PrintPacketNode" } } } }
         - { type: object, additionalProperties: false, required: [type, resource, width_mm, height_mm], properties: { type: { const: image }, resource: { type: string, maxLength: 120 }, width_mm: { type: number, exclusiveMinimum: 0, maximum: 2000 }, height_mm: { type: number, exclusiveMinimum: 0, maximum: 2000 }, fit: { enum: [contain, fill, scale_down], default: contain } } }
-        - { type: object, additionalProperties: false, required: [type, resource, width_mm, height_mm], properties: { type: { const: image_value }, resource: { $ref: "#/components/schemas/BusinessDocumentExpression" }, width_mm: { type: number, exclusiveMinimum: 0, maximum: 2000 }, height_mm: { type: number, exclusiveMinimum: 0, maximum: 2000 }, fit: { enum: [contain, fill, scale_down], default: contain } } }
-        - { type: object, additionalProperties: false, required: [type, value, size_mm], properties: { type: { const: qr }, value: { $ref: "#/components/schemas/BusinessDocumentExpression" }, size_mm: { type: number, minimum: 10, maximum: 100 }, error_correction: { enum: [L, M, Q, H], default: M } } }
-        - { type: object, additionalProperties: false, required: [type, value, symbology, width_mm, height_mm], properties: { type: { const: barcode }, value: { $ref: "#/components/schemas/BusinessDocumentExpression" }, symbology: { const: code128 }, width_mm: { type: number, minimum: 20, maximum: 2000 }, height_mm: { type: number, minimum: 8, maximum: 2000 }, human_readable: { type: boolean, default: false } } }
-    BusinessDocumentTableColumn:
+        - { type: object, additionalProperties: false, required: [type, resource, width_mm, height_mm], properties: { type: { const: image_value }, resource: { $ref: "#/components/schemas/PrintPacketExpression" }, width_mm: { type: number, exclusiveMinimum: 0, maximum: 2000 }, height_mm: { type: number, exclusiveMinimum: 0, maximum: 2000 }, fit: { enum: [contain, fill, scale_down], default: contain } } }
+        - { type: object, additionalProperties: false, required: [type, value, size_mm], properties: { type: { const: qr }, value: { $ref: "#/components/schemas/PrintPacketExpression" }, size_mm: { type: number, minimum: 10, maximum: 100 }, error_correction: { enum: [L, M, Q, H], default: M } } }
+        - { type: object, additionalProperties: false, required: [type, value, symbology, width_mm, height_mm], properties: { type: { const: barcode }, value: { $ref: "#/components/schemas/PrintPacketExpression" }, symbology: { const: code128 }, width_mm: { type: number, minimum: 20, maximum: 2000 }, height_mm: { type: number, minimum: 8, maximum: 2000 }, human_readable: { type: boolean, default: false } } }
+    PrintPacketTableColumn:
       type: object
       additionalProperties: false
       required: [header, cell]
       properties:
-        header: { type: array, maxItems: 10000, items: { $ref: "#/components/schemas/BusinessDocumentInline" } }
-        cell: { type: array, maxItems: 10000, items: { $ref: "#/components/schemas/BusinessDocumentInline" } }
+        header: { type: array, maxItems: 10000, items: { $ref: "#/components/schemas/PrintPacketInline" } }
+        cell: { type: array, maxItems: 10000, items: { $ref: "#/components/schemas/PrintPacketInline" } }
         width: { type: number, exclusiveMinimum: 0, maximum: 1000, default: 1 }
         align: { enum: [left, center, right], default: left }
-    BusinessDocumentRegion:
+    PrintPacketRegion:
       type: object
       additionalProperties: false
       properties:
-        first: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } }
-        default: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } }
-        last: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } }
-    BusinessDocumentV1:
+        first: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/PrintPacketNode" } }
+        default: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/PrintPacketNode" } }
+        last: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/PrintPacketNode" } }
+    PrintPacketV1:
       type: object
       additionalProperties: false
       required: [format, media, body]
       properties:
-        format:
-          type: string
-          enum: [printpacket/v1, piqae.business-document/v1]
-          description: New documents use printpacket/v1. The Piqae identifier is a frozen lossless input alias.
+        format: { type: string, const: printpacket/v1 }
         media:
           oneOf:
-            - { type: object, additionalProperties: false, required: [kind, size], properties: { kind: { const: paged }, size: { enum: [a4, a5, letter] }, orientation: { enum: [portrait, landscape], default: portrait }, margins: { $ref: "#/components/schemas/BusinessDocumentEdges" } } }
-            - { type: object, additionalProperties: false, required: [kind, width_mm], properties: { kind: { const: continuous }, width_mm: { type: number, exclusiveMinimum: 20, maximum: 500 }, margins: { $ref: "#/components/schemas/BusinessDocumentEdges" } } }
-            - { type: object, additionalProperties: false, required: [kind, width_mm, height_mm], properties: { kind: { const: label }, width_mm: { type: number, exclusiveMinimum: 20, maximum: 500 }, height_mm: { type: number, exclusiveMinimum: 10, maximum: 500 }, margins: { $ref: "#/components/schemas/BusinessDocumentEdges" } } }
+            - { type: object, additionalProperties: false, required: [kind, size], properties: { kind: { const: paged }, size: { enum: [a4, a5, letter] }, orientation: { enum: [portrait, landscape], default: portrait }, margins: { $ref: "#/components/schemas/PrintPacketEdges" } } }
+            - { type: object, additionalProperties: false, required: [kind, width_mm], properties: { kind: { const: continuous }, width_mm: { type: number, exclusiveMinimum: 20, maximum: 500 }, margins: { $ref: "#/components/schemas/PrintPacketEdges" } } }
+            - { type: object, additionalProperties: false, required: [kind, width_mm, height_mm], properties: { kind: { const: label }, width_mm: { type: number, exclusiveMinimum: 20, maximum: 500 }, height_mm: { type: number, exclusiveMinimum: 10, maximum: 500 }, margins: { $ref: "#/components/schemas/PrintPacketEdges" } } }
         theme:
           type: object
           additionalProperties: false
@@ -6803,47 +6807,44 @@ components:
               digest: { type: string, pattern: '^sha256:[a-f0-9]{64}$' }
               media_type: { const: image/jpeg }
               byte_length: { type: integer, minimum: 1, maximum: 4194304 }
-        header: { $ref: "#/components/schemas/BusinessDocumentRegion" }
-        body: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/BusinessDocumentNode" } }
-        footer: { $ref: "#/components/schemas/BusinessDocumentRegion" }
-    CreateBusinessDocumentTemplate:
+        header: { $ref: "#/components/schemas/PrintPacketRegion" }
+        body: { type: array, maxItems: 20000, items: { $ref: "#/components/schemas/PrintPacketNode" } }
+        footer: { $ref: "#/components/schemas/PrintPacketRegion" }
+    CreatePrintPacketTemplate:
       type: object
       additionalProperties: false
       required: [name, specification]
       properties:
         name: { type: string, minLength: 1, maxLength: 120 }
-        specification: { $ref: "#/components/schemas/BusinessDocumentV1" }
-    PublishBusinessDocumentTemplate:
+        specification: { $ref: "#/components/schemas/PrintPacketV1" }
+    PublishPrintPacketTemplate:
       type: object
       additionalProperties: false
       required: [specification]
       properties:
-        specification: { $ref: "#/components/schemas/BusinessDocumentV1" }
-    BusinessDocumentTemplate:
+        specification: { $ref: "#/components/schemas/PrintPacketV1" }
+    PrintPacketTemplate:
       type: object
       required: [id, name, state, specification, created_at, updated_at]
       properties:
         id: { type: string }
         name: { type: string }
         state: { enum: [draft, published, archived] }
-        specification: { $ref: "#/components/schemas/BusinessDocumentV1" }
+        specification: { $ref: "#/components/schemas/PrintPacketV1" }
         published_revision_id: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
-    BusinessDocumentTemplateRevision:
+    PrintPacketTemplateRevision:
       type: object
       required: [id, template_id, revision, renderer_profile, specification, created_at]
       properties:
         id: { type: string }
         template_id: { type: string }
-        specification: { $ref: "#/components/schemas/BusinessDocumentV1" }
+        specification: { $ref: "#/components/schemas/PrintPacketV1" }
         revision: { type: integer, minimum: 1 }
-        renderer_profile:
-          type: string
-          const: piqae.business-document/v1
-          description: Frozen persistence-era renderer profile identifier; packet negotiation uses the specification and conformance fields.
+        renderer_profile: { type: string, const: printpacket/v1 }
         created_at: { type: string, format: date-time }
-    CreateBusinessDocumentRender:
+    CreatePrintPacketRender:
       type: object
       additionalProperties: false
       required: [template_revision_id, input]
@@ -6853,7 +6854,7 @@ components:
           type: object
           maxProperties: 1000
           additionalProperties: true
-    BusinessDocumentRender:
+    PrintPacketRender:
       type: object
       required: [id, template_revision_id, state, created_at, updated_at]
       properties:
@@ -6867,7 +6868,7 @@ components:
         failure_code: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
-    PrintBusinessDocumentRender:
+    PrintPacketPrintRequest:
       type: object
       additionalProperties: false
       required: [title]
@@ -6877,14 +6878,14 @@ components:
         title: { type: string, minLength: 1, maxLength: 255 }
         options: { $ref: "#/components/schemas/JobOptions" }
         deliveries: { type: integer, minimum: 1, maximum: 100, default: 1 }
-        render_policy: { $ref: "#/components/schemas/BusinessDocumentRenderPolicy" }
-        render_cost: { $ref: "#/components/schemas/BusinessDocumentRenderCost" }
+        render_policy: { $ref: "#/components/schemas/PrintPacketRenderPolicy" }
+        render_cost: { $ref: "#/components/schemas/PrintPacketRenderCost" }
       oneOf:
         - required: [printer_id]
           not: { required: [target_id] }
         - required: [target_id]
           not: { required: [printer_id] }
-    BusinessDocumentRenderPolicy:
+    PrintPacketRenderPolicy:
       type: string
       enum: [automatic, cloud_only, prefer_node, require_node]
       default: automatic
@@ -6892,7 +6893,7 @@ components:
         automatic uses bounded measured costs; cloud_only always delivers the approved PDF;
         prefer_node uses exact node rendering only when compatible and otherwise delivers the
         approved PDF; require_node fails closed when exact compatibility is unavailable.
-    BusinessDocumentRenderCost:
+    PrintPacketRenderCost:
       type: object
       additionalProperties: false
       required: [document_count, page_count, pdf_bytes, input_bytes]
@@ -6901,7 +6902,7 @@ components:
         page_count: { type: integer, minimum: 1, maximum: 100000 }
         pdf_bytes: { type: integer, format: int64, minimum: 1, maximum: 524288000 }
         input_bytes: { type: integer, format: int64, minimum: 1, maximum: 52428800 }
-    BusinessDocumentResourceDescriptor:
+    PrintPacketResourceDescriptor:
       type: object
       additionalProperties: false
       required: [digest, media_type, byte_length]
@@ -6912,12 +6913,12 @@ components:
           enum: [image/jpeg]
           description: Renderer ABI v1 intentionally supports resolved JPEG resources only; fonts remain built-in Base-14/Windows-1252.
         byte_length: { type: integer, format: int64, minimum: 1, maximum: 4194304 }
-    BusinessDocumentRenderReadiness:
+    PrintPacketRenderReadiness:
       type: object
       additionalProperties: false
       required: [requested_policy, selected_mode, status, reason, approved_pdf_fallback, destination, estimates]
       properties:
-        requested_policy: { $ref: "#/components/schemas/BusinessDocumentRenderPolicy" }
+        requested_policy: { $ref: "#/components/schemas/PrintPacketRenderPolicy" }
         selected_mode: { type: string, enum: [cloud_pdf, node_render] }
         status: { type: string, enum: [ready, fallback_ready, node_update_required] }
         reason: { type: string, maxLength: 128 }
@@ -6954,20 +6955,20 @@ components:
           properties:
             cloud_ms: { type: integer, format: int64, minimum: 0 }
             node_ms: { type: integer, format: int64, minimum: 0 }
-    EvaluateBusinessDocumentRenderReadiness:
+    EvaluatePrintPacketRenderReadiness:
       type: object
       additionalProperties: false
       required: [printer_id]
       properties:
         printer_id: { type: string }
-        render_policy: { $ref: "#/components/schemas/BusinessDocumentRenderPolicy" }
-        render_cost: { $ref: "#/components/schemas/BusinessDocumentRenderCost" }
-    CreateBusinessDocumentPreview:
+        render_policy: { $ref: "#/components/schemas/PrintPacketRenderPolicy" }
+        render_cost: { $ref: "#/components/schemas/PrintPacketRenderCost" }
+    CreatePrintPacketPreview:
       type: object
       additionalProperties: false
       properties:
         expires_in_seconds: { type: integer, minimum: 60, maximum: 1800, default: 600 }
-    BusinessDocumentPreview:
+    PrintPacketPreview:
       type: object
       additionalProperties: false
       required: [id, render_id, state, job_id, expires_at, created_at, updated_at]
@@ -6979,12 +6980,12 @@ components:
         expires_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
-    ApprovedBusinessDocumentPreview:
+    ApprovedPrintPacketPreview:
       type: object
       additionalProperties: false
       required: [preview, job]
       properties:
-        preview: { $ref: "#/components/schemas/BusinessDocumentPreview" }
+        preview: { $ref: "#/components/schemas/PrintPacketPreview" }
         job: { $ref: "#/components/schemas/Job" }
     ErrorEnvelope:
       type: object

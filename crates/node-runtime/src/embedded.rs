@@ -1774,7 +1774,7 @@ fn offer_content_digest(offer: &JobOffer) -> Option<String> {
         | piqae_protocol::agent::ContentDescriptor::EncryptedDownload { sha256, .. } => {
             Some(sha256.clone())
         }
-        piqae_protocol::agent::ContentDescriptor::BusinessDocument { .. } => None,
+        piqae_protocol::agent::ContentDescriptor::PrintPacket { .. } => None,
     }
 }
 

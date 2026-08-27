@@ -1829,6 +1829,51 @@ mod tests {
         serde_json::from_slice(&body).expect("virtual node sync response JSON")
     }
 
+    fn virtual_print_packet_capabilities() -> piqae_protocol::agent::DocumentRenderCapabilities {
+        let neutral = printpacket::RendererCapabilities::reference_pdf();
+        piqae_protocol::agent::DocumentRenderCapabilities {
+            renderer_abi: Some("printpacket.pdf-renderer/v1".into()),
+            resource_abi: Some("printpacket.resources/v1".into()),
+            persistent_cache: true,
+            image_media_types: vec!["image/jpeg".into()],
+            print_packet: Some(piqae_protocol::agent::PrintPacketCapabilitiesV2 {
+                negotiation_version: 2,
+                supported_packet_versions: vec![printpacket::DOCUMENT_V1.into()],
+                feature_ids: neutral
+                    .features
+                    .iter()
+                    .map(|feature| {
+                        serde_json::to_value(feature)
+                            .expect("feature JSON")
+                            .as_str()
+                            .expect("feature string")
+                            .to_owned()
+                    })
+                    .collect(),
+                conformance_profiles: vec![printpacket::CONFORMANCE_CORE_V1.into()],
+                output_profiles: vec![piqae_protocol::agent::PrintPacketOutputProfile::Pdf {
+                    id: printpacket::PDF_BASE14_V1.into(),
+                    media_type: "application/pdf".into(),
+                }],
+                deterministic: true,
+                limits: piqae_protocol::agent::PrintPacketLimits {
+                    max_template_bytes: neutral.limits.max_template_bytes,
+                    max_input_bytes: neutral.limits.max_data_bytes,
+                    max_output_bytes: neutral.limits.max_output_bytes,
+                    max_pages: neutral.limits.max_pages,
+                    max_resource_count: neutral.limits.max_resources,
+                    max_resource_bytes: neutral.limits.max_resource_bytes,
+                    max_total_resource_bytes: neutral.limits.max_total_resource_bytes,
+                },
+                resource_types: vec!["image/jpeg".into()],
+                direct_offline: true,
+                native_language_profiles: Vec::new(),
+                implementation_version: "virtual-printpacket-v2".into(),
+            }),
+            ..Default::default()
+        }
+    }
+
     #[tokio::test]
     #[allow(
         clippy::too_many_lines,
@@ -1845,7 +1890,7 @@ mod tests {
             &application.router,
             idempotent_api_request(
                 "POST",
-                "/v1/business-document-templates",
+                "/v1/printpacket/templates",
                 "piq_test_integration",
                 "node-render-template",
                 Some(
@@ -1860,7 +1905,7 @@ mod tests {
             &application.router,
             idempotent_api_request(
                 "POST",
-                &format!("/v1/business-document-templates/{template_id}/publish"),
+                &format!("/v1/printpacket/templates/{template_id}/publish"),
                 "piq_test_integration",
                 "node-render-publish",
                 Some(&serde_json::json!({"specification": specification}).to_string()),
@@ -1871,7 +1916,7 @@ mod tests {
             &application.router,
             idempotent_api_request(
                 "POST",
-                "/v1/business-document-renders",
+                "/v1/printpacket/renders",
                 "piq_test_integration",
                 "node-render-register",
                 Some(
@@ -1894,7 +1939,7 @@ mod tests {
             &application.router,
             api_request(
                 "GET",
-                &format!("/v1/business-document-renders/{render_id}"),
+                &format!("/v1/printpacket/renders/{render_id}"),
                 "piq_test_integration",
                 None,
             ),
@@ -1902,13 +1947,7 @@ mod tests {
         .await;
         let page_count = completed["page_count"].as_u64().expect("completed pages");
 
-        let supported = piqae_protocol::agent::DocumentRenderCapabilities {
-            renderer_abi: Some("piqae.business-document-pdf/v1".into()),
-            resource_abi: Some("piqae.document-resources/v1".into()),
-            persistent_cache: true,
-            image_media_types: vec!["image/jpeg".into()],
-            ..Default::default()
-        };
+        let supported = virtual_print_packet_capabilities();
         assert!(
             sync_virtual_document_node(&application, supported.clone(), false)
                 .await
@@ -1919,7 +1958,7 @@ mod tests {
             &application.router,
             api_request(
                 "POST",
-                &format!("/v1/business-document-renders/{render_id}/render-readiness"),
+                &format!("/v1/printpacket/renders/{render_id}/readiness"),
                 "piq_test_integration",
                 Some(
                     &serde_json::json!({
@@ -1932,13 +1971,55 @@ mod tests {
         )
         .await;
         assert_eq!(readiness["selected_mode"], "node_render");
+        assert_eq!(readiness["status"], "ready");
         assert_eq!(readiness["destination"]["ready"], true);
+
+        for (label, incompatible) in [
+            ("determinism", {
+                let mut value = supported.clone();
+                value
+                    .print_packet
+                    .as_mut()
+                    .expect("PrintPacket capability")
+                    .deterministic = false;
+                value
+            }),
+            ("renderer ABI", {
+                let mut value = supported.clone();
+                value.renderer_abi = Some("printpacket.pdf-renderer/v2".into());
+                value
+            }),
+        ] {
+            let _ = sync_virtual_document_node(&application, incompatible, false).await;
+            let incompatible_readiness = json_response(
+                &application.router,
+                api_request(
+                    "POST",
+                    &format!("/v1/printpacket/renders/{render_id}/readiness"),
+                    "piq_test_integration",
+                    Some(
+                        &serde_json::json!({
+                            "printer_id": application.printer_id,
+                            "render_policy": "prefer_node"
+                        })
+                        .to_string(),
+                    ),
+                ),
+            )
+            .await;
+            assert_eq!(
+                incompatible_readiness["status"], "node_update_required",
+                "{label} incompatibility must request a node update"
+            );
+            assert_eq!(incompatible_readiness["selected_mode"], "cloud_pdf");
+        }
+        let _ = sync_virtual_document_node(&application, supported.clone(), false).await;
 
         let required = json_response(
             &application.router,
             idempotent_api_request(
                 "POST",
-                &format!("/v1/business-document-renders/{render_id}/print"),
+                &format!("/v1/printpacket/renders/{render_id}/print"),
                 "piq_test_integration",
                 "node-render-required",
                 Some(
@@ -1963,18 +2044,18 @@ mod tests {
             .into_iter()
             .find(|offer| offer.job.id == required_job)
             .expect("required node-render offer");
-        let piqae_protocol::agent::ContentDescriptor::BusinessDocument {
+        let piqae_protocol::agent::ContentDescriptor::PrintPacket {
             policy,
             render,
             fallback_allowed,
             ..
         } = offer.content
         else {
-            panic!("require_node must produce a business-document offer");
+            panic!("require_node must produce a PrintPacket offer");
         };
         assert_eq!(
             policy,
-            piqae_protocol::agent::BusinessDocumentRenderPolicy::RequireNode
+            piqae_protocol::agent::PrintPacketRenderPolicy::RequireNode
         );
         assert!(!fallback_allowed);
         assert_eq!(u64::from(render.expected_page_count), page_count);
@@ -1989,7 +2070,7 @@ mod tests {
             &application.router,
             idempotent_api_request(
                 "POST",
-                &format!("/v1/business-document-renders/{render_id}/print"),
+                &format!("/v1/printpacket/renders/{render_id}/print"),
                 "piq_test_integration",
                 "node-render-preferred-fallback",
                 Some(
@@ -2012,7 +2093,7 @@ mod tests {
             .clone()
             .oneshot(idempotent_api_request(
                 "POST",
-                &format!("/v1/business-document-renders/{render_id}/print"),
+                &format!("/v1/printpacket/renders/{render_id}/print"),
                 "piq_test_integration",
                 "node-render-required-unavailable",
                 Some(
@@ -2037,7 +2118,7 @@ mod tests {
             &application.router,
             idempotent_api_request(
                 "POST",
-                "/v1/business-document-templates",
+                "/v1/printpacket/templates",
                 "piq_test_integration",
                 "template-receipt-v1",
                 Some(
@@ -2051,12 +2132,13 @@ mod tests {
             ),
         )
         .await;
+        assert_eq!(template["specification"]["format"], "printpacket/v1");
         let template_id = template["id"].as_str().expect("template id");
         let revision = json_response(
             &application.router,
             idempotent_api_request(
                 "POST",
-                &format!("/v1/business-document-templates/{template_id}/publish"),
+                &format!("/v1/printpacket/templates/{template_id}/publish"),
                 "piq_test_integration",
                 "publish-receipt-v1",
                 Some(&serde_json::json!({"specification": template["specification"]}).to_string()),
@@ -2068,7 +2150,7 @@ mod tests {
             &application.router,
             idempotent_api_request(
                 "POST",
-                &format!("/v1/business-document-templates/{template_id}/publish"),
+                &format!("/v1/printpacket/templates/{template_id}/publish"),
                 "piq_test_integration",
                 "publish-receipt-v1",
                 Some(&serde_json::json!({"specification": template["specification"]}).to_string()),
@@ -2081,7 +2163,7 @@ mod tests {
             .clone()
             .oneshot(idempotent_api_request(
                 "POST",
-                &format!("/v1/business-document-templates/{template_id}/publish"),
+                &format!("/v1/printpacket/templates/{template_id}/publish"),
                 "piq_test_integration",
                 "publish-receipt-v1",
                 Some(
@@ -2099,7 +2181,7 @@ mod tests {
             &application.router,
             idempotent_api_request(
                 "POST",
-                "/v1/business-document-renders",
+                "/v1/printpacket/renders",
                 "piq_test_integration",
                 "render-receipt-1042",
                 Some(
@@ -2128,7 +2210,7 @@ mod tests {
             .clone()
             .oneshot(idempotent_api_request(
                 "POST",
-                "/v1/business-document-renders",
+                "/v1/printpacket/renders",
                 "piq_test_integration",
                 "render-receipt-1042",
                 Some(
@@ -2147,7 +2229,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/business-document-renders/{}/artifact",
+                    "/v1/printpacket/renders/{}/artifact",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
@@ -2166,7 +2248,7 @@ mod tests {
             api_request(
                 "GET",
                 &format!(
-                    "/v1/business-document-renders/{}",
+                    "/v1/printpacket/renders/{}",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
@@ -2195,7 +2277,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/business-document-renders/{}/artifact",
+                    "/v1/printpacket/renders/{}/artifact",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
@@ -2211,7 +2293,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/business-document-renders/{}/artifact",
+                    "/v1/printpacket/renders/{}/artifact",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
@@ -2266,7 +2348,7 @@ mod tests {
             idempotent_api_request(
                 "POST",
                 &format!(
-                    "/v1/business-document-renders/{}/previews",
+                    "/v1/printpacket/renders/{}/previews",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
@@ -2282,7 +2364,7 @@ mod tests {
             .clone()
             .oneshot(api_request(
                 "GET",
-                &format!("/v1/business-document-previews/{preview_id}/artifact"),
+                &format!("/v1/printpacket/previews/{preview_id}/artifact"),
                 "piq_test_integration",
                 None,
             ))
@@ -2304,7 +2386,7 @@ mod tests {
             &application.router,
             idempotent_api_request(
                 "POST",
-                &format!("/v1/business-document-previews/{preview_id}/approve"),
+                &format!("/v1/printpacket/previews/{preview_id}/approve"),
                 "piq_test_integration",
                 &approval_key,
                 Some(
@@ -2325,7 +2407,7 @@ mod tests {
             &application.router,
             idempotent_api_request(
                 "POST",
-                &format!("/v1/business-document-previews/{preview_id}/approve"),
+                &format!("/v1/printpacket/previews/{preview_id}/approve"),
                 "piq_test_integration",
                 &approval_key,
                 Some(
@@ -2447,7 +2529,7 @@ mod tests {
             ..
         } = &offer.content
         else {
-            panic!("business-document print must use immutable download content");
+            panic!("PrintPacket print must use immutable download content");
         };
         assert_eq!(offered_sha256, &artifact_upload.expected_sha256);
         let reservation = offer
@@ -2494,7 +2576,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/business-document-renders/{}",
+                    "/v1/printpacket/renders/{}",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_other",
@@ -2509,7 +2591,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/business-document-renders/{}/artifact",
+                    "/v1/printpacket/renders/{}/artifact",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_other",
@@ -2534,7 +2616,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/business-document-renders/{}/artifact",
+                    "/v1/printpacket/renders/{}/artifact",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
@@ -2555,7 +2637,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/business-document-renders/{}/artifact",
+                    "/v1/printpacket/renders/{}/artifact",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
@@ -3567,6 +3649,116 @@ mod tests {
             .expect("stored jobs");
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].state, piqae_domain::JobState::WaitingForAgent);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn printer_native_jobs_require_a_current_exact_printer_language_binding() {
+        let application = application().await;
+        let request = |key: &str, printer_native: serde_json::Value| {
+            idempotent_api_request(
+                "POST",
+                "/v1/jobs",
+                "piq_test_integration",
+                key,
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "title": "Virtual receipt",
+                        "content_type": "raw",
+                        "printer_native": printer_native,
+                        "content": {"type": "base64", "data": "G0BmaXh0dXJl"}
+                    })
+                    .to_string(),
+                ),
+            )
+        };
+
+        let missing = application
+            .router
+            .clone()
+            .oneshot(idempotent_api_request(
+                "POST",
+                "/v1/jobs",
+                "piq_test_integration",
+                "raw-missing-binding",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "title": "Unbound receipt",
+                        "content_type": "raw",
+                        "content": {"type": "base64", "data": "G0BmaXh0dXJl"}
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .expect("missing binding response");
+        assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+
+        let mut capabilities = virtual_print_packet_capabilities();
+        let packet = capabilities
+            .print_packet
+            .as_mut()
+            .expect("PrintPacket capability");
+        packet.output_profiles.push(
+            piqae_protocol::agent::PrintPacketOutputProfile::PrinterNative {
+                id: "escpos.generic/v1".into(),
+                media_type: "application/vnd.escpos".into(),
+                language_profile_id: "escpos.generic/v1".into(),
+            },
+        );
+        packet
+            .native_language_profiles
+            .push(piqae_protocol::agent::PrinterNativeLanguageProfile {
+                id: "escpos.generic/v1".into(),
+                language: "escpos".into(),
+                version: "1".into(),
+                media_type: "application/vnd.escpos".into(),
+                printer_ids: vec![application.printer_id.to_string()],
+            });
+        let _ = sync_virtual_document_node(&application, capabilities, false).await;
+
+        let wrong = application
+            .router
+            .clone()
+            .oneshot(request(
+                "raw-wrong-binding",
+                serde_json::json!({
+                    "output_profile_id": "zpl.generic/v1",
+                    "language_profile_id": "zpl.generic/v1"
+                }),
+            ))
+            .await
+            .expect("wrong binding response");
+        assert_eq!(wrong.status(), StatusCode::CONFLICT);
+
+        let accepted = application
+            .router
+            .clone()
+            .oneshot(request(
+                "raw-exact-binding",
+                serde_json::json!({
+                    "output_profile_id": "escpos.generic/v1",
+                    "language_profile_id": "escpos.generic/v1"
+                }),
+            ))
+            .await
+            .expect("exact binding response");
+        assert_eq!(accepted.status(), StatusCode::CREATED);
+        let accepted: serde_json::Value = serde_json::from_slice(
+            &accepted
+                .into_body()
+                .collect()
+                .await
+                .expect("exact binding body")
+                .to_bytes(),
+        )
+        .expect("exact binding JSON");
+        assert_eq!(
+            accepted["metadata"]["piqae.printer_native.language_profile"],
+            "escpos.generic/v1"
+        );
     }
 
     #[tokio::test]

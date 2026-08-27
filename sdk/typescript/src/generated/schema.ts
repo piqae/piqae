@@ -2376,7 +2376,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-templates": {
+    "/v1/printpacket/templates": {
         parameters: {
             query?: never;
             header?: never;
@@ -2385,23 +2385,23 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Create a draft document template */
-        post: operations["createBusinessDocumentTemplate"];
+        /** Create a draft PrintPacket template */
+        post: operations["createPrintPacketTemplate"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-templates/{template_id}": {
+    "/v1/printpacket/templates/{template_id}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Retrieve a document template */
-        get: operations["retrieveBusinessDocumentTemplate"];
+        /** Retrieve a PrintPacket template */
+        get: operations["retrievePrintPacketTemplate"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2410,7 +2410,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-templates/{template_id}/publish": {
+    "/v1/printpacket/templates/{template_id}/publish": {
         parameters: {
             query?: never;
             header?: never;
@@ -2419,23 +2419,23 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Publish an immutable document template revision */
-        post: operations["publishBusinessDocumentTemplate"];
+        /** Publish an immutable PrintPacket template revision */
+        post: operations["publishPrintPacketTemplate"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-template-revisions/{revision_id}": {
+    "/v1/printpacket/template-revisions/{revision_id}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Retrieve an immutable document template revision */
-        get: operations["retrieveBusinessDocumentTemplateRevision"];
+        /** Retrieve an immutable PrintPacket template revision */
+        get: operations["retrievePrintPacketTemplateRevision"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2444,7 +2444,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-renders": {
+    "/v1/printpacket/renders": {
         parameters: {
             query?: never;
             header?: never;
@@ -2453,15 +2453,15 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Register an asynchronous document render */
-        post: operations["createBusinessDocumentRender"];
+        /** Register an asynchronous PrintPacket render */
+        post: operations["createPrintPacketRender"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-resources/{digest}": {
+    "/v1/printpacket/resources/{digest}": {
         parameters: {
             query?: never;
             header?: never;
@@ -2469,8 +2469,8 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Store an immutable content-addressed business-document resource */
-        put: operations["putBusinessDocumentResource"];
+        /** Store an immutable content-addressed PrintPacket resource */
+        put: operations["putPrintPacketResource"];
         post?: never;
         delete?: never;
         options?: never;
@@ -2478,15 +2478,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-renders/{render_id}": {
+    "/v1/printpacket/renders/{render_id}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Retrieve a document render */
-        get: operations["retrieveBusinessDocumentRender"];
+        /** Retrieve a PrintPacket render */
+        get: operations["retrievePrintPacketRender"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2495,7 +2495,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-renders/{render_id}/render-readiness": {
+    "/v1/printpacket/renders/{render_id}/readiness": {
         parameters: {
             query?: never;
             header?: never;
@@ -2505,14 +2505,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Evaluate exact destination readiness and render policy */
-        post: operations["evaluateBusinessDocumentRenderReadiness"];
+        post: operations["evaluatePrintPacketRenderReadiness"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-renders/{render_id}/artifact": {
+    "/v1/printpacket/renders/{render_id}/artifact": {
         parameters: {
             query?: never;
             header?: never;
@@ -2520,10 +2520,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Download a completed document render artifact
+         * Download a completed PrintPacket render artifact
          * @description Authenticated same-origin PDF download. The response never exposes an object-store key or signed URL.
          */
-        get: operations["downloadBusinessDocumentRenderArtifact"];
+        get: operations["downloadPrintPacketRenderArtifact"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2532,7 +2532,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-renders/{render_id}/print": {
+    "/v1/printpacket/renders/{render_id}/print": {
         parameters: {
             query?: never;
             header?: never;
@@ -2541,15 +2541,15 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Register a print job for a completed document render */
-        post: operations["printBusinessDocumentRender"];
+        /** Register a print job for a completed PrintPacket render */
+        post: operations["printPacketRender"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-renders/{render_id}/previews": {
+    "/v1/printpacket/renders/{render_id}/previews": {
         parameters: {
             query?: never;
             header?: never;
@@ -2562,22 +2562,22 @@ export interface paths {
          * Create an expiring approval gate for a completed render
          * @description Retains the exact rendered artifact. No print job is created before approval.
          */
-        post: operations["createBusinessDocumentPreview"];
+        post: operations["createPrintPacketPreview"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-previews/{preview_id}": {
+    "/v1/printpacket/previews/{preview_id}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Retrieve a document preview approval gate */
-        get: operations["retrieveBusinessDocumentPreview"];
+        /** Retrieve a PrintPacket preview approval gate */
+        get: operations["retrievePrintPacketPreview"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2586,7 +2586,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-previews/{preview_id}/artifact": {
+    "/v1/printpacket/previews/{preview_id}/artifact": {
         parameters: {
             query?: never;
             header?: never;
@@ -2594,7 +2594,7 @@ export interface paths {
             cookie?: never;
         };
         /** Download the exact artifact held by a live preview */
-        get: operations["downloadBusinessDocumentPreviewArtifact"];
+        get: operations["downloadPrintPacketPreviewArtifact"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2603,7 +2603,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-previews/{preview_id}/approve": {
+    "/v1/printpacket/previews/{preview_id}/approve": {
         parameters: {
             query?: never;
             header?: never;
@@ -2613,14 +2613,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Approve a preview and idempotently create exactly one print job */
-        post: operations["approveBusinessDocumentPreview"];
+        post: operations["approvePrintPacketPreview"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-previews/{preview_id}/cancel": {
+    "/v1/printpacket/previews/{preview_id}/cancel": {
         parameters: {
             query?: never;
             header?: never;
@@ -2630,7 +2630,7 @@ export interface paths {
         get?: never;
         put?: never;
         /** Cancel a preview before approval */
-        post: operations["cancelBusinessDocumentPreview"];
+        post: operations["cancelPrintPacketPreview"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3361,7 +3361,7 @@ export interface components {
             image_media_types?: "image/jpeg"[];
             font_media_types?: string[];
             cached_resource_digests?: components["schemas"]["Sha256Hex"][];
-            /** @description Version 2 print-packet negotiation. Missing means the node predates print-packet negotiation and is treated as unsupported_old_node; legacy renderer fields never imply support for this contract. */
+            /** @description Version 2 print-packet negotiation. Missing means the node predates print-packet negotiation and is treated as unsupported_old_node; standalone renderer fields never imply support for this contract. */
             print_packet?: components["schemas"]["PrintPacketCapabilitiesV2"] | null;
         };
         PrintPacketCapabilitiesV2: {
@@ -3382,6 +3382,8 @@ export interface components {
             implementation_version: string;
         };
         PrintPacketLimits: {
+            /** Format: int64 */
+            max_template_bytes: number;
             /** Format: int64 */
             max_input_bytes: number;
             /** Format: int64 */
@@ -3483,8 +3485,8 @@ export interface components {
         };
         ContentDescriptor: {
             /** @constant */
-            type: "business_document";
-            policy: components["schemas"]["BusinessDocumentRenderPolicy"];
+            type: "print_packet";
+            policy: components["schemas"]["PrintPacketRenderPolicy"];
             render: {
                 /** @constant */
                 negotiation_version: 2;
@@ -3496,19 +3498,19 @@ export interface components {
                 /** @constant */
                 output_profile: "printpacket.pdf-base14/v1";
                 /** @constant */
-                renderer_abi: "piqae.business-document-pdf/v1";
+                renderer_abi: "printpacket.pdf-renderer/v1";
                 /** @constant */
-                resource_abi: "piqae.document-resources/v1";
-                specification: components["schemas"]["BusinessDocumentV1"];
+                resource_abi: "printpacket.resources/v1";
+                specification: components["schemas"]["PrintPacketV1"];
                 input: {
                     [key: string]: unknown;
                 };
-                resources: components["schemas"]["BusinessDocumentResourceDescriptor"][];
+                resources: components["schemas"]["PrintPacketResourceDescriptor"][];
                 expected_pdf_sha256: components["schemas"]["Sha256Hex"];
                 /** Format: int64 */
                 expected_pdf_bytes: number;
                 /** Format: int64 */
-                expected_pages: number;
+                expected_page_count: number;
             };
             fallback: components["schemas"]["ContentDescriptor"];
             fallback_allowed: boolean;
@@ -3631,7 +3633,13 @@ export interface components {
             };
             /** @description Digest returned by resolvePrintIntent. Required when submitting a resolved professional workflow. */
             resolved_ticket_digest?: components["schemas"]["Sha256Hex"];
-        } & (unknown | unknown);
+        } & ((unknown | unknown) & ({
+            /** @constant */
+            content_type?: "pdf";
+        } | {
+            /** @constant */
+            content_type?: "raw";
+        }));
         PrinterNativeJobDescriptor: {
             output_profile_id: string;
             language_profile_id: string;
@@ -4443,7 +4451,7 @@ export interface components {
              */
             executor_crashes?: number;
             last_error_code?: string | null;
-            /** @description Last authenticated print-packet capability report; missing on legacy API deployments. */
+            /** @description Last authenticated PrintPacket capability report; missing means node_update_required. */
             document_render?: components["schemas"]["DocumentRenderCapabilities"];
         };
         Webhook: {
@@ -4467,13 +4475,13 @@ export interface components {
             /** Format: date-time */
             dead_lettered_at: string | null;
         };
-        BusinessDocumentEdges: {
+        PrintPacketEdges: {
             top_mm: number;
             right_mm: number;
             bottom_mm: number;
             left_mm: number;
         };
-        BusinessDocumentExpression: {
+        PrintPacketExpression: {
             /** @constant */
             type: "literal";
             value: unknown;
@@ -4484,33 +4492,33 @@ export interface components {
         } | {
             /** @enum {unknown} */
             type: "coalesce" | "concat";
-            values: components["schemas"]["BusinessDocumentExpression"][];
+            values: components["schemas"]["PrintPacketExpression"][];
         } | {
             /** @constant */
             type: "compare";
             /** @enum {unknown} */
             operator: "equal" | "not_equal" | "less" | "less_or_equal" | "greater" | "greater_or_equal";
-            left: components["schemas"]["BusinessDocumentExpression"];
-            right: components["schemas"]["BusinessDocumentExpression"];
+            left: components["schemas"]["PrintPacketExpression"];
+            right: components["schemas"]["PrintPacketExpression"];
         } | {
             /** @constant */
             type: "boolean";
             /** @enum {unknown} */
             operator: "and" | "or";
-            values: components["schemas"]["BusinessDocumentExpression"][];
+            values: components["schemas"]["PrintPacketExpression"][];
         } | {
             /** @constant */
             type: "not";
-            value: components["schemas"]["BusinessDocumentExpression"];
+            value: components["schemas"]["PrintPacketExpression"];
         } | {
             /** @constant */
             type: "exists";
-            value: components["schemas"]["BusinessDocumentExpression"];
+            value: components["schemas"]["PrintPacketExpression"];
         } | {
             /** @constant */
             type: "contains";
-            collection: components["schemas"]["BusinessDocumentExpression"];
-            value: components["schemas"]["BusinessDocumentExpression"];
+            collection: components["schemas"]["PrintPacketExpression"];
+            value: components["schemas"]["PrintPacketExpression"];
         } | {
             /** @enum {unknown} */
             type: "page_number" | "page_count";
@@ -4519,35 +4527,35 @@ export interface components {
             type: "arithmetic";
             /** @enum {unknown} */
             operator: "add" | "subtract" | "multiply" | "divide";
-            left: components["schemas"]["BusinessDocumentExpression"];
-            right: components["schemas"]["BusinessDocumentExpression"];
+            left: components["schemas"]["PrintPacketExpression"];
+            right: components["schemas"]["PrintPacketExpression"];
         } | {
             /** @constant */
             type: "format_number";
-            value: components["schemas"]["BusinessDocumentExpression"];
+            value: components["schemas"]["PrintPacketExpression"];
             /** @default 0 */
             decimals?: number;
         } | {
             /** @constant */
             type: "format_money";
-            amount: components["schemas"]["BusinessDocumentExpression"];
-            currency: components["schemas"]["BusinessDocumentExpression"];
+            amount: components["schemas"]["PrintPacketExpression"];
+            currency: components["schemas"]["PrintPacketExpression"];
             /** @default 2 */
             decimals?: number;
         } | {
             /** @constant */
             type: "format_date";
-            value: components["schemas"]["BusinessDocumentExpression"];
+            value: components["schemas"]["PrintPacketExpression"];
             /** @enum {unknown} */
             format: "iso_date" | "day_month_year" | "month_day_year";
         } | {
             /** @constant */
             type: "format_string";
-            value: components["schemas"]["BusinessDocumentExpression"];
+            value: components["schemas"]["PrintPacketExpression"];
             /** @enum {unknown} */
             operation: "trim" | "uppercase_ascii" | "lowercase_ascii";
         };
-        BusinessDocumentTextStyle: {
+        PrintPacketTextStyle: {
             /** @default false */
             bold?: boolean;
             /** @default false */
@@ -4560,97 +4568,97 @@ export interface components {
              * @enum {unknown}
              */
             align?: "left" | "center" | "right";
-            color?: components["schemas"]["BusinessDocumentColor"];
+            color?: components["schemas"]["PrintPacketColor"];
         };
-        BusinessDocumentColor: {
+        PrintPacketColor: {
             red: number;
             green: number;
             blue: number;
         };
-        BusinessDocumentBoxStyle: {
+        PrintPacketBoxStyle: {
             /** @default 0 */
             padding_mm?: number;
-            background?: components["schemas"]["BusinessDocumentColor"];
-            border_color?: components["schemas"]["BusinessDocumentColor"];
+            background?: components["schemas"]["PrintPacketColor"];
+            border_color?: components["schemas"]["PrintPacketColor"];
             /** @default 0 */
             border_width_pt?: number;
         };
-        BusinessDocumentTableStyle: {
+        PrintPacketTableStyle: {
             /** @default 1 */
             cell_padding_mm?: number;
-            header_background?: components["schemas"]["BusinessDocumentColor"];
-            header_text_color?: components["schemas"]["BusinessDocumentColor"];
-            border_color?: components["schemas"]["BusinessDocumentColor"];
+            header_background?: components["schemas"]["PrintPacketColor"];
+            header_text_color?: components["schemas"]["PrintPacketColor"];
+            border_color?: components["schemas"]["PrintPacketColor"];
             /** @default 0.25 */
             border_width_pt?: number;
         };
-        BusinessDocumentInline: {
+        PrintPacketInline: {
             /** @constant */
             type: "text";
             value: string;
-            style?: components["schemas"]["BusinessDocumentTextStyle"];
+            style?: components["schemas"]["PrintPacketTextStyle"];
         } | {
             /** @constant */
             type: "value";
-            value: components["schemas"]["BusinessDocumentExpression"];
-            style?: components["schemas"]["BusinessDocumentTextStyle"];
+            value: components["schemas"]["PrintPacketExpression"];
+            style?: components["schemas"]["PrintPacketTextStyle"];
         } | {
             /** @constant */
             type: "line_break";
         };
-        BusinessDocumentNode: {
+        PrintPacketNode: {
             /** @enum {unknown} */
             type: "section" | "stack" | "row";
-            children: components["schemas"]["BusinessDocumentNode"][];
+            children: components["schemas"]["PrintPacketNode"][];
             /** @default 0 */
             gap_mm?: number;
         } | {
             /** @constant */
             type: "box";
-            children: components["schemas"]["BusinessDocumentNode"][];
-            style?: components["schemas"]["BusinessDocumentBoxStyle"];
+            children: components["schemas"]["PrintPacketNode"][];
+            style?: components["schemas"]["PrintPacketBoxStyle"];
         } | {
             /** @constant */
             type: "paragraph";
-            content: components["schemas"]["BusinessDocumentInline"][];
-            style?: components["schemas"]["BusinessDocumentTextStyle"];
+            content: components["schemas"]["PrintPacketInline"][];
+            style?: components["schemas"]["PrintPacketTextStyle"];
         } | {
             /** @constant */
             type: "heading";
-            content: components["schemas"]["BusinessDocumentInline"][];
+            content: components["schemas"]["PrintPacketInline"][];
             /** @default 1 */
             level?: number;
-            style?: components["schemas"]["BusinessDocumentTextStyle"];
+            style?: components["schemas"]["PrintPacketTextStyle"];
         } | {
             /** @constant */
             type: "grid";
             columns: number[];
-            children: components["schemas"]["BusinessDocumentNode"][];
+            children: components["schemas"]["PrintPacketNode"][];
             /** @default 0 */
             gap_mm?: number;
         } | {
             /** @constant */
             type: "table";
-            items: components["schemas"]["BusinessDocumentExpression"];
-            columns: components["schemas"]["BusinessDocumentTableColumn"][];
+            items: components["schemas"]["PrintPacketExpression"];
+            columns: components["schemas"]["PrintPacketTableColumn"][];
             /** @default false */
             repeat_header?: boolean;
-            empty?: components["schemas"]["BusinessDocumentNode"][];
-            style?: components["schemas"]["BusinessDocumentTableStyle"];
+            empty?: components["schemas"]["PrintPacketNode"][];
+            style?: components["schemas"]["PrintPacketTableStyle"];
         } | {
             /** @constant */
             type: "repeat";
-            items: components["schemas"]["BusinessDocumentExpression"];
-            children: components["schemas"]["BusinessDocumentNode"][];
+            items: components["schemas"]["PrintPacketExpression"];
+            children: components["schemas"]["PrintPacketNode"][];
             /** @default 0 */
             gap_mm?: number;
         } | {
             /** @constant */
             type: "data_list";
-            items: components["schemas"]["BusinessDocumentExpression"];
-            header?: components["schemas"]["BusinessDocumentNode"][];
-            item: components["schemas"]["BusinessDocumentNode"][];
-            empty?: components["schemas"]["BusinessDocumentNode"][];
+            items: components["schemas"]["PrintPacketExpression"];
+            header?: components["schemas"]["PrintPacketNode"][];
+            item: components["schemas"]["PrintPacketNode"][];
+            empty?: components["schemas"]["PrintPacketNode"][];
             /** @default true */
             repeat_header?: boolean;
             /** @default 0 */
@@ -4658,9 +4666,9 @@ export interface components {
         } | {
             /** @constant */
             type: "conditional";
-            condition: components["schemas"]["BusinessDocumentExpression"];
-            then: components["schemas"]["BusinessDocumentNode"][];
-            else?: components["schemas"]["BusinessDocumentNode"][];
+            condition: components["schemas"]["PrintPacketExpression"];
+            then: components["schemas"]["PrintPacketNode"][];
+            else?: components["schemas"]["PrintPacketNode"][];
         } | {
             /** @constant */
             type: "spacer";
@@ -4676,7 +4684,7 @@ export interface components {
         } | {
             /** @constant */
             type: "keep_together";
-            children: components["schemas"]["BusinessDocumentNode"][];
+            children: components["schemas"]["PrintPacketNode"][];
         } | {
             /** @constant */
             type: "image";
@@ -4691,7 +4699,7 @@ export interface components {
         } | {
             /** @constant */
             type: "image_value";
-            resource: components["schemas"]["BusinessDocumentExpression"];
+            resource: components["schemas"]["PrintPacketExpression"];
             width_mm: number;
             height_mm: number;
             /**
@@ -4702,7 +4710,7 @@ export interface components {
         } | {
             /** @constant */
             type: "qr";
-            value: components["schemas"]["BusinessDocumentExpression"];
+            value: components["schemas"]["PrintPacketExpression"];
             size_mm: number;
             /**
              * @default M
@@ -4712,7 +4720,7 @@ export interface components {
         } | {
             /** @constant */
             type: "barcode";
-            value: components["schemas"]["BusinessDocumentExpression"];
+            value: components["schemas"]["PrintPacketExpression"];
             /** @constant */
             symbology: "code128";
             width_mm: number;
@@ -4720,9 +4728,9 @@ export interface components {
             /** @default false */
             human_readable?: boolean;
         };
-        BusinessDocumentTableColumn: {
-            header: components["schemas"]["BusinessDocumentInline"][];
-            cell: components["schemas"]["BusinessDocumentInline"][];
+        PrintPacketTableColumn: {
+            header: components["schemas"]["PrintPacketInline"][];
+            cell: components["schemas"]["PrintPacketInline"][];
             /** @default 1 */
             width?: number;
             /**
@@ -4731,17 +4739,14 @@ export interface components {
              */
             align?: "left" | "center" | "right";
         };
-        BusinessDocumentRegion: {
-            first?: components["schemas"]["BusinessDocumentNode"][];
-            default?: components["schemas"]["BusinessDocumentNode"][];
-            last?: components["schemas"]["BusinessDocumentNode"][];
+        PrintPacketRegion: {
+            first?: components["schemas"]["PrintPacketNode"][];
+            default?: components["schemas"]["PrintPacketNode"][];
+            last?: components["schemas"]["PrintPacketNode"][];
         };
-        BusinessDocumentV1: {
-            /**
-             * @description New documents use printpacket/v1. The Piqae identifier is a frozen lossless input alias.
-             * @enum {string}
-             */
-            format: "printpacket/v1" | "piqae.business-document/v1";
+        PrintPacketV1: {
+            /** @constant */
+            format: "printpacket/v1";
             media: {
                 /** @constant */
                 kind: "paged";
@@ -4752,18 +4757,18 @@ export interface components {
                  * @enum {unknown}
                  */
                 orientation?: "portrait" | "landscape";
-                margins?: components["schemas"]["BusinessDocumentEdges"];
+                margins?: components["schemas"]["PrintPacketEdges"];
             } | {
                 /** @constant */
                 kind: "continuous";
                 width_mm: number;
-                margins?: components["schemas"]["BusinessDocumentEdges"];
+                margins?: components["schemas"]["PrintPacketEdges"];
             } | {
                 /** @constant */
                 kind: "label";
                 width_mm: number;
                 height_mm: number;
-                margins?: components["schemas"]["BusinessDocumentEdges"];
+                margins?: components["schemas"]["PrintPacketEdges"];
             };
             theme?: {
                 /** @default 10 */
@@ -4786,49 +4791,46 @@ export interface components {
                     byte_length: number;
                 };
             };
-            header?: components["schemas"]["BusinessDocumentRegion"];
-            body: components["schemas"]["BusinessDocumentNode"][];
-            footer?: components["schemas"]["BusinessDocumentRegion"];
+            header?: components["schemas"]["PrintPacketRegion"];
+            body: components["schemas"]["PrintPacketNode"][];
+            footer?: components["schemas"]["PrintPacketRegion"];
         };
-        CreateBusinessDocumentTemplate: {
+        CreatePrintPacketTemplate: {
             name: string;
-            specification: components["schemas"]["BusinessDocumentV1"];
+            specification: components["schemas"]["PrintPacketV1"];
         };
-        PublishBusinessDocumentTemplate: {
-            specification: components["schemas"]["BusinessDocumentV1"];
+        PublishPrintPacketTemplate: {
+            specification: components["schemas"]["PrintPacketV1"];
         };
-        BusinessDocumentTemplate: {
+        PrintPacketTemplate: {
             id: string;
             name: string;
             /** @enum {unknown} */
             state: "draft" | "published" | "archived";
-            specification: components["schemas"]["BusinessDocumentV1"];
+            specification: components["schemas"]["PrintPacketV1"];
             published_revision_id?: string | null;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
             updated_at: string;
         };
-        BusinessDocumentTemplateRevision: {
+        PrintPacketTemplateRevision: {
             id: string;
             template_id: string;
-            specification: components["schemas"]["BusinessDocumentV1"];
+            specification: components["schemas"]["PrintPacketV1"];
             revision: number;
-            /**
-             * @description Frozen persistence-era renderer profile identifier; packet negotiation uses the specification and conformance fields.
-             * @constant
-             */
-            renderer_profile: "piqae.business-document/v1";
+            /** @constant */
+            renderer_profile: "printpacket/v1";
             /** Format: date-time */
             created_at: string;
         };
-        CreateBusinessDocumentRender: {
+        CreatePrintPacketRender: {
             template_revision_id: string;
             input: {
                 [key: string]: unknown;
             };
         };
-        BusinessDocumentRender: {
+        PrintPacketRender: {
             id: string;
             template_revision_id: string;
             /** @enum {unknown} */
@@ -4844,23 +4846,23 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
-        PrintBusinessDocumentRender: {
+        PrintPacketPrintRequest: {
             printer_id?: string;
             target_id?: string;
             title: string;
             options?: components["schemas"]["JobOptions"];
             /** @default 1 */
             deliveries?: number;
-            render_policy?: components["schemas"]["BusinessDocumentRenderPolicy"];
-            render_cost?: components["schemas"]["BusinessDocumentRenderCost"];
+            render_policy?: components["schemas"]["PrintPacketRenderPolicy"];
+            render_cost?: components["schemas"]["PrintPacketRenderCost"];
         } & (unknown | unknown);
         /**
          * @description automatic uses bounded measured costs; cloud_only always delivers the approved PDF; prefer_node uses exact node rendering only when compatible and otherwise delivers the approved PDF; require_node fails closed when exact compatibility is unavailable.
          * @default automatic
          * @enum {string}
          */
-        BusinessDocumentRenderPolicy: "automatic" | "cloud_only" | "prefer_node" | "require_node";
-        BusinessDocumentRenderCost: {
+        PrintPacketRenderPolicy: "automatic" | "cloud_only" | "prefer_node" | "require_node";
+        PrintPacketRenderCost: {
             document_count: number;
             page_count: number;
             /** Format: int64 */
@@ -4868,7 +4870,7 @@ export interface components {
             /** Format: int64 */
             input_bytes: number;
         };
-        BusinessDocumentResourceDescriptor: {
+        PrintPacketResourceDescriptor: {
             digest: components["schemas"]["Sha256Hex"];
             /**
              * @description Renderer ABI v1 intentionally supports resolved JPEG resources only; fonts remain built-in Base-14/Windows-1252.
@@ -4878,8 +4880,8 @@ export interface components {
             /** Format: int64 */
             byte_length: number;
         };
-        BusinessDocumentRenderReadiness: {
-            requested_policy: components["schemas"]["BusinessDocumentRenderPolicy"];
+        PrintPacketRenderReadiness: {
+            requested_policy: components["schemas"]["PrintPacketRenderPolicy"];
             /** @enum {string} */
             selected_mode: "cloud_pdf" | "node_render";
             /** @enum {string} */
@@ -4903,16 +4905,16 @@ export interface components {
                 node_ms: number;
             };
         };
-        EvaluateBusinessDocumentRenderReadiness: {
+        EvaluatePrintPacketRenderReadiness: {
             printer_id: string;
-            render_policy?: components["schemas"]["BusinessDocumentRenderPolicy"];
-            render_cost?: components["schemas"]["BusinessDocumentRenderCost"];
+            render_policy?: components["schemas"]["PrintPacketRenderPolicy"];
+            render_cost?: components["schemas"]["PrintPacketRenderCost"];
         };
-        CreateBusinessDocumentPreview: {
+        CreatePrintPacketPreview: {
             /** @default 600 */
             expires_in_seconds?: number;
         };
-        BusinessDocumentPreview: {
+        PrintPacketPreview: {
             id: string;
             render_id: string;
             /** @enum {unknown} */
@@ -4925,8 +4927,8 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
-        ApprovedBusinessDocumentPreview: {
-            preview: components["schemas"]["BusinessDocumentPreview"];
+        ApprovedPrintPacketPreview: {
+            preview: components["schemas"]["PrintPacketPreview"];
             job: components["schemas"]["Job"];
         };
         ErrorEnvelope: {
@@ -8669,7 +8671,7 @@ export interface operations {
             503: components["responses"]["Error"];
         };
     };
-    createBusinessDocumentTemplate: {
+    createPrintPacketTemplate: {
         parameters: {
             query?: never;
             header?: {
@@ -8680,7 +8682,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateBusinessDocumentTemplate"];
+                "application/json": components["schemas"]["CreatePrintPacketTemplate"];
             };
         };
         responses: {
@@ -8690,7 +8692,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentTemplate"];
+                    "application/json": components["schemas"]["PrintPacketTemplate"];
                 };
             };
             /** @description Draft template created. */
@@ -8699,7 +8701,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentTemplate"];
+                    "application/json": components["schemas"]["PrintPacketTemplate"];
                 };
             };
             400: components["responses"]["Error"];
@@ -8707,7 +8709,7 @@ export interface operations {
             409: components["responses"]["Error"];
         };
     };
-    retrieveBusinessDocumentTemplate: {
+    retrievePrintPacketTemplate: {
         parameters: {
             query?: never;
             header?: never;
@@ -8724,14 +8726,14 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentTemplate"];
+                    "application/json": components["schemas"]["PrintPacketTemplate"];
                 };
             };
             401: components["responses"]["Error"];
             404: components["responses"]["Error"];
         };
     };
-    publishBusinessDocumentTemplate: {
+    publishPrintPacketTemplate: {
         parameters: {
             query?: never;
             header?: {
@@ -8744,7 +8746,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["PublishBusinessDocumentTemplate"];
+                "application/json": components["schemas"]["PublishPrintPacketTemplate"];
             };
         };
         responses: {
@@ -8754,7 +8756,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentTemplateRevision"];
+                    "application/json": components["schemas"]["PrintPacketTemplateRevision"];
                 };
             };
             /** @description Immutable revision published. */
@@ -8763,7 +8765,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentTemplateRevision"];
+                    "application/json": components["schemas"]["PrintPacketTemplateRevision"];
                 };
             };
             400: components["responses"]["Error"];
@@ -8771,7 +8773,7 @@ export interface operations {
             409: components["responses"]["Error"];
         };
     };
-    retrieveBusinessDocumentTemplateRevision: {
+    retrievePrintPacketTemplateRevision: {
         parameters: {
             query?: never;
             header?: never;
@@ -8788,14 +8790,14 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentTemplateRevision"];
+                    "application/json": components["schemas"]["PrintPacketTemplateRevision"];
                 };
             };
             401: components["responses"]["Error"];
             404: components["responses"]["Error"];
         };
     };
-    createBusinessDocumentRender: {
+    createPrintPacketRender: {
         parameters: {
             query?: never;
             header?: {
@@ -8806,7 +8808,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateBusinessDocumentRender"];
+                "application/json": components["schemas"]["CreatePrintPacketRender"];
             };
         };
         responses: {
@@ -8816,7 +8818,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentRender"];
+                    "application/json": components["schemas"]["PrintPacketRender"];
                 };
             };
             /** @description Render durably registered. */
@@ -8825,7 +8827,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentRender"];
+                    "application/json": components["schemas"]["PrintPacketRender"];
                 };
             };
             400: components["responses"]["Error"];
@@ -8833,7 +8835,7 @@ export interface operations {
             409: components["responses"]["Error"];
         };
     };
-    putBusinessDocumentResource: {
+    putPrintPacketResource: {
         parameters: {
             query?: never;
             header?: never;
@@ -8859,7 +8861,7 @@ export interface operations {
             401: components["responses"]["Error"];
         };
     };
-    retrieveBusinessDocumentRender: {
+    retrievePrintPacketRender: {
         parameters: {
             query?: never;
             header?: never;
@@ -8876,13 +8878,13 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentRender"];
+                    "application/json": components["schemas"]["PrintPacketRender"];
                 };
             };
             404: components["responses"]["Error"];
         };
     };
-    evaluateBusinessDocumentRenderReadiness: {
+    evaluatePrintPacketRenderReadiness: {
         parameters: {
             query?: never;
             header?: never;
@@ -8893,7 +8895,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["EvaluateBusinessDocumentRenderReadiness"];
+                "application/json": components["schemas"]["EvaluatePrintPacketRenderReadiness"];
             };
         };
         responses: {
@@ -8903,7 +8905,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentRenderReadiness"];
+                    "application/json": components["schemas"]["PrintPacketRenderReadiness"];
                 };
             };
             400: components["responses"]["Error"];
@@ -8911,7 +8913,7 @@ export interface operations {
             404: components["responses"]["Error"];
         };
     };
-    downloadBusinessDocumentRenderArtifact: {
+    downloadPrintPacketRenderArtifact: {
         parameters: {
             query?: never;
             header?: never;
@@ -8941,7 +8943,7 @@ export interface operations {
             503: components["responses"]["Error"];
         };
     };
-    printBusinessDocumentRender: {
+    printPacketRender: {
         parameters: {
             query?: never;
             header?: {
@@ -8954,7 +8956,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["PrintBusinessDocumentRender"];
+                "application/json": components["schemas"]["PrintPacketPrintRequest"];
             };
         };
         responses: {
@@ -8981,7 +8983,7 @@ export interface operations {
             409: components["responses"]["Error"];
         };
     };
-    createBusinessDocumentPreview: {
+    createPrintPacketPreview: {
         parameters: {
             query?: never;
             header?: {
@@ -8994,7 +8996,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateBusinessDocumentPreview"];
+                "application/json": components["schemas"]["CreatePrintPacketPreview"];
             };
         };
         responses: {
@@ -9004,7 +9006,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentPreview"];
+                    "application/json": components["schemas"]["PrintPacketPreview"];
                 };
             };
             /** @description Preview awaiting approval */
@@ -9013,7 +9015,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentPreview"];
+                    "application/json": components["schemas"]["PrintPacketPreview"];
                 };
             };
             400: components["responses"]["Error"];
@@ -9022,7 +9024,7 @@ export interface operations {
             409: components["responses"]["Error"];
         };
     };
-    retrieveBusinessDocumentPreview: {
+    retrievePrintPacketPreview: {
         parameters: {
             query?: never;
             header?: never;
@@ -9039,14 +9041,14 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentPreview"];
+                    "application/json": components["schemas"]["PrintPacketPreview"];
                 };
             };
             401: components["responses"]["Error"];
             404: components["responses"]["Error"];
         };
     };
-    downloadBusinessDocumentPreviewArtifact: {
+    downloadPrintPacketPreviewArtifact: {
         parameters: {
             query?: never;
             header?: never;
@@ -9072,7 +9074,7 @@ export interface operations {
             503: components["responses"]["Error"];
         };
     };
-    approveBusinessDocumentPreview: {
+    approvePrintPacketPreview: {
         parameters: {
             query?: never;
             header?: {
@@ -9085,7 +9087,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["PrintBusinessDocumentRender"];
+                "application/json": components["schemas"]["PrintPacketPrintRequest"];
             };
         };
         responses: {
@@ -9095,7 +9097,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ApprovedBusinessDocumentPreview"];
+                    "application/json": components["schemas"]["ApprovedPrintPacketPreview"];
                 };
             };
             /** @description Approved preview and newly registered job */
@@ -9104,7 +9106,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ApprovedBusinessDocumentPreview"];
+                    "application/json": components["schemas"]["ApprovedPrintPacketPreview"];
                 };
             };
             400: components["responses"]["Error"];
@@ -9113,7 +9115,7 @@ export interface operations {
             409: components["responses"]["Error"];
         };
     };
-    cancelBusinessDocumentPreview: {
+    cancelPrintPacketPreview: {
         parameters: {
             query?: never;
             header?: {
@@ -9132,7 +9134,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentPreview"];
+                    "application/json": components["schemas"]["PrintPacketPreview"];
                 };
             };
             401: components["responses"]["Error"];

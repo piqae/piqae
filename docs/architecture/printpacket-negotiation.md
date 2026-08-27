@@ -1,9 +1,8 @@
 # PrintPacket capability negotiation
 
-`printpacket/v1` is the canonical vendor-neutral packet identifier. The frozen
-`piqae.business-document/v1` identifier remains a lossless input alias for
-already-published templates, but new requirements and wire descriptors use the
-canonical identifier.
+`printpacket/v1` is the sole vendor-neutral packet identifier. Piqae is still
+pre-release, so prior experimental identifiers are rejected instead of being
+normalized, migrated, or advertised.
 
 The renderer capability report is a set of independently testable facts. It is
 not inferred from an app version. Negotiation version 2 reports exact packet
@@ -14,7 +13,7 @@ version is diagnostic only.
 
 The control plane intersects every required fact before registering a
 `require_node` print and again before offering the job. A node which omits the
-version 2 report is `unsupported_old_node`; legacy renderer ABI strings do not
+version 2 report is `unsupported_old_node`; standalone ABI strings do not
 upgrade that result. Such a node never receives a PrintPacket descriptor.
 
 Render readiness has three operator/developer states:
@@ -38,9 +37,8 @@ an output profile and a language profile which the authenticated node has bound
 to the exact printer ID. The media types must match. Capability disappearance
 between registration and lease causes the server to withhold the offer.
 
-The legacy compatibility endpoint cannot carry this binding and therefore
-rejects legacy RAW inputs. Its PDF behavior is unchanged. A generic RAW fallback
-is never substituted for a missing pinned profile.
+Every API surface requires this binding for printer-native bytes. A generic RAW
+fallback is never substituted for a missing pinned profile.
 
 `direct_offline` is only a reported execution fact. It does not authorize cloud
 delivery, imply iOS background time, or prove output reached paper.

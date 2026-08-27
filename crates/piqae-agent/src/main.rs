@@ -5889,7 +5889,7 @@ async fn materialize_descriptor(
                 )
                 .await?)
         }
-        ContentDescriptor::BusinessDocument {
+        ContentDescriptor::PrintPacket {
             policy: _,
             render,
             fallback,
@@ -5902,11 +5902,20 @@ async fn materialize_descriptor(
                 .iter()
                 .map(print_packet_feature_id)
                 .collect::<Vec<_>>();
+            let template_bytes = serde_json::to_vec(&render.specification)
+                .ok()
+                .and_then(|value| u64::try_from(value.len()).ok())
+                .unwrap_or(u64::MAX);
+            let input_bytes = serde_json::to_vec(&render.input)
+                .ok()
+                .and_then(|value| u64::try_from(value.len()).ok())
+                .unwrap_or(u64::MAX);
+            let resource_count = u32::try_from(render.resources.len()).unwrap_or(u32::MAX);
+            let total_resource_bytes = render.resources.iter().fold(0_u64, |total, resource| {
+                total.saturating_add(resource.byte_length)
+            });
             let rendered = if render.negotiation_version == 2
-                && matches!(
-                    render.packet_version.as_str(),
-                    printpacket::DOCUMENT_V1 | printpacket::LEGACY_PIQAE_DOCUMENT_V1
-                )
+                && render.packet_version == printpacket::DOCUMENT_V1
                 && render
                     .required_feature_ids
                     .iter()
@@ -5914,6 +5923,16 @@ async fn materialize_descriptor(
                 && render.conformance_profile == printpacket::CONFORMANCE_CORE_V1
                 && render.output_profile == printpacket::PDF_BASE14_V1
                 && render.expected_page_count > 0
+                && template_bytes <= neutral.limits.max_template_bytes
+                && input_bytes <= neutral.limits.max_data_bytes
+                && render.expected_pdf_bytes <= neutral.limits.max_output_bytes
+                && render.expected_page_count <= neutral.limits.max_pages
+                && resource_count <= neutral.limits.max_resources
+                && total_resource_bytes <= neutral.limits.max_total_resource_bytes
+                && render.resources.iter().all(|resource| {
+                    resource.byte_length <= neutral.limits.max_resource_bytes
+                        && neutral.resource_media_types.contains(&resource.media_type)
+                })
                 && render.renderer_abi == RENDERER_ABI
                 && render.resource_abi == RESOURCE_ABI
             {
@@ -5929,8 +5948,6 @@ async fn materialize_descriptor(
                     &render.resources,
                 )
                 .await;
-                let input_bytes =
-                    u64::try_from(serde_json::to_vec(&render.input)?.len()).unwrap_or(u64::MAX);
                 let capabilities = NodeDocumentCapabilities::local()
                     .with_persistent_resource_cache(DOCUMENT_RESOURCE_MAX_BYTES);
                 resources.map_or_else(
@@ -5995,7 +6012,7 @@ async fn resolve_node_render_resources(
     lease_id: uuid::Uuid,
     lease_token: &str,
     specification: &printpacket_renderer::PrintPacketV1,
-    offered: &[piqae_protocol::agent::BusinessDocumentResourceDescriptor],
+    offered: &[piqae_protocol::agent::PrintPacketResourceDescriptor],
 ) -> Result<printpacket_renderer::ResolvedResources> {
     let cache = DOCUMENT_RESOURCE_CACHE
         .get()
@@ -6295,12 +6312,7 @@ fn sync_request(
                 let neutral = printpacket::RendererCapabilities::reference_pdf();
                 piqae_protocol::agent::PrintPacketCapabilitiesV2 {
                     negotiation_version: 2,
-                    supported_packet_versions: vec![
-                        printpacket::DOCUMENT_V1.into(),
-                        // Frozen compatibility alias for already-published
-                        // templates. New requirements use printpacket/v1.
-                        printpacket::LEGACY_PIQAE_DOCUMENT_V1.into(),
-                    ],
+                    supported_packet_versions: vec![printpacket::DOCUMENT_V1.into()],
                     feature_ids: neutral
                         .features
                         .iter()
@@ -6313,6 +6325,7 @@ fn sync_request(
                     }],
                     deterministic: local.deterministic,
                     limits: piqae_protocol::agent::PrintPacketLimits {
+                        max_template_bytes: neutral.limits.max_template_bytes,
                         max_input_bytes: neutral.limits.max_data_bytes,
                         max_output_bytes: neutral.limits.max_output_bytes,
                         max_pages: neutral.limits.max_pages,

@@ -14,6 +14,64 @@ const uncertainJob = (id: string, since: string) => ({
 });
 
 describe('live dashboard overview', () => {
+  it('reports PrintPacket ready only for the exact negotiated renderer contract', async () => {
+    const capability = {
+      renderer_abi: 'printpacket.pdf-renderer/v1',
+      resource_abi: 'printpacket.resources/v1',
+      persistent_cache: true,
+      font_rendering: false,
+      image_media_types: ['image/jpeg'],
+      font_media_types: [],
+      cached_resource_digests: [],
+      print_packet: {
+        negotiation_version: 2,
+        supported_packet_versions: ['printpacket/v1'],
+        feature_ids: [],
+        conformance_profiles: ['printpacket.conformance/core-v1'],
+        output_profiles: [{
+          id: 'printpacket.pdf-base14/v1',
+          kind: 'pdf',
+          media_type: 'application/pdf'
+        }],
+        deterministic: true,
+        limits: {
+          max_template_bytes: 1024,
+          max_input_bytes: 1024,
+          max_output_bytes: 4096,
+          max_pages: 2,
+          max_resource_count: 1,
+          max_resource_bytes: 1024,
+          max_total_resource_bytes: 1024
+        },
+        resource_types: ['image/jpeg'],
+        direct_offline: true,
+        native_language_profiles: [],
+        implementation_version: 'virtual-v1'
+      }
+    };
+    const fetcher = vi.fn(async () => Response.json([
+      {
+        id: 'agt_ready', name: 'Ready node', platform: 'macos/arm64', state: 'connected',
+        version: '0.1.0', last_seen_at: '2026-08-27T00:00:00Z', labels: [],
+        document_render: capability
+      },
+      {
+        id: 'agt_wrong_abi', name: 'Old renderer', platform: 'macos/arm64', state: 'connected',
+        version: '0.1.0', last_seen_at: '2026-08-27T00:00:00Z', labels: [],
+        document_render: { ...capability, renderer_abi: 'printpacket.pdf-renderer/v2' }
+      }
+    ]));
+
+    await expect(
+      createLiveApi(fetcher as typeof fetch, 'https://api.example.test').agents()
+    ).resolves.toMatchObject({
+      data: [
+        { id: 'agt_ready', printPacket: { status: 'ready', directOffline: true } },
+        { id: 'agt_wrong_abi', printPacket: { status: 'node_update_required' } }
+      ]
+    });
+  });
+
   it('maps runtime availability and advisory refresh hints without upgrading them to remote wake', async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));

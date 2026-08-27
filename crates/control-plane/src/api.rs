@@ -3235,19 +3235,13 @@ pub async fn agent_sync(
                 .get("piqae.document.render_policy")
                 .map(String::as_str)
             {
-                Some("cloud_only") => {
-                    piqae_protocol::agent::BusinessDocumentRenderPolicy::CloudOnly
-                }
-                Some("prefer_node") => {
-                    piqae_protocol::agent::BusinessDocumentRenderPolicy::PreferNode
-                }
-                Some("require_node") => {
-                    piqae_protocol::agent::BusinessDocumentRenderPolicy::RequireNode
-                }
-                _ => piqae_protocol::agent::BusinessDocumentRenderPolicy::Automatic,
+                Some("cloud_only") => piqae_protocol::agent::PrintPacketRenderPolicy::CloudOnly,
+                Some("prefer_node") => piqae_protocol::agent::PrintPacketRenderPolicy::PreferNode,
+                Some("require_node") => piqae_protocol::agent::PrintPacketRenderPolicy::RequireNode,
+                _ => piqae_protocol::agent::PrintPacketRenderPolicy::Automatic,
             };
             let fallback_allowed =
-                policy != piqae_protocol::agent::BusinessDocumentRenderPolicy::RequireNode;
+                policy != piqae_protocol::agent::PrintPacketRenderPolicy::RequireNode;
             if matches!(content, ContentDescriptor::EncryptedDownload { .. }) {
                 if !fallback_allowed {
                     return Err(AppError::service_unavailable(
@@ -3283,11 +3277,11 @@ pub async fn agent_sync(
                 render_id,
             )
             .await?;
-            if !supports_business_document_offer(&request.document_render, &render) {
+            if !supports_print_packet_offer(&request.document_render, &render) {
                 if fallback_allowed {
                     // Capability changed after registration. Preserve the
                     // already-approved PDF without leaking a descriptor to a
-                    // legacy or now-incompatible node.
+                    // node that no longer satisfies the exact contract.
                     candidate_jobs.push(JobOffer {
                         expected_capability_revision: lease
                             .job
@@ -3321,7 +3315,7 @@ pub async fn agent_sync(
                     .await?;
                 continue;
             }
-            content = ContentDescriptor::BusinessDocument {
+            content = ContentDescriptor::PrintPacket {
                 policy,
                 render: Box::new(render),
                 fallback: Box::new(content),
@@ -3374,9 +3368,9 @@ pub async fn agent_sync(
     }))
 }
 
-fn supports_business_document_offer(
+fn supports_print_packet_offer(
     capabilities: &piqae_protocol::agent::DocumentRenderCapabilities,
-    render: &piqae_protocol::agent::BusinessDocumentNodeRender,
+    render: &piqae_protocol::agent::PrintPacketNodeRender,
 ) -> bool {
     let Some(packet) = capabilities.print_packet.as_ref() else {
         return false;
@@ -3385,11 +3379,19 @@ fn supports_business_document_offer(
         .ok()
         .and_then(|value| u64::try_from(value.len()).ok())
         .unwrap_or(u64::MAX);
+    let template_bytes = serde_json::to_vec(&render.specification)
+        .ok()
+        .and_then(|value| u64::try_from(value.len()).ok())
+        .unwrap_or(u64::MAX);
     let resource_count = u32::try_from(render.resources.len()).unwrap_or(u32::MAX);
     let total_resource_bytes = render.resources.iter().fold(0_u64, |total, resource| {
         total.saturating_add(resource.byte_length)
     });
-    packet.negotiation_version == render.negotiation_version
+    render.negotiation_version == 2
+        && render.packet_version == printpacket::DOCUMENT_V1
+        && render.conformance_profile == printpacket::CONFORMANCE_CORE_V1
+        && render.output_profile == printpacket::PDF_BASE14_V1
+        && packet.negotiation_version == render.negotiation_version
         && packet
             .supported_packet_versions
             .contains(&render.packet_version)
@@ -3410,6 +3412,7 @@ fn supports_business_document_offer(
         && packet.deterministic
         && capabilities.renderer_abi.as_deref() == Some(render.renderer_abi.as_str())
         && capabilities.resource_abi.as_deref() == Some(render.resource_abi.as_str())
+        && template_bytes <= packet.limits.max_template_bytes
         && input_bytes <= packet.limits.max_input_bytes
         && render.expected_pdf_bytes <= packet.limits.max_output_bytes
         && render.expected_page_count > 0
@@ -3480,6 +3483,15 @@ fn validate_document_render_capabilities(
             })
             && value.as_bytes()[0].is_ascii_lowercase()
     };
+    let valid_packet_version = |value: &str| {
+        value.strip_prefix("printpacket/v").is_some_and(|version| {
+            let mut bytes = version.bytes();
+            bytes
+                .next()
+                .is_some_and(|first| matches!(first, b'1'..=b'9'))
+                && bytes.all(|byte| byte.is_ascii_digit())
+        })
+    };
     let unique = |values: &[String]| values.iter().collect::<BTreeSet<_>>().len() == values.len();
     let valid_packet = value.print_packet.as_ref().is_none_or(|packet| {
         let output_ids = packet
@@ -3498,7 +3510,7 @@ fn validate_document_render_capabilities(
             && packet
                 .supported_packet_versions
                 .iter()
-                .all(|version| !version.is_empty() && version.len() <= 128 && version.is_ascii())
+                .all(|version| valid_packet_version(version))
             && packet.feature_ids.len() <= 256
             && unique(&packet.feature_ids)
             && packet.feature_ids.iter().all(|id| valid_id(id, false))
@@ -3525,6 +3537,8 @@ fn validate_document_render_capabilities(
                         && language_ids.contains(language_profile_id.as_str())
                 }
             })
+            && packet.limits.max_template_bytes <= 52_428_800
+            && packet.limits.max_template_bytes > 0
             && packet.limits.max_input_bytes <= 52_428_800
             && packet.limits.max_input_bytes > 0
             && packet.limits.max_output_bytes <= 524_288_000
@@ -3639,18 +3653,19 @@ fn adaptive_poll_with_jitter(uptime_seconds: i64, has_immediate_work: bool, seed
 )]
 mod adaptive_poll_tests {
     use super::{
-        adaptive_poll_with_jitter, supports_printer_native_offer,
+        adaptive_poll_with_jitter, supports_print_packet_offer, supports_printer_native_offer,
         validate_document_render_capabilities,
     };
     use piqae_protocol::agent::{
         DocumentRenderCapabilities, PrintPacketCapabilitiesV2, PrintPacketLimits,
-        PrintPacketOutputProfile, PrinterNativeLanguageProfile,
+        PrintPacketNodeRender, PrintPacketOutputProfile, PrintPacketResourceDescriptor,
+        PrinterNativeLanguageProfile,
     };
 
     fn packet_capabilities() -> DocumentRenderCapabilities {
         DocumentRenderCapabilities {
-            renderer_abi: Some("piqae.business-document-pdf/v1".into()),
-            resource_abi: Some("piqae.document-resources/v1".into()),
+            renderer_abi: Some("printpacket.pdf-renderer/v1".into()),
+            resource_abi: Some("printpacket.resources/v1".into()),
             persistent_cache: true,
             font_rendering: false,
             image_media_types: vec!["image/jpeg".into()],
@@ -3658,10 +3673,7 @@ mod adaptive_poll_tests {
             cached_resource_digests: vec!["a".repeat(64)],
             print_packet: Some(PrintPacketCapabilitiesV2 {
                 negotiation_version: 2,
-                supported_packet_versions: vec![
-                    "printpacket/v1".into(),
-                    "piqae.business-document/v1".into(),
-                ],
+                supported_packet_versions: vec!["printpacket/v1".into()],
                 feature_ids: vec!["typography_base14_windows1252".into()],
                 conformance_profiles: vec!["printpacket.conformance/core-v1".into()],
                 output_profiles: vec![
@@ -3677,10 +3689,11 @@ mod adaptive_poll_tests {
                 ],
                 deterministic: true,
                 limits: PrintPacketLimits {
+                    max_template_bytes: 1024,
                     max_input_bytes: 1024,
                     max_output_bytes: 4096,
                     max_pages: 2,
-                    max_resource_count: 1,
+                    max_resource_count: 2,
                     max_resource_bytes: 1024,
                     max_total_resource_bytes: 1024,
                 },
@@ -3701,8 +3714,8 @@ mod adaptive_poll_tests {
     #[test]
     fn document_renderer_capabilities_are_truthful_and_bounded() {
         let supported = DocumentRenderCapabilities {
-            renderer_abi: Some("piqae.business-document-pdf/v1".into()),
-            resource_abi: Some("piqae.document-resources/v1".into()),
+            renderer_abi: Some("printpacket.pdf-renderer/v1".into()),
+            resource_abi: Some("printpacket.resources/v1".into()),
             persistent_cache: true,
             font_rendering: false,
             image_media_types: vec!["image/jpeg".into()],
@@ -3755,11 +3768,60 @@ mod adaptive_poll_tests {
         }
         assert!(validate_document_render_capabilities(&duplicate).is_err());
 
+        let mut retired_identifier = supported.clone();
+        if let Some(packet) = &mut retired_identifier.print_packet {
+            packet.supported_packet_versions = vec!["piqae.business-document/v1".into()];
+        }
+        assert!(validate_document_render_capabilities(&retired_identifier).is_err());
+
         let mut unbound = supported;
         if let Some(packet) = &mut unbound.print_packet {
             packet.native_language_profiles.clear();
         }
         assert!(validate_document_render_capabilities(&unbound).is_err());
+    }
+
+    #[test]
+    fn print_packet_offer_intersects_template_and_aggregate_resource_limits() {
+        let supported = packet_capabilities();
+        let mut render = PrintPacketNodeRender {
+            negotiation_version: 2,
+            packet_version: "printpacket/v1".into(),
+            required_feature_ids: vec!["typography_base14_windows1252".into()],
+            conformance_profile: "printpacket.conformance/core-v1".into(),
+            output_profile: "printpacket.pdf-base14/v1".into(),
+            renderer_abi: "printpacket.pdf-renderer/v1".into(),
+            resource_abi: "printpacket.resources/v1".into(),
+            specification: serde_json::json!({
+                "format": "printpacket/v1",
+                "media": {"kind": "paged", "size": "a4"},
+                "body": []
+            }),
+            input: serde_json::json!({}),
+            resources: vec![
+                PrintPacketResourceDescriptor {
+                    digest: "a".repeat(64),
+                    media_type: "image/jpeg".into(),
+                    byte_length: 500,
+                },
+                PrintPacketResourceDescriptor {
+                    digest: "b".repeat(64),
+                    media_type: "image/jpeg".into(),
+                    byte_length: 500,
+                },
+            ],
+            expected_pdf_sha256: "c".repeat(64),
+            expected_pdf_bytes: 4096,
+            expected_page_count: 1,
+        };
+        assert!(supports_print_packet_offer(&supported, &render));
+
+        render.resources[1].byte_length = 600;
+        assert!(!supports_print_packet_offer(&supported, &render));
+
+        render.resources[1].byte_length = 400;
+        render.specification = serde_json::json!({"padding": "x".repeat(1024)});
+        assert!(!supports_print_packet_offer(&supported, &render));
     }
 
     #[test]
@@ -4146,7 +4208,7 @@ pub async fn get_agent_document_resource(
         .ok_or_else(|| {
             AppError::invalid(
                 "resource_not_authorized",
-                "Job does not reference a business document.",
+                "Job does not reference a PrintPacket render.",
             )
         })?;
     let payload = crate::documents::node_render_payload(
@@ -4419,6 +4481,20 @@ async fn validate_printer_native_job(
             "Encrypted job v3 does not bind printer-native language profiles.",
         ));
     }
+    let agent = state
+        .repository
+        .get_agent(
+            tenant.workspace_id,
+            tenant.environment_id,
+            destination.agent_id,
+        )
+        .await?;
+    if !crate::routing::agent_is_connected(&agent) {
+        return Err(AppError::conflict(
+            "printer_native_capability_unavailable",
+            "The destination node must be online with a current printer-native capability report.",
+        ));
+    }
     let capabilities = match state
         .repository
         .document_render_capabilities_for_printer(
@@ -4440,7 +4516,7 @@ async fn validate_printer_native_job(
     let packet = capabilities.print_packet.as_ref().ok_or_else(|| {
         AppError::conflict(
             "node_update_required",
-            "The destination node predates language-bound printer-native jobs.",
+            "The destination node must be updated for language-bound printer-native jobs.",
         )
     })?;
     let output = packet

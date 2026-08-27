@@ -16,7 +16,7 @@ use bytes::BytesMut;
 use futures::StreamExt as _;
 use piqae_auth::Scope;
 use piqae_domain::{ContentKind, ContentSource, JobOptions};
-use piqae_protocol::agent::{BusinessDocumentNodeRender, BusinessDocumentResourceDescriptor};
+use piqae_protocol::agent::{PrintPacketNodeRender, PrintPacketResourceDescriptor};
 use piqae_storage_postgres::{CreateDocumentResult, StoredDocumentPreview, StoredDocumentRender};
 use printpacket_renderer::{PRINT_PACKET_DOCUMENT_FORMAT, PrintPacketV1};
 use serde::{Deserialize, Serialize};
@@ -123,6 +123,8 @@ const PRINT_PACKET_NEGOTIATION_VERSION: u16 = 2;
 const PRINT_PACKET_VERSION: &str = printpacket::DOCUMENT_V1;
 const PRINT_PACKET_CONFORMANCE_PROFILE: &str = printpacket::CONFORMANCE_CORE_V1;
 const PRINT_PACKET_OUTPUT_PROFILE: &str = printpacket::PDF_BASE14_V1;
+const PRINT_PACKET_RENDERER_ABI: &str = "printpacket.pdf-renderer/v1";
+const PRINT_PACKET_RESOURCE_ABI: &str = "printpacket.resources/v1";
 
 fn print_packet_feature_id(feature: &printpacket::Feature) -> String {
     serde_json::to_value(feature)
@@ -133,60 +135,54 @@ fn print_packet_feature_id(feature: &printpacket::Feature) -> String {
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/v1/business-document-templates", post(create_template))
+        .route("/v1/printpacket/templates", post(create_template))
         .route(
-            "/v1/business-document-resources/{digest}",
-            put(put_document_resource),
+            "/v1/printpacket/resources/{digest}",
+            put(put_printpacket_resource),
         )
+        .route("/v1/printpacket/templates/{template_id}", get(get_template))
         .route(
-            "/v1/business-document-templates/{template_id}",
-            get(get_template),
-        )
-        .route(
-            "/v1/business-document-templates/{template_id}/publish",
+            "/v1/printpacket/templates/{template_id}/publish",
             post(publish_template),
         )
         .route(
-            "/v1/business-document-template-revisions/{revision_id}",
+            "/v1/printpacket/template-revisions/{revision_id}",
             get(get_revision),
         )
-        .route("/v1/business-document-renders", post(register_render))
-        .route("/v1/business-document-renders/{render_id}", get(get_render))
+        .route("/v1/printpacket/renders", post(register_render))
+        .route("/v1/printpacket/renders/{render_id}", get(get_render))
         .route(
-            "/v1/business-document-renders/{render_id}/render-readiness",
+            "/v1/printpacket/renders/{render_id}/readiness",
             post(render_readiness),
         )
         .route(
-            "/v1/business-document-renders/{render_id}/artifact",
+            "/v1/printpacket/renders/{render_id}/artifact",
             get(download_render_artifact),
         )
         .route(
-            "/v1/business-document-renders/{render_id}/print",
+            "/v1/printpacket/renders/{render_id}/print",
             post(print_render),
         )
         .route(
-            "/v1/business-document-renders/{render_id}/previews",
+            "/v1/printpacket/renders/{render_id}/previews",
             post(create_preview),
         )
+        .route("/v1/printpacket/previews/{preview_id}", get(get_preview))
         .route(
-            "/v1/business-document-previews/{preview_id}",
-            get(get_preview),
-        )
-        .route(
-            "/v1/business-document-previews/{preview_id}/artifact",
+            "/v1/printpacket/previews/{preview_id}/artifact",
             get(download_preview_artifact),
         )
         .route(
-            "/v1/business-document-previews/{preview_id}/approve",
+            "/v1/printpacket/previews/{preview_id}/approve",
             post(approve_preview),
         )
         .route(
-            "/v1/business-document-previews/{preview_id}/cancel",
+            "/v1/printpacket/previews/{preview_id}/cancel",
             post(cancel_preview),
         )
 }
 
-async fn put_document_resource(
+async fn put_printpacket_resource(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(digest): Path<String>,
@@ -198,7 +194,7 @@ async fn put_document_resource(
         || digest != digest.to_ascii_lowercase()
     {
         return Err(AppError::invalid(
-            "invalid_document_resource",
+            "invalid_printpacket_resource",
             "Resource digest is invalid.",
         ));
     }
@@ -209,16 +205,18 @@ async fn put_document_resource(
         .map(str::trim);
     if media_type != Some("image/jpeg") {
         return Err(AppError::invalid(
-            "unsupported_document_resource",
+            "unsupported_printpacket_resource",
             "Renderer ABI v1 accepts image/jpeg resources only.",
         ));
     }
     let bytes = axum::body::to_bytes(body, 4 * 1024 * 1024)
         .await
-        .map_err(|_| AppError::invalid("document_resource_too_large", "Resource exceeds 4 MiB."))?;
+        .map_err(|_| {
+            AppError::invalid("printpacket_resource_too_large", "Resource exceeds 4 MiB.")
+        })?;
     if bytes.is_empty() || hex::encode(Sha256::digest(&bytes)) != digest.to_ascii_lowercase() {
         return Err(AppError::invalid(
-            "document_resource_digest_mismatch",
+            "printpacket_resource_digest_mismatch",
             "Resource bytes do not match the URL digest.",
         ));
     }
@@ -227,8 +225,9 @@ async fn put_document_resource(
         &tenant.environment_id.to_string(),
         &digest,
     );
-    let byte_length = i64::try_from(bytes.len())
-        .map_err(|_| AppError::invalid("document_resource_too_large", "Resource exceeds 4 MiB."))?;
+    let byte_length = i64::try_from(bytes.len()).map_err(|_| {
+        AppError::invalid("printpacket_resource_too_large", "Resource exceeds 4 MiB.")
+    })?;
     state
         .object_store
         .put(&object_key, bytes, Some(&digest))
@@ -256,7 +255,7 @@ pub(crate) fn document_resource_object_key(
     environment: &str,
     digest: &str,
 ) -> String {
-    format!("business-document-resources/{workspace}/{environment}/{digest}")
+    format!("printpacket/resources/{workspace}/{environment}/{digest}")
 }
 
 #[derive(Debug, Deserialize)]
@@ -628,6 +627,9 @@ async fn get_render(
     )))
 }
 
+// This is intentionally kept as one capability matrix so every readiness
+// response is derived from the same atomic view of a node report and payload.
+#[allow(clippy::too_many_lines)]
 async fn evaluate_readiness(
     state: &AppState,
     workspace_id: piqae_domain::WorkspaceId,
@@ -652,6 +654,12 @@ async fn evaluate_readiness(
         .await?;
     let input_bytes = u64::try_from(
         serde_json::to_vec(&payload.input)
+            .map_err(|_| AppError::service_unavailable("invalid_stored_document"))?
+            .len(),
+    )
+    .map_err(|_| AppError::service_unavailable("invalid_stored_content_length"))?;
+    let template_bytes = u64::try_from(
+        serde_json::to_vec(&payload.specification)
             .map_err(|_| AppError::service_unavailable("invalid_stored_document"))?
             .len(),
     )
@@ -722,7 +730,8 @@ async fn evaluate_readiness(
         total.saturating_add(resource.byte_length)
     });
     let limits_supported = packet.is_some_and(|packet| {
-        input_bytes <= packet.limits.max_input_bytes
+        template_bytes <= packet.limits.max_template_bytes
+            && input_bytes <= packet.limits.max_input_bytes
             && payload.expected_pdf_bytes <= packet.limits.max_output_bytes
             && payload.expected_page_count <= packet.limits.max_pages
             && resource_count <= packet.limits.max_resource_count
@@ -810,7 +819,10 @@ async fn evaluate_readiness(
         || !packet_version_supported
         || !missing_features.is_empty()
         || !conformance_supported
-        || !output_supported;
+        || !output_supported
+        || !deterministic
+        || !abi_supported
+        || !media_supported;
     let status = if ready {
         "ready"
     } else if requires_node_update || !approved_pdf_fallback {
@@ -1433,7 +1445,7 @@ pub(crate) async fn node_render_payload(
     workspace_id: piqae_domain::WorkspaceId,
     environment_id: piqae_domain::EnvironmentId,
     render_id: &str,
-) -> Result<BusinessDocumentNodeRender, AppError> {
+) -> Result<PrintPacketNodeRender, AppError> {
     let render = state
         .repository
         .get_document_render(workspace_id, environment_id, render_id)
@@ -1474,7 +1486,7 @@ pub(crate) async fn node_render_payload(
                 digest,
                 media_type,
                 byte_length,
-            } => Ok(BusinessDocumentResourceDescriptor {
+            } => Ok(PrintPacketResourceDescriptor {
                 digest: normalized_resource_digest(digest)
                     .ok_or_else(|| AppError::service_unavailable("invalid_stored_document"))?,
                 media_type: media_type.clone(),
@@ -1482,7 +1494,7 @@ pub(crate) async fn node_render_payload(
             }),
         })
         .collect::<Result<Vec<_>, AppError>>()?;
-    Ok(BusinessDocumentNodeRender {
+    Ok(PrintPacketNodeRender {
         negotiation_version: PRINT_PACKET_NEGOTIATION_VERSION,
         packet_version: PRINT_PACKET_VERSION.into(),
         required_feature_ids: printpacket::required_features(&specification)
@@ -1491,8 +1503,8 @@ pub(crate) async fn node_render_payload(
             .collect(),
         conformance_profile: PRINT_PACKET_CONFORMANCE_PROFILE.into(),
         output_profile: PRINT_PACKET_OUTPUT_PROFILE.into(),
-        renderer_abi: "piqae.business-document-pdf/v1".into(),
-        resource_abi: "piqae.document-resources/v1".into(),
+        renderer_abi: PRINT_PACKET_RENDERER_ABI.into(),
+        resource_abi: PRINT_PACKET_RESOURCE_ABI.into(),
         specification: serde_json::from_slice(&spec_bytes)
             .map_err(|_| AppError::service_unavailable("invalid_stored_document"))?,
         input: serde_json::from_slice(&input_bytes)
@@ -1518,8 +1530,7 @@ pub(crate) async fn node_render_payload(
     })
 }
 fn document_aad_for(domain: &str, workspace: &str, environment: &str, resource: &str) -> Vec<u8> {
-    format!("piqae.business-documents/v1\0{domain}\0{workspace}\0{environment}\0{resource}")
-        .into_bytes()
+    format!("printpacket/v1\0{domain}\0{workspace}\0{environment}\0{resource}").into_bytes()
 }
 fn validate_document_spec(value: &Value) -> Result<Vec<u8>, AppError> {
     if value.get("format").and_then(Value::as_str) != Some(PRINT_PACKET_DOCUMENT_FORMAT) {
@@ -1529,8 +1540,18 @@ fn validate_document_spec(value: &Value) -> Result<Vec<u8>, AppError> {
         ));
     }
     let encoded = validate_json(value, true)?;
-    serde_json::from_slice::<PrintPacketV1>(&encoded).map_err(|_| {
+    let specification = serde_json::from_slice::<PrintPacketV1>(&encoded).map_err(|_| {
         AppError::invalid("invalid_document_spec", "Document structure is invalid.")
+    })?;
+    printpacket_renderer::validate(
+        &specification,
+        printpacket_renderer::RenderLimits::default(),
+    )
+    .map_err(|_| {
+        AppError::invalid(
+            "invalid_document_spec",
+            "Document structure, version, or declared content is invalid.",
+        )
     })?;
     Ok(encoded)
 }
@@ -1613,22 +1634,34 @@ mod tests {
     }
 
     #[test]
-    fn document_specs_are_bounded_and_reject_runtime_urls() {
-        assert!(
-            validate_document_spec(&serde_json::json!({
-                "format": PRINT_PACKET_DOCUMENT_FORMAT, "media": {"kind": "paged", "size": "a4"},
-                "body": [{"type": "paragraph", "content": [{"type": "text", "value": "Receipt"}]}]
-            }))
-            .is_ok()
-        );
+    fn document_specs_are_bounded_and_reject_runtime_urls() -> Result<(), String> {
+        let canonical = validate_document_spec(&serde_json::json!({
+            "format": "printpacket/v1", "media": {"kind": "paged", "size": "a4"},
+            "body": [{"type": "paragraph", "content": [{"type": "text", "value": "Receipt"}]}]
+        }))
+        .map_err(|error| format!("canonical PrintPacket validation failed: {error:?}"))?;
+        let normalized: PrintPacketV1 = serde_json::from_slice(&canonical)
+            .map_err(|error| format!("canonical PrintPacket decoding failed: {error}"))?;
+        assert_eq!(normalized.format, PRINT_PACKET_DOCUMENT_FORMAT);
         assert!(
             validate_document_spec(&serde_json::json!({
                 "format": "piqae.business-document/v1", "media": {"kind": "paged", "size": "a4"},
                 "body": [{"type": "paragraph", "content": [{"type": "text", "value": "https://example.test/logo.png"}]}]
             }))
-            .is_err()
+            .is_err(),
+            "experimental Piqae format identifier must not be normalized or migrated"
+        );
+        assert!(
+            validate_document_spec(&serde_json::json!({
+                "format": "printpacket/v1", "media": {"kind": "paged", "size": "a4"},
+                "header": {"last": [{"type": "paragraph", "content": []}]},
+                "body": []
+            }))
+            .is_err(),
+            "semantic renderer constraints must be rejected before publishing"
         );
         assert!(validate_document_spec(&serde_json::json!({"format": "other/v1"})).is_err());
+        Ok(())
     }
 
     #[test]

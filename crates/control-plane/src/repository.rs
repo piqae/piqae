@@ -3701,7 +3701,7 @@ impl MemoryRepository {
                     sqlite_integrity_ok: None,
                     executor_crashes: 0,
                     last_error_code: None,
-                    document_render: Default::default(),
+                    document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
                 },
             ),
         );
@@ -5987,7 +5987,7 @@ impl Repository for MemoryRepository {
             sqlite_integrity_ok: None,
             executor_crashes: 0,
             last_error_code: None,
-            document_render: Default::default(),
+            document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
         };
         state
             .agents
@@ -6072,7 +6072,7 @@ impl Repository for MemoryRepository {
                     sqlite_integrity_ok: None,
                     executor_crashes: 0,
                     last_error_code: None,
-                    document_render: Default::default(),
+                    document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
                 },
             ),
         );
@@ -8116,7 +8116,7 @@ mod routing_repository_tests {
                     sqlite_integrity_ok: None,
                     executor_crashes: 0,
                     last_error_code: None,
-                    document_render: Default::default(),
+                    document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
                 },
             ),
         );
@@ -8714,7 +8714,7 @@ mod routing_repository_tests {
                     sqlite_integrity_ok: None,
                     executor_crashes: 0,
                     last_error_code: None,
-                    document_render: Default::default(),
+                    document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
                 },
             ),
         );
@@ -8811,7 +8811,8 @@ mod routing_repository_tests {
                         sqlite_integrity_ok: None,
                         executor_crashes: 0,
                         last_error_code: None,
-                        document_render: Default::default(),
+                        document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(
+                        ),
                     },
                 ),
             );
@@ -9001,7 +9002,7 @@ mod routing_repository_tests {
                     sqlite_integrity_ok: None,
                     executor_crashes: 0,
                     last_error_code: None,
-                    document_render: Default::default(),
+                    document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
                 },
             ),
         );

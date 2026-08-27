@@ -278,10 +278,15 @@ export function createLiveApi(
     printPacket: (() => {
       const capability = agent.document_render?.print_packet;
       const ready = capability?.negotiation_version === 2
+        && agent.document_render?.renderer_abi === 'printpacket.pdf-renderer/v1'
+        && agent.document_render?.resource_abi === 'printpacket.resources/v1'
         && capability.supported_packet_versions.includes('printpacket/v1')
+        && capability.conformance_profiles.includes('printpacket.conformance/core-v1')
         && capability.deterministic
         && capability.output_profiles.some(
-          (profile) => profile.kind === 'pdf' && profile.media_type === 'application/pdf'
+          (profile) => profile.kind === 'pdf'
+            && profile.id === 'printpacket.pdf-base14/v1'
+            && profile.media_type === 'application/pdf'
         );
       return {
         status: ready ? 'ready' : 'node_update_required',

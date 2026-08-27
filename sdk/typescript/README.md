@@ -3,11 +3,11 @@
 Typed, dependency-free TypeScript client for Piqae's native API. It works in
 Node.js, browsers, serverless runtimes, and against a local-only agent.
 
-Portable business documents are exposed through `client.businessDocuments`.
+Portable PrintPackets are exposed through `client.printPackets`.
 Existing PDF and RAW printing does not require templates. Templates use the
-bounded `piqae.business-document/v1` format; adapters and editor-specific source
+bounded `printpacket/v1` format; adapters and editor-specific source
 languages are compiled by the integrating application, never executed by Piqae.
-`businessDocuments.renderAndPrint` composes the durable render and print bridge with
+`printPackets.renderAndPrint` composes the durable render and print bridge with
 separate idempotency keys; job state still distinguishes spooler acceptance
 from reported completion and uncertain delivery.
 

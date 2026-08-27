@@ -238,7 +238,7 @@ pub(crate) async fn create_print_job(
     if content_kind == ContentKind::Raw {
         return Err(AppError::invalid(
             "RawLanguageProfileRequired",
-            "Legacy RAW input has no printer-language profile and is rejected. Use the native Piqae API with printer_native binding.",
+            "Compatibility RAW input has no printer-language profile and is rejected. Use the native Piqae API with printer_native binding.",
         )
         .compatibility());
     }

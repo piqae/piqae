@@ -423,9 +423,9 @@ pub struct DocumentRenderCapabilities {
     /// tenant/node sync and must never be exposed to another tenant.
     #[serde(default)]
     pub cached_resource_digests: Vec<String>,
-    /// Exact V2 print-packet capability intersection. Missing is an explicit
-    /// rolling-upgrade signal: the node is old/unsupported, even when legacy
-    /// renderer ABI strings happen to match.
+    /// Exact V2 `PrintPacket` capability intersection. Missing is an explicit
+    /// update-required signal; standalone renderer ABI strings never imply
+    /// support.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub print_packet: Option<PrintPacketCapabilitiesV2>,
 }
@@ -451,6 +451,7 @@ pub struct PrintPacketCapabilitiesV2 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrintPacketLimits {
+    pub max_template_bytes: u64,
     pub max_input_bytes: u64,
     pub max_output_bytes: u64,
     pub max_pages: u32,
@@ -503,7 +504,7 @@ pub struct PrinterNativeJobDescriptor {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum BusinessDocumentRenderPolicy {
+pub enum PrintPacketRenderPolicy {
     #[default]
     Automatic,
     CloudOnly,
@@ -512,35 +513,31 @@ pub enum BusinessDocumentRenderPolicy {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct BusinessDocumentResourceDescriptor {
+#[serde(deny_unknown_fields)]
+pub struct PrintPacketResourceDescriptor {
     pub digest: String,
     pub media_type: String,
     pub byte_length: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct BusinessDocumentNodeRender {
-    #[serde(default)]
+#[serde(deny_unknown_fields)]
+pub struct PrintPacketNodeRender {
     pub negotiation_version: u16,
-    #[serde(default)]
     pub packet_version: String,
-    #[serde(default)]
     pub required_feature_ids: Vec<String>,
-    #[serde(default)]
     pub conformance_profile: String,
-    #[serde(default)]
     pub output_profile: String,
     pub renderer_abi: String,
     pub resource_abi: String,
     pub specification: serde_json::Value,
     pub input: serde_json::Value,
-    pub resources: Vec<BusinessDocumentResourceDescriptor>,
+    pub resources: Vec<PrintPacketResourceDescriptor>,
     pub expected_pdf_sha256: String,
     pub expected_pdf_bytes: u64,
     /// Authoritative page count produced with the same immutable specification,
     /// input, resources, renderer build, and PDF digest. Nodes use this value as
     /// the render page limit instead of substituting a local guess.
-    #[serde(default)]
     pub expected_page_count: u32,
 }
 
@@ -753,7 +750,7 @@ impl std::fmt::Debug for CloudRouteReservation {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContentDescriptor {
     Download {
         url: String,
@@ -780,9 +777,9 @@ pub enum ContentDescriptor {
     /// Exact node-render input with the already approved server PDF as a
     /// mandatory fallback. `require_node` is represented by `fallback_allowed`
     /// false and must fail closed instead of printing the fallback.
-    BusinessDocument {
-        policy: BusinessDocumentRenderPolicy,
-        render: Box<BusinessDocumentNodeRender>,
+    PrintPacket {
+        policy: PrintPacketRenderPolicy,
+        render: Box<PrintPacketNodeRender>,
         fallback: Box<ContentDescriptor>,
         fallback_allowed: bool,
         decision_reason: String,
@@ -1167,21 +1164,17 @@ mod route_protocol_tests {
     }
 
     #[test]
-    fn legacy_document_offer_without_page_count_fails_closed_additively() {
-        let Ok(render): Result<BusinessDocumentNodeRender, _> =
-            serde_json::from_value(serde_json::json!({
-                "renderer_abi": "piqae.business-document-pdf/v1",
-                "resource_abi": "piqae.document-resources/v1",
-                "specification": {},
-                "input": {},
-                "resources": [],
-                "expected_pdf_sha256": "a".repeat(64),
-                "expected_pdf_bytes": 100
-            }))
-        else {
-            panic!("legacy document offer must remain decodable");
-        };
-        assert_eq!(render.expected_page_count, 0);
+    fn print_packet_offer_requires_the_complete_negotiated_descriptor() {
+        let render = serde_json::from_value::<PrintPacketNodeRender>(serde_json::json!({
+            "renderer_abi": "printpacket.pdf-renderer/v1",
+            "resource_abi": "printpacket.resources/v1",
+            "specification": {},
+            "input": {},
+            "resources": [],
+            "expected_pdf_sha256": "a".repeat(64),
+            "expected_pdf_bytes": 100
+        }));
+        assert!(render.is_err());
     }
 
     #[test]
