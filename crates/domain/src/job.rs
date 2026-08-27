@@ -412,6 +412,7 @@ pub enum JobFailureReason {
     DriverError,
     ExecutorCrashed,
     ExecutorTimedOut,
+    NodeUpdateRequired,
     AmbiguousHandoff,
     CancelledByUser,
     Expired,

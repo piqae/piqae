@@ -33,8 +33,8 @@ use futures::StreamExt;
 use p256::pkcs8::DecodePublicKey as _;
 use piqae_auth::{Environment, Scope, generate_api_key};
 use piqae_domain::{
-    AgentId, ContentKind, ContentSource, EnvironmentId, Job, JobEvent, JobId, JobOptions, JobState,
-    PrinterId, PrinterState, WorkspaceId,
+    AgentId, ContentKind, ContentSource, EnvironmentId, Job, JobEvent, JobFailureReason, JobId,
+    JobOptions, JobState, PrinterId, PrinterState, WorkspaceId,
 };
 use piqae_object_store::{ObjectByteStream, ObjectStoreError, digest_hex};
 use piqae_protocol::agent::{
@@ -46,7 +46,7 @@ use piqae_protocol::agent::{
     NodeDisplayIdentity,
 };
 use piqae_storage_postgres::{
-    StoredAgent, StoredApiKey, StoredNodeConnector, StoredPrinter, StoredTargetBinding,
+    JobLease, StoredAgent, StoredApiKey, StoredNodeConnector, StoredPrinter, StoredTargetBinding,
     StoredUpload, StoredWebhook, StoredWebhookDelivery, SyncedPrinter,
     acceptance_revocation_webhook_idempotency_key, agent_acceptance_webhook_idempotency_key,
     preaccept_cancellation_webhook_idempotency_key,
@@ -59,6 +59,8 @@ use std::{
     convert::Infallible,
     str::FromStr,
 };
+
+const MAX_CAPABILITY_CANDIDATES_PER_SYNC: i64 = 16;
 
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
@@ -3063,7 +3065,43 @@ pub async fn agent_sync(
         request.agent_id,
     )
     .await?;
-    let leases = if request.queue.accepts_jobs && runtime_admission.eligible_for_offers {
+    let can_offer = request.queue.accepts_jobs && runtime_admission.eligible_for_offers;
+    if can_offer {
+        // A capability-blocked job is deliberately absent from the ordinary
+        // lease query. Only a fresh authenticated report that satisfies the
+        // complete offer contract may return it to the queue, and this scan is
+        // bounded so a stale backlog cannot dominate sync latency.
+        for blocked in state
+            .repository
+            .list_node_update_required_jobs(
+                tenant.workspace_id,
+                tenant.environment_id,
+                request.agent_id,
+                MAX_CAPABILITY_CANDIDATES_PER_SYNC,
+            )
+            .await?
+        {
+            if blocked_job_capability_is_restored(
+                &state,
+                tenant,
+                &blocked,
+                &request.document_render,
+            )
+            .await
+            {
+                let _ = state
+                    .repository
+                    .recover_node_update_required_job(
+                        tenant.workspace_id,
+                        tenant.environment_id,
+                        request.agent_id,
+                        blocked.id,
+                    )
+                    .await?;
+            }
+        }
+    }
+    let leases = if can_offer {
         state
             .repository
             .claim_jobs(
@@ -3071,49 +3109,158 @@ pub async fn agent_sync(
                 tenant.environment_id,
                 request.agent_id,
                 &format!("{}:{}", request.agent_id, request.agent_version),
-                // The V1 agent materializes offers serially. Claiming a batch
-                // would let later 30-second leases expire before the agent
-                // reaches them, so offer one durable handoff per sync.
-                1,
+                MAX_CAPABILITY_CANDIDATES_PER_SYNC,
             )
             .await?
     } else {
         Vec::new()
     };
-    let mut candidate_jobs = Vec::with_capacity(leases.len());
-    for lease in leases {
-        if lease.job.content_kind == ContentKind::Raw
-            && !supports_printer_native_offer(
-                &request.document_render,
-                &lease.job.metadata,
-                &lease.job.printer_id.to_string(),
-            )
-        {
-            // Capabilities can change after registration. Never offer opaque
-            // native bytes after the exact printer/language binding disappears.
-            state
-                .repository
-                .release_agent_lease(
-                    tenant.workspace_id,
-                    tenant.environment_id,
+    let mut selected = None;
+    let mut leases = leases.into_iter();
+    while let Some(lease) = leases.next() {
+        if selected.is_some() {
+            let mut remaining = vec![lease];
+            remaining.extend(leases);
+            if let Err(error) =
+                release_agent_lease_batch(&state, tenant, request.agent_id, remaining).await
+            {
+                let (selected_lease, _) = selected
+                    .take()
+                    .ok_or_else(|| AppError::service_unavailable("selected_agent_lease_missing"))?;
+                let _ = release_agent_lease_batch(
+                    &state,
+                    tenant,
                     request.agent_id,
-                    lease.job.id,
-                    lease.lease_id,
-                    &lease.lease_token,
+                    vec![selected_lease],
                 )
-                .await?;
-            continue;
+                .await;
+                return Err(error.into());
+            }
+            break;
         }
-        let route_reservation = match crate::destination_topology::reserve_job_route(
+        let preparation =
+            match prepare_agent_offer_content(&state, tenant, &lease.job, &request.document_render)
+                .await
+            {
+                Ok(preparation) => preparation,
+                Err(error) => {
+                    // An infrastructure failure still aborts this sync, but only
+                    // after every lease claimed in the batch has been released.
+                    // Do not turn a temporary database/object-store outage into a
+                    // sibling 30-second starvation window.
+                    let mut unreleased = vec![lease];
+                    unreleased.extend(leases);
+                    let _ = release_agent_lease_batch(&state, tenant, request.agent_id, unreleased)
+                        .await;
+                    return Err(error);
+                }
+            };
+        match preparation {
+            AgentOfferPreparation::Ready(content) => selected = Some((lease, content)),
+            AgentOfferPreparation::NodeUpdateRequired => {
+                // Capability drift is durable and recoverable. Blocking it
+                // removes the head-of-line job from ordinary claims without a
+                // retry storm; a later compatible sync can return it once.
+                let transition = state
+                    .repository
+                    .block_agent_lease_for_node_update(
+                        tenant.workspace_id,
+                        tenant.environment_id,
+                        request.agent_id,
+                        lease.job.id,
+                        lease.lease_id,
+                        &lease.lease_token,
+                    )
+                    .await;
+                if let Err(error) = transition {
+                    let mut pending = vec![lease];
+                    pending.extend(leases);
+                    let _ =
+                        release_agent_lease_batch(&state, tenant, request.agent_id, pending).await;
+                    return Err(error.into());
+                }
+            }
+            AgentOfferPreparation::RetryLater => {
+                let release = state
+                    .repository
+                    .release_agent_lease(
+                        tenant.workspace_id,
+                        tenant.environment_id,
+                        request.agent_id,
+                        lease.job.id,
+                        lease.lease_id,
+                        &lease.lease_token,
+                    )
+                    .await;
+                if let Err(error) = release {
+                    let mut pending = vec![lease];
+                    pending.extend(leases);
+                    let _ =
+                        release_agent_lease_batch(&state, tenant, request.agent_id, pending).await;
+                    return Err(error.into());
+                }
+            }
+            AgentOfferPreparation::PermanentFailure { reason, message } => {
+                let transition = state
+                    .repository
+                    .fail_agent_lease_before_handoff(
+                        tenant.workspace_id,
+                        tenant.environment_id,
+                        request.agent_id,
+                        lease.job.id,
+                        lease.lease_id,
+                        &lease.lease_token,
+                        reason,
+                        message,
+                    )
+                    .await;
+                if let Err(error) = transition {
+                    let mut pending = vec![lease];
+                    pending.extend(leases);
+                    let _ =
+                        release_agent_lease_batch(&state, tenant, request.agent_id, pending).await;
+                    return Err(error.into());
+                }
+            }
+        }
+    }
+    let mut candidate_jobs = Vec::with_capacity(usize::from(selected.is_some()));
+    if let Some((lease, content)) = selected {
+        let reservation = match crate::destination_topology::reserve_job_route(
             &state,
             tenant,
             &lease.job,
             lease.lease_until,
         )
-        .await?
+        .await
         {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                let _ =
+                    release_agent_lease_batch(&state, tenant, request.agent_id, vec![lease]).await;
+                return Err(error);
+            }
+        };
+        match reservation {
             crate::destination_topology::JobRouteReservation::Reserved(reservation) => {
-                Some(reservation)
+                candidate_jobs.push(JobOffer {
+                    expected_capability_revision: lease
+                        .job
+                        .metadata
+                        .get("piqae.capability_revision")
+                        .and_then(|revision| revision.parse().ok()),
+                    resolved_ticket_digest: lease
+                        .job
+                        .metadata
+                        .get("piqae.resolved_ticket_digest")
+                        .cloned(),
+                    job: lease.job,
+                    lease_id: lease.lease_id,
+                    lease_token: lease.lease_token,
+                    lease_expires_at: lease.lease_until,
+                    content,
+                    route_reservation: Some(reservation),
+                });
             }
             crate::destination_topology::JobRouteReservation::Busy => {
                 state
@@ -3127,7 +3274,6 @@ pub async fn agent_sync(
                         &lease.lease_token,
                     )
                     .await?;
-                continue;
             }
             crate::destination_topology::JobRouteReservation::ProjectionRequired {
                 destination_id,
@@ -3158,194 +3304,8 @@ pub async fn agent_sync(
                         }),
                     )
                     .await?;
-                continue;
             }
-        };
-        let mut content = match &lease.job.content {
-            ContentSource::Upload { upload_id } => {
-                let upload = state
-                    .repository
-                    .get_upload(tenant.workspace_id, tenant.environment_id, upload_id)
-                    .await?;
-                if upload.state != "complete" {
-                    return Err(AppError::service_unavailable("job_upload_is_not_complete"));
-                }
-                ContentDescriptor::Download {
-                    url: format!("/v1/agent/jobs/{}/content", lease.job.id),
-                    sha256: upload.expected_sha256,
-                    bytes: u64::try_from(upload.expected_bytes).map_err(|_| {
-                        AppError::service_unavailable("invalid_stored_content_length")
-                    })?,
-                }
-            }
-            ContentSource::EncryptedUpload {
-                upload_id,
-                manifest,
-            } => {
-                let upload = state
-                    .repository
-                    .get_upload(tenant.workspace_id, tenant.environment_id, upload_id)
-                    .await?;
-                if upload.state != "complete" {
-                    return Err(AppError::service_unavailable("job_upload_is_not_complete"));
-                }
-                ContentDescriptor::EncryptedDownload {
-                    url: format!("/v1/agent/jobs/{}/content", lease.job.id),
-                    sha256: upload.expected_sha256,
-                    bytes: u64::try_from(upload.expected_bytes).map_err(|_| {
-                        AppError::service_unavailable("invalid_stored_content_length")
-                    })?,
-                    manifest: manifest.clone(),
-                }
-            }
-            ContentSource::Base64 { data } => {
-                let decoded = base64::engine::general_purpose::STANDARD
-                    .decode(data)
-                    .map_err(|_| AppError::service_unavailable("invalid_stored_base64_content"))?;
-                ContentDescriptor::InlineBase64 {
-                    data: data.clone(),
-                    sha256: Some(digest_hex(&decoded)),
-                    bytes: Some(decoded.len() as u64),
-                }
-            }
-            ContentSource::Uri {
-                uri,
-                authentication,
-            } => ContentDescriptor::Uri {
-                uri: uri.clone(),
-                authentication: authentication.clone(),
-                sha256: None,
-                bytes: None,
-            },
-        };
-        if lease
-            .job
-            .metadata
-            .get("piqae.document.render_mode")
-            .is_some_and(|mode| mode == "node_render")
-        {
-            let render_id = lease
-                .job
-                .metadata
-                .get("piqae.document.render_id")
-                .ok_or_else(|| AppError::service_unavailable("document_render_metadata_missing"))?;
-            let policy = match lease
-                .job
-                .metadata
-                .get("piqae.document.render_policy")
-                .map(String::as_str)
-            {
-                Some("cloud_only") => piqae_protocol::agent::PrintPacketRenderPolicy::CloudOnly,
-                Some("prefer_node") => piqae_protocol::agent::PrintPacketRenderPolicy::PreferNode,
-                Some("require_node") => piqae_protocol::agent::PrintPacketRenderPolicy::RequireNode,
-                _ => piqae_protocol::agent::PrintPacketRenderPolicy::Automatic,
-            };
-            let fallback_allowed =
-                policy != piqae_protocol::agent::PrintPacketRenderPolicy::RequireNode;
-            if matches!(content, ContentDescriptor::EncryptedDownload { .. }) {
-                if !fallback_allowed {
-                    return Err(AppError::service_unavailable(
-                        "node_render_encrypted_content_unsupported",
-                    ));
-                }
-                // Never attach cleartext specification/input beside encrypted
-                // job content. Prefer/automatic keep the encrypted PDF offer.
-                candidate_jobs.push(JobOffer {
-                    expected_capability_revision: lease
-                        .job
-                        .metadata
-                        .get("piqae.capability_revision")
-                        .and_then(|revision| revision.parse().ok()),
-                    resolved_ticket_digest: lease
-                        .job
-                        .metadata
-                        .get("piqae.resolved_ticket_digest")
-                        .cloned(),
-                    job: lease.job,
-                    lease_id: lease.lease_id,
-                    lease_token: lease.lease_token,
-                    lease_expires_at: lease.lease_until,
-                    content,
-                    route_reservation,
-                });
-                continue;
-            }
-            let render = crate::documents::node_render_payload(
-                &state,
-                tenant.workspace_id,
-                tenant.environment_id,
-                render_id,
-            )
-            .await?;
-            if !supports_print_packet_offer(&request.document_render, &render) {
-                if fallback_allowed {
-                    // Capability changed after registration. Preserve the
-                    // already-approved PDF without leaking a descriptor to a
-                    // node that no longer satisfies the exact contract.
-                    candidate_jobs.push(JobOffer {
-                        expected_capability_revision: lease
-                            .job
-                            .metadata
-                            .get("piqae.capability_revision")
-                            .and_then(|revision| revision.parse().ok()),
-                        resolved_ticket_digest: lease
-                            .job
-                            .metadata
-                            .get("piqae.resolved_ticket_digest")
-                            .cloned(),
-                        job: lease.job,
-                        lease_id: lease.lease_id,
-                        lease_token: lease.lease_token,
-                        lease_expires_at: lease.lease_until,
-                        content,
-                        route_reservation,
-                    });
-                    continue;
-                }
-                state
-                    .repository
-                    .release_agent_lease(
-                        tenant.workspace_id,
-                        tenant.environment_id,
-                        request.agent_id,
-                        lease.job.id,
-                        lease.lease_id,
-                        &lease.lease_token,
-                    )
-                    .await?;
-                continue;
-            }
-            content = ContentDescriptor::PrintPacket {
-                policy,
-                render: Box::new(render),
-                fallback: Box::new(content),
-                fallback_allowed,
-                decision_reason: lease
-                    .job
-                    .metadata
-                    .get("piqae.document.render_decision_reason")
-                    .cloned()
-                    .unwrap_or_else(|| "unspecified".into()),
-            };
         }
-        candidate_jobs.push(JobOffer {
-            expected_capability_revision: lease
-                .job
-                .metadata
-                .get("piqae.capability_revision")
-                .and_then(|revision| revision.parse().ok()),
-            resolved_ticket_digest: lease
-                .job
-                .metadata
-                .get("piqae.resolved_ticket_digest")
-                .cloned(),
-            job: lease.job,
-            lease_id: lease.lease_id,
-            lease_token: lease.lease_token,
-            lease_expires_at: lease.lease_until,
-            content,
-            route_reservation,
-        });
     }
     let has_immediate_work = !request.events.is_empty()
         || request.queue.queued_jobs > 0
@@ -3366,6 +3326,249 @@ pub async fn agent_sync(
         acknowledged_handoff_sequence,
         wake_hints: runtime_admission.wake_hints,
     }))
+}
+
+/// Releases every lease in a claimed batch and reports the first repository
+/// error only after later siblings have also had a release attempt.
+async fn release_agent_lease_batch(
+    state: &AppState,
+    tenant: TenantContext,
+    agent_id: AgentId,
+    leases: Vec<JobLease>,
+) -> Result<(), RepositoryError> {
+    let mut first_error = None;
+    for lease in leases {
+        if let Err(error) = state
+            .repository
+            .release_agent_lease(
+                tenant.workspace_id,
+                tenant.environment_id,
+                agent_id,
+                lease.job.id,
+                lease.lease_id,
+                &lease.lease_token,
+            )
+            .await
+        {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+/// Materializes an offer only after every capability-sensitive part of the
+/// content contract has been checked.
+enum AgentOfferPreparation {
+    Ready(ContentDescriptor),
+    NodeUpdateRequired,
+    RetryLater,
+    PermanentFailure {
+        reason: JobFailureReason,
+        message: &'static str,
+    },
+}
+
+async fn blocked_job_capability_is_restored(
+    state: &AppState,
+    tenant: TenantContext,
+    job: &Job,
+    capabilities: &piqae_protocol::agent::DocumentRenderCapabilities,
+) -> bool {
+    if job.content_kind == ContentKind::Raw {
+        return supports_printer_native_offer(
+            capabilities,
+            &job.metadata,
+            &job.printer_id.to_string(),
+        );
+    }
+    if job
+        .metadata
+        .get("piqae.document.render_mode")
+        .is_none_or(|mode| mode != "node_render")
+        || job
+            .metadata
+            .get("piqae.document.render_policy")
+            .is_none_or(|policy| policy != "require_node")
+        || matches!(job.content, ContentSource::EncryptedUpload { .. })
+    {
+        return false;
+    }
+    let Some(render_id) = job.metadata.get("piqae.document.render_id") else {
+        return false;
+    };
+    let Ok(render) = crate::documents::node_render_payload(
+        state,
+        tenant.workspace_id,
+        tenant.environment_id,
+        render_id,
+    )
+    .await
+    else {
+        // A malformed or temporarily unavailable blocked artifact must not
+        // abort recovery of later jobs. It remains blocked for inspection.
+        return false;
+    };
+    supports_print_packet_offer(capabilities, &render)
+}
+
+async fn prepare_agent_offer_content(
+    state: &AppState,
+    tenant: TenantContext,
+    job: &Job,
+    capabilities: &piqae_protocol::agent::DocumentRenderCapabilities,
+) -> Result<AgentOfferPreparation, AppError> {
+    if job.content_kind == ContentKind::Raw
+        && !supports_printer_native_offer(capabilities, &job.metadata, &job.printer_id.to_string())
+    {
+        return Ok(AgentOfferPreparation::NodeUpdateRequired);
+    }
+    let content = match &job.content {
+        ContentSource::Upload { upload_id } => {
+            let upload = match state
+                .repository
+                .get_upload(tenant.workspace_id, tenant.environment_id, upload_id)
+                .await
+            {
+                Ok(upload) => upload,
+                Err(RepositoryError::NotFound) => {
+                    return Ok(AgentOfferPreparation::PermanentFailure {
+                        reason: JobFailureReason::ContentUnavailable,
+                        message: "Stored job content is unavailable",
+                    });
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if upload.state != "complete" {
+                return Ok(AgentOfferPreparation::RetryLater);
+            }
+            let Ok(bytes) = u64::try_from(upload.expected_bytes) else {
+                return Ok(AgentOfferPreparation::PermanentFailure {
+                    reason: JobFailureReason::Internal,
+                    message: "Stored job content length is invalid",
+                });
+            };
+            ContentDescriptor::Download {
+                url: format!("/v1/agent/jobs/{}/content", job.id),
+                sha256: upload.expected_sha256,
+                bytes,
+            }
+        }
+        ContentSource::EncryptedUpload {
+            upload_id,
+            manifest,
+        } => {
+            let upload = match state
+                .repository
+                .get_upload(tenant.workspace_id, tenant.environment_id, upload_id)
+                .await
+            {
+                Ok(upload) => upload,
+                Err(RepositoryError::NotFound) => {
+                    return Ok(AgentOfferPreparation::PermanentFailure {
+                        reason: JobFailureReason::ContentUnavailable,
+                        message: "Stored encrypted job content is unavailable",
+                    });
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if upload.state != "complete" {
+                return Ok(AgentOfferPreparation::RetryLater);
+            }
+            let Ok(bytes) = u64::try_from(upload.expected_bytes) else {
+                return Ok(AgentOfferPreparation::PermanentFailure {
+                    reason: JobFailureReason::Internal,
+                    message: "Stored encrypted job content length is invalid",
+                });
+            };
+            ContentDescriptor::EncryptedDownload {
+                url: format!("/v1/agent/jobs/{}/content", job.id),
+                sha256: upload.expected_sha256,
+                bytes,
+                manifest: manifest.clone(),
+            }
+        }
+        ContentSource::Base64 { data } => {
+            let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(data) else {
+                return Ok(AgentOfferPreparation::PermanentFailure {
+                    reason: JobFailureReason::ContentChecksumMismatch,
+                    message: "Stored inline job content is invalid",
+                });
+            };
+            ContentDescriptor::InlineBase64 {
+                data: data.clone(),
+                sha256: Some(digest_hex(&decoded)),
+                bytes: Some(decoded.len() as u64),
+            }
+        }
+        ContentSource::Uri {
+            uri,
+            authentication,
+        } => ContentDescriptor::Uri {
+            uri: uri.clone(),
+            authentication: authentication.clone(),
+            sha256: None,
+            bytes: None,
+        },
+    };
+    if job
+        .metadata
+        .get("piqae.document.render_mode")
+        .is_none_or(|mode| mode != "node_render")
+    {
+        return Ok(AgentOfferPreparation::Ready(content));
+    }
+    let Some(render_id) = job.metadata.get("piqae.document.render_id") else {
+        return Ok(AgentOfferPreparation::PermanentFailure {
+            reason: JobFailureReason::Internal,
+            message: "Stored PrintPacket render metadata is incomplete",
+        });
+    };
+    let policy = match job
+        .metadata
+        .get("piqae.document.render_policy")
+        .map(String::as_str)
+    {
+        Some("cloud_only") => piqae_protocol::agent::PrintPacketRenderPolicy::CloudOnly,
+        Some("prefer_node") => piqae_protocol::agent::PrintPacketRenderPolicy::PreferNode,
+        Some("require_node") => piqae_protocol::agent::PrintPacketRenderPolicy::RequireNode,
+        _ => piqae_protocol::agent::PrintPacketRenderPolicy::Automatic,
+    };
+    let fallback_allowed = policy != piqae_protocol::agent::PrintPacketRenderPolicy::RequireNode;
+    if matches!(content, ContentDescriptor::EncryptedDownload { .. }) {
+        // Never attach cleartext specification/input beside encrypted content.
+        return Ok(if fallback_allowed {
+            AgentOfferPreparation::Ready(content)
+        } else {
+            AgentOfferPreparation::NodeUpdateRequired
+        });
+    }
+    let render = crate::documents::node_render_payload(
+        state,
+        tenant.workspace_id,
+        tenant.environment_id,
+        render_id,
+    )
+    .await?;
+    if !supports_print_packet_offer(capabilities, &render) {
+        return Ok(if fallback_allowed {
+            AgentOfferPreparation::Ready(content)
+        } else {
+            AgentOfferPreparation::NodeUpdateRequired
+        });
+    }
+    Ok(AgentOfferPreparation::Ready(
+        ContentDescriptor::PrintPacket {
+            policy,
+            render: Box::new(render),
+            fallback: Box::new(content),
+            fallback_allowed,
+            decision_reason: job
+                .metadata
+                .get("piqae.document.render_decision_reason")
+                .cloned()
+                .unwrap_or_else(|| "unspecified".into()),
+        },
+    ))
 }
 
 fn supports_print_packet_offer(

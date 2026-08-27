@@ -29,7 +29,9 @@ use piqae_storage_postgres::{
     StoredWorkspaceMember, StripeBillingEvent, StripeProjectionResult, SyncedPrinter,
     UpsertedPlatformAccount, WebhookDeliveryWork, WorkOsIdentityEvent, WorkOsProjectionResult,
     acceptance_revocation_webhook_idempotency_key, agent_acceptance_webhook_idempotency_key,
-    preaccept_cancellation_webhook_idempotency_key,
+    node_capability_recovered_webhook_idempotency_key,
+    node_update_required_webhook_idempotency_key, preaccept_cancellation_webhook_idempotency_key,
+    prehandoff_failure_webhook_idempotency_key,
 };
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -1111,6 +1113,40 @@ pub trait Repository: Send + Sync + 'static {
         lease_id: Uuid,
         lease_token: &str,
     ) -> Result<(), RepositoryError>;
+    async fn block_agent_lease_for_node_update(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+    ) -> Result<Job, RepositoryError>;
+    async fn fail_agent_lease_before_handoff(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        reason: JobFailureReason,
+        message: &str,
+    ) -> Result<Job, RepositoryError>;
+    async fn list_node_update_required_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, RepositoryError>;
+    async fn recover_node_update_required_job(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+    ) -> Result<Option<Job>, RepositoryError>;
     async fn validate_agent_lease(
         &self,
         workspace_id: WorkspaceId,
@@ -3236,6 +3272,78 @@ impl Repository for PostgresStore {
         )
         .await
         .map_err(Into::into)
+    }
+
+    async fn block_agent_lease_for_node_update(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+    ) -> Result<Job, RepositoryError> {
+        Self::block_agent_lease_for_node_update(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn fail_agent_lease_before_handoff(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        reason: JobFailureReason,
+        message: &str,
+    ) -> Result<Job, RepositoryError> {
+        Self::fail_agent_lease_before_handoff(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+            reason,
+            message,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn list_node_update_required_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, RepositoryError> {
+        Self::list_node_update_required_jobs(self, workspace_id, environment_id, agent_id, limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn recover_node_update_required_job(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+    ) -> Result<Option<Job>, RepositoryError> {
+        Self::recover_node_update_required_job(self, workspace_id, environment_id, agent_id, job_id)
+            .await
+            .map_err(Into::into)
     }
 
     async fn validate_agent_lease(
@@ -7456,7 +7564,8 @@ impl Repository for MemoryRepository {
     ) -> Result<Vec<JobLease>, RepositoryError> {
         let lease_until = Utc::now() + chrono::Duration::seconds(30);
         let mut state = self.state.write().await;
-        let jobs = state
+        let now = Utc::now();
+        let mut jobs = state
             .jobs
             .values()
             .filter(|record| {
@@ -7467,10 +7576,19 @@ impl Repository for MemoryRepository {
                         record.job.state,
                         JobState::WaitingForAgent | JobState::FailedRetryable
                     )
+                    && state
+                        .leases
+                        .get(&record.job.id)
+                        .is_none_or(|(_, _, _, expiry)| *expiry <= now)
             })
-            .take(usize::try_from(limit.clamp(1, 100)).unwrap_or(100))
             .map(|record| record.job.clone())
             .collect::<Vec<_>>();
+        jobs.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.to_string().cmp(&right.id.to_string()))
+        });
+        jobs.truncate(usize::try_from(limit.clamp(1, 100)).unwrap_or(100));
         let mut leases = Vec::with_capacity(jobs.len());
         for job in jobs {
             let lease_id = Uuid::new_v4();
@@ -7556,6 +7674,242 @@ impl Repository for MemoryRepository {
         .await?;
         self.state.write().await.leases.remove(&job_id);
         Ok(())
+    }
+
+    async fn block_agent_lease_for_node_update(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+    ) -> Result<Job, RepositoryError> {
+        let mut state = self.state.write().await;
+        let valid_lease = state.leases.get(&job_id).is_some_and(
+            |(stored_agent, stored_id, stored_token, expiry)| {
+                *stored_agent == agent_id
+                    && *stored_id == lease_id
+                    && stored_token == lease_token
+                    && *expiry > Utc::now()
+            },
+        );
+        if !valid_lease {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        let (job, sequence) = {
+            let record = state
+                .jobs
+                .get_mut(&job_id)
+                .filter(|record| {
+                    record.job.workspace_id == workspace_id
+                        && record.job.environment_id == environment_id
+                        && record.agent_id == agent_id
+                        && matches!(
+                            record.job.state,
+                            JobState::WaitingForAgent | JobState::FailedRetryable
+                        )
+                })
+                .ok_or(RepositoryError::NotFound)?;
+            record.sequence = record.sequence.saturating_add(1);
+            record.job.state = JobState::Blocked;
+            record.events.push(JobEvent {
+                id: EventId::new(),
+                job_id,
+                sequence: record.sequence,
+                state: JobState::Blocked,
+                reason: Some(JobFailureReason::NodeUpdateRequired),
+                message: Some(
+                    "Assigned node requires an update for this job's exact print capabilities"
+                        .into(),
+                ),
+                // Server provenance keeps this distinct from a physical block
+                // reported by the authenticated node.
+                agent_id: None,
+                native_job_id: None,
+                occurred_at: Utc::now(),
+            });
+            (record.job.clone(), record.sequence)
+        };
+        state.leases.remove(&job_id);
+        let payload = serde_json::to_value(&job)
+            .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+        enqueue_memory_webhook_event(
+            &mut state,
+            Some(&node_update_required_webhook_idempotency_key(
+                workspace_id,
+                environment_id,
+                job_id,
+                sequence,
+            )),
+            workspace_id,
+            environment_id,
+            "job.updated",
+            &payload,
+        );
+        Ok(job)
+    }
+
+    async fn fail_agent_lease_before_handoff(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        reason: JobFailureReason,
+        message: &str,
+    ) -> Result<Job, RepositoryError> {
+        let mut state = self.state.write().await;
+        let valid_lease = state.leases.get(&job_id).is_some_and(
+            |(stored_agent, stored_id, stored_token, expiry)| {
+                *stored_agent == agent_id
+                    && *stored_id == lease_id
+                    && stored_token == lease_token
+                    && *expiry > Utc::now()
+            },
+        );
+        if !valid_lease {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        let (job, sequence) = {
+            let record = state
+                .jobs
+                .get_mut(&job_id)
+                .filter(|record| {
+                    record.job.workspace_id == workspace_id
+                        && record.job.environment_id == environment_id
+                        && record.agent_id == agent_id
+                        && matches!(
+                            record.job.state,
+                            JobState::WaitingForAgent | JobState::FailedRetryable
+                        )
+                })
+                .ok_or(RepositoryError::NotFound)?;
+            record.sequence = record.sequence.saturating_add(1);
+            record.job.state = JobState::FailedTerminal;
+            record.events.push(JobEvent {
+                id: EventId::new(),
+                job_id,
+                sequence: record.sequence,
+                state: JobState::FailedTerminal,
+                reason: Some(reason),
+                message: Some(message.to_owned()),
+                agent_id: Some(agent_id),
+                native_job_id: None,
+                occurred_at: Utc::now(),
+            });
+            (record.job.clone(), record.sequence)
+        };
+        state.leases.remove(&job_id);
+        let payload = serde_json::to_value(&job)
+            .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+        enqueue_memory_webhook_event(
+            &mut state,
+            Some(&prehandoff_failure_webhook_idempotency_key(
+                workspace_id,
+                environment_id,
+                job_id,
+                sequence,
+            )),
+            workspace_id,
+            environment_id,
+            "job.updated",
+            &payload,
+        );
+        Ok(job)
+    }
+
+    async fn list_node_update_required_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, RepositoryError> {
+        let state = self.state.read().await;
+        let mut jobs = state
+            .jobs
+            .values()
+            .filter(|record| {
+                record.job.workspace_id == workspace_id
+                    && record.job.environment_id == environment_id
+                    && record.agent_id == agent_id
+                    && record.job.state == JobState::Blocked
+                    && record.job.expires_at > Utc::now()
+                    && record.events.last().is_some_and(|event| {
+                        event.reason == Some(JobFailureReason::NodeUpdateRequired)
+                            && event.agent_id.is_none()
+                    })
+            })
+            .map(|record| record.job.clone())
+            .collect::<Vec<_>>();
+        jobs.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.to_string().cmp(&right.id.to_string()))
+        });
+        jobs.truncate(usize::try_from(limit.clamp(1, 100)).unwrap_or(100));
+        Ok(jobs)
+    }
+
+    async fn recover_node_update_required_job(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+    ) -> Result<Option<Job>, RepositoryError> {
+        let mut state = self.state.write().await;
+        let (job, sequence) = {
+            let Some(record) = state.jobs.get_mut(&job_id).filter(|record| {
+                record.job.workspace_id == workspace_id
+                    && record.job.environment_id == environment_id
+                    && record.agent_id == agent_id
+                    && record.job.state == JobState::Blocked
+                    && record.job.expires_at > Utc::now()
+                    && record.events.last().is_some_and(|event| {
+                        event.reason == Some(JobFailureReason::NodeUpdateRequired)
+                            && event.agent_id.is_none()
+                    })
+            }) else {
+                return Ok(None);
+            };
+            // This is the only server-authorized Blocked -> Waiting transition:
+            // the latest durable event proves this was a pre-handoff capability
+            // block rather than a physical spooler observation.
+            record.sequence = record.sequence.saturating_add(1);
+            record.job.state = JobState::WaitingForAgent;
+            record.events.push(JobEvent {
+                id: EventId::new(),
+                job_id,
+                sequence: record.sequence,
+                state: JobState::WaitingForAgent,
+                reason: None,
+                message: Some("Node print capabilities restored; job returned to queue".into()),
+                agent_id: None,
+                native_job_id: None,
+                occurred_at: Utc::now(),
+            });
+            (record.job.clone(), record.sequence)
+        };
+        let payload = serde_json::to_value(&job)
+            .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+        enqueue_memory_webhook_event(
+            &mut state,
+            Some(&node_capability_recovered_webhook_idempotency_key(
+                workspace_id,
+                environment_id,
+                job_id,
+                sequence,
+            )),
+            workspace_id,
+            environment_id,
+            "job.updated",
+            &payload,
+        );
+        Ok(Some(job))
     }
 
     async fn validate_agent_lease(
@@ -9490,6 +9844,173 @@ mod routing_repository_tests {
                 .await
                 .routing_attempts
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_block_is_ordered_tenant_scoped_idempotent_and_recoverable() {
+        let repository = MemoryRepository::default();
+        let workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        let other_workspace = WorkspaceId::new();
+        let agent = AgentId::new();
+        let printer = PrinterId::new();
+        repository
+            .add_printer(workspace, environment, printer, agent)
+            .await;
+        let make_job = |title: &str, created_at: DateTime<Utc>| Job {
+            id: JobId::new(),
+            workspace_id: workspace,
+            environment_id: environment,
+            printer_id: printer,
+            title: title.into(),
+            source: None,
+            content_kind: piqae_domain::ContentKind::Raw,
+            content: piqae_domain::ContentSource::Base64 {
+                data: "G0BmaXh0dXJl".into(),
+            },
+            options: JobOptions::default(),
+            metadata: BTreeMap::new(),
+            deliveries: 1,
+            state: JobState::WaitingForAgent,
+            created_at,
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            delivery_uncertain_since: None,
+        };
+        let oldest = make_job(
+            "old incompatible",
+            Utc::now() - chrono::Duration::seconds(2),
+        );
+        let later = make_job(
+            "later compatible",
+            Utc::now() - chrono::Duration::seconds(1),
+        );
+        for job in [&oldest, &later] {
+            repository
+                .create_job(job, agent, None, job.title.as_bytes())
+                .await
+                .expect("create job");
+        }
+
+        let leases = repository
+            .claim_jobs(workspace, environment, agent, "test", 16)
+            .await
+            .expect("ordered leases");
+        assert_eq!(leases.len(), 2);
+        assert_eq!(leases[0].job.id, oldest.id);
+        assert_eq!(leases[1].job.id, later.id);
+        let blocked = repository
+            .block_agent_lease_for_node_update(
+                workspace,
+                environment,
+                agent,
+                oldest.id,
+                leases[0].lease_id,
+                &leases[0].lease_token,
+            )
+            .await
+            .expect("block incompatible lease");
+        assert_eq!(blocked.state, JobState::Blocked);
+        assert!(matches!(
+            repository
+                .block_agent_lease_for_node_update(
+                    workspace,
+                    environment,
+                    agent,
+                    oldest.id,
+                    leases[0].lease_id,
+                    &leases[0].lease_token,
+                )
+                .await,
+            Err(RepositoryError::ConcurrentStateChange)
+        ));
+        let events = repository
+            .list_job_events(workspace, environment, oldest.id)
+            .await
+            .expect("job events");
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events.last().and_then(|event| event.reason.clone()),
+            Some(JobFailureReason::NodeUpdateRequired)
+        );
+        assert_eq!(
+            events.last().and_then(|event| event.agent_id),
+            None,
+            "automatic recovery must be limited to server-authored capability blocks"
+        );
+        assert_eq!(
+            repository
+                .list_node_update_required_jobs(workspace, environment, agent, 1)
+                .await
+                .expect("blocked jobs")
+                .iter()
+                .map(|job| job.id)
+                .collect::<Vec<_>>(),
+            vec![oldest.id]
+        );
+        assert!(
+            repository
+                .list_node_update_required_jobs(other_workspace, environment, agent, 16)
+                .await
+                .expect("other tenant blocked jobs")
+                .is_empty()
+        );
+        assert_eq!(
+            repository
+                .list_tenant_events(workspace, environment, None, 100)
+                .await
+                .expect("tenant events")
+                .iter()
+                .filter(|event| {
+                    event.event_type == "job.updated"
+                        && event.payload["id"] == oldest.id.as_ulid().to_string()
+                })
+                .count(),
+            1
+        );
+
+        assert!(
+            repository
+                .recover_node_update_required_job(workspace, environment, agent, oldest.id)
+                .await
+                .expect("recover capability block")
+                .is_some()
+        );
+        assert!(
+            repository
+                .recover_node_update_required_job(workspace, environment, agent, oldest.id)
+                .await
+                .expect("idempotent recovery")
+                .is_none()
+        );
+        assert_eq!(
+            repository
+                .get_job(workspace, environment, oldest.id)
+                .await
+                .expect("recovered job")
+                .state,
+            JobState::WaitingForAgent
+        );
+        assert_eq!(
+            repository
+                .list_job_events(workspace, environment, oldest.id)
+                .await
+                .expect("recovered events")
+                .len(),
+            3
+        );
+        assert_eq!(
+            repository
+                .list_tenant_events(workspace, environment, None, 100)
+                .await
+                .expect("recovered tenant events")
+                .iter()
+                .filter(|event| {
+                    event.event_type == "job.updated"
+                        && event.payload["id"] == oldest.id.as_ulid().to_string()
+                })
+                .count(),
+            2
         );
     }
 

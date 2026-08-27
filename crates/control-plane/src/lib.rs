@@ -2038,7 +2038,44 @@ mod tests {
             .expect("required job id")
             .parse()
             .expect("typed job id");
-        let offer = sync_virtual_document_node(&application, supported, true)
+        let incompatible_required = sync_virtual_document_node(
+            &application,
+            piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            true,
+        )
+        .await;
+        assert!(incompatible_required.candidate_jobs.is_empty());
+        assert_eq!(
+            application
+                .repository
+                .get_job(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    required_job,
+                )
+                .await
+                .expect("blocked require_node job")
+                .state,
+            JobState::Blocked
+        );
+        assert_eq!(
+            application
+                .repository
+                .list_job_events(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    required_job,
+                )
+                .await
+                .expect("require_node block events")
+                .iter()
+                .filter(|event| {
+                    event.reason == Some(piqae_domain::JobFailureReason::NodeUpdateRequired)
+                })
+                .count(),
+            1
+        );
+        let offer = sync_virtual_document_node(&application, supported, false)
             .await
             .candidate_jobs
             .into_iter()
@@ -3814,6 +3851,330 @@ mod tests {
             .language_version = "2".into();
         let withheld = sync_virtual_document_node(&application, changed, false).await;
         assert!(withheld.candidate_jobs.is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn incompatible_oldest_job_blocks_once_while_later_compatible_job_is_offered() {
+        use piqae_storage_postgres::destination_topology::TenantScope;
+
+        let application = application().await;
+        let mut raw_capabilities = virtual_print_packet_capabilities();
+        let packet = raw_capabilities
+            .print_packet
+            .as_mut()
+            .expect("PrintPacket capability");
+        packet.output_profiles.push(
+            piqae_protocol::agent::PrintPacketOutputProfile::PrinterNative {
+                id: "escpos.generic/v1".into(),
+                media_type: "application/vnd.escpos".into(),
+                language_profile_id: "escpos.generic/v1".into(),
+            },
+        );
+        packet
+            .native_language_profiles
+            .push(piqae_protocol::agent::PrinterNativeLanguageProfile {
+                id: "escpos.generic/v1".into(),
+                language: "escpos".into(),
+                version: "1".into(),
+                media_type: "application/vnd.escpos".into(),
+                printer_ids: vec![application.printer_id.to_string()],
+            });
+        assert!(
+            sync_virtual_document_node(&application, raw_capabilities, false)
+                .await
+                .candidate_jobs
+                .is_empty()
+        );
+        let mut raw_jobs = Vec::new();
+        for index in 0..17 {
+            let raw = json_response(
+                &application.router,
+                idempotent_api_request(
+                    "POST",
+                    "/v1/jobs",
+                    "piq_test_integration",
+                    &format!("raw-capability-drift-{index}"),
+                    Some(
+                        &serde_json::json!({
+                            "printer_id": application.printer_id,
+                            "title": format!("Old native receipt {index}"),
+                            "content_type": "raw",
+                            "printer_native": {
+                                "output_profile_id": "escpos.generic/v1",
+                                "language_profile_id": "escpos.generic/v1"
+                            },
+                            "content": {"type": "base64", "data": "G0BmaXh0dXJl"}
+                        })
+                        .to_string(),
+                    ),
+                ),
+            )
+            .await;
+            raw_jobs.push(
+                raw["id"]
+                    .as_str()
+                    .expect("raw job id")
+                    .parse::<JobId>()
+                    .expect("typed raw job id"),
+            );
+        }
+        let raw_job = raw_jobs[0];
+        let pdf = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                "/v1/jobs",
+                "piq_test_integration",
+                "pdf-after-capability-drift",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "title": "Later PDF",
+                        "content_type": "pdf",
+                        "content": {"type": "base64", "data": "JVBERi0="}
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        let pdf_job: JobId = pdf["id"]
+            .as_str()
+            .expect("PDF job id")
+            .parse()
+            .expect("typed PDF job id");
+
+        let drifted = sync_virtual_document_node(
+            &application,
+            piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            false,
+        )
+        .await;
+        assert!(
+            drifted.candidate_jobs.is_empty(),
+            "the bounded first scan must not skip beyond sixteen incompatible jobs"
+        );
+        let blocked_after_first = application
+            .repository
+            .list_jobs(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                None,
+                100,
+            )
+            .await
+            .expect("jobs after bounded scan")
+            .into_iter()
+            .filter(|job| job.state == JobState::Blocked)
+            .count();
+        assert_eq!(blocked_after_first, 16);
+        let drifted = sync_virtual_document_node(
+            &application,
+            piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            true,
+        )
+        .await;
+        assert_eq!(drifted.candidate_jobs.len(), 1);
+        assert_eq!(drifted.candidate_jobs[0].job.id, pdf_job);
+        assert_eq!(
+            application
+                .repository
+                .get_job(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    raw_job,
+                )
+                .await
+                .expect("blocked raw job")
+                .state,
+            JobState::Blocked
+        );
+        let job_events = application
+            .repository
+            .list_job_events(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                raw_job,
+            )
+            .await
+            .expect("raw job events");
+        assert_eq!(
+            job_events
+                .iter()
+                .filter(|event| {
+                    event.reason == Some(piqae_domain::JobFailureReason::NodeUpdateRequired)
+                })
+                .count(),
+            1
+        );
+        let tenant_events = application
+            .repository
+            .list_tenant_events(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                None,
+                500,
+            )
+            .await
+            .expect("tenant events");
+        assert_eq!(
+            tenant_events
+                .iter()
+                .filter(|event| {
+                    event.event_type == "job.updated"
+                        && event.payload["id"] == raw_job.as_ulid().to_string()
+                        && event.payload["state"] == "blocked"
+                })
+                .count(),
+            1
+        );
+        let reservations = application
+            .state
+            .destination_topology
+            .list_route_reservations(
+                TenantScope {
+                    workspace_id: application.tenant.workspace_id,
+                    environment_id: application.tenant.environment_id,
+                },
+                100,
+            )
+            .await
+            .expect("route reservations");
+        assert!(
+            reservations.iter().all(|reservation| !raw_jobs
+                .iter()
+                .any(|job| job.to_string() == reservation.job_id)),
+            "the incompatible job must be blocked before any route reservation"
+        );
+
+        let retry = sync_virtual_document_node(
+            &application,
+            piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            false,
+        )
+        .await;
+        assert!(retry.candidate_jobs.is_empty());
+        assert_eq!(
+            application
+                .repository
+                .list_job_events(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    raw_job,
+                )
+                .await
+                .expect("raw events after retry")
+                .iter()
+                .filter(|event| {
+                    event.reason == Some(piqae_domain::JobFailureReason::NodeUpdateRequired)
+                })
+                .count(),
+            1,
+            "an unchanged capability report must not create a retry storm"
+        );
+    }
+
+    #[tokio::test]
+    async fn poisoned_oldest_job_fails_durably_without_holding_later_leases() {
+        let application = application().await;
+        assert!(
+            sync_virtual_document_node(
+                &application,
+                piqae_protocol::agent::DocumentRenderCapabilities::default(),
+                false,
+            )
+            .await
+            .candidate_jobs
+            .is_empty()
+        );
+        let poisoned_job = piqae_domain::Job {
+            id: JobId::new(),
+            workspace_id: application.tenant.workspace_id,
+            environment_id: application.tenant.environment_id,
+            printer_id: application.printer_id,
+            title: "Poisoned inline content".into(),
+            source: None,
+            content_kind: piqae_domain::ContentKind::Pdf,
+            content: piqae_domain::ContentSource::Base64 {
+                data: "not-valid-base64".into(),
+            },
+            options: piqae_domain::JobOptions::default(),
+            metadata: std::collections::BTreeMap::new(),
+            deliveries: 1,
+            state: JobState::WaitingForAgent,
+            created_at: Utc::now() - chrono::Duration::seconds(1),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            delivery_uncertain_since: None,
+        };
+        application
+            .repository
+            .create_job(
+                &poisoned_job,
+                application.agent_id,
+                None,
+                b"poisoned virtual fixture",
+            )
+            .await
+            .expect("create poisoned fixture");
+        let later = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                "/v1/jobs",
+                "piq_test_integration",
+                "later-after-poison",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "title": "Later valid PDF",
+                        "content_type": "pdf",
+                        "content": {"type": "base64", "data": "JVBERi0="}
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        let later_id: JobId = later["id"]
+            .as_str()
+            .expect("later job id")
+            .parse()
+            .expect("typed later job id");
+        let sync = sync_virtual_document_node(
+            &application,
+            piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            true,
+        )
+        .await;
+        assert_eq!(sync.candidate_jobs.len(), 1);
+        assert_eq!(sync.candidate_jobs[0].job.id, later_id);
+        assert_eq!(
+            application
+                .repository
+                .get_job(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    poisoned_job.id,
+                )
+                .await
+                .expect("failed poison job")
+                .state,
+            JobState::FailedTerminal
+        );
+        let poison_events = application
+            .repository
+            .list_job_events(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                poisoned_job.id,
+            )
+            .await
+            .expect("poison events");
+        assert_eq!(
+            poison_events.last().and_then(|event| event.reason.clone()),
+            Some(piqae_domain::JobFailureReason::ContentChecksumMismatch)
+        );
     }
 
     #[tokio::test]

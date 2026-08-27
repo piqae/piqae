@@ -8,7 +8,7 @@
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use piqae_domain::{
-    AgentId, EnvironmentId, EventId, Job, JobEvent, JobId, JobOptions, JobState,
+    AgentId, EnvironmentId, EventId, Job, JobEvent, JobFailureReason, JobId, JobOptions, JobState,
     NativePrinterOption, PrinterCapabilities, PrinterId, PrinterState, WorkspaceId,
     validate_transition,
 };
@@ -103,6 +103,52 @@ pub fn preaccept_cancellation_webhook_idempotency_key(
 ) -> String {
     let digest = Sha256::digest(format!("{workspace_id}\n{environment_id}\n{job_id}").as_bytes());
     format!("preaccept-cancellation:{digest:x}")
+}
+
+/// Returns the stable outbox key for a capability rejection before handoff.
+///
+/// Capability drift can be observed repeatedly by sync retries. The job state,
+/// lifecycle event, and tenant webhook are committed once under this key.
+#[must_use]
+pub fn node_update_required_webhook_idempotency_key(
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+    sequence: u64,
+) -> String {
+    let digest = Sha256::digest(
+        format!("{workspace_id}\n{environment_id}\n{job_id}\n{sequence}").as_bytes(),
+    );
+    format!("node-update-required:{digest:x}")
+}
+
+/// Returns the stable outbox key for the server-side transition that returns a
+/// capability-blocked job to the queue after a compatible authenticated sync.
+#[must_use]
+pub fn node_capability_recovered_webhook_idempotency_key(
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+    sequence: u64,
+) -> String {
+    let digest = Sha256::digest(
+        format!("{workspace_id}\n{environment_id}\n{job_id}\n{sequence}").as_bytes(),
+    );
+    format!("node-capability-recovered:{digest:x}")
+}
+
+/// Returns the stable outbox key for a permanent pre-handoff content failure.
+#[must_use]
+pub fn prehandoff_failure_webhook_idempotency_key(
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+    sequence: u64,
+) -> String {
+    let digest = Sha256::digest(
+        format!("{workspace_id}\n{environment_id}\n{job_id}\n{sequence}").as_bytes(),
+    );
+    format!("prehandoff-failure:{digest:x}")
 }
 
 #[derive(Clone, Debug)]
@@ -8184,6 +8230,383 @@ impl PostgresStore {
             return Err(StorageError::ConcurrentStateChange);
         }
         Ok(())
+    }
+
+    /// Atomically blocks a leased pre-handoff job whose exact node capability
+    /// contract is no longer satisfied.
+    ///
+    /// The lifecycle event and tenant outbox row commit with the state change,
+    /// so a sync retry cannot create an alert storm or leave the lease live.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn block_agent_lease_for_node_update(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+    ) -> Result<Job, StorageError> {
+        let token_hash = Sha256::digest(lease_token.as_bytes()).to_vec();
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT payload,state,state_sequence FROM jobs
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4
+               AND lease_id=$5 AND lease_token_hash=$6 AND lease_until>now()
+               AND state IN ('waiting_for_agent','failed_retryable')
+             FOR UPDATE",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(lease_id)
+        .bind(token_hash)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::ConcurrentStateChange)?;
+        let current_state: String = row.try_get("state")?;
+        let mut job = job_from_row(row.try_get("payload")?, &current_state)?;
+        let sequence = row.try_get::<i64, _>("state_sequence")? + 1;
+        let sequence_u64 = u64::try_from(sequence)
+            .map_err(|error| StorageError::InvalidData(format!("event sequence: {error}")))?;
+        let now = Utc::now();
+        job.state = JobState::Blocked;
+        insert_event(
+            &mut transaction,
+            &job,
+            &JobEvent {
+                id: EventId::new(),
+                job_id,
+                sequence: sequence_u64,
+                state: JobState::Blocked,
+                reason: Some(JobFailureReason::NodeUpdateRequired),
+                message: Some(
+                    "Assigned node requires an update for this job's exact print capabilities"
+                        .into(),
+                ),
+                // `None` is server provenance. Agent events are always stored
+                // with their authenticated agent ID and can never authorize
+                // the narrow Blocked -> Waiting recovery below.
+                agent_id: None,
+                native_job_id: None,
+                occurred_at: now,
+            },
+        )
+        .await?;
+        let updated = sqlx::query(
+            "UPDATE jobs SET payload=$7,state='blocked',state_sequence=$8,
+                    lease_owner=NULL,lease_id=NULL,lease_token_hash=NULL,lease_until=NULL,
+                    updated_at=$9
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4
+               AND lease_id=$5 AND lease_token_hash=$6",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(lease_id)
+        .bind(Sha256::digest(lease_token.as_bytes()).to_vec())
+        .bind(serde_json::to_value(&job)?)
+        .bind(sequence)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        // A current server never reserves before compatibility is proven. The
+        // cleanup is intentionally defensive for a lease first offered by an
+        // older process before a capability report changed.
+        sqlx::query(
+            "UPDATE delivery_attempts SET state='rejected_before_handoff',final_at=$4,updated_at=$4
+             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3
+               AND state='route_leased' AND final_at IS NULL",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(job_id.to_string())
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE route_reservations SET state='released',released_at=$4,updated_at=$4
+             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND state='active'",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(job_id.to_string())
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        enqueue_webhook_event_in_transaction(
+            &mut transaction,
+            Some(&node_update_required_webhook_idempotency_key(
+                workspace_id,
+                environment_id,
+                job_id,
+                sequence_u64,
+            )),
+            workspace_id,
+            environment_id,
+            "job.updated",
+            &serde_json::to_value(&job)?,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(job)
+    }
+
+    /// Atomically terminalizes malformed durable content before any native
+    /// handoff. This is reserved for stored jobs that cannot become valid by
+    /// retrying; incomplete but potentially recoverable content is released.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn fail_agent_lease_before_handoff(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        reason: JobFailureReason,
+        message: &str,
+    ) -> Result<Job, StorageError> {
+        let token_hash = Sha256::digest(lease_token.as_bytes()).to_vec();
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT payload,state,state_sequence FROM jobs
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4
+               AND lease_id=$5 AND lease_token_hash=$6 AND lease_until>now()
+               AND state IN ('waiting_for_agent','failed_retryable')
+             FOR UPDATE",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(lease_id)
+        .bind(&token_hash)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::ConcurrentStateChange)?;
+        let current_state: String = row.try_get("state")?;
+        let mut job = job_from_row(row.try_get("payload")?, &current_state)?;
+        let sequence = row.try_get::<i64, _>("state_sequence")? + 1;
+        let sequence_u64 = u64::try_from(sequence)
+            .map_err(|error| StorageError::InvalidData(format!("event sequence: {error}")))?;
+        let now = Utc::now();
+        job.state = JobState::FailedTerminal;
+        insert_event(
+            &mut transaction,
+            &job,
+            &JobEvent {
+                id: EventId::new(),
+                job_id,
+                sequence: sequence_u64,
+                state: JobState::FailedTerminal,
+                reason: Some(reason),
+                message: Some(message.to_owned()),
+                agent_id: Some(agent_id),
+                native_job_id: None,
+                occurred_at: now,
+            },
+        )
+        .await?;
+        let updated = sqlx::query(
+            "UPDATE jobs SET payload=$7,state='failed_terminal',state_sequence=$8,final_at=$9,
+                    lease_owner=NULL,lease_id=NULL,lease_token_hash=NULL,lease_until=NULL,
+                    updated_at=$9
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4
+               AND lease_id=$5 AND lease_token_hash=$6",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(lease_id)
+        .bind(token_hash)
+        .bind(serde_json::to_value(&job)?)
+        .bind(sequence)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        sqlx::query(
+            "UPDATE delivery_attempts SET state='rejected_before_handoff',final_at=$4,updated_at=$4
+             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3
+               AND state='route_leased' AND final_at IS NULL",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(job_id.to_string())
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE route_reservations SET state='released',released_at=$4,updated_at=$4
+             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND state='active'",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(job_id.to_string())
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        enqueue_webhook_event_in_transaction(
+            &mut transaction,
+            Some(&prehandoff_failure_webhook_idempotency_key(
+                workspace_id,
+                environment_id,
+                job_id,
+                sequence_u64,
+            )),
+            workspace_id,
+            environment_id,
+            "job.updated",
+            &serde_json::to_value(&job)?,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(job)
+    }
+
+    /// Lists only jobs blocked by the server for a missing node capability.
+    /// The ordered bound prevents a stale fleet backlog from dominating sync.
+    pub async fn list_node_update_required_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT job.payload,job.state FROM jobs AS job
+             WHERE job.workspace_id=$1 AND job.environment_id=$2 AND job.agent_id=$3
+               AND job.state='blocked' AND job.expires_at>now()
+               AND (
+                 SELECT event.payload->>'reason'='node_update_required'
+                        AND event.payload->>'agent_id' IS NULL
+                 FROM job_events AS event
+                 WHERE event.workspace_id=job.workspace_id
+                   AND event.environment_id=job.environment_id
+                   AND event.job_id=job.id
+                 ORDER BY event.sequence DESC LIMIT 1
+               )=TRUE
+             ORDER BY job.created_at,job.id LIMIT $4",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                job_from_row(
+                    row.try_get("payload")?,
+                    row.try_get::<String, _>("state")?.as_str(),
+                )
+            })
+            .collect()
+    }
+
+    /// Returns a capability-blocked job to the queue exactly once after the
+    /// caller has evaluated the current authenticated capability report.
+    pub async fn recover_node_update_required_job(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+    ) -> Result<Option<Job>, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT job.payload,job.state,job.state_sequence FROM jobs AS job
+             WHERE job.id=$1 AND job.workspace_id=$2 AND job.environment_id=$3
+               AND job.agent_id=$4 AND job.state='blocked' AND job.expires_at>now()
+               AND (
+                 SELECT event.payload->>'reason'='node_update_required'
+                        AND event.payload->>'agent_id' IS NULL
+                 FROM job_events AS event
+                 WHERE event.workspace_id=job.workspace_id
+                   AND event.environment_id=job.environment_id
+                   AND event.job_id=job.id
+                 ORDER BY event.sequence DESC LIMIT 1
+               )=TRUE
+             FOR UPDATE",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let state: String = row.try_get("state")?;
+        let mut job = job_from_row(row.try_get("payload")?, &state)?;
+        let sequence = row.try_get::<i64, _>("state_sequence")? + 1;
+        let sequence_u64 = u64::try_from(sequence)
+            .map_err(|error| StorageError::InvalidData(format!("event sequence: {error}")))?;
+        let now = Utc::now();
+        // This recovery is deliberately narrower than the public agent state
+        // machine: only the server-created node_update_required block above is
+        // eligible to return to a pre-handoff queue state.
+        job.state = JobState::WaitingForAgent;
+        insert_event(
+            &mut transaction,
+            &job,
+            &JobEvent {
+                id: EventId::new(),
+                job_id,
+                sequence: sequence_u64,
+                state: JobState::WaitingForAgent,
+                reason: None,
+                message: Some("Node print capabilities restored; job returned to queue".into()),
+                agent_id: None,
+                native_job_id: None,
+                occurred_at: now,
+            },
+        )
+        .await?;
+        let updated = sqlx::query(
+            "UPDATE jobs SET payload=$5,state='waiting_for_agent',state_sequence=$6,updated_at=$7
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4
+               AND state='blocked'",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(serde_json::to_value(&job)?)
+        .bind(sequence)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        enqueue_webhook_event_in_transaction(
+            &mut transaction,
+            Some(&node_capability_recovered_webhook_idempotency_key(
+                workspace_id,
+                environment_id,
+                job_id,
+                sequence_u64,
+            )),
+            workspace_id,
+            environment_id,
+            "job.updated",
+            &serde_json::to_value(&job)?,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(Some(job))
     }
 
     pub async fn validate_agent_lease(
