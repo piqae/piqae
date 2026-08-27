@@ -6484,24 +6484,11 @@ async fn discover_cloud_printers(
                 &capabilities,
                 observed_unix_ms,
             )?;
-            for profile in
-                support_packs.native_language_profiles(printer.driver_fingerprint.as_ref())?
-            {
-                native_bindings.push(LocalPrinterNativeBinding {
-                    printer_id: stored.printer_id.clone(),
-                    output_profile_id: profile.output_profile_id,
-                    language_profile: piqae_protocol::agent::PrinterNativeLanguageProfile {
-                        id: profile.id,
-                        language: profile.language,
-                        language_version: profile.language_version,
-                        profile_version: profile.profile_version,
-                        media_type: profile.media_type,
-                        driver_fingerprint_sha256: profile.driver_fingerprint_sha256,
-                        support_pack_digest_sha256: profile.support_pack_digest_sha256,
-                        printer_ids: vec![stored.printer_id.clone()],
-                    },
-                });
-            }
+            append_local_printer_native_bindings(
+                &mut native_bindings,
+                &stored.printer_id,
+                support_packs.native_language_profiles(printer.driver_fingerprint.as_ref())?,
+            );
             let native_options = serde_json::to_string(&printer.native_options)?;
             let profile = store.store_printer_profile(
                 &stored.printer_id,
@@ -6566,6 +6553,31 @@ async fn discover_cloud_printers(
     });
     native_bindings.truncate(32);
     Ok((snapshots.into_iter().flatten().collect(), native_bindings))
+}
+
+fn append_local_printer_native_bindings(
+    bindings: &mut Vec<LocalPrinterNativeBinding>,
+    printer_id: &str,
+    profiles: Vec<piqae_support_packs::BoundNativeLanguageProfile>,
+) {
+    bindings.extend(
+        profiles
+            .into_iter()
+            .map(|profile| LocalPrinterNativeBinding {
+                printer_id: printer_id.to_owned(),
+                output_profile_id: profile.output_profile_id,
+                language_profile: piqae_protocol::agent::PrinterNativeLanguageProfile {
+                    id: profile.id,
+                    language: profile.language,
+                    language_version: profile.language_version,
+                    profile_version: profile.profile_version,
+                    media_type: profile.media_type,
+                    driver_fingerprint_sha256: profile.driver_fingerprint_sha256,
+                    support_pack_digest_sha256: profile.support_pack_digest_sha256,
+                    printer_ids: vec![printer_id.to_owned()],
+                },
+            }),
+    );
 }
 
 fn route_observation_inputs(

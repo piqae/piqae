@@ -2070,7 +2070,6 @@ impl Repository for PostgresStore {
             printer_id,
         )
         .await
-        .map_err(Into::into)
     }
     async fn register_printpacket_resource(
         &self,

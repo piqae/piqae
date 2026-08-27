@@ -4027,12 +4027,14 @@ mod adaptive_poll_tests {
             "ptr_other"
         ));
         let mut stale = supported.clone();
-        stale
+        let Some(language_profile) = stale
             .print_packet
             .as_mut()
             .and_then(|packet| packet.native_language_profiles.first_mut())
-            .expect("native language profile")
-            .language_version = "2".into();
+        else {
+            panic!("native language profile fixture is missing");
+        };
+        language_profile.language_version = "2".into();
         assert!(!supports_printer_native_offer(
             &stale,
             &metadata,

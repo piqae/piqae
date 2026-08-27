@@ -3876,8 +3876,11 @@ mod tests {
             .push(piqae_protocol::agent::PrinterNativeLanguageProfile {
                 id: "escpos.generic/v1".into(),
                 language: "escpos".into(),
-                version: "1".into(),
+                language_version: "1".into(),
+                profile_version: "1.0.0".into(),
                 media_type: "application/vnd.escpos".into(),
+                driver_fingerprint_sha256: "b".repeat(64),
+                support_pack_digest_sha256: "c".repeat(64),
                 printer_ids: vec![application.printer_id.to_string()],
             });
         assert!(

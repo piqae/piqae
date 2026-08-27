@@ -3987,6 +3987,13 @@ export interface components {
             job_id: string;
             sequence: number;
             state: components["schemas"]["JobState"];
+            /**
+             * @description Stable machine-readable failure reason. `node_update_required`
+             *     means the assigned node no longer satisfies the job's exact
+             *     PrintPacket or printer-native capability contract. The job remains
+             *     blocked without lease retries until an authenticated capability
+             *     report proves compatibility has been restored.
+             */
             reason: string | null;
             message: string | null;
             agent_id: string | null;
