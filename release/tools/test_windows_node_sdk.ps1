@@ -39,9 +39,10 @@ try {
     }
 
     New-Item -ItemType Directory -Force $OutputDirectory | Out-Null
+    $OutputDirectory = (Resolve-Path $OutputDirectory).Path
     $expectedPackage = Join-Path $OutputDirectory "Piqae.Node.$PackageVersion.nupkg"
     if (Test-Path $expectedPackage) { throw "Refusing to replace an existing staged NuGet package: $expectedPackage" }
-    dotnet pack sdk/dotnet/src/Piqae.Node/Piqae.Node.csproj --configuration Release --output $OutputDirectory /p:PiqaeNativeLibrary="$native" /p:PackageVersion="$PackageVersion"
+    dotnet pack sdk/dotnet/src/Piqae.Node/Piqae.Node.csproj --configuration Release /p:PackageOutputPath="$OutputDirectory" /p:PiqaeNativeLibrary="$native" /p:PackageVersion="$PackageVersion"
     if ($LASTEXITCODE -ne 0) { throw ".NET node SDK package build failed" }
     if (-not (Test-Path $expectedPackage -PathType Leaf)) { throw "The exact Piqae.Node $PackageVersion package was not produced" }
     $unexpectedPackages = @(Get-ChildItem $OutputDirectory -Filter "Piqae.Node.*.nupkg" | Where-Object { $_.FullName -ne (Get-Item $expectedPackage).FullName })
