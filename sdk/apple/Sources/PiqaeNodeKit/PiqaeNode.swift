@@ -68,6 +68,8 @@ public final class PiqaeRemoteNotificationsService: @unchecked Sendable {
 
     public let availability: PiqaeRemoteNotificationAvailability =
         .opportunisticWhileInstalled
+    public let whenTerminated: PiqaeRemoteNotificationAvailability =
+        .unavailableWhenTerminated
 
     public func register(
         deviceToken: Data,

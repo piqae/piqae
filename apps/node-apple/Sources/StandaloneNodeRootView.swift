@@ -71,8 +71,8 @@ private struct OverviewView: View {
                 LabeledContent("Retained jobs", value: "\(model.history.count)")
             }
             Section("Background delivery") {
-                Label("Opportunistic on iPhone and iPad", systemImage: "moon.zzz")
-                Text("Piqae retries when the app is foregrounded, receives a permitted background hint, or iOS grants maintenance time. Force-quit, suspended, powered-off, or unreachable devices are unavailable routes.")
+                Label("Local and scheduled retries", systemImage: "moon.zzz")
+                Text("This Preview has no APNs registration provider. Piqae retries while the app is open, after foreground or network recovery, and when iOS grants scheduled maintenance. Force-quit, suspended, powered-off, or unreachable devices are unavailable routes.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -308,7 +308,7 @@ private struct ConnectionsView: View {
             } header: {
                 Text("Who can use this node")
             } footer: {
-                Text("Each connection has isolated credentials and cloud state, while all connections share this node's one durable local queue.")
+                Text("Each connection has isolated credentials, durable queue state, and cloud outbox. One shared runtime serializes eligible handoffs to each physical printer.")
             }
         }
         .navigationTitle("Connections")
@@ -368,7 +368,7 @@ private struct NodeSettingsView: View {
                     "Native runtime",
                     value: PiqaeNativeRuntime.linkedLibraryAvailable ? "Linked" : "Unavailable in this build"
                 )
-                LabeledContent("Remote wake", value: "Best effort")
+                LabeledContent("Remote wake", value: "Not configured in Preview")
                 LabeledContent("Maintenance", value: model.backgroundMaintenanceStatus)
                 LabeledContent("After force quit", value: "Unavailable")
                 LabeledContent("Last snapshot", value: model.snapshot?.lastUpdatedAt.formatted() ?? "None")
@@ -390,7 +390,7 @@ private struct OnboardingView: View {
         NavigationStack {
             Form {
                 Section {
-                    Label("One durable queue", systemImage: "externaldrive.connected.to.line.below")
+                    Label("One durable runtime", systemImage: "externaldrive.connected.to.line.below")
                     Label("Many isolated connections", systemImage: "link")
                     Label("Background availability reported honestly", systemImage: "moon.zzz")
                 } header: {

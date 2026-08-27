@@ -1,9 +1,107 @@
 import PiqaeNodeKit
+import UIKit
 import XCTest
 @testable import PiqaeNode
 
 @MainActor
 final class StandaloneNodeStoreTests: XCTestCase {
+    func testColdLaunchWakeIsBufferedUntilTheModelStarts() async {
+        let delegate = PiqaeNodeAppDelegate(
+            wakeDeadlineSeconds: 1,
+            maximumPendingHints: 4
+        )
+        let model = FakeStandaloneWakeHandler()
+        let completed = expectation(description: "wake completion")
+        var result: UIBackgroundFetchResult?
+
+        delegate.application(
+            UIApplication.shared,
+            didReceiveRemoteNotification: wakePayload("cold-launch"),
+            fetchCompletionHandler: {
+                result = $0
+                completed.fulfill()
+            }
+        )
+        await Task.yield()
+        XCTAssertEqual(model.handledCollapseIDs, [])
+
+        delegate.install(model: model)
+        delegate.modelDidStart()
+        await fulfillment(of: [completed], timeout: 1)
+
+        XCTAssertEqual(model.handledCollapseIDs, ["cold-launch"])
+        XCTAssertEqual(result, .newData)
+    }
+
+    func testDuplicateColdLaunchWakeHintsCoalesceButCompleteEveryHandler() async {
+        let delegate = PiqaeNodeAppDelegate(
+            wakeDeadlineSeconds: 1,
+            maximumPendingHints: 4
+        )
+        let model = FakeStandaloneWakeHandler()
+        let completed = expectation(description: "duplicate wake completions")
+        completed.expectedFulfillmentCount = 2
+
+        for _ in 0 ..< 2 {
+            delegate.application(
+                UIApplication.shared,
+                didReceiveRemoteNotification: wakePayload("same-generation"),
+                fetchCompletionHandler: { _ in completed.fulfill() }
+            )
+        }
+        delegate.install(model: model)
+        delegate.modelDidStart()
+        await fulfillment(of: [completed], timeout: 1)
+
+        XCTAssertEqual(model.handledCollapseIDs, ["same-generation"])
+    }
+
+    func testColdLaunchWakeDeadlineCompletesWithoutRetainingTheHint() async {
+        let delegate = PiqaeNodeAppDelegate(
+            wakeDeadlineSeconds: 0.01,
+            maximumPendingHints: 1
+        )
+        let completed = expectation(description: "expired wake completion")
+        var result: UIBackgroundFetchResult?
+        delegate.application(
+            UIApplication.shared,
+            didReceiveRemoteNotification: wakePayload("expires"),
+            fetchCompletionHandler: {
+                result = $0
+                completed.fulfill()
+            }
+        )
+
+        await fulfillment(of: [completed], timeout: 1)
+        XCTAssertEqual(result, .noData)
+
+        let model = FakeStandaloneWakeHandler()
+        delegate.install(model: model)
+        delegate.modelDidStart()
+        await Task.yield()
+        XCTAssertEqual(model.handledCollapseIDs, [])
+    }
+
+    func testWakeHintContainsOnlyOpaqueReconciliationMetadata() {
+        let valid: [AnyHashable: Any] = [
+            "aps": ["content-available": 1],
+            "piqae_wake_hint": "inventory-changed",
+        ]
+        XCTAssertEqual(
+            StandaloneWakeHintEnvelope.collapseID(from: valid),
+            "inventory-changed"
+        )
+        XCTAssertNil(StandaloneWakeHintEnvelope.collapseID(from: [
+            "aps": ["content-available": 1],
+            "piqae_wake_hint": "inventory-changed",
+            "job_id": "job_secret",
+        ]))
+        XCTAssertNil(StandaloneWakeHintEnvelope.collapseID(from: [
+            "aps": ["content-available": 1, "alert": "Print this"],
+            "piqae_wake_hint": "inventory-changed",
+        ]))
+    }
+
     func testOnboardingUsesPrivacySafeBoundedDefaultAndPersistsExplicitDetails() throws {
         let suite = "com.piqae.tests.store.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -71,5 +169,22 @@ final class StandaloneNodeStoreTests: XCTestCase {
         XCTAssertFalse(requireInstalled.allowsEmbeddedFallback)
         XCTAssertEqual(isolated.effectiveStartupMode, .embedded)
         XCTAssertFalse(isolated.allowsEmbeddedFallback)
+    }
+
+    private func wakePayload(_ collapseID: String) -> [AnyHashable: Any] {
+        [
+            "aps": ["content-available": 1],
+            "piqae_wake_hint": collapseID,
+        ]
+    }
+}
+
+@MainActor
+private final class FakeStandaloneWakeHandler: StandaloneWakeHandling {
+    private(set) var handledCollapseIDs: [String] = []
+
+    func handleBackgroundPush(collapseID: String) async -> Bool {
+        handledCollapseIDs.append(collapseID)
+        return true
     }
 }

@@ -12,7 +12,8 @@ queues, recovery, and cloud synchronization.
   connection UI or let the integrator automate one or many invitations. The
   contract intentionally has no single-connection restriction.
 - Desktop SDKs should `prefer_installed` so approved applications attach to the
-  machine's standalone node and share its one durable queue. An app may select
+  machine's standalone node and share its durable runtime, connector-isolated
+  queue state/outboxes, and serialized physical handoff. An app may select
   `isolated_application` explicitly when isolation is the intended topology.
 - iOS and iPadOS applications are sandboxed. Their effective policy is an
   isolated application runtime even when the app itself is the standalone

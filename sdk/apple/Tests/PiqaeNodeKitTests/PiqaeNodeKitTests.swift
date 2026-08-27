@@ -49,6 +49,10 @@ final class PiqaeNodeKitTests: XCTestCase {
             management: .hostManaged,
             allowedAuthorityOrigins: []
         ))
+        XCTAssertThrowsError(try PiqaeConnectionPolicy(
+            management: .userManaged,
+            allowsMultiple: false
+        ))
         XCTAssertThrowsError(try PiqaeNodeIdentityConfiguration(
             displayName: "Node",
             labels: ["duplicate", "duplicate"]
@@ -625,6 +629,49 @@ final class PiqaeNodeKitTests: XCTestCase {
         await node.stop()
     }
 
+    func testRemoteNotificationTokenRotationAndRegistrationRetryAreExplicit() async throws {
+        let provider = PiqaeFakeRemoteNotificationProvider()
+        await provider.failNextRegistrations(1)
+        let node = PiqaeNode(
+            PiqaeNodeConfiguration(
+                startupMode: .embedded,
+                identityStore: PiqaeMemoryInstallationIdentityStore(
+                    id: .init(rawValue: "ins_apple_push_rotation")
+                ),
+                remoteNotificationProvider: provider
+            )
+        )
+        try await node.start()
+        defer { Task { await node.stop() } }
+
+        await XCTAssertThrowsErrorAsync(
+            try await node.remoteNotifications.register(
+                deviceToken: Data([1]),
+                environment: .development,
+                bundleIdentifier: "com.example.print"
+            )
+        )
+        try await node.remoteNotifications.register(
+            deviceToken: Data([1]),
+            environment: .development,
+            bundleIdentifier: "com.example.print"
+        )
+        try await node.remoteNotifications.register(
+            deviceToken: Data([2]),
+            environment: .development,
+            bundleIdentifier: "com.example.print"
+        )
+
+        let registrations = await provider.registrations
+        XCTAssertEqual(registrations.count, 2)
+        XCTAssertEqual(registrations[0].token.withBytes { $0 }, Data([1]))
+        XCTAssertEqual(registrations[1].token.withBytes { $0 }, Data([2]))
+        XCTAssertEqual(
+            node.remoteNotifications.whenTerminated,
+            .unavailableWhenTerminated
+        )
+    }
+
     func testRemoteNotificationRegistrationIsOptIn() async throws {
         let node = PiqaeNode(
             .localOnly(
@@ -645,6 +692,10 @@ final class PiqaeNodeKitTests: XCTestCase {
         XCTAssertEqual(
             node.remoteNotifications.availability,
             .opportunisticWhileInstalled
+        )
+        XCTAssertEqual(
+            node.remoteNotifications.whenTerminated,
+            .unavailableWhenTerminated
         )
         await node.stop()
     }

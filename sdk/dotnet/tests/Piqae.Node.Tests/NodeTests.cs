@@ -50,6 +50,9 @@ public sealed class NodeTests
         Assert.Throws<ArgumentException>(() => new ConnectionPolicy(
             ConnectionManagement.HostManaged,
             allowedAuthorityOrigins: []));
+        Assert.Throws<ArgumentException>(() => new ConnectionPolicy(
+            ConnectionManagement.UserManaged,
+            allowsMultiple: false));
     }
 
     [Fact]

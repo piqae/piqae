@@ -75,7 +75,8 @@ invitation and starts the resulting durable connector worker.
 For an embedded host, that worker signals NodeKit only after remote work is
 durably activated. The callback carries no tenant, job, printer, document, or
 credential data. Signals are coalesced until NodeKit observes each adapter queue
-empty, so several connectors still feed one durable runtime and one adapter
+empty, so several connectors still feed one durable runtime with isolated
+connector queue state/outboxes and one adapter
 drain. Foreground entry, wake, and restored network availability immediately
 retry pending work. Stopping NodeKit cancels and joins the Swift drain before
 the native runtime destroys the callback context.
@@ -133,7 +134,8 @@ separate queue implementations:
   pins its allowed HTTPS authority origins; a standalone user-managed host
   accepts an authority only through an explicit local connection flow;
 - a desktop embedded SDK prefers an OS-authenticated installed-node attachment
-  so the machine has one durable queue. Isolated fallback is explicit and never
+  so the machine has one durable runtime coordinating connector-isolated queues
+  and serialized physical handoff. Isolated fallback is explicit and never
   follows a consent, proof, or compatibility failure;
 - iOS sandboxing prevents cross-app daemon attachment, so every iOS app has an
   isolated installation. Cloud physical-destination routing can coordinate
