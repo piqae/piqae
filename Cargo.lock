@@ -2528,7 +2528,6 @@ dependencies = [
  "piqae-agent-client",
  "piqae-agent-core",
  "piqae-agent-storage",
- "piqae-document-renderer",
  "piqae-domain",
  "piqae-executor-supervisor",
  "piqae-local-api",
@@ -2537,6 +2536,7 @@ dependencies = [
  "piqae-node-runtime",
  "piqae-protocol",
  "piqae-support-packs",
+ "printpacket-renderer",
  "rand 0.8.7",
  "reqwest 0.12.28",
  "serde",
@@ -2581,9 +2581,9 @@ version = "0.1.22"
 dependencies = [
  "async-trait",
  "piqae-agent-storage",
- "piqae-document-renderer",
  "piqae-domain",
  "piqae-protocol",
+ "printpacket-renderer",
  "serde",
  "serde_json",
  "sha2",
@@ -2646,12 +2646,12 @@ dependencies = [
  "p256",
  "piqae-agent-storage",
  "piqae-auth",
- "piqae-document-renderer",
  "piqae-domain",
  "piqae-object-store",
  "piqae-protocol",
  "piqae-storage-postgres",
  "piqae-webhooks",
+ "printpacket-renderer",
  "rand 0.8.7",
  "regex",
  "reqwest 0.12.28",
@@ -2674,17 +2674,6 @@ dependencies = [
  "ulid",
  "url",
  "uuid",
-]
-
-[[package]]
-name = "piqae-document-renderer"
-version = "0.1.22"
-dependencies = [
- "qrcode",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
 ]
 
 [[package]]
@@ -3163,7 +3152,18 @@ dependencies = [
 name = "printpacket"
 version = "0.1.22"
 dependencies = [
- "piqae-document-renderer",
+ "printpacket-renderer",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "printpacket-renderer"
+version = "0.1.22"
+dependencies = [
+ "qrcode",
  "serde",
  "serde_json",
  "sha2",

@@ -51,7 +51,7 @@ zeroize = { version = "1.8.1", features = ["derive"] }
 
 piqae-domain = { path = "crates/domain", version = "0.1.16" }
 piqae-protocol = { path = "crates/protocol", version = "0.1.16" }
-piqae-document-renderer = { path = "crates/document-renderer", version = "0.1.16" }
+printpacket-renderer = { path = "crates/document-renderer", version = "0.1.16" }
 printpacket = { path = "crates/printpacket", version = "0.1.22" }
 
 [workspace.lints.rust]

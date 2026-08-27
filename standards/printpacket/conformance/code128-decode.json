@@ -1,0 +1,7 @@
+{
+  "suite": "printpacket.conformance/code128-b-v1",
+  "symbology": "code128",
+  "value": "ABC-123",
+  "quiet_zone_modules": 10,
+  "expected_codewords": [104, 33, 34, 35, 13, 17, 18, 19, 70, 106]
+}

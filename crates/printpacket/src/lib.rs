@@ -7,9 +7,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-pub use piqae_document_renderer::{
-    BarcodeSymbology, BusinessDocumentV1 as DocumentV1, Color, DateFormat, Edges, Expr, ImageFit,
-    Inline, Media, Node, Orientation, PageSize, QrCorrection, Region, RenderError, RenderLimits,
+pub use printpacket_renderer::{
+    BarcodeSymbology, Color, DateFormat, Edges, Expr, ImageFit, Inline, Media, Node, Orientation,
+    PageSize, PrintPacketV1 as DocumentV1, QrCorrection, Region, RenderError, RenderLimits,
     RenderOutput, ResolvedResources, Resource, StringOperation, TableColumn, TableStyle, TextAlign,
     TextStyle, Theme, render, render_with_metrics, render_with_resources, validate,
 };
@@ -20,15 +20,17 @@ use thiserror::Error;
 
 /// Canonical, implementation-independent document identifier.
 pub const DOCUMENT_V1: &str = "printpacket/v1";
-/// Lossless compatibility alias used by Piqae before the standard was split
-/// into its own public contract.
-pub const LEGACY_PIQAE_DOCUMENT_V1: &str = "piqae.business-document/v1";
 /// Stable deterministic PDF output contract for the initial conformance set.
 pub const PDF_BASE14_V1: &str = "printpacket.pdf-base14/v1";
 /// Identifies the exact public fixtures that compatible renderers must pass.
 pub const CONFORMANCE_CORE_V1: &str = "printpacket.conformance/core-v1";
 /// Canonical JSON algorithm used for template, data, and cache identities.
 pub const CANONICAL_JSON_V1: &str = "printpacket.canonical-json/v1";
+/// Typed, cross-runtime data encoding used by render cache identities.
+pub const CANONICAL_DATA_V1: &str = "printpacket.canonical-data/v1";
+const MAX_CANONICAL_DATA_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CANONICAL_DATA_DEPTH: usize = 128;
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum PacketError {
@@ -207,17 +209,15 @@ pub struct CompatibilityReport {
     pub implementation_version: String,
 }
 
-/// Normalize a legacy Piqae identifier to the vendor-neutral v1 identifier.
-/// The document semantics are otherwise byte-for-byte equivalent.
+/// Require the canonical vendor-neutral v1 identifier.
 ///
 /// # Errors
 /// Returns [`PacketError::UnsupportedVersion`] for any other identifier.
-pub fn normalize_document(mut document: DocumentV1) -> Result<DocumentV1, PacketError> {
+pub fn normalize_document(document: DocumentV1) -> Result<DocumentV1, PacketError> {
     match document.format.as_str() {
-        DOCUMENT_V1 | LEGACY_PIQAE_DOCUMENT_V1 => document.format = DOCUMENT_V1.into(),
-        unsupported => return Err(PacketError::UnsupportedVersion(unsupported.into())),
+        DOCUMENT_V1 => Ok(document),
+        unsupported => Err(PacketError::UnsupportedVersion(unsupported.into())),
     }
-    Ok(document)
 }
 
 /// Parse, normalize, validate, and derive a portable feature/cache manifest.
@@ -270,26 +270,88 @@ pub fn canonical_document_bytes(document: &DocumentV1) -> Result<Vec<u8>, Packet
     serde_json::to_vec(&normalized).map_err(|error| PacketError::InvalidDocument(error.to_string()))
 }
 
-/// Canonicalize arbitrary template data by sorting every object key. This
-/// avoids language/runtime insertion-order differences in content cache keys.
+/// Canonicalize arbitrary template data with a typed cross-runtime byte format.
+///
+/// Values use one-byte type tags, decimal collection/string byte lengths, UTF-8
+/// strings, lexically sorted object keys, and exactly 16 lowercase hexadecimal
+/// IEEE-754 binary64 bits for numbers. Negative zero is normalized to positive
+/// zero. Integral values outside JavaScript's exact safe-integer range fail
+/// closed so a Rust producer and browser/JavaScript producer cannot assign
+/// different values to one cache identity.
 ///
 /// # Errors
 /// Returns an error if the supplied value cannot be encoded as bounded JSON.
 pub fn canonical_data_bytes(data: &Value) -> Result<Vec<u8>, PacketError> {
-    fn sorted(value: &Value) -> Value {
+    fn append(output: &mut Vec<u8>, bytes: &[u8]) -> Result<(), PacketError> {
+        if output
+            .len()
+            .checked_add(bytes.len())
+            .is_none_or(|length| length > MAX_CANONICAL_DATA_BYTES)
+        {
+            return Err(PacketError::InvalidData("canonical data is too large"));
+        }
+        output.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn length(output: &mut Vec<u8>, value: usize) -> Result<(), PacketError> {
+        append(output, value.to_string().as_bytes())?;
+        append(output, b":")
+    }
+
+    fn encode(value: &Value, output: &mut Vec<u8>, depth: usize) -> Result<(), PacketError> {
+        if depth > MAX_CANONICAL_DATA_DEPTH {
+            return Err(PacketError::InvalidData("canonical data nesting"));
+        }
         match value {
-            Value::Array(values) => Value::Array(values.iter().map(sorted).collect()),
-            Value::Object(values) => {
-                let ordered = values
-                    .iter()
-                    .map(|(key, value)| (key.clone(), sorted(value)))
-                    .collect::<BTreeMap<_, _>>();
-                Value::Object(ordered.into_iter().collect())
+            Value::Null => append(output, b"n"),
+            Value::Bool(false) => append(output, b"f"),
+            Value::Bool(true) => append(output, b"t"),
+            Value::String(value) => {
+                append(output, b"s")?;
+                length(output, value.len())?;
+                append(output, value.as_bytes())
             }
-            primitive => primitive.clone(),
+            Value::Number(value) => {
+                let mut number = value
+                    .as_f64()
+                    .filter(|number| number.is_finite())
+                    .ok_or(PacketError::InvalidData("data number"))?;
+                if number.fract() == 0.0 && number.abs() > MAX_SAFE_INTEGER {
+                    return Err(PacketError::InvalidData(
+                        "integer is outside the cross-runtime safe range",
+                    ));
+                }
+                if number == 0.0 {
+                    number = 0.0;
+                }
+                append(output, format!("d{:016x}", number.to_bits()).as_bytes())
+            }
+            Value::Array(values) => {
+                append(output, b"a")?;
+                length(output, values.len())?;
+                for value in values {
+                    encode(value, output, depth + 1)?;
+                }
+                Ok(())
+            }
+            Value::Object(values) => {
+                append(output, b"o")?;
+                length(output, values.len())?;
+                let sorted = values.iter().collect::<BTreeMap<_, _>>();
+                for (key, value) in sorted {
+                    encode(&Value::String(key.clone()), output, depth + 1)?;
+                    encode(value, output, depth + 1)?;
+                }
+                Ok(())
+            }
         }
     }
-    serde_json::to_vec(&sorted(data)).map_err(|_| PacketError::InvalidData("data JSON"))
+
+    let mut output = CANONICAL_DATA_V1.as_bytes().to_vec();
+    append(&mut output, b"\0")?;
+    encode(data, &mut output, 0)?;
+    Ok(output)
 }
 
 /// Domain-separated render cache identity. Hosts may cache the output only
@@ -525,13 +587,17 @@ mod tests {
     }
 
     #[test]
-    fn legacy_and_neutral_documents_share_one_canonical_identity() {
+    fn canonical_document_is_analyzed_and_old_identifiers_are_rejected() {
         let (_, neutral) = analyze_document(&receipt(DOCUMENT_V1), RenderLimits::default())
             .unwrap_or_else(|error| panic!("neutral fixture: {error}"));
-        let (_, legacy) =
-            analyze_document(&receipt(LEGACY_PIQAE_DOCUMENT_V1), RenderLimits::default())
-                .unwrap_or_else(|error| panic!("legacy fixture: {error}"));
-        assert_eq!(neutral.canonical_sha256, legacy.canonical_sha256);
+        assert!(matches!(
+            analyze_document(
+                &receipt("piqae.business-document/v1"),
+                RenderLimits::default()
+            ),
+            Err(PacketError::UnsupportedVersion(version))
+                if version == "piqae.business-document/v1"
+        ));
         assert!(
             neutral
                 .required_features
@@ -548,6 +614,26 @@ mod tests {
         assert_eq!(
             canonical_data_bytes(&left).unwrap_or_default(),
             canonical_data_bytes(&right).unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn canonical_data_has_exact_cross_runtime_numeric_bytes() {
+        let encoded = canonical_data_bytes(&json!({"n": 1, "z": -0.0, "text": "café"}))
+            .unwrap_or_else(|error| panic!("canonical data: {error}"));
+        assert_eq!(
+            encoded,
+            b"printpacket.canonical-data/v1\0o3:s1:nd3ff0000000000000s4:texts5:caf\xc3\xa9s1:zd0000000000000000"
+        );
+        assert_eq!(
+            canonical_data_bytes(&json!(1)).unwrap_or_default(),
+            canonical_data_bytes(&json!(1.0)).unwrap_or_default()
+        );
+        assert_eq!(
+            canonical_data_bytes(&json!(9_007_199_254_740_992_u64)),
+            Err(PacketError::InvalidData(
+                "integer is outside the cross-runtime safe range"
+            ))
         );
     }
 

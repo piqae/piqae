@@ -8,7 +8,7 @@ rust-version.workspace = true
 description = "Vendor-neutral bounded print-template contracts and conformance tools"
 
 [dependencies]
-piqae-document-renderer.workspace = true
+printpacket-renderer.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

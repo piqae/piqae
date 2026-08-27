@@ -63,7 +63,7 @@ url.workspace = true
 uuid.workspace = true
 
 piqae-domain.workspace = true
-piqae-document-renderer.workspace = true
+printpacket-renderer.workspace = true
 piqae-object-store = { path = "../object-store", version = "0.1.2" }
 piqae-protocol.workspace = true
 piqae-auth = { path = "../auth", version = "0.1.2" }

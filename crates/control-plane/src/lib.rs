@@ -1837,7 +1837,7 @@ mod tests {
     async fn node_render_selection_fallback_and_requirement_are_end_to_end() {
         let application = application().await;
         let specification = serde_json::json!({
-            "format": "piqae.business-document/v1",
+            "format": "printpacket/v1",
             "media": {"kind": "paged", "size": "a4"},
             "body": [{"type": "paragraph", "content": [{"type": "text", "value": "Virtual"}]}]
         });
@@ -2043,7 +2043,7 @@ mod tests {
                 Some(
                     &serde_json::json!({
                         "name": "Receipt",
-                        "specification": {"format":"piqae.business-document/v1","media":{"kind":"paged","size":"a4"},
+                        "specification": {"format":"printpacket/v1","media":{"kind":"paged","size":"a4"},
                             "body":[{"type":"paragraph","content":[{"type":"value","value":{"type":"path","path":["number"]}}]}]}
                     })
                     .to_string(),
@@ -2086,7 +2086,7 @@ mod tests {
                 "publish-receipt-v1",
                 Some(
                     &serde_json::json!({"specification": {
-                        "format":"piqae.business-document/v1","media":{"kind":"paged","size":"a4"},
+                        "format":"printpacket/v1","media":{"kind":"paged","size":"a4"},
                         "body":[{"type":"paragraph","content":[{"type":"text","value":"different"}]}]
                     }})
                     .to_string(),
