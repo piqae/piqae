@@ -395,6 +395,16 @@ final class PiqaeNodeKitTests: XCTestCase {
         XCTAssertThrowsError(try PiqaePrintPacket(templateJSON: Data("[]".utf8)))
     }
 
+    func testInvalidNativeCommandRequiresMatchingCoreUpdate() {
+        XCTAssertEqual(
+            PiqaeNativeRuntime.mappedRuntimeError(
+                code: "invalid_command",
+                message: "The command is not recognized."
+            ),
+            .nativeCoreUpdateRequired
+        )
+    }
+
     func testPrintPacketFacadeValidatesReceiptAndLabelAndSubmitsIdempotentlyOffline() async throws {
         try requireLinkedRuntime()
         let fixture = nativeFixture("printpacket")

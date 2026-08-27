@@ -1552,12 +1552,7 @@ mod disconnect_compatibility_tests {
         assert_eq!(record.node_identity_conflict_revision, Some(5));
         assert_eq!(record.node_identity_conflict_local_revision, Some(1));
         assert_eq!(
-            store
-                .lock()
-                .unwrap()
-                .configuration()
-                .identity
-                .display_name,
+            store.lock().unwrap().configuration().identity.display_name,
             "Kitchen iPad"
         );
 
