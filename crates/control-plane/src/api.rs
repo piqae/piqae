@@ -38,9 +38,10 @@ use piqae_domain::{
 use piqae_object_store::{ObjectByteStream, ObjectStoreError, digest_hex};
 use piqae_protocol::agent::{
     AgentAcceptJobRequest, AgentAcceptJobResponse, AgentAcceptanceAbandonResponse,
-    AgentAcceptanceReconciliationResponse, AgentReleaseLeaseRequest, AgentRenewLeaseRequest,
-    AgentRenewLeaseResponse, AgentSyncRequest, AgentSyncResponse, ConnectSessionPreview,
-    ConnectSessionPreviewRequest, ContentDescriptor, EnrolRequest, EnrolResponse, JobOffer,
+    AgentAcceptanceReconciliationResponse, AgentCommand, AgentReleaseLeaseRequest,
+    AgentRenewLeaseRequest, AgentRenewLeaseResponse, AgentSyncRequest, AgentSyncResponse,
+    ConnectSessionPreview, ConnectSessionPreviewRequest, ContentDescriptor, EnrolRequest,
+    EnrolResponse, JobOffer,
 };
 use piqae_storage_postgres::{
     StoredAgent, StoredApiKey, StoredNodeConnector, StoredPrinter, StoredTargetBinding,
@@ -2910,7 +2911,7 @@ pub async fn agent_sync(
             .await?;
         }
     }
-    let command_batch = state
+    let mut command_batch = state
         .repository
         .sync_agent_commands(
             tenant.workspace_id,
@@ -2920,6 +2921,26 @@ pub async fn agent_sync(
             100,
         )
         .await?;
+    let mut deliverable_commands = Vec::with_capacity(command_batch.commands.len());
+    for command in command_batch.commands {
+        let retire = if let AgentCommand::CancelJob { job_id } = &command {
+            state
+                .repository
+                .retire_terminal_absent_local_cancellation(
+                    tenant.workspace_id,
+                    tenant.environment_id,
+                    request.agent_id,
+                    *job_id,
+                )
+                .await?
+        } else {
+            false
+        };
+        if !retire {
+            deliverable_commands.push(command);
+        }
+    }
+    command_batch.commands = deliverable_commands;
     crate::destination_topology::finalize_acknowledged_uncertainty(
         &state,
         tenant,

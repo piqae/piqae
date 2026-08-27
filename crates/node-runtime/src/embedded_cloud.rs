@@ -6,11 +6,11 @@
 
 use crate::connector_registry::{ConnectorRecord, ConnectorRegistry};
 use crate::{
-    AgentClientAuthority, CloudCommandApplier, CloudConnectorWorker, CloudWorkerError,
-    ConnectorKeyError, ContentMaterializer, DurableOfferAcceptor, EmbeddedQueue, EventAcknowledger,
-    GeneratedConnectorKey, HostBackedDeviceIdentity, InventorySnapshotProvider, NodeRuntime,
-    PendingCloudAcceptance, PendingCloudRelease, SecureConnectorSigner, SecureKeyHandle,
-    WakeReconciler,
+    AgentClientAuthority, CloudCommandApplication, CloudCommandApplier, CloudConnectorWorker,
+    CloudWorkerError, ConnectorKeyError, ContentMaterializer, DurableOfferAcceptor, EmbeddedQueue,
+    EventAcknowledger, GeneratedConnectorKey, HostBackedDeviceIdentity, InventorySnapshotProvider,
+    NodeRuntime, PendingCloudAcceptance, PendingCloudRelease, SecureConnectorSigner,
+    SecureKeyHandle, WakeReconciler,
 };
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -1026,17 +1026,14 @@ impl CloudCommandApplier for EmbeddedCommands {
         &mut self,
         command_cursor: Option<&str>,
         commands: Vec<AgentCommand>,
-    ) -> Result<(), CloudWorkerError> {
+    ) -> Result<CloudCommandApplication, CloudWorkerError> {
         let mut queue = self
             .0
             .queue
             .lock()
             .map_err(|_| CloudWorkerError::new("embedded_queue_unavailable"))?;
         queue
-            .apply_connector_commands(&self.0.connector_id, &commands)
-            .and_then(|()| {
-                queue.acknowledge_connector_response(&self.0.connector_id, None, command_cursor)
-            })
+            .apply_connector_commands_recovering(&self.0.connector_id, command_cursor, &commands)
             .map_err(|_| CloudWorkerError::new("embedded_command_failed"))
     }
 }

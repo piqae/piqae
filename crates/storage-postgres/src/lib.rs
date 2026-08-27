@@ -91,6 +91,20 @@ pub fn agent_acceptance_webhook_idempotency_key(
     format!("agent-acceptance:{digest:x}")
 }
 
+/// Returns the stable outbox key for cancellation completed before acceptance.
+///
+/// Agent sync can retry this repair after a lost response; the durable tenant
+/// event must still be emitted exactly once.
+#[must_use]
+pub fn preaccept_cancellation_webhook_idempotency_key(
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+) -> String {
+    let digest = Sha256::digest(format!("{workspace_id}\n{environment_id}\n{job_id}").as_bytes());
+    format!("preaccept-cancellation:{digest:x}")
+}
+
 #[derive(Clone, Debug)]
 pub enum CreateJobResult {
     Created(Job),
@@ -7701,6 +7715,74 @@ impl PostgresStore {
         })?)
         .execute(&mut *transaction)
         .await?;
+        let accepted: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM job_acceptances
+             WHERE job_id=$1 AND workspace_id=$2 AND environment_id=$3)",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !accepted {
+            let now = Utc::now();
+            let cancelled_sequence = sequence.saturating_add(1);
+            job.state = JobState::Cancelled;
+            insert_event(
+                &mut transaction,
+                &job,
+                &JobEvent {
+                    id: EventId::new(),
+                    job_id,
+                    sequence: cancelled_sequence,
+                    state: JobState::Cancelled,
+                    reason: Some(piqae_domain::JobFailureReason::CancelledByUser),
+                    message: Some("Cancellation completed before node acceptance".into()),
+                    agent_id: None,
+                    native_job_id: None,
+                    occurred_at: now,
+                },
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE jobs SET payload=$2,state='cancelled',state_sequence=$3,
+                    final_at=COALESCE(final_at,$4),lease_owner=NULL,lease_id=NULL,
+                    lease_token_hash=NULL,lease_until=NULL,updated_at=now()
+                 WHERE id=$1 AND workspace_id=$5 AND environment_id=$6",
+            )
+            .bind(job_id.to_string())
+            .bind(serde_json::to_value(&job)?)
+            .bind(i64::try_from(cancelled_sequence).map_err(|error| {
+                StorageError::InvalidData(format!("event sequence overflow: {error}"))
+            })?)
+            .bind(now)
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE delivery_attempts SET state='cancelled',final_at=COALESCE(final_at,$4),updated_at=$4
+                 WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND final_at IS NULL",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(job_id.to_string())
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE route_reservations SET state='cancelled',released_at=COALESCE(released_at,$4),updated_at=$4
+                 WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND state='active'",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(job_id.to_string())
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            return Ok(job);
+        }
         sqlx::query(
             "INSERT INTO agent_commands (workspace_id, environment_id, agent_id, command)
              VALUES ($1,$2,$3,$4)",
@@ -7713,6 +7795,134 @@ impl PostgresStore {
         .await?;
         transaction.commit().await?;
         Ok(job)
+    }
+
+    /// Retires a stale cancellation only when the exact tenant job belongs to
+    /// this node and has never been accepted by any route. This is deliberately
+    /// server-side so N-1 nodes stop receiving a command they cannot classify.
+    pub async fn retire_terminal_absent_local_cancellation(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+    ) -> Result<bool, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let Some(row) = sqlx::query(
+            "SELECT payload,state,state_sequence,agent_id FROM jobs
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 FOR UPDATE",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        else {
+            transaction.commit().await?;
+            return Ok(false);
+        };
+        if row.try_get::<String, _>("agent_id")? != agent_id.to_string() {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+        let state: String = row.try_get("state")?;
+        let mut job = job_from_row(row.try_get("payload")?, &state)?;
+        let accepted: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM job_acceptances
+             WHERE job_id=$1 AND workspace_id=$2 AND environment_id=$3)",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if accepted || (!job.state.is_terminal() && job.state != JobState::CancelRequested) {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+        if !job.state.is_terminal() {
+            let now = Utc::now();
+            let sequence = row.try_get::<i64, _>("state_sequence")? + 1;
+            job.state = JobState::Cancelled;
+            insert_event(
+                &mut transaction,
+                &job,
+                &JobEvent {
+                    id: EventId::new(),
+                    job_id,
+                    sequence: u64::try_from(sequence)
+                        .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+                    state: JobState::Cancelled,
+                    reason: Some(piqae_domain::JobFailureReason::CancelledByUser),
+                    message: Some("Cancellation completed before node acceptance".into()),
+                    agent_id: Some(agent_id),
+                    native_job_id: None,
+                    occurred_at: now,
+                },
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE jobs SET payload=$2,state='cancelled',state_sequence=$3,
+                    final_at=COALESCE(final_at,$4),lease_owner=NULL,lease_id=NULL,
+                    lease_token_hash=NULL,lease_until=NULL,updated_at=now()
+                 WHERE id=$1 AND workspace_id=$5 AND environment_id=$6 AND agent_id=$7",
+            )
+            .bind(job_id.to_string())
+            .bind(serde_json::to_value(&job)?)
+            .bind(sequence)
+            .bind(now)
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(agent_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE delivery_attempts SET state='cancelled',final_at=COALESCE(final_at,$4),updated_at=$4
+                 WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND final_at IS NULL",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(job_id.to_string())
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE route_reservations SET state='cancelled',released_at=COALESCE(released_at,$4),updated_at=$4
+                 WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND state='active'",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(job_id.to_string())
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+            enqueue_webhook_event_in_transaction(
+                &mut transaction,
+                Some(&preaccept_cancellation_webhook_idempotency_key(
+                    workspace_id,
+                    environment_id,
+                    job_id,
+                )),
+                workspace_id,
+                environment_id,
+                "job.updated",
+                &serde_json::to_value(&job)?,
+            )
+            .await?;
+        }
+        sqlx::query(
+            "UPDATE agent_commands SET acknowledged_at=COALESCE(acknowledged_at,now())
+             WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3
+               AND command->'cancel_job'->>'job_id'=$4",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(job_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(true)
     }
 
     pub async fn claim_jobs(

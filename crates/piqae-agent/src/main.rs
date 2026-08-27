@@ -52,11 +52,11 @@ use piqae_local_ipc::{
 };
 use piqae_node_runtime::{
     AgentClientAuthority, AvailabilityClass, BrokerConsentHandle, BrokerRegistry,
-    BrokerServerState, CloudCommandApplier, CloudConnectorWorker, CloudWorkerError,
-    ContentMaterializer, DurableOfferAcceptor, EventAcknowledger, HostCapabilities, HostKind,
-    InventorySnapshotProvider, LifecycleEvent, NodeRuntime, NodeRuntimeMode,
-    PendingCloudAcceptance, PendingCloudRelease, PrinterTransport, RuntimeConfiguration,
-    WakeReconciler,
+    BrokerServerState, CloudCommandApplication, CloudCommandApplier, CloudConnectorWorker,
+    CloudWorkerError, CommandRecoveryLedger, ContentMaterializer, DurableOfferAcceptor,
+    EventAcknowledger, HostCapabilities, HostKind, InventorySnapshotProvider, LifecycleEvent,
+    NodeRuntime, NodeRuntimeMode, PendingCloudAcceptance, PendingCloudRelease, PrinterTransport,
+    RuntimeConfiguration, WakeReconciler,
     command::{ConnectorInvitationRequest, ConnectorInvitationResult},
     connector_disconnect_requires_authority_upgrade, connector_registry as connector_runtime,
     route_coordinator,
@@ -4416,7 +4416,7 @@ impl CloudCommandApplier for InstalledCommandAdapter {
         &mut self,
         command_cursor: Option<&str>,
         commands: Vec<AgentCommand>,
-    ) -> Result<(), CloudWorkerError> {
+    ) -> Result<CloudCommandApplication, CloudWorkerError> {
         let mut stores = self.stores.lock().await;
         apply_commands(
             &mut stores.queue,
@@ -4426,8 +4426,7 @@ impl CloudCommandApplier for InstalledCommandAdapter {
             commands,
             command_cursor.map(ToOwned::to_owned),
         )
-        .await;
-        Ok(())
+        .await
     }
 }
 
@@ -5014,8 +5013,16 @@ async fn run_cloud_sync_loop(
                     last_printer_refresh = Some(tokio::time::Instant::now());
                 }
                 failures = 0;
-                *connection.write().await = ConnectionState::Connected;
-                *last_sync_error_code.write().await = None;
+                if outcome.command_retry_after.is_some() {
+                    *connection.write().await = ConnectionState::Degraded;
+                    *last_sync_error_code.write().await = Some("command_deferred".into());
+                    if outcome.command_failure_recorded {
+                        warn!("a cloud command was deferred; live sync remains active");
+                    }
+                } else {
+                    *connection.write().await = ConnectionState::Connected;
+                    *last_sync_error_code.write().await = None;
+                }
                 outcome.next_poll_after
             }
             Err(error) => {
@@ -5180,8 +5187,20 @@ async fn apply_commands(
     connector_id: &str,
     commands: Vec<AgentCommand>,
     command_cursor: Option<String>,
-) {
+) -> Result<CloudCommandApplication, CloudWorkerError> {
+    let now = Utc::now().timestamp_millis();
+    let mut ledger = CommandRecoveryLedger::load(store)
+        .map_err(|_| CloudWorkerError::new("command_recovery_load_failed"))?;
+    ledger
+        .retain_batch(&commands)
+        .map_err(|_| CloudWorkerError::new("command_recovery_batch_failed"))?;
+    let mut attempted_failure = false;
     for command in commands {
+        let key = CommandRecoveryLedger::key(&command)
+            .map_err(|_| CloudWorkerError::new("command_recovery_key_failed"))?;
+        if ledger.is_applied(&key) || !ledger.is_due(&key, now) {
+            continue;
+        }
         let result = match command {
             AgentCommand::ResolveAmbiguousHandoff {
                 job_id,
@@ -5199,17 +5218,44 @@ async fn apply_commands(
             ),
             command => apply_command(store, paused, command).map_err(anyhow::Error::from),
         };
-        if let Err(error) = result {
-            warn!(%error, "cloud command could not be applied durably");
-            return;
+        match result {
+            Ok(()) => ledger.record_applied(key),
+            Err(error) => {
+                let code = if error
+                    .downcast_ref::<StorageError>()
+                    .is_some_and(|error| matches!(error, StorageError::JobNotFound(_)))
+                {
+                    "local_job_absent_unproved"
+                } else {
+                    "command_apply_retry"
+                };
+                ledger.record_retry(key, now, code);
+                attempted_failure = true;
+                warn!(
+                    error_code = code,
+                    "cloud command deferred for durable reconciliation"
+                );
+            }
         }
+        ledger
+            .persist(store)
+            .map_err(|_| CloudWorkerError::new("command_recovery_persist_failed"))?;
     }
-    let Some(cursor) = command_cursor else {
-        return;
-    };
-    if let Err(error) = store.set_setting("command_cursor", &cursor) {
-        warn!(%error, "command cursor could not be persisted");
+    if ledger.complete() {
+        if let Some(cursor) = command_cursor {
+            store
+                .set_setting("command_cursor", &cursor)
+                .map_err(|_| CloudWorkerError::new("command_cursor_failed"))?;
+        }
+        ledger
+            .clear(store)
+            .map_err(|_| CloudWorkerError::new("command_recovery_clear_failed"))?;
+        return Ok(CloudCommandApplication::complete());
     }
+    Ok(CloudCommandApplication {
+        retry_after: ledger.retry_after(now),
+        attempted_failure,
+    })
 }
 
 fn apply_command(
@@ -6320,6 +6366,86 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[tokio::test]
+    async fn missing_cancel_is_bounded_while_sibling_command_survives_restart() {
+        let directory = tempfile::tempdir().expect("directory");
+        let database = directory.path().join("queue.db");
+        let coordinator = Arc::new(Mutex::new(
+            route_coordinator::RouteCoordinator::open(directory.path().join("routes"))
+                .expect("coordinator"),
+        ));
+        let missing = AgentCommand::CancelJob {
+            job_id: JobId::new(),
+        };
+        let pause = AgentCommand::Pause;
+        let paused = AtomicBool::new(false);
+        let mut store = AgentStore::open(&database).expect("store");
+        let first = apply_commands(
+            &mut store,
+            &paused,
+            &coordinator,
+            "ncon_test",
+            vec![missing.clone(), pause.clone()],
+            Some("2".into()),
+        )
+        .await
+        .expect("deferred outcome");
+        assert!(first.attempted_failure);
+        assert_eq!(first.retry_after, Some(Duration::from_secs(30)));
+        assert!(paused.load(Ordering::Relaxed));
+        assert_eq!(
+            store.setting("paused").expect("paused"),
+            Some("true".into())
+        );
+        assert_eq!(store.setting("command_cursor").expect("cursor"), None);
+        let recovery_before_restart = store
+            .setting("cloud_command_recovery_v1")
+            .expect("recovery")
+            .expect("recovery document");
+        drop(store);
+
+        let mut restarted = AgentStore::open(&database).expect("restart store");
+        paused.store(false, Ordering::Relaxed);
+        let deferred = apply_commands(
+            &mut restarted,
+            &paused,
+            &coordinator,
+            "ncon_test",
+            vec![missing, pause.clone()],
+            Some("2".into()),
+        )
+        .await
+        .expect("restart deferred outcome");
+        assert!(!deferred.attempted_failure);
+        assert!(
+            !paused.load(Ordering::Relaxed),
+            "applied sibling was not replayed"
+        );
+        assert_eq!(
+            restarted
+                .setting("cloud_command_recovery_v1")
+                .expect("recovery")
+                .expect("recovery document"),
+            recovery_before_restart
+        );
+
+        let completed = apply_commands(
+            &mut restarted,
+            &paused,
+            &coordinator,
+            "ncon_test",
+            vec![pause],
+            Some("2".into()),
+        )
+        .await
+        .expect("authority-retired stale command");
+        assert_eq!(completed, CloudCommandApplication::complete());
+        assert_eq!(
+            restarted.setting("command_cursor").expect("cursor"),
+            Some("2".into())
+        );
+    }
 
     #[test]
     fn computer_name_is_bounded_and_rejects_control_data() {

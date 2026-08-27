@@ -10,6 +10,7 @@
 pub mod broker;
 pub mod cloud_worker;
 pub mod command;
+pub mod command_recovery;
 pub mod connector_enrollment;
 pub mod connector_registry;
 mod durable_file;
@@ -27,6 +28,7 @@ pub use broker::{
 };
 pub use cloud_worker::*;
 pub use command::*;
+pub use command_recovery::*;
 pub use connector_enrollment::*;
 pub use embedded::*;
 pub use embedded_cloud::*;

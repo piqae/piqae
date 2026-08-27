@@ -10,6 +10,7 @@
     reason = "the public durable boundary is validated fail-closed and restart repair intentionally snapshots journal keys before mutation"
 )]
 
+use crate::{CloudCommandApplication, CommandRecoveryLedger};
 use anyhow::{Context as _, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
@@ -551,6 +552,72 @@ impl EmbeddedQueue {
             }
         }
         Ok(())
+    }
+
+    /// Applies every due command independently and persists bounded retry
+    /// metadata so one malformed or transient command cannot starve siblings.
+    pub fn apply_connector_commands_recovering(
+        &mut self,
+        connector_id: &str,
+        command_cursor: Option<&str>,
+        commands: &[AgentCommand],
+    ) -> Result<CloudCommandApplication> {
+        let store = self.store_for_scope_mut(connector_id)?;
+        let now = Utc::now().timestamp_millis();
+        let mut ledger = CommandRecoveryLedger::load(store)?;
+        ledger.retain_batch(commands)?;
+        let mut attempted_failure = false;
+        for command in commands {
+            let key = CommandRecoveryLedger::key(command)?;
+            if ledger.is_applied(&key) || !ledger.is_due(&key, now) {
+                continue;
+            }
+            let result = match command {
+                AgentCommand::CancelJob { job_id } => store
+                    .request_cancel(&job_id.to_string(), now)
+                    .map(|_| ())
+                    .map_err(anyhow::Error::from),
+                AgentCommand::Pause => store
+                    .set_setting("paused", "true")
+                    .map_err(anyhow::Error::from),
+                AgentCommand::Resume => store
+                    .set_setting("paused", "false")
+                    .map_err(anyhow::Error::from),
+                AgentCommand::RefreshPrinters | AgentCommand::UpdateAvailable { .. } => Ok(()),
+                AgentCommand::CollectDiagnostics { .. }
+                | AgentCommand::ResolveAmbiguousHandoff { .. } => {
+                    Err(anyhow::anyhow!("unsupported embedded host command"))
+                }
+            };
+            match result {
+                Ok(()) => ledger.record_applied(key),
+                Err(error) => {
+                    let code = if error
+                        .downcast_ref::<piqae_agent_storage::StorageError>()
+                        .is_some_and(|error| {
+                            matches!(error, piqae_agent_storage::StorageError::JobNotFound(_))
+                        }) {
+                        "local_job_absent_unproved"
+                    } else {
+                        "embedded_command_retry"
+                    };
+                    ledger.record_retry(key, now, code);
+                    attempted_failure = true;
+                }
+            }
+            ledger.persist(store)?;
+        }
+        if ledger.complete() {
+            if let Some(cursor) = command_cursor {
+                store.set_setting("command_cursor", cursor)?;
+            }
+            ledger.clear(store)?;
+            return Ok(CloudCommandApplication::complete());
+        }
+        Ok(CloudCommandApplication {
+            retry_after: ledger.retry_after(now),
+            attempted_failure,
+        })
     }
 
     pub fn pending_connector_accepts(&self, connector_id: &str) -> Result<Vec<CloudAcceptIntent>> {

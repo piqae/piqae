@@ -284,7 +284,28 @@ pub trait CloudCommandApplier: fmt::Debug + Send + Sync {
         &mut self,
         command_cursor: Option<&str>,
         commands: Vec<AgentCommand>,
-    ) -> Result<(), CloudWorkerError>;
+    ) -> Result<CloudCommandApplication, CloudWorkerError>;
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CloudCommandApplication {
+    /// A durable command remains unacknowledged. The worker still advances
+    /// inventory, events and offers on the server cadence; only re-applying
+    /// this command is deferred so a poison command cannot create a storm.
+    pub retry_after: Option<Duration>,
+    /// True only when this cycle attempted an operation and recorded a new
+    /// classified failure; callers may emit one bounded diagnostic signal.
+    pub attempted_failure: bool,
+}
+
+impl CloudCommandApplication {
+    #[must_use]
+    pub const fn complete() -> Self {
+        Self {
+            retry_after: None,
+            attempted_failure: false,
+        }
+    }
 }
 
 /// Turns a lease-scoped descriptor into bounded local content. Implementations
@@ -353,6 +374,8 @@ pub struct CloudCycleOutcome {
     pub next_poll_after: Duration,
     pub inventory_submitted: bool,
     pub offers_seen: usize,
+    pub command_retry_after: Option<Duration>,
+    pub command_failure_recorded: bool,
 }
 
 /// Reusable single-connector worker. A supervisor owns retry/backoff and one
@@ -482,7 +505,8 @@ where
             self.refresh_inventory = !inventory_submitted;
         }
 
-        self.commands
+        let command_application = self
+            .commands
             .apply(response.command_cursor.as_deref(), response.commands)
             .await?;
         let offers_seen = response.candidate_jobs.len();
@@ -493,10 +517,13 @@ where
                 deferred_error = Some(error);
             }
         }
+        let server_delay = Duration::from_millis(response.next_poll_after_ms.clamp(250, 60_000));
         let outcome = CloudCycleOutcome {
-            next_poll_after: Duration::from_millis(response.next_poll_after_ms.clamp(250, 60_000)),
+            next_poll_after: server_delay,
             inventory_submitted,
             offers_seen,
+            command_retry_after: command_application.retry_after,
+            command_failure_recorded: command_application.attempted_failure,
         };
         deferred_error.map_or(Ok(outcome), Err)
     }
@@ -987,9 +1014,27 @@ mod tests {
             &mut self,
             _cursor: Option<&str>,
             _commands: Vec<AgentCommand>,
-        ) -> Result<(), CloudWorkerError> {
+        ) -> Result<CloudCommandApplication, CloudWorkerError> {
             self.0.lock().unwrap().push("commands");
-            Ok(())
+            Ok(CloudCommandApplication::complete())
+        }
+    }
+
+    #[derive(Debug)]
+    struct DeferredCommands(Log);
+
+    #[async_trait]
+    impl CloudCommandApplier for DeferredCommands {
+        async fn apply(
+            &mut self,
+            _cursor: Option<&str>,
+            _commands: Vec<AgentCommand>,
+        ) -> Result<CloudCommandApplication, CloudWorkerError> {
+            self.0.lock().unwrap().push("commands_deferred");
+            Ok(CloudCommandApplication {
+                retry_after: Some(Duration::from_secs(30)),
+                attempted_failure: true,
+            })
         }
     }
 
@@ -1490,6 +1535,61 @@ mod tests {
             "content_invalid"
         );
         assert!(log.lock().unwrap().contains(&"remote_release"));
+    }
+
+    #[tokio::test]
+    async fn deferred_command_does_not_starve_inventory_or_sibling_offer() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(FakeSecureStore {
+            key: SigningKey::from_bytes(&[29; 32]),
+            deleted: Mutex::new(false),
+        });
+        let generated = provider.generate("com.example.pos").unwrap();
+        let agent_id = AgentId::new();
+        let identity: Arc<dyn DeviceRequestSigner> = Arc::new(HostBackedDeviceIdentity::new(
+            agent_id,
+            generated.handle,
+            provider,
+        ));
+        let mut response = empty_response();
+        response.commands.push(AgentCommand::Pause);
+        response.command_cursor = Some("cmd_deferred".into());
+        response.candidate_jobs.push(offer(JobId::new()));
+        let runtime = runtime(&directory.path().join("runtime"));
+        let mut worker = CloudConnectorWorker::new(
+            authority(
+                identity,
+                ed25519_dalek::VerifyingKey::from_bytes(&generated.public_key).unwrap(),
+                vec![Ok(response)],
+                Arc::clone(&log),
+            ),
+            FakeInventory {
+                agent_id,
+                log: Arc::clone(&log),
+            },
+            FakeEvents(Arc::clone(&log)),
+            DeferredCommands(Arc::clone(&log)),
+            FakeMaterializer {
+                log: Arc::clone(&log),
+                fail: false,
+            },
+            FileAcceptor::open(&directory.path().join("queue.json"), Arc::clone(&log)),
+            FakeWake(Arc::clone(&log)),
+            runtime,
+        );
+        let outcome = worker.reconcile_once().await.unwrap();
+        assert_eq!(outcome.command_retry_after, Some(Duration::from_secs(30)));
+        assert_eq!(outcome.next_poll_after, Duration::from_secs(1));
+        assert!(outcome.command_failure_recorded);
+        assert!(outcome.inventory_submitted);
+        assert_eq!(outcome.offers_seen, 1);
+        let entries = log.lock().unwrap();
+        assert!(entries.contains(&"inventory_ack"));
+        assert!(entries.contains(&"commands_deferred"));
+        assert!(entries.contains(&"durable_handoff"));
+        assert!(entries.contains(&"activate"));
+        drop(entries);
     }
 
     #[tokio::test]
