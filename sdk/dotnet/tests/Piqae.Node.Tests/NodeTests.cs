@@ -168,6 +168,9 @@ public sealed class NodeTests
         Assert.IsType<PrintPacketOutputTarget.Pdf>(packet.OutputTarget);
         Assert.Equal(1, packet.Resources["logo"][0]);
         Assert.Equal("printpacket/v1", packet.Template.GetProperty("format").GetString());
+        Assert.Throws<ArgumentException>(() => PrintPacket.Parse(
+            """{"format":"printpacket/v0","media":{"kind":"continuous","width_mm":80},"body":[]}"""u8,
+            "{}"u8));
     }
 
     [Fact]
@@ -182,7 +185,7 @@ public sealed class NodeTests
             "com.piqae.tests.printpacket",
             unique));
         node.Start();
-        using var capabilities = JsonDocument.Parse("""{"document_kinds":["pdf"]}""");
+        using var adapterCapabilities = JsonDocument.Parse("""{"document_kinds":["pdf"]}""");
         node.RegisterAdapter(new AdapterRegistration(
             new AdapterFingerprint(
                 "windows",
@@ -190,7 +193,7 @@ public sealed class NodeTests
                 "1.0.0",
                 "test",
                 null),
-            capabilities.RootElement.Clone()));
+            adapterCapabilities.RootElement.Clone()));
         using var nativeOptions = JsonDocument.Parse("{}");
         var inventory = node.ObservePrinterInventory(
             "com.piqae.tests.fake-printer",
@@ -205,6 +208,13 @@ public sealed class NodeTests
 
         var receipt = ReadPrintPacketFixture("receipt-80mm");
         var label = ReadPrintPacketFixture("production-label-100x50");
+        var capabilities = node.GetPrintPacketCapabilities();
+        Assert.Equal("printpacket/v1", capabilities.Contract);
+        Assert.Equal("printpacket.pdf-renderer/v1", capabilities.RendererAbi);
+        Assert.Equal("printpacket.resources/v1", capabilities.ResourceAbi);
+        Assert.Equal("printpacket.render-cache/v1", capabilities.CacheProfile);
+        Assert.True(capabilities.DirectOfflineRendering);
+        Assert.True(capabilities.HardLimits.MaxPages > 0);
         var receiptValidation = node.ValidatePrintPacket(receipt);
         var labelValidation = node.ValidatePrintPacket(label);
         Assert.Equal("printpacket/v1", receiptValidation.Manifest.SpecificationVersion);
@@ -243,7 +253,7 @@ public sealed class NodeTests
                 203,
                 812));
         var exception = Assert.Throws<PiqaeNodeException>(() => node.ValidatePrintPacket(unsupported));
-        Assert.Equal("printpacket_invalid_or_unsupported", exception.Code);
+        Assert.Equal("printpacket_unsupported_target", exception.Code);
     }
 
     [Fact]
@@ -265,15 +275,19 @@ public sealed class NodeTests
     }
 
     [Fact]
-    public void InvalidNativeCommandRequiresMatchingCoreUpdate()
+    public void OnlyExplicitPrintPacketCoreErrorRequiresUpdate()
     {
         var exception = PiqaeNodeException.FromNative(
-            "invalid_command",
-            "The command is not recognized.");
+            "printpacket_core_update_required",
+            "The renderer is too old.");
 
         Assert.Equal("native_core_update_required", exception.Code);
-        Assert.Equal("invalid_command", exception.NativeCode);
+        Assert.Equal("printpacket_core_update_required", exception.NativeCode);
         Assert.Contains("must be updated", exception.Message, StringComparison.Ordinal);
+        var invalid = PiqaeNodeException.FromNative(
+            "invalid_command",
+            "The command is not recognized.");
+        Assert.Equal("invalid_command", invalid.Code);
     }
 
     private static PrintPacket ReadPrintPacketFixture(string name)
@@ -355,7 +369,10 @@ public sealed class NodeTests
             PiqaeNode.EnsureCompatibleAbi(new NativeAbiDescriptor(2, 1, 1)));
         Assert.Equal("unsupported_native_abi", exception.Code);
         Assert.Throws<PiqaeNodeException>(() =>
-            PiqaeNode.EnsureCompatibleAbi(new NativeAbiDescriptor(1, 2, 2)));
+            PiqaeNode.EnsureCompatibleAbi(new NativeAbiDescriptor(1, 1, 1)));
+        Assert.Throws<PiqaeNodeException>(() =>
+            PiqaeNode.EnsureCompatibleAbi(new NativeAbiDescriptor(1, 3, 3)));
+        PiqaeNode.EnsureCompatibleAbi(new NativeAbiDescriptor(1, 2, 2));
     }
 
     [Fact]

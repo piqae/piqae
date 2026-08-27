@@ -122,6 +122,7 @@ let packet = try PiqaePrintPacket(
     dataJSON: orderJSON,
     resources: ["logo.png": logoData] // optional embedded resources
 )
+let capabilities = try await node.printPackets.capabilities()
 let validation = try await node.printPackets.validate(packet) // local PDF by default
 let submission = try await node.printPackets.submit(.init(
     adapterID: printer.adapterID,
@@ -141,14 +142,15 @@ certified. Direct PrintPacket calls currently require the embedded runtime;
 attached installed-node clients have no equivalent authenticated broker command
 yet and never start a parallel renderer as a fallback.
 
-The native ABI contract is still version 1 and does not advertise individual
-PrintPacket commands. If an application loads an older contract-v1 native core,
-NodeKit maps its `invalid_command` response to
-`PiqaeNativeRuntimeError.nativeCoreUpdateRequired`; update the bundled
-XCFramework. It does not try another renderer or queue. Other PrintPacket
-validation, limit, and unsupported-target failures currently share the native
-`printpacket_invalid_or_unsupported` code, so applications must present the
-message and must not infer a retryable failure class from that code alone.
+Native runtime contract 2 is a hard pre-release cut with no contract-1 fallback.
+It reports the exact `printpacket/v1` contract, renderer/resource ABIs,
+renderer build, conformance/cache profiles, supported features and output
+targets, resource media types, and hard limits before work is attempted. An
+incompatible ABI fails at startup; an explicit
+`printpacket_core_update_required` response maps to
+`PiqaeNativeRuntimeError.nativeCoreUpdateRequired`. Invalid packet/data/resource,
+unsupported feature/target, limit, and render failures have distinct redacted
+native codes. NodeKit never starts another renderer or queue as a fallback.
 
 For an embedded host, NodeKit calls `adapter.submit` only after the shared
 runtime has persisted the document, operation ID, route fence, deadline, and

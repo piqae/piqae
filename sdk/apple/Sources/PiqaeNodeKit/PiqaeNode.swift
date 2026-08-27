@@ -72,6 +72,10 @@ public final class PiqaePrintPacketsService: @unchecked Sendable {
     private let engine: PiqaeNodeEngine
     fileprivate init(engine: PiqaeNodeEngine) { self.engine = engine }
 
+    public func capabilities() async throws -> PiqaePrintPacketCapabilities {
+        try await engine.printPacketCapabilities()
+    }
+
     public func validate(_ packet: PiqaePrintPacket) async throws
         -> PiqaePrintPacketValidation
     {
@@ -512,6 +516,16 @@ actor PiqaeNodeEngine {
             )
         }
         return try await runtime.validatePrintPacket(packet)
+    }
+
+    func printPacketCapabilities() async throws -> PiqaePrintPacketCapabilities {
+        try requireStarted()
+        guard selectedIPC == nil, let runtime = configuration.embeddedRuntime else {
+            throw PiqaeNodeError.unsupportedOperation(
+                "The attached installed node does not expose direct PrintPacket capabilities."
+            )
+        }
+        return try await runtime.printPacketCapabilities()
     }
 
     func enqueuePrintPacket(_ request: PiqaePrintPacketSubmissionRequest) async throws

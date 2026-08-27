@@ -124,7 +124,7 @@ public sealed class PiqaeNode : IDisposable
         EnsureCompatibleAbi(descriptor);
         var payload = JsonSerializer.SerializeToUtf8Bytes(new
         {
-            contract = 1,
+            contract = 2,
             host_mode = options.HostMode,
             availability = options.Availability,
             local_only = options.LocalOnly,
@@ -358,6 +358,18 @@ public sealed class PiqaeNode : IDisposable
     });
 
     /// <summary>
+    /// Returns the exact direct/offline PrintPacket renderer, resource,
+    /// conformance, target and hard-limit contract of the loaded native core.
+    /// </summary>
+    public PrintPacketCapabilities GetPrintPacketCapabilities()
+    {
+        var result = Command(new { type = "print_packet_capabilities" });
+        return JsonSerializer.Deserialize<PrintPacketCapabilities>(
+            result.GetProperty("capabilities").GetRawText(), JsonOptions)
+            ?? throw InvalidNativeResponse();
+    }
+
+    /// <summary>
     /// Validates and renders a PrintPacket locally using the runtime's exact
     /// bounded reference renderer. No cloud connection or queue mutation is
     /// required.
@@ -365,6 +377,7 @@ public sealed class PiqaeNode : IDisposable
     public PrintPacketValidation ValidatePrintPacket(PrintPacket packet)
     {
         ArgumentNullException.ThrowIfNull(packet);
+        EnsurePrintPacketSupport(packet);
         var result = Command(new
         {
             type = "validate_print_packet",
@@ -395,6 +408,7 @@ public sealed class PiqaeNode : IDisposable
         long? expiresUnixMs = null)
     {
         ArgumentNullException.ThrowIfNull(packet);
+        EnsurePrintPacketSupport(packet);
         using var options = JsonDocument.Parse(optionsJson);
         if (options.RootElement.ValueKind != JsonValueKind.Object)
             throw new ArgumentException("Print options must be a JSON object.", nameof(optionsJson));
@@ -417,6 +431,24 @@ public sealed class PiqaeNode : IDisposable
         });
         return JsonSerializer.Deserialize<PrintPacketSubmission>(result.GetRawText(), JsonOptions)
             ?? throw InvalidNativeResponse();
+    }
+
+    private void EnsurePrintPacketSupport(PrintPacket packet)
+    {
+        var capabilities = GetPrintPacketCapabilities();
+        if (capabilities.Contract != "printpacket/v1"
+            || capabilities.RendererAbi != "printpacket.pdf-renderer/v1"
+            || capabilities.ResourceAbi != "printpacket.resources/v1"
+            || capabilities.ConformanceProfile != "printpacket.conformance/core-v1"
+            || capabilities.CacheProfile != "printpacket.render-cache/v1"
+            || !capabilities.DirectOfflineRendering)
+            throw new PiqaeNodeException(
+                "native_core_update_required",
+                "The bundled native runtime must be updated for this PrintPacket contract.");
+        if (!capabilities.SupportedOutputTargets.Any(packet.OutputTarget.IsAdvertisedBy))
+            throw new PiqaeNodeException(
+                "printpacket_unsupported_target",
+                "The exact PrintPacket output target is not supported by this runtime.");
     }
 
     public JsonElement NextAdapterOperation(string adapterId) => Command(new
@@ -781,7 +813,7 @@ public sealed class PiqaeNode : IDisposable
 
     internal static void EnsureCompatibleAbi(NativeAbiDescriptor descriptor)
     {
-        if (descriptor.AbiVersion != 1 || descriptor.ContractMin > 1 || descriptor.ContractMax < 1)
+        if (descriptor.AbiVersion != 1 || descriptor.ContractMin > 2 || descriptor.ContractMax < 2)
             throw new PiqaeNodeException(
                 "unsupported_native_abi",
                 "The native Piqae runtime ABI is not compatible with this SDK.");
@@ -1002,7 +1034,7 @@ public sealed class PiqaeNodeException(
     internal static PiqaeNodeException FromNative(
         string code,
         string message,
-        ulong? currentRevision = null) => code == "invalid_command"
+        ulong? currentRevision = null) => code == "printpacket_core_update_required"
         ? new PiqaeNodeException(
             "native_core_update_required",
             "The bundled Piqae native runtime must be updated to use this SDK operation.",

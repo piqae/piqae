@@ -81,6 +81,7 @@ var packet = PrintPacket.Parse(templateJson, orderJson, new Dictionary<string, b
 {
     ["logo.png"] = logoBytes,
 });
+var capabilities = node.GetPrintPacketCapabilities();
 var validation = node.ValidatePrintPacket(packet);
 var submission = node.EnqueuePrintPacket(
     adapterId: printerAdapterId,
@@ -96,14 +97,15 @@ handoff. Retrying the same content with the same idempotency key returns the
 existing job. A `PrinterNative` target fails closed until its exact language and
 profile renderer is available and certified.
 
-The native ABI contract is still version 1 and does not advertise individual
-PrintPacket commands. If an application loads an older contract-v1 native core,
-the SDK maps its `invalid_command` response to a `PiqaeNodeException` with code
-`native_core_update_required` and preserves `invalid_command` in `NativeCode`.
-Update the bundled native library; the SDK does not fall back to another
-renderer or queue. Other PrintPacket validation, limit, and unsupported-target
-failures currently share `printpacket_invalid_or_unsupported`, so callers must
-not infer a retryable failure class from that code alone.
+Native runtime contract 2 is a hard pre-release cut with no contract-1 fallback.
+It reports the exact `printpacket/v1` contract, renderer/resource ABIs,
+renderer build, conformance/cache profiles, supported features and output
+targets, resource media types, and hard limits before work is attempted. An
+incompatible ABI fails at startup; an explicit
+`printpacket_core_update_required` response maps to
+`native_core_update_required`. Invalid packet/data/resource, unsupported
+feature/target, limit, and render failures have distinct redacted native codes.
+The SDK never starts another renderer or queue as a fallback.
 
 If the user abandons the flow, call
 `CancelPreparedConnectorInvitation(prepared.KeyHandle)`. Pending-key expiry,

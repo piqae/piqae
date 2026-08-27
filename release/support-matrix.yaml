@@ -84,7 +84,7 @@ features:
     reason: encrypted transport and local decryption are implemented for evaluation but lack independent cryptographic review, hardware-backed keys and physical release evidence
   declarative_document_generation:
     tier: disabled
-    reason: the bounded business-document renderer, encrypted tenant persistence, SDK/MCP contracts, content-addressed JPEG resources, optional exact node rendering, PostgreSQL cutover tests, virtual lifecycle tests, and a 250-page local synthetic benchmark exist; international Unicode shaping, downloadable fonts, PNG/SVG, production fleet soak, independent security review, and physical release gates remain open
+    reason: the bounded PrintPacket renderer, encrypted tenant persistence, SDK/MCP contracts, content-addressed JPEG resources, optional exact node rendering, PostgreSQL cutover tests, virtual lifecycle tests, and a 250-page local synthetic benchmark exist; international Unicode shaping, downloadable fonts, PNG/SVG, production fleet soak, independent security review, and physical release gates remain open
   shopify_order_printing:
     tier: disabled
     reason: the embedded app, Word-like semantic editor, Liquid compiler, Admin/POS/customer extensions, render-policy/readiness controls, verified asset publication, direct-node path, and PDF fallback pass local and virtual gates; international typography, deployment of the new API, Shopify approvals, live bulk store/POS validation, Web Vitals evidence, production fleet soak, and physical printing remain open

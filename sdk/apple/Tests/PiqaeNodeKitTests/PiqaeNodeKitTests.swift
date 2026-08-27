@@ -393,15 +393,29 @@ final class PiqaeNodeKitTests: XCTestCase {
         XCTAssertEqual(packet.outputTarget, .pdf())
         XCTAssertEqual(packet.resources["logo"], Data([1, 2, 3]))
         XCTAssertThrowsError(try PiqaePrintPacket(templateJSON: Data("[]".utf8)))
+        XCTAssertThrowsError(
+            try PiqaePrintPacket(
+                templateJSON: Data(
+                    #"{"format":"printpacket/v0","media":{"kind":"continuous","width_mm":80},"body":[]}"#.utf8
+                )
+            )
+        )
     }
 
-    func testInvalidNativeCommandRequiresMatchingCoreUpdate() {
+    func testOnlyExplicitPrintPacketCoreErrorRequiresUpdate() {
+        XCTAssertEqual(
+            PiqaeNativeRuntime.mappedRuntimeError(
+                code: "printpacket_core_update_required",
+                message: "The renderer is too old."
+            ),
+            .nativeCoreUpdateRequired
+        )
         XCTAssertEqual(
             PiqaeNativeRuntime.mappedRuntimeError(
                 code: "invalid_command",
                 message: "The command is not recognized."
             ),
-            .nativeCoreUpdateRequired
+            .rejected(code: "invalid_command", message: "The command is not recognized.")
         )
     }
 
@@ -434,6 +448,14 @@ final class PiqaeNodeKitTests: XCTestCase {
         let printer = try XCTUnwrap(printers.first)
         let receipt = try printPacketFixture("receipt-80mm")
         let label = try printPacketFixture("production-label-100x50")
+
+        let capabilities = try await node.printPackets.capabilities()
+        XCTAssertEqual(capabilities.contract, "printpacket/v1")
+        XCTAssertEqual(capabilities.rendererABI, "printpacket.pdf-renderer/v1")
+        XCTAssertEqual(capabilities.resourceABI, "printpacket.resources/v1")
+        XCTAssertEqual(capabilities.cacheProfile, "printpacket.render-cache/v1")
+        XCTAssertTrue(capabilities.directOfflineRendering)
+        XCTAssertGreaterThan(capabilities.hardLimits.maxPages, 0)
 
         let receiptValidation = try await node.printPackets.validate(receipt)
         let labelValidation = try await node.printPackets.validate(label)
@@ -474,7 +496,7 @@ final class PiqaeNodeKitTests: XCTestCase {
             guard case let PiqaeNativeRuntimeError.rejected(code, _) = error else {
                 return XCTFail("Expected the native runtime to reject an unsupported target.")
             }
-            XCTAssertEqual(code, "printpacket_invalid_or_unsupported")
+            XCTAssertEqual(code, "printpacket_unsupported_target")
         }
     }
 

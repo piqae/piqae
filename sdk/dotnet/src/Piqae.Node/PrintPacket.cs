@@ -29,6 +29,53 @@ public abstract record PrintPacketOutputTarget
         },
         _ => throw new ArgumentOutOfRangeException(nameof(PrintPacketOutputTarget))
     };
+
+    internal bool IsAdvertisedBy(PrintPacketSupportedOutputTarget target) => this switch
+    {
+        Pdf pdf => target.Kind == "pdf" && target.Profile == pdf.Profile,
+        PrinterNative native => target.Kind == "printer_native"
+            && target.Language == native.Language
+            && target.Profile == native.Profile
+            && target.Dpi == native.Dpi
+            && target.PrintableWidthDots == native.PrintableWidthDots,
+        _ => false
+    };
+}
+
+public sealed record PrintPacketSupportedOutputTarget
+{
+    [JsonPropertyName("kind")] public required string Kind { get; init; }
+    [JsonPropertyName("profile")] public required string Profile { get; init; }
+    [JsonPropertyName("language")] public string? Language { get; init; }
+    [JsonPropertyName("dpi")] public ushort? Dpi { get; init; }
+    [JsonPropertyName("printable_width_dots")] public uint? PrintableWidthDots { get; init; }
+}
+
+public sealed record PrintPacketHardLimits
+{
+    [JsonPropertyName("max_template_bytes")] public ulong MaxTemplateBytes { get; init; }
+    [JsonPropertyName("max_data_bytes")] public ulong MaxDataBytes { get; init; }
+    [JsonPropertyName("max_output_bytes")] public ulong MaxOutputBytes { get; init; }
+    [JsonPropertyName("max_pages")] public uint MaxPages { get; init; }
+    [JsonPropertyName("max_resources")] public uint MaxResources { get; init; }
+    [JsonPropertyName("max_resource_bytes")] public ulong MaxResourceBytes { get; init; }
+    [JsonPropertyName("max_total_resource_bytes")] public ulong MaxTotalResourceBytes { get; init; }
+}
+
+public sealed record PrintPacketCapabilities
+{
+    [JsonPropertyName("contract")] public required string Contract { get; init; }
+    [JsonPropertyName("renderer_abi")] public required string RendererAbi { get; init; }
+    [JsonPropertyName("resource_abi")] public required string ResourceAbi { get; init; }
+    [JsonPropertyName("renderer_build")] public required string RendererBuild { get; init; }
+    [JsonPropertyName("conformance_profile")] public required string ConformanceProfile { get; init; }
+    [JsonPropertyName("cache_profile")] public required string CacheProfile { get; init; }
+    [JsonPropertyName("supported_features")] public required IReadOnlyList<string> SupportedFeatures { get; init; }
+    [JsonPropertyName("supported_output_targets")] public required IReadOnlyList<PrintPacketSupportedOutputTarget> SupportedOutputTargets { get; init; }
+    [JsonPropertyName("resource_media_types")] public required IReadOnlyList<string> ResourceMediaTypes { get; init; }
+    [JsonPropertyName("hard_limits")] public required PrintPacketHardLimits HardLimits { get; init; }
+    [JsonPropertyName("persistent_resource_cache")] public bool PersistentResourceCache { get; init; }
+    [JsonPropertyName("direct_offline_rendering")] public bool DirectOfflineRendering { get; init; }
 }
 
 public sealed record PrintPacket
@@ -46,6 +93,12 @@ public sealed record PrintPacket
     {
         if (template.ValueKind != JsonValueKind.Object)
             throw new ArgumentException("A PrintPacket template must be a JSON object.", nameof(template));
+        if (!template.TryGetProperty("format", out var format)
+            || format.ValueKind != JsonValueKind.String
+            || format.GetString() != "printpacket/v1")
+            throw new ArgumentException(
+                "A PrintPacket template must use the canonical printpacket/v1 contract.",
+                nameof(template));
         Template = template.Clone();
         Data = data.Clone();
         Resources = resources?.ToDictionary(

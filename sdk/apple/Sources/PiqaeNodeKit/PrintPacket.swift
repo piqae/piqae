@@ -24,6 +24,123 @@ public enum PiqaePrintPacketOutputTarget: Equatable, Sendable {
             ]
         }
     }
+
+    func isAdvertised(by capability: PiqaePrintPacketSupportedOutputTarget) -> Bool {
+        switch (self, capability) {
+        case let (.pdf(profile), .pdf(supportedProfile)):
+            profile == supportedProfile
+        case let (
+            .printerNative(language, profile, dpi, printableWidthDots),
+            .printerNative(
+                supportedLanguage,
+                supportedProfile,
+                supportedDPI,
+                supportedPrintableWidthDots
+            )
+        ):
+            language == supportedLanguage && profile == supportedProfile && dpi == supportedDPI
+                && printableWidthDots == supportedPrintableWidthDots
+        default:
+            false
+        }
+    }
+}
+
+public enum PiqaePrintPacketSupportedOutputTarget: Codable, Equatable, Sendable {
+    case pdf(profile: String)
+    case printerNative(
+        language: String,
+        profile: String,
+        dpi: UInt16,
+        printableWidthDots: UInt32
+    )
+
+    private enum CodingKeys: String, CodingKey {
+        case kind, profile, language, dpi
+        case printableWidthDots = "printable_width_dots"
+    }
+
+    private enum Kind: String, Codable { case pdf; case printerNative = "printer_native" }
+
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        switch try values.decode(Kind.self, forKey: .kind) {
+        case .pdf:
+            self = try .pdf(profile: values.decode(String.self, forKey: .profile))
+        case .printerNative:
+            self = try .printerNative(
+                language: values.decode(String.self, forKey: .language),
+                profile: values.decode(String.self, forKey: .profile),
+                dpi: values.decode(UInt16.self, forKey: .dpi),
+                printableWidthDots: values.decode(UInt32.self, forKey: .printableWidthDots)
+            )
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .pdf(profile):
+            try values.encode(Kind.pdf, forKey: .kind)
+            try values.encode(profile, forKey: .profile)
+        case let .printerNative(language, profile, dpi, printableWidthDots):
+            try values.encode(Kind.printerNative, forKey: .kind)
+            try values.encode(language, forKey: .language)
+            try values.encode(profile, forKey: .profile)
+            try values.encode(dpi, forKey: .dpi)
+            try values.encode(printableWidthDots, forKey: .printableWidthDots)
+        }
+    }
+}
+
+public struct PiqaePrintPacketHardLimits: Codable, Equatable, Sendable {
+    public let maxTemplateBytes: UInt64
+    public let maxDataBytes: UInt64
+    public let maxOutputBytes: UInt64
+    public let maxPages: UInt32
+    public let maxResources: UInt32
+    public let maxResourceBytes: UInt64
+    public let maxTotalResourceBytes: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case maxTemplateBytes = "max_template_bytes"
+        case maxDataBytes = "max_data_bytes"
+        case maxOutputBytes = "max_output_bytes"
+        case maxPages = "max_pages"
+        case maxResources = "max_resources"
+        case maxResourceBytes = "max_resource_bytes"
+        case maxTotalResourceBytes = "max_total_resource_bytes"
+    }
+}
+
+public struct PiqaePrintPacketCapabilities: Codable, Equatable, Sendable {
+    public let contract: String
+    public let rendererABI: String
+    public let resourceABI: String
+    public let rendererBuild: String
+    public let conformanceProfile: String
+    public let cacheProfile: String
+    public let supportedFeatures: [String]
+    public let supportedOutputTargets: [PiqaePrintPacketSupportedOutputTarget]
+    public let resourceMediaTypes: [String]
+    public let hardLimits: PiqaePrintPacketHardLimits
+    public let persistentResourceCache: Bool
+    public let directOfflineRendering: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case contract
+        case rendererABI = "renderer_abi"
+        case resourceABI = "resource_abi"
+        case rendererBuild = "renderer_build"
+        case conformanceProfile = "conformance_profile"
+        case cacheProfile = "cache_profile"
+        case supportedFeatures = "supported_features"
+        case supportedOutputTargets = "supported_output_targets"
+        case resourceMediaTypes = "resource_media_types"
+        case hardLimits = "hard_limits"
+        case persistentResourceCache = "persistent_resource_cache"
+        case directOfflineRendering = "direct_offline_rendering"
+    }
 }
 
 /// Immutable PrintPacket input. JSON remains caller-owned wire data until the
@@ -42,11 +159,13 @@ public struct PiqaePrintPacket: Equatable, Sendable {
         outputTarget: PiqaePrintPacketOutputTarget = .pdf()
     ) throws {
         guard
-            (try? JSONSerialization.jsonObject(with: templateJSON)) is [String: Any],
+            let decodedTemplate = try? JSONSerialization.jsonObject(with: templateJSON),
+            let template = decodedTemplate as? [String: Any],
+            template["format"] as? String == "printpacket/v1",
             (try? JSONSerialization.jsonObject(with: dataJSON, options: .fragmentsAllowed)) != nil
         else {
             throw PiqaeNodeError.invalidConfiguration(
-                "PrintPacket template and data must be valid JSON; the template must be an object."
+                "PrintPacket requires a printpacket/v1 template object and valid JSON data."
             )
         }
         self.templateJSON = templateJSON

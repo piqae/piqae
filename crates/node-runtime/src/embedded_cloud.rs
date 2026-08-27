@@ -832,6 +832,10 @@ fn retry_secure_cleanup(registry: &mut ConnectorRegistry, provider: &dyn SecureC
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one supervised connector pass receives shared durable services plus its immutable record and deadline"
+)]
 async fn reconcile_connector(
     queue: Arc<Mutex<EmbeddedQueue>>,
     registry: Arc<Mutex<ConnectorRegistry>>,

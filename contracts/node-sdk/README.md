@@ -34,9 +34,12 @@ nonblocking generation-fenced cloud-reconciliation ABI used by Swift and .NET.
 The poll result contains aggregate counts, success scope, retryability, and a
 privacy-safe failure class only; it never contains connector or tenant identity.
 
-`printpacket-validate.json` and `printpacket-enqueue.json` pin the vendor-neutral
-`printpacket/v1` direct/offline path. Rust validates and renders before entering
-the existing durable embedded queue; bindings never create another renderer
-queue. The v1 reference target is deterministic PDF. A `printer_native` target
-fails closed unless a later registered language/profile capability matches it
-exactly.
+`printpacket-capabilities.json`, `printpacket-validate.json`, and
+`printpacket-enqueue.json` pin the vendor-neutral `printpacket/v1`
+direct/offline path in native runtime contract 2. Rust validates and renders
+before entering the existing durable embedded queue; bindings never create
+another renderer or queue. Contract 2 has no contract-1 fallback. The
+capability response reports the exact renderer/resource ABI, renderer build,
+conformance/cache profiles, features, targets, media types, and hard limits.
+The reference target is deterministic PDF. A `printer_native` target fails
+closed unless a registered language/profile capability matches it exactly.
