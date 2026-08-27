@@ -141,6 +141,15 @@ certified. Direct PrintPacket calls currently require the embedded runtime;
 attached installed-node clients have no equivalent authenticated broker command
 yet and never start a parallel renderer as a fallback.
 
+The native ABI contract is still version 1 and does not advertise individual
+PrintPacket commands. If an application loads an older contract-v1 native core,
+NodeKit maps its `invalid_command` response to
+`PiqaeNativeRuntimeError.nativeCoreUpdateRequired`; update the bundled
+XCFramework. It does not try another renderer or queue. Other PrintPacket
+validation, limit, and unsupported-target failures currently share the native
+`printpacket_invalid_or_unsupported` code, so applications must present the
+message and must not infer a retryable failure class from that code alone.
+
 For an embedded host, NodeKit calls `adapter.submit` only after the shared
 runtime has persisted the document, operation ID, route fence, deadline, and
 idempotency key and then durably recorded that native handoff is beginning. A

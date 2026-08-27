@@ -991,10 +991,24 @@ internal struct NativeConnectorKeyProvider
 public sealed class PiqaeNodeException(
     string code,
     string message,
-    ulong? currentRevision = null) : Exception(message)
+    ulong? currentRevision = null,
+    string? nativeCode = null) : Exception(message)
 {
     public string Code { get; } = code;
     public ulong? CurrentRevision { get; } = currentRevision;
+    /// <summary>The original native error code when the SDK maps it to an actionable error.</summary>
+    public string? NativeCode { get; } = nativeCode;
+
+    internal static PiqaeNodeException FromNative(
+        string code,
+        string message,
+        ulong? currentRevision = null) => code == "invalid_command"
+        ? new PiqaeNodeException(
+            "native_core_update_required",
+            "The bundled Piqae native runtime must be updated to use this SDK operation.",
+            currentRevision,
+            code)
+        : new PiqaeNodeException(code, message, currentRevision, code);
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -1067,7 +1081,7 @@ internal sealed class NativeResponse : IDisposable
                     && details.TryGetProperty("current_revision", out var revision)
                     && revision.TryGetUInt64(out var parsedRevision))
                     currentRevision = parsedRevision;
-                throw new PiqaeNodeException(
+                throw PiqaeNodeException.FromNative(
                     error.GetProperty("code").GetString() ?? "native_error",
                     error.GetProperty("message").GetString() ?? "The native runtime operation failed.",
                     currentRevision);

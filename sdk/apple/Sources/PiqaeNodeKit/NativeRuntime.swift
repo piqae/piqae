@@ -8,6 +8,10 @@ public enum PiqaeNativeRuntimeError: Error, LocalizedError, Equatable, Sendable 
     case libraryUnavailable
     case incompatibleABI
     case invalidResponse
+    /// The loaded native core predates an operation exposed by this SDK.
+    /// Applications must update the bundled core; NodeKit never falls back to
+    /// a second renderer, queue, or cloud implementation.
+    case nativeCoreUpdateRequired
     case rejected(code: String, message: String)
     case keyUnavailable
     case nodeIdentityRevisionConflict(currentRevision: UInt64)
@@ -17,6 +21,8 @@ public enum PiqaeNativeRuntimeError: Error, LocalizedError, Equatable, Sendable 
         case .libraryUnavailable: "The Piqae native runtime library is unavailable."
         case .incompatibleABI: "The Piqae native runtime ABI is incompatible with this SDK."
         case .invalidResponse: "The Piqae native runtime returned an invalid response."
+        case .nativeCoreUpdateRequired:
+            "The bundled Piqae native runtime must be updated to use this SDK operation."
         case let .rejected(_, message): message
         case .keyUnavailable: "The Piqae installation key is unavailable."
         case .nodeIdentityRevisionConflict:
@@ -639,16 +645,25 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
         catch { throw PiqaeNativeRuntimeError.invalidResponse }
         if envelope.ok, let value = envelope.data { return value }
         if let error = envelope.error {
-            if error.code == "node_identity_revision_conflict",
-                let currentRevision = error.details?.currentRevision
-            {
-                throw PiqaeNativeRuntimeError.nodeIdentityRevisionConflict(
-                    currentRevision: currentRevision
-                )
-            }
-            throw PiqaeNativeRuntimeError.rejected(code: error.code, message: error.message)
+            throw mappedRuntimeError(
+                code: error.code,
+                message: error.message,
+                currentRevision: error.details?.currentRevision
+            )
         }
         throw PiqaeNativeRuntimeError.invalidResponse
+    }
+
+    static func mappedRuntimeError(
+        code: String,
+        message: String,
+        currentRevision: UInt64? = nil
+    ) -> PiqaeNativeRuntimeError {
+        if code == "invalid_command" { return .nativeCoreUpdateRequired }
+        if code == "node_identity_revision_conflict", let currentRevision {
+            return .nodeIdentityRevisionConflict(currentRevision: currentRevision)
+        }
+        return .rejected(code: code, message: message)
     }
 }
 

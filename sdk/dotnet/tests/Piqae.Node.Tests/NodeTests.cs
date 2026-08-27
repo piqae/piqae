@@ -264,6 +264,18 @@ public sealed class NodeTests
             hostConfiguration)));
     }
 
+    [Fact]
+    public void InvalidNativeCommandRequiresMatchingCoreUpdate()
+    {
+        var exception = PiqaeNodeException.FromNative(
+            "invalid_command",
+            "The command is not recognized.");
+
+        Assert.Equal("native_core_update_required", exception.Code);
+        Assert.Equal("invalid_command", exception.NativeCode);
+        Assert.Contains("must be updated", exception.Message, StringComparison.Ordinal);
+    }
+
     private static PrintPacket ReadPrintPacketFixture(string name)
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
