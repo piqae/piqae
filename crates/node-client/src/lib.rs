@@ -425,10 +425,9 @@ impl BrokerTransport for WindowsBrokerTransport {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use piqae_local_ipc::{
-        BrokerAuthorizationDecision, BrokerPresence, ConnectionState, LocalFailure, LocalPrinter,
-        LocalPrinterQueueCounts,
-    };
+    #[cfg(unix)]
+    use piqae_local_ipc::{BrokerAuthorizationDecision, LocalPrinter, LocalPrinterQueueCounts};
+    use piqae_local_ipc::{BrokerPresence, ConnectionState, LocalFailure};
     #[cfg(unix)]
     use piqae_node_runtime::{
         BrokerConsentHandle, BrokerRegistry, BrokerServerState, RuntimeCommand,
