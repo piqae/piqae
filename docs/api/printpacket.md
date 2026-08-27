@@ -49,7 +49,7 @@ fonts and unsupported image fitting explicitly. Consult renderer conformance
 tests and the support matrix before making support claims.
 
 For a reproducible compute/payload probe of the bulk path, run
-`cargo run --release -p piqae-document-renderer --example render_batch -- 250 20`.
+`cargo run --release -p printpacket-renderer --example render_batch -- 250 20`.
 This measures only deterministic local rendering; it is not a network, spooler,
 fleet, or paper-delivery SLO.
 

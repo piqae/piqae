@@ -61,17 +61,6 @@ divider_width = node_for.call("divider").fetch("properties").fetch("width_pt")
 divider_width.delete("exclusiveMinimum")
 divider_width["minimum"] = 0.1
 
-region = definitions.fetch("PrintPacketRegion")
-definitions["PrintPacketHeaderRegion"] = region.merge(
-  "properties" => region.fetch("properties").slice("first", "default")
-)
-definitions["PrintPacketFooterRegion"] = region.merge(
-  "properties" => region.fetch("properties").slice("default", "last")
-)
-document_properties = definitions.fetch("PrintPacketV1").fetch("properties")
-document_properties["header"] = { "$ref" => "#/$defs/PrintPacketHeaderRegion" }
-document_properties["footer"] = { "$ref" => "#/$defs/PrintPacketFooterRegion" }
-
 schema = {
   "$schema" => "https://json-schema.org/draft/2020-12/schema",
   "$id" => "urn:printpacket:schema:v1",

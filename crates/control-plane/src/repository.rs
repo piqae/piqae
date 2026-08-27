@@ -392,7 +392,7 @@ pub trait Repository: Send + Sync + 'static {
         environment_id: EnvironmentId,
         printer_id: PrinterId,
     ) -> Result<piqae_protocol::agent::DocumentRenderCapabilities, RepositoryError>;
-    async fn register_business_document_resource(
+    async fn register_printpacket_resource(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
@@ -400,20 +400,20 @@ pub trait Repository: Send + Sync + 'static {
         media_type: &str,
         byte_length: i64,
     ) -> Result<(), RepositoryError>;
-    async fn link_business_document_render_resources(
+    async fn link_printpacket_render_resources(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         render_id: &str,
         digests: &[String],
     ) -> Result<(), RepositoryError>;
-    async fn claim_expired_business_document_resources(
+    async fn claim_expired_printpacket_resources(
         &self,
         limit: i64,
-    ) -> Result<Vec<piqae_storage_postgres::ExpiredBusinessDocumentResource>, RepositoryError>;
-    async fn complete_expired_business_document_resource(
+    ) -> Result<Vec<piqae_storage_postgres::ExpiredPrintPacketResource>, RepositoryError>;
+    async fn complete_expired_printpacket_resource(
         &self,
-        resource: &piqae_storage_postgres::ExpiredBusinessDocumentResource,
+        resource: &piqae_storage_postgres::ExpiredPrintPacketResource,
     ) -> Result<(), RepositoryError>;
     async fn create_node_diagnostic(
         &self,
@@ -2036,7 +2036,7 @@ impl Repository for PostgresStore {
         .await
         .map_err(Into::into)
     }
-    async fn register_business_document_resource(
+    async fn register_printpacket_resource(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
@@ -2044,7 +2044,7 @@ impl Repository for PostgresStore {
         media_type: &str,
         byte_length: i64,
     ) -> Result<(), RepositoryError> {
-        Self::register_business_document_resource(
+        Self::register_printpacket_resource(
             self,
             workspace_id,
             environment_id,
@@ -2055,14 +2055,14 @@ impl Repository for PostgresStore {
         .await
         .map_err(Into::into)
     }
-    async fn link_business_document_render_resources(
+    async fn link_printpacket_render_resources(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         render_id: &str,
         digests: &[String],
     ) -> Result<(), RepositoryError> {
-        Self::link_business_document_render_resources(
+        Self::link_printpacket_render_resources(
             self,
             workspace_id,
             environment_id,
@@ -2072,19 +2072,19 @@ impl Repository for PostgresStore {
         .await
         .map_err(Into::into)
     }
-    async fn claim_expired_business_document_resources(
+    async fn claim_expired_printpacket_resources(
         &self,
         limit: i64,
-    ) -> Result<Vec<piqae_storage_postgres::ExpiredBusinessDocumentResource>, RepositoryError> {
-        Self::claim_expired_business_document_resources(self, limit)
+    ) -> Result<Vec<piqae_storage_postgres::ExpiredPrintPacketResource>, RepositoryError> {
+        Self::claim_expired_printpacket_resources(self, limit)
             .await
             .map_err(Into::into)
     }
-    async fn complete_expired_business_document_resource(
+    async fn complete_expired_printpacket_resource(
         &self,
-        resource: &piqae_storage_postgres::ExpiredBusinessDocumentResource,
+        resource: &piqae_storage_postgres::ExpiredPrintPacketResource,
     ) -> Result<(), RepositoryError> {
-        Self::complete_expired_business_document_resource(self, resource)
+        Self::complete_expired_printpacket_resource(self, resource)
             .await
             .map_err(Into::into)
     }
@@ -4042,7 +4042,7 @@ impl Repository for MemoryRepository {
             id: revision_id.into(),
             template_id: template_id.into(),
             revision: 1,
-            renderer_profile: "piqae.business-document/v1".into(),
+            renderer_profile: "printpacket/v1".into(),
             created_at: Utc::now(),
             spec_ciphertext: template.draft_ciphertext.clone(),
             spec_sha256: template.draft_sha256.clone(),
@@ -4704,7 +4704,7 @@ impl Repository for MemoryRepository {
             .cloned()
             .unwrap_or_else(|| agent.document_render.clone()))
     }
-    async fn register_business_document_resource(
+    async fn register_printpacket_resource(
         &self,
         _workspace_id: WorkspaceId,
         _environment_id: EnvironmentId,
@@ -4714,7 +4714,7 @@ impl Repository for MemoryRepository {
     ) -> Result<(), RepositoryError> {
         Ok(())
     }
-    async fn link_business_document_render_resources(
+    async fn link_printpacket_render_resources(
         &self,
         _workspace_id: WorkspaceId,
         _environment_id: EnvironmentId,
@@ -4723,15 +4723,15 @@ impl Repository for MemoryRepository {
     ) -> Result<(), RepositoryError> {
         Ok(())
     }
-    async fn claim_expired_business_document_resources(
+    async fn claim_expired_printpacket_resources(
         &self,
         _limit: i64,
-    ) -> Result<Vec<piqae_storage_postgres::ExpiredBusinessDocumentResource>, RepositoryError> {
+    ) -> Result<Vec<piqae_storage_postgres::ExpiredPrintPacketResource>, RepositoryError> {
         Ok(Vec::new())
     }
-    async fn complete_expired_business_document_resource(
+    async fn complete_expired_printpacket_resource(
         &self,
-        _resource: &piqae_storage_postgres::ExpiredBusinessDocumentResource,
+        _resource: &piqae_storage_postgres::ExpiredPrintPacketResource,
     ) -> Result<(), RepositoryError> {
         Ok(())
     }

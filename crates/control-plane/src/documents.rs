@@ -235,7 +235,7 @@ async fn put_printpacket_resource(
         .map_err(|_| AppError::service_unavailable("object_store_unavailable"))?;
     if let Err(error) = state
         .repository
-        .register_business_document_resource(
+        .register_printpacket_resource(
             tenant.workspace_id,
             tenant.environment_id,
             &digest.to_ascii_lowercase(),
@@ -603,7 +603,7 @@ async fn register_render(
         .collect::<Result<Vec<_>, AppError>>()?;
     state
         .repository
-        .link_business_document_render_resources(
+        .link_printpacket_render_resources(
             tenant.workspace_id,
             tenant.environment_id,
             &stored.id,
@@ -1662,7 +1662,17 @@ mod tests {
                 "body": [{"type": "page_break"}]
             }))
             .is_err(),
-            "semantic renderer constraints must be rejected before publishing"
+            "continuous media must reject recursive page breaks before publishing"
+        );
+        assert!(
+            validate_document_spec(&serde_json::json!({
+                "format": "printpacket/v1", "media": {"kind": "paged", "size": "a4"},
+                "header": {"last": [{"type": "paragraph", "content": []}]},
+                "footer": {"first": [{"type": "paragraph", "content": []}]},
+                "body": []
+            }))
+            .is_ok(),
+            "all bounded first/default/last region variants must be publishable"
         );
         assert!(validate_document_spec(&serde_json::json!({"format": "other/v1"})).is_err());
         Ok(())

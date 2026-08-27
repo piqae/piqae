@@ -4,6 +4,210 @@
   "title": "PrintPacket v1",
   "$ref": "#/$defs/PrintPacketV1",
   "$defs": {
+    "PrintPacketCapabilitiesV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "negotiation_version",
+        "supported_packet_versions",
+        "feature_ids",
+        "conformance_profiles",
+        "output_profiles",
+        "deterministic",
+        "limits",
+        "resource_types",
+        "direct_offline",
+        "native_language_profiles",
+        "implementation_version"
+      ],
+      "properties": {
+        "negotiation_version": {
+          "type": "integer",
+          "const": 2
+        },
+        "supported_packet_versions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^printpacket/v[1-9][0-9]*$",
+            "maxLength": 128
+          }
+        },
+        "feature_ids": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9._-]{0,127}$"
+          }
+        },
+        "conformance_profiles": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9._/-]{0,127}$"
+          }
+        },
+        "output_profiles": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/PrintPacketOutputProfile"
+          }
+        },
+        "deterministic": {
+          "type": "boolean",
+          "description": "True only when the declared deterministic output profile is byte-stable."
+        },
+        "limits": {
+          "$ref": "#/$defs/PrintPacketLimits"
+        },
+        "resource_types": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "direct_offline": {
+          "type": "boolean",
+          "description": "Diagnostic fact; it does not authorize cloud delivery or background execution."
+        },
+        "native_language_profiles": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/PrinterNativeLanguageProfile"
+          }
+        },
+        "implementation_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Display-only implementation/build diagnostic; never used instead of exact capability intersection."
+        }
+      }
+    },
+    "PrintPacketLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_template_bytes",
+        "max_input_bytes",
+        "max_output_bytes",
+        "max_pages",
+        "max_resource_count",
+        "max_resource_bytes",
+        "max_total_resource_bytes"
+      ],
+      "properties": {
+        "max_template_bytes": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1,
+          "maximum": 52428800
+        },
+        "max_input_bytes": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1,
+          "maximum": 52428800
+        },
+        "max_output_bytes": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1,
+          "maximum": 524288000
+        },
+        "max_pages": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "max_resource_count": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "max_resource_bytes": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1,
+          "maximum": 52428800
+        },
+        "max_total_resource_bytes": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1,
+          "maximum": 524288000
+        }
+      }
+    },
+    "PrintPacketOutputProfile": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "kind",
+            "media_type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9._/-]{0,127}$"
+            },
+            "kind": {
+              "const": "pdf"
+            },
+            "media_type": {
+              "const": "application/pdf"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "kind",
+            "media_type",
+            "language_profile_id"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9._/-]{0,127}$"
+            },
+            "kind": {
+              "const": "printer_native"
+            },
+            "media_type": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "language_profile_id": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9._/-]{0,127}$"
+            }
+          }
+        }
+      ]
+    },
     "PrintPacketEdges": {
       "type": "object",
       "additionalProperties": false,
@@ -1285,7 +1489,7 @@
           }
         },
         "header": {
-          "$ref": "#/$defs/PrintPacketHeaderRegion"
+          "$ref": "#/$defs/PrintPacketRegion"
         },
         "body": {
           "type": "array",
@@ -1295,7 +1499,7 @@
           }
         },
         "footer": {
-          "$ref": "#/$defs/PrintPacketFooterRegion"
+          "$ref": "#/$defs/PrintPacketRegion"
         }
       }
     },
@@ -1450,6 +1654,63 @@
         }
       }
     },
+    "PrintPacketPrintRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title"
+      ],
+      "properties": {
+        "printer_id": {
+          "type": "string"
+        },
+        "target_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "options": {
+          "$ref": "#/$defs/JobOptions"
+        },
+        "deliveries": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 1
+        },
+        "render_policy": {
+          "$ref": "#/$defs/PrintPacketRenderPolicy"
+        },
+        "render_cost": {
+          "$ref": "#/$defs/PrintPacketRenderCost"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "printer_id"
+          ],
+          "not": {
+            "required": [
+              "target_id"
+            ]
+          }
+        },
+        {
+          "required": [
+            "target_id"
+          ],
+          "not": {
+            "required": [
+              "printer_id"
+            ]
+          }
+        }
+      ]
+    },
     "PrintPacketRenderPolicy": {
       "type": "string",
       "enum": [
@@ -1528,7 +1789,9 @@
       "required": [
         "requested_policy",
         "selected_mode",
+        "status",
         "reason",
+        "approved_pdf_fallback",
         "destination",
         "estimates"
       ],
@@ -1543,9 +1806,21 @@
             "node_render"
           ]
         },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ready",
+            "fallback_ready",
+            "node_update_required"
+          ]
+        },
         "reason": {
           "type": "string",
           "maxLength": 128
+        },
+        "approved_pdf_fallback": {
+          "type": "boolean",
+          "description": "True only when the immutable completed PDF may be delivered under the requested policy."
         },
         "destination": {
           "type": "object",
@@ -1553,6 +1828,9 @@
           "required": [
             "supported",
             "ready",
+            "missing_features",
+            "supported_packet_versions",
+            "current_implementation",
             "missing_resources",
             "reason"
           ],
@@ -1562,6 +1840,32 @@
             },
             "ready": {
               "type": "boolean"
+            },
+            "missing_features": {
+              "type": "array",
+              "maxItems": 256,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9._-]{0,127}$"
+              }
+            },
+            "supported_packet_versions": {
+              "type": "array",
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "current_implementation": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 128
             },
             "missing_resources": {
               "type": "array",
@@ -1646,46 +1950,6 @@
         "updated_at": {
           "type": "string",
           "format": "date-time"
-        }
-      }
-    },
-    "PrintPacketHeaderRegion": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "first": {
-          "type": "array",
-          "maxItems": 20000,
-          "items": {
-            "$ref": "#/$defs/PrintPacketNode"
-          }
-        },
-        "default": {
-          "type": "array",
-          "maxItems": 20000,
-          "items": {
-            "$ref": "#/$defs/PrintPacketNode"
-          }
-        }
-      }
-    },
-    "PrintPacketFooterRegion": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "default": {
-          "type": "array",
-          "maxItems": 20000,
-          "items": {
-            "$ref": "#/$defs/PrintPacketNode"
-          }
-        },
-        "last": {
-          "type": "array",
-          "maxItems": 20000,
-          "items": {
-            "$ref": "#/$defs/PrintPacketNode"
-          }
         }
       }
     }

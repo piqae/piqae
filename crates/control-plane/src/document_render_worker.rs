@@ -113,7 +113,7 @@ impl DocumentRenderWorker {
         let resources = self
             .state
             .repository
-            .claim_expired_business_document_resources(limit)
+            .claim_expired_printpacket_resources(limit)
             .await?;
         for resource in resources {
             let object_key = crate::documents::document_resource_object_key(
@@ -128,7 +128,7 @@ impl DocumentRenderWorker {
             if let Err(error) = self
                 .state
                 .repository
-                .complete_expired_business_document_resource(&resource)
+                .complete_expired_printpacket_resource(&resource)
                 .await
             {
                 tracing::warn!(digest=%resource.digest, %error, "resource expiry finalization will retry");

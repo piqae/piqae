@@ -394,6 +394,11 @@ fn release_check(root: &Path) -> TaskResult {
     run(command(
         root,
         "python3",
+        ["release/tools/check_printpacket_source_policy.py"],
+    ))?;
+    run(command(
+        root,
+        "python3",
         ["release/tools/check_postgres_release_tests.py"],
     ))?;
     test_all(root)?;
@@ -648,6 +653,10 @@ const CHECKS: &[Check] = &[
             &["ruby", "release/tools/test_release_policy.rb"],
             &["python3", "release/tools/check_security_exceptions.py"],
             &["python3", "release/tools/check_competitor_mentions.py"],
+            &[
+                "python3",
+                "release/tools/check_printpacket_source_policy.py",
+            ],
         ],
     },
     Check {
@@ -1269,6 +1278,13 @@ mod tests {
                         .steps
                         .iter()
                         .any(|step| *step == ["ruby", "release/tools/test_release_policy.rb"])
+                    && check.steps.iter().any(|step| {
+                        *step
+                            == [
+                                "python3",
+                                "release/tools/check_printpacket_source_policy.py",
+                            ]
+                    })
             }),
             "release policy check must reproduce CI"
         );
