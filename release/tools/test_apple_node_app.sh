@@ -6,29 +6,49 @@ app_root="$repository_root/apps/node-apple"
 fixture_root="$repository_root/.piqae-test-fixtures"
 derived_data="$fixture_root/apple-node-app-derived-data"
 temporary_app=$(mktemp -d "$repository_root/apps/.piqae-node-apple-project.XXXXXX")
+mode=${1:-linked-simulator}
 
 cleanup() {
   rm -rf -- "$temporary_app"
 }
 trap cleanup EXIT HUP INT TERM
 
-for command in xcodegen xcodebuild xcrun python3 diff; do
+if [[ "$mode" != project-only && "$mode" != linked-simulator ]]; then
+  echo "usage: $0 [project-only|linked-simulator]" >&2
+  exit 2
+fi
+
+commands=(xcodegen diff)
+if [[ "$mode" == linked-simulator ]]; then
+  commands+=(xcodebuild xcrun python3)
+fi
+for command in "${commands[@]}"; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "required Apple app validation command is unavailable: $command" >&2
     exit 2
   fi
 done
-if [[ ! -d "$repository_root/sdk/apple/.artifacts/PiqaeNode.xcframework" ]]; then
+if [[ "$mode" == linked-simulator && ! -d "$repository_root/sdk/apple/.artifacts/PiqaeNode.xcframework" ]]; then
   echo "linked Apple app validation requires the already-built PiqaeNode XCFramework" >&2
   exit 2
 fi
 
+# Generate from a complete, isolated app tree. Copying only project.yml makes
+# every source/resource path invalid and changes the relative local-package
+# path away from sdk/apple.
 cp "$app_root/project.yml" "$temporary_app/project.yml"
+for source in Config Resources Sources Tests; do
+  cp -R "$app_root/$source" "$temporary_app/$source"
+done
 xcodegen generate --spec "$temporary_app/project.yml" --project "$temporary_app"
 diff -ru \
   -x xcuserdata \
   "$app_root/PiqaeNodeApple.xcodeproj" \
   "$temporary_app/PiqaeNodeApple.xcodeproj"
+
+if [[ "$mode" == project-only ]]; then
+  exit 0
+fi
 
 destination_id=$(xcrun simctl list devices available -j | python3 -c '
 import json, sys
