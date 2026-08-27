@@ -517,6 +517,8 @@ mod tests {
                         active_jobs: 0,
                         printer_warnings: 0,
                         paused: false,
+                        node_identity: None,
+                        node_identity_revision: None,
                     }),
                 }),
                 BrokerOperation::Execute { .. }
@@ -769,6 +771,8 @@ mod tests {
                             active_jobs: 0,
                             printer_warnings: 0,
                             paused: false,
+                            node_identity: None,
+                            node_identity_revision: None,
                         });
                     }
                     RuntimeCommand::Printers { respond_to } => {

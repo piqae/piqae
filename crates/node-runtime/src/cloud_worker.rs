@@ -50,6 +50,7 @@ impl From<ClientError> for CloudWorkerError {
             ClientError::Status { .. } => "server_rejected",
             ClientError::ResponseTooLarge => "response_too_large",
             ClientError::DeviceAuthorization => "authorization_failed",
+            ClientError::NodeIdentityRevisionConflict { .. } => "node_identity_revision_conflict",
             ClientError::Url(_) | ClientError::Header(_) | ClientError::Json(_) => {
                 "request_invalid"
             }

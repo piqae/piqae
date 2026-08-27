@@ -2113,7 +2113,12 @@ paths:
               schema: { $ref: "#/components/schemas/Agent" }
         "404": { $ref: "#/components/responses/Error" }
     patch:
-      summary: Update operator-visible node details
+      summary: Update node display identity
+      description: >-
+        Updates tenant-visible operator details. Site and location are never
+        inferred from personal data. expected_revision provides
+        compare-and-set protection; older clients may omit it during the N/N-1
+        compatibility window. Every successful update increments identity_revision.
       tags: [Nodes]
       operationId: patchNode
       requestBody:
@@ -2125,22 +2130,34 @@ paths:
               additionalProperties: false
               minProperties: 1
               properties:
-                name: { type: string, minLength: 1, maxLength: 120 }
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 120
+                  description: At most 120 bytes when UTF-8 encoded.
                 site:
                   type: [string, "null"]
                   minLength: 1
                   maxLength: 120
-                  description: Optional operator-supplied site label. Piqae never infers this from a user or address.
+                  description: Optional operator-supplied site label, at most 120 UTF-8 bytes. Piqae never infers this from a user or address.
                 location:
                   type: [string, "null"]
                   minLength: 1
                   maxLength: 120
-                  description: Optional operator-supplied placement such as Dispatch desk or Kitchen.
+                  description: Optional operator-supplied placement such as Dispatch desk or Kitchen, at most 120 UTF-8 bytes.
                 labels:
                   type: array
                   maxItems: 16
                   uniqueItems: true
-                  items: { type: string, minLength: 1, maxLength: 64 }
+                  items:
+                    type: string
+                    minLength: 1
+                    maxLength: 64
+                    description: At most 64 bytes when UTF-8 encoded.
+                expected_revision:
+                  type: integer
+                  format: int64
+                  minimum: 1
       responses:
         "200":
           description: Updated node.
@@ -2148,6 +2165,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Agent" }
         "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
     delete:
       summary: Revoke a node and its device key
@@ -2737,6 +2755,37 @@ paths:
           $ref: "#/components/responses/Error"
         "401":
           $ref: "#/components/responses/Error"
+  /v1/agent/identity:
+    put:
+      summary: Update this connector's node display identity
+      description: >-
+        Compares the supplied revision with this tenant-scoped agent record.
+        The operation changes display metadata only; it never rotates the
+        device credential, installation identity, printer routes, or queue.
+        A conflict includes the current revision in error.details.current_revision.
+      tags: [Agents]
+      operationId: updateAgentIdentity
+      security:
+        - agentId: []
+          agentTimestamp: []
+          agentNonce: []
+          agentBodyDigest: []
+          agentSignature: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentIdentityUpdateRequest" }
+      responses:
+        "200":
+          description: Display identity updated at exactly the next revision.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentIdentityUpdateResponse" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /v1/agent/connectors/{connector_id}/revoke:
     parameters:
       - name: connector_id
@@ -4666,6 +4715,72 @@ components:
           oneOf:
             - { $ref: "#/components/schemas/AgentRuntimeObservation" }
             - { type: "null" }
+    NodeDisplayIdentity:
+      type: object
+      additionalProperties: false
+      required: [display_name, site, location, labels]
+      properties:
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: At most 120 bytes when UTF-8 encoded.
+        site:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 120
+          description: At most 120 bytes when UTF-8 encoded.
+        location:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 120
+          description: At most 120 bytes when UTF-8 encoded.
+        labels:
+          type: array
+          maxItems: 16
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+            description: At most 64 bytes when UTF-8 encoded.
+    AgentIdentityUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, display_name, site, location, labels]
+      properties:
+        expected_revision: { type: integer, format: int64, minimum: 1 }
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: At most 120 bytes when UTF-8 encoded.
+        site:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 120
+          description: At most 120 bytes when UTF-8 encoded.
+        location:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 120
+          description: At most 120 bytes when UTF-8 encoded.
+        labels:
+          type: array
+          maxItems: 16
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+            description: At most 64 bytes when UTF-8 encoded.
+    AgentIdentityUpdateResponse:
+      type: object
+      additionalProperties: false
+      required: [revision, identity]
+      properties:
+        revision: { type: integer, format: int64, minimum: 1 }
+        identity: { $ref: "#/components/schemas/NodeDisplayIdentity" }
     DocumentRenderCapabilities:
       type: object
       additionalProperties: false
@@ -6340,7 +6455,7 @@ components:
       enum: [online, offline, paused, busy, paper_out, error, unknown]
     Agent:
       type: object
-      required: [id, name, platform, state, version, last_seen_at]
+      required: [id, name, platform, state, version, last_seen_at, site, location, labels, identity_revision]
       properties:
         id:
           type: string
@@ -6349,16 +6464,21 @@ components:
         site:
           type: [string, "null"]
           maxLength: 120
-          description: Operator-supplied site label; never inferred from personal data.
+          description: Operator-supplied site label, at most 120 UTF-8 bytes; never inferred from personal data.
         location:
           type: [string, "null"]
           maxLength: 120
-          description: Operator-supplied physical placement label.
+          description: Operator-supplied physical placement label, at most 120 UTF-8 bytes.
         labels:
           type: array
           maxItems: 16
           uniqueItems: true
-          items: { type: string, minLength: 1, maxLength: 64 }
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+            description: At most 64 bytes when UTF-8 encoded.
+        identity_revision: { type: integer, format: int64, minimum: 1 }
         platform:
           type: string
         state:

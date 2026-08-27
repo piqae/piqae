@@ -163,6 +163,40 @@ impl LocalAgentClient {
         self.get("/v1/local/broker/authorization-requests")
     }
 
+    /// Creates a single-use, authenticated browser handoff to local node
+    /// identity settings. The bearer token never enters the URL.
+    pub fn node_settings_url(&self) -> Result<String, ShellError> {
+        #[derive(serde::Deserialize)]
+        struct DashboardSession {
+            url: String,
+            expires_in_seconds: u64,
+        }
+        let session: DashboardSession = self.post(
+            "/v1/local/dashboard-sessions/node",
+            &serde_json::Value::Null,
+            None,
+        )?;
+        let url = url::Url::parse(&session.url)
+            .map_err(|_| ShellError::Protocol("invalid node settings handoff URL".into()))?;
+        if session.expires_in_seconds == 0
+            || session.expires_in_seconds > 30
+            || url.scheme() != "http"
+            || !matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1"))
+            || url.path() != "/local/node"
+            || url.username() != ""
+            || url.password().is_some()
+            || url.fragment().is_some()
+            || !url
+                .query_pairs()
+                .any(|(name, value)| name == "handoff" && !value.is_empty())
+        {
+            return Err(ShellError::Protocol(
+                "invalid node settings handoff URL".into(),
+            ));
+        }
+        Ok(session.url)
+    }
+
     pub fn decide_broker_authorization(
         &self,
         authorization_id: Uuid,
@@ -1022,6 +1056,63 @@ mod tests {
             status.connection,
             piqae_local_ipc::ConnectionState::Connected
         );
+        server.join().unwrap_or_else(|error| panic!("{error:?}"));
+        fs::remove_file(token_file).unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    #[test]
+    fn node_settings_handoff_is_loopback_bounded_and_token_free() {
+        let listener =
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap_or_else(|error| panic!("{error}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("{error}"));
+        let token_file = std::env::temp_dir().join(format!("piqae-shell-token-{}", Uuid::new_v4()));
+        fs::write(&token_file, "local-secret\n").unwrap_or_else(|error| panic!("{error}"));
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap_or_else(|error| panic!("{error}"));
+            let mut request = Vec::new();
+            loop {
+                let mut byte = [0_u8; 1];
+                stream
+                    .read_exact(&mut byte)
+                    .unwrap_or_else(|error| panic!("{error}"));
+                request.push(byte[0]);
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap_or_else(|error| panic!("{error}"));
+            assert!(request.starts_with("POST /v1/local/dashboard-sessions/node HTTP/1.1\r\n"));
+            let content_length = request
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("Content-Length: ")
+                        .and_then(|value| value.parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            let mut request_body = vec![0_u8; content_length];
+            stream
+                .read_exact(&mut request_body)
+                .unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(request_body, b"null");
+            let body = format!(
+                "{{\"url\":\"http://{address}/local/node?handoff=one-time\",\"expires_in_seconds\":30}}"
+            );
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                .unwrap_or_else(|error| panic!("{error}"));
+        });
+        let client = LocalAgentClient::new(LocalApiConfiguration {
+            base_url: format!("http://{address}"),
+            token_file: token_file.clone(),
+            address,
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+        let url = client
+            .node_settings_url()
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(!url.contains("local-secret"));
+        assert!(url.ends_with("/local/node?handoff=one-time"));
         server.join().unwrap_or_else(|error| panic!("{error:?}"));
         fs::remove_file(token_file).unwrap_or_else(|error| panic!("{error}"));
     }

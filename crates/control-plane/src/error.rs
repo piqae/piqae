@@ -183,6 +183,10 @@ impl From<RepositoryError> for AppError {
                 retryable: false,
                 compatibility: false,
             },
+            RepositoryError::NodeIdentityRevisionConflict(_) => Self::conflict(
+                "node_identity_revision_conflict",
+                "The node identity changed; reconcile before saving.",
+            ),
             RepositoryError::QuotaExceeded => Self {
                 status: StatusCode::PAYMENT_REQUIRED,
                 code: "quota_exceeded",

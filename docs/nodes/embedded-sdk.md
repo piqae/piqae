@@ -7,16 +7,49 @@ shared runtime and its safety rules are specified in
 
 ## Choose the host before choosing the API
 
+The portable `node-host-configuration.v1` contract uses these orthogonal
+choices:
+
+- `product`: `standalone` or `embedded`;
+- `installed_host_policy`: `prefer_installed`, `require_installed`, or
+  `isolated_application`;
+- `connection_policy.management`: `user_managed` or `host_managed`;
+- `connection_policy.allows_multiple`: always `true` in v1.
+
+Standalone products are user-managed and own their runtime. Embedded products
+may be user- or host-managed. A host-managed SDK can pin up to 32 exact HTTPS
+authority origins and exchange short-lived invitations without displaying a
+Piqae account flow; it still cannot ship a platform service-account secret or
+manufacture workspace ownership fields. Host-managed mode requires at least
+one pinned exact HTTPS origin; an empty list is invalid. User-managed hosts may
+start empty because every new authority requires an explicit user choice.
+
+`identity.display_name`, `site`, `location`, and `labels` are bounded display
+metadata. The standalone desktop default comes only from the operating-system
+computer/device name. Usernames and addresses are not discovery inputs. SDK
+hosts set the same fields from their own setup experience. Identity edits are
+revision-checked and durable across process and shell restarts.
+
+In contract v1, that edit changes the durable host default and stages an
+independent signed update for every existing connector. Each workspace retains
+its own server revision. A newer operator edit wins: the node records the
+connector-specific conflict and asks the user or embedding app to reconcile it
+instead of overwriting it from stale local state. Transport failures remain
+durably pending and retry after restart. An exact retry is idempotent and also
+repairs a missed `node.updated` publication; an older operator PATCH without an
+expected revision remains legacy last-writer-wins behavior. None of these edits
+rotate credentials, installation identity, printer routes, or queue state.
+
 | Situation | Recommended mode | What remains available |
 | --- | --- | --- |
-| A Piqae desktop node is already installed | `automatic`, which attaches after local consent | The installed node owns one durable queue, all of its connectors, profiles, updates, and printer drivers. |
+| A Piqae desktop node is already installed | `automatic`, which attaches after local consent | The installed node owns one durable runtime with connector-isolated queue state/content/outboxes, shared profiles and drivers, and serialized physical handoff. |
 | A desktop app needs isolated local printing | `embedded_application` with an app-scoped state root | Only while the app/runtime is running and the computer is awake. It is a separate node and route. |
 | A foreground iPad POS or production app prints immediately | `embedded_application` with AirPrint or a reviewed adapter | While the app has foreground execution and the selected printer is reachable. |
 | An iPad must receive unattended cloud prints | A powered managed kiosk, legitimate accessory wake, direct printer integration, or an always-awake gateway | Only the verified topology may advertise the corresponding availability. An ordinary suspended app is not eligible. |
 | A server or workstation must print before login | `machine_service` where the operating system package supports it | While the machine and service are awake. Hardware/network wake remains separately verified. |
 | An integration must work without Piqae Cloud | `local_only`, optionally adding self-hosted connectors later | Local discovery, durable queueing, profiles, and native handoff do not require the hosted service. |
 
-`automatic` never opens another process's database. It attaches through the
+`prefer_installed` (the former low-level `automatic` selection) never opens another process's database. It attaches through the
 versioned local broker after the person controlling the node approves the
 application and its requested capabilities. If embedded isolation is selected,
 the app receives a distinct installation identity, state root, connector set,
@@ -109,6 +142,14 @@ authorities. A local installation can serialize their handoffs, but Piqae does
 not claim global ordering or exactly-once failover between those authorities.
 External OS/device jobs are exposed only as privacy-safe counts and can affect
 queue estimates; their titles, owners, and documents are never projected.
+
+An approved attached app is a client of the standalone node, not another node.
+It shares that installation's runtime under its capability grant while queue
+state, content and outboxes remain connector-isolated and physical handoff is
+serialized. Revoking the app removes broker access without disconnecting
+the node's workspaces. If an embedded app instead selects isolation, its route
+is a separate installation and the physical-destination coordinator must have
+strong evidence before it can group that route with another node.
 
 ## Sleep and background execution
 

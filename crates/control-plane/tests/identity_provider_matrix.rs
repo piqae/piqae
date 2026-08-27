@@ -38,7 +38,7 @@ use piqae_control_plane::{
     repository::MemoryRepository,
     router,
 };
-use piqae_domain::{EnvironmentId, WorkspaceId};
+use piqae_domain::{AgentId, EnvironmentId, WorkspaceId};
 use piqae_storage_postgres::StoredWorkspaceMember;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -224,6 +224,29 @@ async fn provider_independent_routes_are_never_unavailable_in_any_configuration(
                  unauthenticated caller on authentication alone"
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn revisioned_node_identity_patch_is_available_under_every_provider() {
+    for provider in PROVIDERS {
+        let deployment = deployment(provider, "owner").await;
+        let response = deployment
+            .oneshot(request(
+                "PATCH",
+                &format!("/v1/nodes/{}", AgentId::new()),
+                None,
+                Some(
+                    r#"{"name":"Dispatch node","site":null,"location":null,"labels":[],"expected_revision":1}"#,
+                ),
+            ))
+            .await
+            .expect("router response");
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "node identity PATCH must authenticate rather than become unavailable under {provider}"
+        );
     }
 }
 

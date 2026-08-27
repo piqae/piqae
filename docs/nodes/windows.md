@@ -14,10 +14,28 @@ queue/profile menus, native create/edit/clone through the driver's
 `DocumentPropertiesW` UI, immutable full DEVMODE capture (including private
 driver bytes), and PDFium-to-GDI replay foundations.
 
+The standalone tray displays the revisioned node name and optional
+site/location and opens an authenticated local editor. Its default is the
+Windows computer name; Piqae never substitutes the logged-in username or an
+address. These fields are display metadata and changing them does not replace
+the durable node, DPAPI/Credential Manager keys, printer routes, profiles, or
+connections.
+
+The Windows standalone node is the common user-managed host for zero to many
+connections. Embedded .NET applications may prefer or require its
+OS-authenticated broker, or explicitly own an isolated app-scoped runtime. A
+broker presence probe is not authorization: attach occurs only after the
+verified application principal receives capability-scoped approval.
+
 **Not release-tested:** signed install/upgrade/uninstall, Windows Service
 lifecycle, clean-login startup, physical PDF/RAW matrices, OKI production
 stock, spooler restart, and long-duration reliability. Therefore implementation
 does not equal Supported Windows printing.
+
+The host-policy and local identity paths are covered by Rust and simulated
+client tests, but Windows hosted-runner validation, Authenticode signing,
+signed installer upgrade/uninstall, per-user login/restart, native broker peer
+identity, sleep/resume and physical printer certification remain release gates.
 
 Cloud document-decryption keys are stored for the current user in Windows
 Credential Manager, whose credential data is protected by Windows. P-256 key

@@ -65,6 +65,7 @@ mod windows_shell {
             approve: bool,
         },
         OpenDashboard,
+        OpenNodeSettings,
         CheckForUpdates,
         Refresh,
         Exit,
@@ -308,6 +309,29 @@ mod windows_shell {
                         connection_label(status.connection)
                     ),
                 );
+                let node_menu = unsafe { CreatePopupMenu() };
+                if !node_menu.is_null() {
+                    let identity = status.node_identity.as_ref();
+                    append_disabled(
+                        node_menu,
+                        identity.map_or("Piqae node", |value| value.display_name.as_str()),
+                    );
+                    if let Some(site) = identity.and_then(|value| value.site.as_deref()) {
+                        append_disabled(node_menu, &format!("Site: {site}"));
+                    }
+                    if let Some(location) = identity.and_then(|value| value.location.as_deref()) {
+                        append_disabled(node_menu, &format!("Location: {location}"));
+                    }
+                    append_disabled(node_menu, "Standalone · user-managed connections");
+                    append_separator(node_menu);
+                    append_action(
+                        node_menu,
+                        "Rename & set location…",
+                        MenuAction::OpenNodeSettings,
+                        &mut actions,
+                    );
+                    append_submenu(menu, node_menu, "This node");
+                }
                 append_separator(menu);
                 if printers.is_empty() {
                     append_disabled(menu, "No printers found");
@@ -475,6 +499,7 @@ mod windows_shell {
                 is_default,
             ),
             Some(MenuAction::OpenDashboard) => open_dashboard(window),
+            Some(MenuAction::OpenNodeSettings) => open_node_settings(window),
             Some(MenuAction::DecideAuthorization {
                 authorization_id,
                 display_name,
@@ -768,6 +793,38 @@ mod windows_shell {
         }
     }
 
+    fn open_node_settings(window: HWND) {
+        let result = SHELL_STATE
+            .get()
+            .and_then(|state| state.lock().ok())
+            .map(|state| Arc::clone(&state.client))
+            .ok_or_else(|| ShellError::Configuration("shell state is unavailable".into()))
+            .and_then(|client| client.node_settings_url());
+        match result {
+            Ok(url) => {
+                let operation = wide("open");
+                let url = wide(&url);
+                // SAFETY: Strings are NUL-terminated and the owner window is live.
+                unsafe {
+                    ShellExecuteW(
+                        window,
+                        operation.as_ptr(),
+                        url.as_ptr(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        SW_SHOWNORMAL,
+                    );
+                }
+            }
+            Err(error) => message(
+                window,
+                "Piqae node settings unavailable",
+                &compact_error(&error),
+                MB_ICONERROR,
+            ),
+        }
+    }
+
     fn append_action(
         menu: *mut std::ffi::c_void,
         label: &str,
@@ -873,6 +930,8 @@ mod windows_shell {
                 active_jobs: 1,
                 printer_warnings: 0,
                 paused: false,
+                node_identity: None,
+                node_identity_revision: None,
             };
             let pending: Result<Vec<PendingBrokerAuthorization>, &str> =
                 Err("supplementary endpoint unavailable");

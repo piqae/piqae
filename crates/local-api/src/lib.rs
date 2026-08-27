@@ -17,8 +17,9 @@ use piqae_local_ipc::{
 pub use piqae_node_runtime::command::{
     CommandFailure as ControlFailure, ConfirmLoadedMediaRequest, DeleteProfileQuery,
     ExposureUpdate, HostLifecycleRequest, LocalConnectorDetail, LocalContent, LocalCreateJob,
-    LocalHistoryJob, LocalJobAccepted, LocalJobHistory, ProfileCaptureBeginRequest, ProfileCreate,
-    ProfileUpdate, RuntimeCommand as ControlRequest, TestPageRequest, ValidateProfileRequest,
+    LocalHistoryJob, LocalJobAccepted, LocalJobHistory, NodeIdentityUpdate, NodeIdentityUpdated,
+    ProfileCaptureBeginRequest, ProfileCreate, ProfileUpdate, RuntimeCommand as ControlRequest,
+    TestPageRequest, ValidateProfileRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -94,6 +95,7 @@ pub fn router(state: LocalApiState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/local/status", get(status))
+        .route("/v1/local/node/identity", put(update_node_identity))
         .route("/v1/local/lifecycle", post(apply_host_lifecycle))
         .route(
             "/v1/local/broker/authorization-requests",
@@ -141,6 +143,12 @@ pub fn router(state: LocalApiState) -> Router {
             "/v1/local/dashboard-sessions",
             post(create_dashboard_session),
         )
+        .route(
+            "/v1/local/dashboard-sessions/{view}",
+            post(create_dashboard_session_for_view),
+        )
+        .route("/local/node", get(open_dashboard))
+        .route("/local/node/identity", put(dashboard_update_node_identity))
         .route("/local/history", get(open_dashboard))
         .route("/local/connections", get(open_dashboard))
         // Keep the pre-split URL alive so bookmarks and an older macOS shell
@@ -201,6 +209,7 @@ async fn create_dashboard_session(
         .and_then(|value| value.to_str().ok())
     {
         Some("connections") => "connections",
+        Some("node") => "node",
         _ => "history",
     };
     Json(DashboardSessionCreated {
@@ -208,6 +217,22 @@ async fn create_dashboard_session(
         expires_in_seconds: HANDOFF_LIFETIME.as_secs(),
     })
     .into_response()
+}
+
+async fn create_dashboard_session_for_view(
+    State(state): State<LocalApiState>,
+    Path(view): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !matches!(view.as_str(), "history" | "connections" | "node") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Ok(value) = HeaderValue::from_str(&view) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let mut headers = headers;
+    headers.insert("x-piqae-dashboard-view", value);
+    create_dashboard_session(State(state), headers).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -245,10 +270,10 @@ async fn open_dashboard(
         .sessions
         .insert(session.clone(), Instant::now() + BROWSER_SESSION_LIFETIME);
     drop(sessions);
-    let path = if uri.path() == "/local/connections" {
-        "/local/connections"
-    } else {
-        "/local/history"
+    let path = match uri.path() {
+        "/local/connections" => "/local/connections",
+        "/local/node" => "/local/node",
+        _ => "/local/history",
     };
     let mut response = Redirect::to(path).into_response();
     set_dashboard_cookie(&mut response, &session);
@@ -300,14 +325,59 @@ async fn dashboard_data(
     {
         return unavailable();
     }
-    match (history_receive.await, connector_receive.await) {
-        (Ok(Ok(history)), Ok(Ok(connectors))) => {
-            Json(serde_json::json!({"history": history, "connectors": connectors})).into_response()
-        }
-        (Ok(Err(failure)), _) | (_, Ok(Err(failure))) => {
+    let (status_send, status_receive) = oneshot::channel();
+    if state
+        .control
+        .send(ControlRequest::Status {
+            respond_to: status_send,
+        })
+        .await
+        .is_err()
+    {
+        return unavailable();
+    }
+    match (
+        history_receive.await,
+        connector_receive.await,
+        status_receive.await,
+    ) {
+        (Ok(Ok(history)), Ok(Ok(connectors)), Ok(status)) => Json(
+            serde_json::json!({"history": history, "connectors": connectors, "status": status}),
+        )
+        .into_response(),
+        (Ok(Err(failure)), _, _) | (_, Ok(Err(failure)), _) => {
             (failure_status(&failure.code), Json(failure)).into_response()
         }
         _ => unavailable(),
+    }
+}
+
+async fn dashboard_update_node_identity(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<NodeIdentityUpdate>,
+) -> Response {
+    if !dashboard_authenticated(&state, &headers).await
+        || headers.get("x-piqae-local-action").is_none()
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let (send, receive) = oneshot::channel();
+    if state
+        .control
+        .send(ControlRequest::UpdateNodeIdentity {
+            request,
+            respond_to: send,
+        })
+        .await
+        .is_err()
+    {
+        return unavailable();
+    }
+    match receive.await {
+        Ok(Ok(updated)) => Json(updated).into_response(),
+        Ok(Err(failure)) => (failure_status(&failure.code), Json(failure)).into_response(),
+        Err(_) => unavailable(),
     }
 }
 
@@ -442,6 +512,23 @@ async fn status(State(state): State<LocalApiState>, headers: HeaderMap) -> Respo
     receive
         .await
         .map_or_else(|_| unavailable(), |status| Json(status).into_response())
+}
+
+async fn update_node_identity(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<NodeIdentityUpdate>,
+) -> Response {
+    request_response(
+        state,
+        headers,
+        |respond_to| ControlRequest::UpdateNodeIdentity {
+            request,
+            respond_to,
+        },
+        StatusCode::OK,
+    )
+    .await
 }
 
 async fn apply_host_lifecycle(
@@ -648,6 +735,7 @@ async fn commit_profile_capture(
             Json(ControlFailure {
                 code: "capture_token_required".into(),
                 message: "X-Piqae-Capture-Token is required".into(),
+                current_revision: None,
             }),
         )
             .into_response();
@@ -680,6 +768,7 @@ async fn cancel_profile_capture(
             Json(ControlFailure {
                 code: "capture_token_required".into(),
                 message: "X-Piqae-Capture-Token is required".into(),
+                current_revision: None,
             }),
         )
             .into_response();
@@ -904,7 +993,7 @@ fn failure_status(code: &str) -> StatusCode {
         | "profile_not_found"
         | "profile_capture_not_found"
         | "broker_authorization_not_found" => StatusCode::NOT_FOUND,
-        "profile_revision_conflict" => StatusCode::CONFLICT,
+        "profile_revision_conflict" | "node_identity_revision_conflict" => StatusCode::CONFLICT,
         "profile_capture_token_invalid" => StatusCode::UNAUTHORIZED,
         "profile_capture_timed_out"
         | "profile_capture_cancelled"
@@ -941,6 +1030,7 @@ fn unavailable() -> Response {
         Json(ControlFailure {
             code: "agent_control_unavailable".into(),
             message: "the agent control loop is unavailable".into(),
+            current_revision: None,
         }),
     )
         .into_response()
@@ -988,6 +1078,14 @@ mod tests {
         assert!(html.contains("prefers-color-scheme:dark"));
         assert!(html.contains("type=\"datetime-local\""));
         assert!(html.contains("aria-label=\"Search print history\""));
+        assert!(
+            html.contains(
+                "Standalone node · user-managed · multiple isolated connections supported."
+            )
+        );
+        assert!(html.contains("Piqae does not infer your account name or address."));
+        assert!(html.contains("Updated node details are stored locally and will retry"));
+        assert!(html.contains("Open the owner to reconcile the local and cloud values"));
         assert!(html.contains(
             "Multiple scheduling authorities; local handoffs serialized; automatic cross-server failover disabled."
         ));
@@ -1013,6 +1111,9 @@ mod tests {
             eligible_printer_count: 3,
             inventory_revision: 1,
             inventory_refresh_pending: true,
+            identity_sync_status: "conflict".into(),
+            identity_server_revision: Some(4),
+            identity_conflict_revision: Some(5),
             cross_authority_route_warning: true,
             manage_url: Some("https://shop.example/settings".into()),
         };
@@ -1024,6 +1125,9 @@ mod tests {
         assert_eq!(encoded["requesting_service_account_id"], "svc_shopify");
         assert_eq!(encoded["manage_url"], "https://shop.example/settings");
         assert_eq!(encoded["cross_authority_route_warning"], true);
+        assert_eq!(encoded["identity_sync_status"], "conflict");
+        assert_eq!(encoded["identity_server_revision"], 4);
+        assert_eq!(encoded["identity_conflict_revision"], 5);
         assert!(encoded.get("device_key").is_none());
         assert!(encoded.get("token").is_none());
         assert!(encoded.get("identity_evidence").is_none());
@@ -1081,6 +1185,8 @@ mod tests {
                     active_jobs: 0,
                     printer_warnings: 0,
                     paused: false,
+                    node_identity: None,
+                    node_identity_revision: None,
                 });
             }
         });
@@ -1096,6 +1202,51 @@ mod tests {
             .expect("response");
         responder.await.expect("responder");
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn authenticated_identity_update_is_revision_checked_by_the_agent() {
+        let (state, mut receive) = test_state();
+        let responder = tokio::spawn(async move {
+            if let Some(ControlRequest::UpdateNodeIdentity {
+                request,
+                respond_to,
+            }) = receive.recv().await
+            {
+                assert_eq!(request.expected_revision, 4);
+                assert_eq!(request.display_name, "Dispatch PC");
+                assert_eq!(request.site.as_deref(), Some("Warehouse"));
+                let _ = respond_to.send(Ok(NodeIdentityUpdated {
+                    revision: 5,
+                    identity: piqae_local_ipc::LocalNodeIdentity {
+                        display_name: request.display_name,
+                        site: request.site,
+                        location: request.location,
+                        labels: request.labels,
+                    },
+                }));
+            }
+        });
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/local/node/identity")
+                    .header("authorization", "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"expected_revision":4,"display_name":"Dispatch PC","site":"Warehouse","location":null,"labels":[]}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        responder.await.expect("responder");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 4096).await.expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["revision"], 5);
+        assert_eq!(json["identity"]["display_name"], "Dispatch PC");
     }
 
     #[tokio::test]

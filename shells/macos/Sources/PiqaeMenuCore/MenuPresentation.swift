@@ -4,6 +4,14 @@ public enum MenuPresentation {
     public static let cloudAndAPIAccessTitle = "Available to connected services"
     public static let connectionsTitle = "Connections"
     public static let queueTitle = "Print History…"
+    public static let nodeTitle = "This Node"
+
+    public static func nodeSummary(identity: LocalNodeIdentity?) -> String {
+        guard let identity else { return "Piqae node" }
+        return [identity.displayName, identity.site, identity.location]
+            .compactMap { $0 }
+            .joined(separator: " · ")
+    }
 
     public static func printerActivityTitle(
         state: String,

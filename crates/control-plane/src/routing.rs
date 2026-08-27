@@ -836,6 +836,7 @@ mod tests {
             site: None,
             location: None,
             labels: Vec::new(),
+            identity_revision: 1,
             platform: "macos".into(),
             state: "connected".into(),
             version: "0.1.0".into(),

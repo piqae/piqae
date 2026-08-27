@@ -11,6 +11,7 @@ use crate::{
     device_auth::{authenticate_agent, authenticate_agent_for_revocation},
     error::AppError,
     repository::{CreateResult, RepositoryError},
+    request_id,
 };
 use axum::{
     Json,
@@ -38,15 +39,17 @@ use piqae_domain::{
 use piqae_object_store::{ObjectByteStream, ObjectStoreError, digest_hex};
 use piqae_protocol::agent::{
     AgentAcceptJobRequest, AgentAcceptJobResponse, AgentAcceptanceAbandonResponse,
-    AgentAcceptanceReconciliationResponse, AgentCommand, AgentReleaseLeaseRequest,
-    AgentRenewLeaseRequest, AgentRenewLeaseResponse, AgentSyncRequest, AgentSyncResponse,
-    ConnectSessionPreview, ConnectSessionPreviewRequest, ContentDescriptor, EnrolRequest,
-    EnrolResponse, JobOffer,
+    AgentAcceptanceReconciliationResponse, AgentCommand, AgentIdentityUpdateRequest,
+    AgentIdentityUpdateResponse, AgentReleaseLeaseRequest, AgentRenewLeaseRequest,
+    AgentRenewLeaseResponse, AgentSyncRequest, AgentSyncResponse, ConnectSessionPreview,
+    ConnectSessionPreviewRequest, ContentDescriptor, EnrolRequest, EnrolResponse, JobOffer,
+    NodeDisplayIdentity,
 };
 use piqae_storage_postgres::{
     StoredAgent, StoredApiKey, StoredNodeConnector, StoredPrinter, StoredTargetBinding,
     StoredUpload, StoredWebhook, StoredWebhookDelivery, SyncedPrinter,
     acceptance_revocation_webhook_idempotency_key, agent_acceptance_webhook_idempotency_key,
+    preaccept_cancellation_webhook_idempotency_key,
 };
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
@@ -225,9 +228,10 @@ pub async fn list_agents(
 pub async fn get_node(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(node_id): Path<AgentId>,
+    Path(node_id): Path<String>,
 ) -> Result<Json<StoredAgent>, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::AgentsRead).await?;
+    let node_id = node_id.parse().map_err(|_| AppError::not_found())?;
     Ok(Json(
         state
             .repository
@@ -237,6 +241,7 @@ pub async fn get_node(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PatchNodeRequest {
     name: Option<String>,
     #[serde(default)]
@@ -244,6 +249,7 @@ pub struct PatchNodeRequest {
     #[serde(default)]
     location: PatchOptionalString,
     labels: Option<Vec<String>>,
+    expected_revision: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -261,38 +267,6 @@ impl<'de> Deserialize<'de> for PatchOptionalString {
     {
         Ok(Option::<String>::deserialize(deserializer)?.map_or(Self::Clear, Self::Value))
     }
-}
-
-enum NodeOptionalLabel {
-    Clear,
-    Set(String),
-}
-
-impl NodeOptionalLabel {
-    fn value(&self) -> Option<&str> {
-        match self {
-            Self::Clear => None,
-            Self::Set(value) => Some(value),
-        }
-    }
-}
-
-fn optional_node_label(
-    field: &PatchOptionalString,
-    field_name: &str,
-) -> Result<Option<NodeOptionalLabel>, AppError> {
-    let value = match field {
-        PatchOptionalString::Missing => return Ok(None),
-        PatchOptionalString::Clear => return Ok(Some(NodeOptionalLabel::Clear)),
-        PatchOptionalString::Value(value) => value.trim(),
-    };
-    if value.is_empty() || value.chars().count() > 120 {
-        return Err(AppError::invalid(
-            "invalid_node",
-            format!("The node {field_name} is outside the supported limits."),
-        ));
-    }
-    Ok(Some(NodeOptionalLabel::Set(value.to_owned())))
 }
 
 #[cfg(test)]
@@ -320,61 +294,124 @@ mod patch_node_tests {
 pub async fn patch_node(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(node_id): Path<AgentId>,
+    Path(node_id): Path<String>,
     Json(request): Json<PatchNodeRequest>,
-) -> Result<Json<StoredAgent>, AppError> {
+) -> Result<Response, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::AgentsWrite).await?;
-    let name = request.name.as_deref().map(str::trim);
-    let site = optional_node_label(&request.site, "site")?;
-    let location = optional_node_label(&request.location, "location")?;
-    let labels = request.labels.map(|labels| {
-        labels
-            .into_iter()
-            .map(|label| label.trim().to_owned())
-            .collect::<Vec<_>>()
-    });
-    if name.is_none() && site.is_none() && location.is_none() && labels.is_none() {
+    if request.name.is_none()
+        && matches!(request.site, PatchOptionalString::Missing)
+        && matches!(request.location, PatchOptionalString::Missing)
+        && request.labels.is_none()
+    {
         return Err(AppError::invalid(
             "invalid_node",
             "At least one node detail is required for this update.",
         ));
     }
-    if name.is_some_and(|name| name.is_empty() || name.chars().count() > 120) {
-        return Err(AppError::invalid(
-            "invalid_node",
-            "The node name is outside the supported limits.",
-        ));
-    }
-    if labels.as_ref().is_some_and(|labels| {
-        labels.len() > 16
-            || labels
-                .iter()
-                .any(|label| label.is_empty() || label.chars().count() > 64)
-            || labels
-                .iter()
-                .collect::<std::collections::BTreeSet<_>>()
-                .len()
-                != labels.len()
-    }) {
-        return Err(AppError::invalid(
-            "invalid_node",
-            "Node labels must be unique and contain at most 16 values of 1 to 64 characters.",
-        ));
-    }
-    let node = state
+    let node_id = node_id.parse().map_err(|_| AppError::not_found())?;
+    let current = state
         .repository
-        .update_agent_details(
+        .get_agent(tenant.workspace_id, tenant.environment_id, node_id)
+        .await?;
+    let site = match request.site {
+        PatchOptionalString::Missing => current.site,
+        PatchOptionalString::Clear => None,
+        PatchOptionalString::Value(site) => Some(site),
+    };
+    let location = match request.location {
+        PatchOptionalString::Missing => current.location,
+        PatchOptionalString::Clear => None,
+        PatchOptionalString::Value(location) => Some(location),
+    };
+    let display_name = request.name.unwrap_or(current.name);
+    let identity = validated_node_identity(
+        &display_name,
+        site,
+        location,
+        request.labels.unwrap_or(current.labels),
+    )?;
+    let expected_revision = request
+        .expected_revision
+        .or(Some(current.identity_revision));
+    let node = match state
+        .repository
+        .update_agent_identity(
             tenant.workspace_id,
             tenant.environment_id,
             node_id,
-            name,
-            site.as_ref().map(NodeOptionalLabel::value),
-            location.as_ref().map(NodeOptionalLabel::value),
-            labels.as_deref(),
+            expected_revision,
+            &identity,
         )
-        .await?;
-    state.publish(tenant, "node.updated", &node).await?;
-    Ok(Json(node))
+        .await
+    {
+        Ok(node) => node,
+        Err(RepositoryError::NodeIdentityRevisionConflict(revision)) => {
+            return Ok(node_identity_conflict(revision));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    publish_node_identity_update(&state, tenant, &node).await?;
+    Ok(Json(node).into_response())
+}
+
+fn validated_node_identity(
+    display_name: &str,
+    site: Option<String>,
+    location: Option<String>,
+    labels: Vec<String>,
+) -> Result<NodeDisplayIdentity, AppError> {
+    let display_name = display_name.trim().to_owned();
+    let site = site.map(|value| value.trim().to_owned());
+    let location = location.map(|value| value.trim().to_owned());
+    let labels = labels
+        .into_iter()
+        .map(|label| label.trim().to_owned())
+        .collect::<Vec<_>>();
+    let fields_are_valid = !display_name.is_empty()
+        && display_name.len() <= 120
+        && !display_name.chars().any(char::is_control)
+        && site.as_ref().is_none_or(|value| {
+            !value.is_empty() && value.len() <= 120 && !value.chars().any(char::is_control)
+        })
+        && location.as_ref().is_none_or(|value| {
+            !value.is_empty() && value.len() <= 120 && !value.chars().any(char::is_control)
+        });
+    let labels_are_valid = labels.len() <= 16
+        && labels.iter().collect::<BTreeSet<_>>().len() == labels.len()
+        && labels.iter().all(|label| {
+            !label.is_empty()
+                && label.len() <= 64
+                && label.trim() == label
+                && !label.chars().any(char::is_control)
+        });
+    if !fields_are_valid || !labels_are_valid {
+        return Err(AppError::invalid(
+            "invalid_node_identity",
+            "The node display identity is outside the supported limits.",
+        ));
+    }
+    Ok(NodeDisplayIdentity {
+        display_name,
+        site,
+        location,
+        labels,
+    })
+}
+
+fn node_identity_conflict(current_revision: u64) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": {
+                "code": "node_identity_revision_conflict",
+                "message": "The node identity changed; reconcile before saving.",
+                "request_id": request_id::current(),
+                "retryable": false,
+                "details": { "current_revision": current_revision }
+            }
+        })),
+    )
+        .into_response()
 }
 
 async fn publish_acceptance_revocation(
@@ -1422,6 +1459,64 @@ pub struct ContentEncryptionKeyResponse {
     lifecycle_state: String,
     state_changed_at: chrono::DateTime<Utc>,
     created_at: chrono::DateTime<Utc>,
+}
+
+pub async fn update_agent_identity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, AppError> {
+    let path = "/v1/agent/identity";
+    let authenticated = authenticate_agent(&state, &headers, "PUT", path, &body).await?;
+    let request: AgentIdentityUpdateRequest = serde_json::from_slice(&body)?;
+    let identity = validated_node_identity(
+        &request.display_name,
+        request.site,
+        request.location,
+        request.labels,
+    )?;
+    let node = match state
+        .repository
+        .update_agent_identity(
+            authenticated.tenant.workspace_id,
+            authenticated.tenant.environment_id,
+            authenticated.agent_id,
+            Some(request.expected_revision),
+            &identity,
+        )
+        .await
+    {
+        Ok(node) => node,
+        Err(RepositoryError::NodeIdentityRevisionConflict(revision)) => {
+            return Ok(node_identity_conflict(revision));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    publish_node_identity_update(&state, authenticated.tenant, &node).await?;
+    Ok(Json(AgentIdentityUpdateResponse {
+        revision: node.identity_revision,
+        identity: NodeDisplayIdentity {
+            display_name: node.name,
+            site: node.site,
+            location: node.location,
+            labels: node.labels,
+        },
+    })
+    .into_response())
+}
+
+async fn publish_node_identity_update(
+    state: &AppState,
+    tenant: TenantContext,
+    node: &StoredAgent,
+) -> Result<(), RepositoryError> {
+    let key = format!(
+        "node-identity:{}:{}:{}:{}",
+        tenant.workspace_id, tenant.environment_id, node.id, node.identity_revision
+    );
+    state
+        .publish_idempotently(&key, tenant, "node.updated", node)
+        .await
 }
 
 pub async fn register_agent_content_encryption_key(
@@ -2678,7 +2773,22 @@ pub async fn cancel_job(
             parse_job_id(&job_id)?,
         )
         .await?;
-    state.publish(tenant, "job.updated", &job).await?;
+    if job.state == JobState::Cancelled {
+        state
+            .publish_idempotently(
+                &preaccept_cancellation_webhook_idempotency_key(
+                    tenant.workspace_id,
+                    tenant.environment_id,
+                    job.id,
+                ),
+                tenant,
+                "job.updated",
+                &job,
+            )
+            .await?;
+    } else {
+        state.publish(tenant, "job.updated", &job).await?;
+    }
     Ok((StatusCode::ACCEPTED, Json(JobResponse::from(job))).into_response())
 }
 

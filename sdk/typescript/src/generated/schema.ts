@@ -1747,7 +1747,10 @@ export interface paths {
         delete: operations["deleteNode"];
         options?: never;
         head?: never;
-        /** Update operator-visible node details */
+        /**
+         * Update node display identity
+         * @description Updates tenant-visible operator details. Site and location are never inferred from personal data. expected_revision provides compare-and-set protection; older clients may omit it during the N/N-1 compatibility window. Every successful update increments identity_revision.
+         */
         patch: operations["patchNode"];
         trace?: never;
     };
@@ -2166,6 +2169,26 @@ export interface paths {
         put?: never;
         /** Synchronize agent health, printers, events, and job offers */
         post: operations["syncAgent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/agent/identity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Update this connector's node display identity
+         * @description Compares the supplied revision with this tenant-scoped agent record. The operation changes display metadata only; it never rotates the device credential, installation identity, printer routes, or queue. A conflict includes the current revision in error.details.current_revision.
+         */
+        put: operations["updateAgentIdentity"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -3303,6 +3326,31 @@ export interface components {
             document_render?: components["schemas"]["DocumentRenderCapabilities"];
             runtime?: components["schemas"]["AgentRuntimeObservation"] | null;
         };
+        NodeDisplayIdentity: {
+            /** @description At most 120 bytes when UTF-8 encoded. */
+            display_name: string;
+            /** @description At most 120 bytes when UTF-8 encoded. */
+            site: string | null;
+            /** @description At most 120 bytes when UTF-8 encoded. */
+            location: string | null;
+            labels: string[];
+        };
+        AgentIdentityUpdateRequest: {
+            /** Format: int64 */
+            expected_revision: number;
+            /** @description At most 120 bytes when UTF-8 encoded. */
+            display_name: string;
+            /** @description At most 120 bytes when UTF-8 encoded. */
+            site: string | null;
+            /** @description At most 120 bytes when UTF-8 encoded. */
+            location: string | null;
+            labels: string[];
+        };
+        AgentIdentityUpdateResponse: {
+            /** Format: int64 */
+            revision: number;
+            identity: components["schemas"]["NodeDisplayIdentity"];
+        };
         DocumentRenderCapabilities: {
             renderer_abi?: string | null;
             resource_abi?: string | null;
@@ -4301,11 +4349,13 @@ export interface components {
         Agent: {
             id: string;
             name: string;
-            /** @description Operator-supplied site label; never inferred from personal data. */
-            site?: string | null;
-            /** @description Operator-supplied physical placement label. */
-            location?: string | null;
-            labels?: string[];
+            /** @description Operator-supplied site label, at most 120 UTF-8 bytes; never inferred from personal data. */
+            site: string | null;
+            /** @description Operator-supplied physical placement label, at most 120 UTF-8 bytes. */
+            location: string | null;
+            labels: string[];
+            /** Format: int64 */
+            identity_revision: number;
             platform: string;
             /** @enum {unknown} */
             state: "connected" | "disconnected" | "paused" | "degraded";
@@ -7526,12 +7576,15 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": {
+                    /** @description At most 120 bytes when UTF-8 encoded. */
                     name?: string;
-                    /** @description Optional operator-supplied site label. Piqae never infers this from a user or address. */
+                    /** @description Optional operator-supplied site label, at most 120 UTF-8 bytes. Piqae never infers this from a user or address. */
                     site?: string | null;
-                    /** @description Optional operator-supplied placement such as Dispatch desk or Kitchen. */
+                    /** @description Optional operator-supplied placement such as Dispatch desk or Kitchen, at most 120 UTF-8 bytes. */
                     location?: string | null;
                     labels?: string[];
+                    /** Format: int64 */
+                    expected_revision?: number;
                 };
             };
         };
@@ -7547,6 +7600,7 @@ export interface operations {
             };
             400: components["responses"]["Error"];
             404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
         };
     };
     pauseNode: {
@@ -8238,6 +8292,34 @@ export interface operations {
             };
             400: components["responses"]["Error"];
             401: components["responses"]["Error"];
+        };
+    };
+    updateAgentIdentity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AgentIdentityUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Display identity updated at exactly the next revision. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentIdentityUpdateResponse"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
         };
     };
     revokeAgentConnector: {

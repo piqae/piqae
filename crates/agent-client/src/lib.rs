@@ -8,11 +8,11 @@ use chrono::Utc;
 use ed25519_dalek::{Signer, SigningKey};
 use piqae_domain::{AgentId, JobId};
 use piqae_protocol::agent::{
-    AgentAcceptJobRequest, AgentAcceptJobResponse, AgentReleaseLeaseRequest,
-    AgentRenewLeaseRequest, AgentRenewLeaseResponse, AgentSyncRequest, AgentSyncResponse,
-    ConnectSessionPreview, ConnectSessionPreviewRequest, CreateDeviceAuthorizationRequest,
-    CreatedDeviceAuthorization, DeviceAuthorizationExchange, DeviceAuthorizationStatus,
-    EnrolRequest, EnrolResponse,
+    AgentAcceptJobRequest, AgentAcceptJobResponse, AgentIdentityUpdateRequest,
+    AgentIdentityUpdateResponse, AgentReleaseLeaseRequest, AgentRenewLeaseRequest,
+    AgentRenewLeaseResponse, AgentSyncRequest, AgentSyncResponse, ConnectSessionPreview,
+    ConnectSessionPreviewRequest, CreateDeviceAuthorizationRequest, CreatedDeviceAuthorization,
+    DeviceAuthorizationExchange, DeviceAuthorizationStatus, EnrolRequest, EnrolResponse,
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
@@ -50,6 +50,8 @@ pub enum ClientError {
     DeviceAuthorization,
     #[error("device request signing failed")]
     Signing,
+    #[error("node identity revision conflict; current revision is {current_revision}")]
+    NodeIdentityRevisionConflict { current_revision: u64 },
 }
 
 impl ClientError {
@@ -140,6 +142,18 @@ fn server_time_ms(headers: &HeaderMap) -> Option<i64> {
 }
 
 fn status_error(status: u16, bytes: &[u8]) -> ClientError {
+    if status == 409
+        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes)
+        && value
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str)
+            == Some("node_identity_revision_conflict")
+        && let Some(current_revision) = value
+            .pointer("/error/details/current_revision")
+            .and_then(serde_json::Value::as_u64)
+    {
+        return ClientError::NodeIdentityRevisionConflict { current_revision };
+    }
     let body: String = String::from_utf8_lossy(bytes).chars().take(1024).collect();
     if status == 401 {
         let code = serde_json::from_slice::<serde_json::Value>(bytes)
@@ -449,6 +463,43 @@ impl AgentClient {
     ) -> Result<AgentSyncResponse, ClientError> {
         self.post_json("v1/agent/sync", request, Some(identity))
             .await
+    }
+
+    /// Updates only this connector's tenant-visible node metadata using an
+    /// independent server revision. Exact response-loss retries are
+    /// idempotent and never rotate node credentials or queue identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NodeIdentityRevisionConflict` with the current server revision
+    /// when an operator or another client updated this connector first.
+    pub async fn update_node_identity(
+        &self,
+        identity: &dyn DeviceRequestSigner,
+        request: &AgentIdentityUpdateRequest,
+    ) -> Result<AgentIdentityUpdateResponse, ClientError> {
+        let body = serde_json::to_vec(request)?;
+        let path = "/v1/agent/identity";
+        let mut builder = self
+            .client
+            .put(self.base_url.join(path.trim_start_matches('/'))?)
+            .header("content-type", "application/json")
+            .body(body.clone());
+        builder = builder.headers(identity.signed_headers(
+            "PUT",
+            path,
+            &body,
+            self.clock.signing_timestamp_ms(),
+            Uuid::new_v4(),
+        )?);
+        let mut response = builder.send().await?;
+        self.clock.observe(response.headers());
+        let status = response.status();
+        let bytes = bounded_response_bytes(&mut response).await?;
+        if !status.is_success() {
+            return Err(status_error(status.as_u16(), &bytes));
+        }
+        Ok(serde_json::from_slice(&bytes)?)
     }
 
     /// Durably revokes this connector's server-side grant using its final
@@ -844,6 +895,17 @@ mod tests {
         let outage = status_error(503, b"{}");
         assert!(!outage.is_unauthorized());
         assert!(matches!(outage, ClientError::Status { status: 503, .. }));
+
+        let conflict = status_error(
+            409,
+            br#"{"error":{"code":"node_identity_revision_conflict","details":{"current_revision":14}}}"#,
+        );
+        assert!(matches!(
+            conflict,
+            ClientError::NodeIdentityRevisionConflict {
+                current_revision: 14
+            }
+        ));
     }
 
     #[test]

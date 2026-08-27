@@ -8,6 +8,33 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeDisplayIdentity {
+    pub display_name: String,
+    pub site: Option<String>,
+    pub location: Option<String>,
+    pub labels: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentIdentityUpdateRequest {
+    pub expected_revision: u64,
+    pub display_name: String,
+    pub site: Option<String>,
+    pub location: Option<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentIdentityUpdateResponse {
+    pub revision: u64,
+    pub identity: NodeDisplayIdentity,
+}
+
 fn append_proof_field(message: &mut Vec<u8>, value: &[u8]) {
     let length = u64::try_from(value.len()).unwrap_or(u64::MAX);
     message.extend_from_slice(&length.to_be_bytes());

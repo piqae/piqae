@@ -71,6 +71,8 @@ pub enum RepositoryError {
     NodeQuotaExceeded,
     #[error("platform mode is already enabled")]
     PlatformAlreadyEnabled,
+    #[error("node identity revision conflict; current revision is {0}")]
+    NodeIdentityRevisionConflict(u64),
     #[error("persistence failure: {0}")]
     Persistence(String),
 }
@@ -86,6 +88,9 @@ impl From<StorageError> for RepositoryError {
             StorageError::BillingBlocked => Self::BillingBlocked,
             StorageError::NodeQuotaExceeded => Self::NodeQuotaExceeded,
             StorageError::PlatformAlreadyEnabled => Self::PlatformAlreadyEnabled,
+            StorageError::NodeIdentityRevisionConflict(revision) => {
+                Self::NodeIdentityRevisionConflict(revision)
+            }
             other => Self::Persistence(other.to_string()),
         }
     }
@@ -463,15 +468,13 @@ pub trait Repository: Send + Sync + 'static {
         environment_id: EnvironmentId,
         agent_id: AgentId,
     ) -> Result<StoredAgent, RepositoryError>;
-    async fn update_agent_details(
+    async fn update_agent_identity(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         agent_id: AgentId,
-        name: Option<&str>,
-        site: Option<Option<&str>>,
-        location: Option<Option<&str>>,
-        labels: Option<&[String]>,
+        expected_revision: Option<u64>,
+        identity: &piqae_protocol::agent::NodeDisplayIdentity,
     ) -> Result<StoredAgent, RepositoryError>;
     async fn revoke_agent(
         &self,
@@ -2157,25 +2160,21 @@ impl Repository for PostgresStore {
             .map_err(Into::into)
     }
 
-    async fn update_agent_details(
+    async fn update_agent_identity(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         agent_id: AgentId,
-        name: Option<&str>,
-        site: Option<Option<&str>>,
-        location: Option<Option<&str>>,
-        labels: Option<&[String]>,
+        expected_revision: Option<u64>,
+        identity: &piqae_protocol::agent::NodeDisplayIdentity,
     ) -> Result<StoredAgent, RepositoryError> {
-        Self::update_agent_details(
+        Self::update_agent_identity(
             self,
             workspace_id,
             environment_id,
             agent_id,
-            name,
-            site,
-            location,
-            labels,
+            expected_revision,
+            identity,
         )
         .await
         .map_err(Into::into)
@@ -3690,6 +3689,7 @@ impl MemoryRepository {
                     site: None,
                     location: None,
                     labels: Vec::new(),
+                    identity_revision: 1,
                     platform: "test".into(),
                     state: "connected".into(),
                     version: env!("CARGO_PKG_VERSION").into(),
@@ -4941,15 +4941,13 @@ impl Repository for MemoryRepository {
             .ok_or(RepositoryError::NotFound)
     }
 
-    async fn update_agent_details(
+    async fn update_agent_identity(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         agent_id: AgentId,
-        name: Option<&str>,
-        site: Option<Option<&str>>,
-        location: Option<Option<&str>>,
-        labels: Option<&[String]>,
+        expected_revision: Option<u64>,
+        identity: &piqae_protocol::agent::NodeDisplayIdentity,
     ) -> Result<StoredAgent, RepositoryError> {
         let mut state = self.state.write().await;
         let (_, _, agent) = state
@@ -4959,18 +4957,28 @@ impl Repository for MemoryRepository {
                 *workspace == workspace_id && *environment == environment_id
             })
             .ok_or(RepositoryError::NotFound)?;
-        if let Some(name) = name {
-            name.clone_into(&mut agent.name);
+        if expected_revision.is_some_and(|revision| revision != agent.identity_revision) {
+            if expected_revision.and_then(|revision| revision.checked_add(1))
+                == Some(agent.identity_revision)
+                && agent.name == identity.display_name
+                && agent.site == identity.site
+                && agent.location == identity.location
+                && agent.labels == identity.labels
+            {
+                return Ok(agent.clone());
+            }
+            return Err(RepositoryError::NodeIdentityRevisionConflict(
+                agent.identity_revision,
+            ));
         }
-        if let Some(site) = site {
-            agent.site = site.map(str::to_owned);
-        }
-        if let Some(location) = location {
-            agent.location = location.map(str::to_owned);
-        }
-        if let Some(labels) = labels {
-            labels.clone_into(&mut agent.labels);
-        }
+        agent.name.clone_from(&identity.display_name);
+        agent.site.clone_from(&identity.site);
+        agent.location.clone_from(&identity.location);
+        agent.labels.clone_from(&identity.labels);
+        agent.identity_revision = agent
+            .identity_revision
+            .checked_add(1)
+            .ok_or_else(|| RepositoryError::Persistence("identity revision exhausted".into()))?;
         Ok(agent.clone())
     }
 
@@ -5958,6 +5966,7 @@ impl Repository for MemoryRepository {
             site: None,
             location: None,
             labels: Vec::new(),
+            identity_revision: 1,
             platform,
             state: "disconnected".into(),
             version,
@@ -6041,6 +6050,7 @@ impl Repository for MemoryRepository {
                     site: None,
                     location: None,
                     labels: Vec::new(),
+                    identity_revision: 1,
                     platform: platform.into(),
                     state: "connected".into(),
                     version: version.into(),
@@ -7324,6 +7334,20 @@ impl Repository for MemoryRepository {
             (record.job.clone(), record.agent_id, !accepted)
         };
         if terminalized_locally {
+            let payload = serde_json::to_value(&job)
+                .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+            enqueue_memory_webhook_event(
+                &mut state,
+                Some(&preaccept_cancellation_webhook_idempotency_key(
+                    workspace_id,
+                    environment_id,
+                    job_id,
+                )),
+                workspace_id,
+                environment_id,
+                "job.updated",
+                &payload,
+            );
             return Ok(job);
         }
         state.next_agent_command_cursor = state.next_agent_command_cursor.saturating_add(1);
@@ -8069,6 +8093,7 @@ mod routing_repository_tests {
                     site: None,
                     location: None,
                     labels: Vec::new(),
+                    identity_revision: 1,
                     platform: "macos".into(),
                     state: "connected".into(),
                     version: env!("CARGO_PKG_VERSION").into(),
@@ -8084,14 +8109,17 @@ mod routing_repository_tests {
 
         let labels = vec!["shipping".to_owned(), "labels".to_owned()];
         let updated = repository
-            .update_agent_details(
+            .update_agent_identity(
                 workspace,
                 environment,
                 node,
-                Some("Warehouse Mac mini"),
-                Some(Some("Main warehouse")),
-                Some(Some("Dispatch desk")),
-                Some(&labels),
+                Some(1),
+                &piqae_protocol::agent::NodeDisplayIdentity {
+                    display_name: "Warehouse Mac mini".into(),
+                    site: Some("Main warehouse".into()),
+                    location: Some("Dispatch desk".into()),
+                    labels: labels.clone(),
+                },
             )
             .await
             .expect("update own node");
@@ -8100,27 +8128,33 @@ mod routing_repository_tests {
         assert_eq!(updated.labels, labels);
         assert!(matches!(
             repository
-                .update_agent_details(
+                .update_agent_identity(
                     other_workspace,
                     environment,
                     node,
-                    Some("Other"),
-                    None,
-                    None,
-                    None
+                    Some(2),
+                    &piqae_protocol::agent::NodeDisplayIdentity {
+                        display_name: "Other".into(),
+                        site: None,
+                        location: None,
+                        labels: Vec::new(),
+                    },
                 )
                 .await,
             Err(RepositoryError::NotFound)
         ));
         let cleared = repository
-            .update_agent_details(
+            .update_agent_identity(
                 workspace,
                 environment,
                 node,
-                None,
-                Some(None),
-                Some(None),
-                None,
+                Some(2),
+                &piqae_protocol::agent::NodeDisplayIdentity {
+                    display_name: updated.name,
+                    site: None,
+                    location: None,
+                    labels: labels.clone(),
+                },
             )
             .await
             .expect("clear optional labels");
@@ -8656,6 +8690,7 @@ mod routing_repository_tests {
                     site: None,
                     location: None,
                     labels: Vec::new(),
+                    identity_revision: 1,
                     platform: "test".into(),
                     state: "connected".into(),
                     version: "1".into(),
@@ -8751,6 +8786,7 @@ mod routing_repository_tests {
                         site: None,
                         location: None,
                         labels: Vec::new(),
+                        identity_revision: 1,
                         platform: "test".into(),
                         state: "connected".into(),
                         version: "1".into(),
@@ -8939,6 +8975,7 @@ mod routing_repository_tests {
                     site: None,
                     location: None,
                     labels: Vec::new(),
+                    identity_revision: 1,
                     platform: "test".into(),
                     state: "connected".into(),
                     version: "1".into(),

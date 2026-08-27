@@ -54,9 +54,10 @@ use piqae_node_runtime::{
     AgentClientAuthority, AvailabilityClass, BrokerConsentHandle, BrokerRegistry,
     BrokerServerState, CloudCommandApplication, CloudCommandApplier, CloudConnectorWorker,
     CloudWorkerError, CommandRecoveryLedger, ContentMaterializer, DurableOfferAcceptor,
-    EventAcknowledger, HostCapabilities, HostKind, InventorySnapshotProvider, LifecycleEvent,
-    NodeRuntime, NodeRuntimeMode, PendingCloudAcceptance, PendingCloudRelease, PrinterTransport,
-    RuntimeConfiguration, WakeReconciler,
+    EventAcknowledger, HostCapabilities, HostConfiguration, HostConfigurationStore, HostKind,
+    InventorySnapshotProvider, LifecycleEvent, NodeIdentity, NodeRuntime, NodeRuntimeMode,
+    PendingCloudAcceptance, PendingCloudRelease, PrinterTransport, RuntimeConfiguration,
+    WakeReconciler,
     command::{ConnectorInvitationRequest, ConnectorInvitationResult},
     connector_disconnect_requires_authority_upgrade, connector_registry as connector_runtime,
     route_coordinator,
@@ -321,6 +322,10 @@ enum ConnectorSupervisorCommand {
     Details {
         respond_to: oneshot::Sender<Result<Vec<LocalConnectorDetail>, ControlFailure>>,
     },
+    UpdateIdentity {
+        identity: NodeIdentity,
+        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
+    },
     RefreshPrinters,
 }
 
@@ -380,6 +385,16 @@ fn reject_connector_supervisor_command(
                     "connector supervisor is busy"
                 } else {
                     "connector supervisor is unavailable"
+                },
+            )));
+        }
+        ConnectorSupervisorCommand::UpdateIdentity { respond_to, .. } => {
+            let _ = respond_to.send(Err(control_failure(
+                "connector_identity_sync_deferred",
+                if is_full {
+                    "connector supervisor is busy; periodic recovery will retry"
+                } else {
+                    "connector supervisor is unavailable; restart will retry"
                 },
             )));
         }
@@ -824,6 +839,15 @@ async fn main() -> Result<()> {
             printer_transports,
         },
     })?);
+    let host_configuration = HostConfigurationStore::open_or_create(
+        &arguments.data_dir,
+        HostConfiguration::standalone(NodeIdentity::new(
+            installation_hostname(),
+            None,
+            None,
+            Vec::new(),
+        )?),
+    )?;
     let _ = node_runtime.apply_lifecycle(LifecycleEvent::Started);
     let database_path = arguments.data_dir.join("agent.sqlite3");
     let store = AgentStore::open(&database_path)
@@ -902,6 +926,7 @@ async fn main() -> Result<()> {
         .context("open local application broker registry")?;
     let broker_state = BrokerServerState::new(broker_registry, control_tx.clone());
     let broker_consent = broker_state.consent_handle();
+    let initial_host_identity = host_configuration.configuration().identity.clone();
     let mut control_task = tokio::spawn(control_loop(
         control_rx,
         engine,
@@ -916,6 +941,7 @@ async fn main() -> Result<()> {
         connector_supervisor_tx,
         broker_consent,
         Arc::clone(&node_runtime),
+        host_configuration,
     ));
 
     // A populated registry supersedes the legacy cloud identity. Running both
@@ -962,6 +988,7 @@ async fn main() -> Result<()> {
         legacy_cloud_worker,
         connector_connections,
         Arc::clone(&node_runtime),
+        initial_host_identity,
     ));
 
     info!(
@@ -1942,7 +1969,9 @@ fn installation_hostname() -> String {
         .into_iter()
         .find_map(|name| std::env::var(name).ok())
         .and_then(|value| privacy_safe_computer_name(value.as_bytes()))
-        .unwrap_or_else(|| "Piqae node".into())
+        .unwrap_or_else(|| {
+            piqae_node_runtime::default_device_display_name(None, std::env::consts::OS)
+        })
 }
 
 fn privacy_safe_computer_name(raw: &[u8]) -> Option<String> {
@@ -1950,7 +1979,12 @@ fn privacy_safe_computer_name(raw: &[u8]) -> Option<String> {
     if value.is_empty() || value.chars().any(char::is_control) {
         return None;
     }
-    Some(value.chars().take(120).collect())
+    let end = value
+        .char_indices()
+        .map(|(start, character)| start + character.len_utf8())
+        .take_while(|end| *end <= 120)
+        .last()?;
+    Some(value[..end].to_owned())
 }
 
 fn write_new_device_key(path: &Path, secret: &[u8; 32]) -> Result<()> {
@@ -2068,6 +2102,7 @@ async fn control_loop(
     connector_supervisor: mpsc::Sender<ConnectorSupervisorCommand>,
     broker_consent: BrokerConsentHandle,
     node_runtime: Arc<NodeRuntime>,
+    mut host_configuration: HostConfigurationStore,
 ) {
     let mut scheduler = tokio::time::interval(Duration::from_millis(250));
     scheduler.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2108,6 +2143,7 @@ async fn control_loop(
                     &connector_supervisor,
                     &broker_consent,
                     &node_runtime,
+                    &mut host_configuration,
                 ).await;
                 if sync_relevant {
                     cloud_sync_wakeup.notify_one();
@@ -2179,6 +2215,7 @@ async fn connector_supervisor_loop(
     mut legacy_cloud_worker: Option<LegacyCloudWorker>,
     connections: ConnectorConnectionTracker,
     node_runtime: Arc<NodeRuntime>,
+    mut host_identity: NodeIdentity,
 ) {
     let mut workers = std::collections::BTreeMap::<String, ConnectorWorker>::new();
     retry_installed_revocations(&data_dir).await;
@@ -2200,6 +2237,9 @@ async fn connector_supervisor_loop(
     .await
     {
         error!(%error, "initial connector worker load failed");
+    }
+    if let Err(error) = stage_connector_identity(&data_dir, &host_identity) {
+        warn!(%error, "initial connector identity projection deferred");
     }
     let mut recovery = tokio::time::interval(Duration::from_secs(30));
     recovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2234,6 +2274,17 @@ async fn connector_supervisor_loop(
             }
             _ = recovery.tick() => {
                 retry_installed_revocations(&data_dir).await;
+                match HostConfigurationStore::open(&data_dir) {
+                    Ok(configuration) => {
+                        host_identity = configuration.configuration().identity.clone();
+                    }
+                    Err(error) => {
+                        warn!(%error, "durable host identity reload deferred");
+                    }
+                }
+                if let Err(error) = stage_connector_identity(&data_dir, &host_identity) {
+                    warn!(%error, "periodic connector identity projection deferred");
+                }
                 if let Err(error) = retire_legacy_cloud_worker_if_needed(&data_dir, &mut legacy_cloud_worker).await {
                     warn!(%error, "periodic legacy cloud worker retirement deferred");
                     continue;
@@ -2417,6 +2468,39 @@ async fn connector_supervisor_loop(
                                     .flatten()
                                     .and_then(|revision| revision.parse::<u64>().ok())
                                     .unwrap_or(0);
+                            let (
+                                identity_pending,
+                                identity_server_revision,
+                                identity_conflict_revision,
+                            ) = connector_runtime::ConnectorRegistry::load(&data_dir)
+                                .ok()
+                                .and_then(|registry| registry.paths(&record.connector_id).ok())
+                                .and_then(|paths| AgentStore::open(paths.database).ok())
+                                .map_or((false, None, None), |store| {
+                                    let pending = store
+                                        .setting(NODE_IDENTITY_DESIRED_SETTING)
+                                        .ok()
+                                        .flatten()
+                                        .is_some_and(|value| !value.is_empty());
+                                    let server = store
+                                        .setting(NODE_IDENTITY_SERVER_REVISION_SETTING)
+                                        .ok()
+                                        .flatten()
+                                        .and_then(|value| value.parse::<u64>().ok());
+                                    let conflict = store
+                                        .setting(NODE_IDENTITY_CONFLICT_REVISION_SETTING)
+                                        .ok()
+                                        .flatten()
+                                        .and_then(|value| value.parse::<u64>().ok());
+                                    (pending, server, conflict)
+                                });
+                            let identity_sync_status = if identity_conflict_revision.is_some() {
+                                "conflict"
+                            } else if identity_pending {
+                                "pending"
+                            } else {
+                                "current"
+                            };
                             let cross_authority_route_warning =
                                 cross_authority_connectors.contains(&record.connector_id);
                             details.push(LocalConnectorDetail {
@@ -2439,6 +2523,9 @@ async fn connector_supervisor_loop(
                                 eligible_printer_count,
                                 inventory_revision,
                                 inventory_refresh_pending,
+                                identity_sync_status: identity_sync_status.to_owned(),
+                                identity_server_revision,
+                                identity_conflict_revision,
                                 cross_authority_route_warning,
                                 manage_url: record.manage_url.map(|url| url.to_string()),
                             });
@@ -2448,6 +2535,24 @@ async fn connector_supervisor_loop(
                     Err(failure) => Err(failure),
                 };
                 let _ = respond_to.send(details);
+            }
+            ConnectorSupervisorCommand::UpdateIdentity {
+                identity,
+                respond_to,
+            } => {
+                host_identity = identity;
+                let result = stage_connector_identity(&data_dir, &host_identity)
+                    .map(|connector_ids| {
+                        for connector_id in connector_ids {
+                            if let Some(worker) = workers.get(&connector_id) {
+                                worker.wakeup.notify_one();
+                            }
+                        }
+                    })
+                    .map_err(|error| {
+                        control_failure("connector_identity_sync_deferred", &error.to_string())
+                    });
+                let _ = respond_to.send(result);
             }
             ConnectorSupervisorCommand::RefreshPrinters => {
                 for worker in workers.values() {
@@ -2467,6 +2572,43 @@ async fn connector_supervisor_loop(
             warn!(connector_id = %id, %error, "connector worker shutdown was forced");
         }
     }
+}
+
+const NODE_IDENTITY_DESIRED_SETTING: &str = "node_identity_desired_v1";
+const NODE_IDENTITY_APPLIED_SETTING: &str = "node_identity_applied_v1";
+const NODE_IDENTITY_SERVER_REVISION_SETTING: &str = "node_identity_server_revision_v1";
+const NODE_IDENTITY_CONFLICT_REVISION_SETTING: &str = "node_identity_conflict_revision_v1";
+
+fn stage_connector_identity(data_dir: &Path, identity: &NodeIdentity) -> Result<Vec<String>> {
+    let registry = connector_runtime::ConnectorRegistry::load(data_dir)?;
+    let desired = serde_json::to_string(&piqae_protocol::agent::NodeDisplayIdentity {
+        display_name: identity.display_name.clone(),
+        site: identity.site.clone(),
+        location: identity.location.clone(),
+        labels: identity.labels.clone(),
+    })?;
+    let mut staged = Vec::new();
+    for record in registry.enabled() {
+        let paths = registry.paths(&record.connector_id)?;
+        if let Some(parent) = paths.database.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut store = AgentStore::open(paths.database)?;
+        let pending = store.setting(NODE_IDENTITY_DESIRED_SETTING)?;
+        let applied = store.setting(NODE_IDENTITY_APPLIED_SETTING)?;
+        if pending.as_deref() != Some(&desired) && applied.as_deref() != Some(&desired) {
+            if let Some(conflict_revision) = store
+                .setting(NODE_IDENTITY_CONFLICT_REVISION_SETTING)?
+                .filter(|revision| !revision.is_empty())
+            {
+                store.set_setting(NODE_IDENTITY_SERVER_REVISION_SETTING, &conflict_revision)?;
+            }
+            store.set_setting(NODE_IDENTITY_DESIRED_SETTING, &desired)?;
+            store.set_setting(NODE_IDENTITY_CONFLICT_REVISION_SETTING, "")?;
+        }
+        staged.push(record.connector_id.clone());
+    }
+    Ok(staged)
 }
 
 async fn revoke_installed_authority(
@@ -2876,6 +3018,7 @@ async fn handle_control_request(
     connector_supervisor: &mpsc::Sender<ConnectorSupervisorCommand>,
     broker_consent: &BrokerConsentHandle,
     node_runtime: &NodeRuntime,
+    host_configuration: &mut HostConfigurationStore,
 ) {
     match request {
         ControlRequest::ConnectInvitation {
@@ -2910,7 +3053,59 @@ async fn handle_control_request(
                 version,
                 current_connection,
                 paused,
+                host_configuration,
             ));
+        }
+        ControlRequest::UpdateNodeIdentity {
+            request,
+            respond_to,
+        } => {
+            let result = if request.expected_revision == host_configuration.revision() {
+                NodeIdentity::new(
+                    request.display_name,
+                    request.site,
+                    request.location,
+                    request.labels,
+                )
+                .map_err(|error| control_failure("invalid_node_identity", &error.to_string()))
+                .and_then(|identity| {
+                    host_configuration
+                        .update_identity(request.expected_revision, identity)
+                        .map_err(|error| {
+                            control_failure("node_identity_update_failed", &error.to_string())
+                        })
+                })
+                .map(
+                    |revision| piqae_node_runtime::command::NodeIdentityUpdated {
+                        revision,
+                        identity: local_node_identity(host_configuration.configuration()),
+                    },
+                )
+            } else {
+                Err(ControlFailure {
+                    code: "node_identity_revision_conflict".into(),
+                    message: "the node identity changed; refresh before saving".into(),
+                    current_revision: Some(host_configuration.revision()),
+                })
+            };
+            if result.is_ok() {
+                let (staged_send, staged_receive) = oneshot::channel();
+                let staged =
+                    connector_supervisor.try_send(ConnectorSupervisorCommand::UpdateIdentity {
+                        identity: host_configuration.configuration().identity.clone(),
+                        respond_to: staged_send,
+                    });
+                if let Err(error) = staged {
+                    reject_connector_supervisor_command(error);
+                }
+                let staged = tokio::time::timeout(Duration::from_secs(2), staged_receive).await;
+                if !matches!(staged, Ok(Ok(Ok(())))) {
+                    warn!(
+                        "node identity is durable locally; connector projection will retry on restart"
+                    );
+                }
+            }
+            let _ = respond_to.send(result);
         }
         ControlRequest::Printers { respond_to } => match refresh_local_printers(engine).await {
             Ok(printers) => {
@@ -3139,6 +3334,7 @@ fn local_status(
     version: &str,
     connection: ConnectionState,
     paused: &AtomicBool,
+    host_configuration: &HostConfigurationStore,
 ) -> LocalStatus {
     let counts = match store.queue_counts() {
         Ok(counts) => counts,
@@ -3163,6 +3359,17 @@ fn local_status(
         active_jobs: counts.active,
         printer_warnings,
         paused: paused.load(Ordering::Relaxed),
+        node_identity: Some(local_node_identity(host_configuration.configuration())),
+        node_identity_revision: Some(host_configuration.revision()),
+    }
+}
+
+fn local_node_identity(configuration: &HostConfiguration) -> piqae_local_ipc::LocalNodeIdentity {
+    piqae_local_ipc::LocalNodeIdentity {
+        display_name: configuration.identity.display_name.clone(),
+        site: configuration.identity.site.clone(),
+        location: configuration.identity.location.clone(),
+        labels: configuration.identity.labels.clone(),
     }
 }
 
@@ -4178,6 +4385,7 @@ fn control_failure(code: &str, message: &str) -> ControlFailure {
     ControlFailure {
         code: code.to_owned(),
         message: message.to_owned(),
+        current_revision: None,
     }
 }
 
@@ -4978,7 +5186,7 @@ async fn run_cloud_sync_loop(
     let acceptor = InstalledOfferAcceptor {
         stores: Arc::clone(&stores),
         route_coordinator,
-        connector_id: cloud.connector_id,
+        connector_id: cloud.connector_id.clone(),
         admission: stop.clone(),
     };
     let wake = InstalledWakeAdapter {
@@ -5007,6 +5215,7 @@ async fn run_cloud_sync_loop(
             let stores = stores.lock().await;
             sweep_confidential_files(&stores.queue);
         }
+        let identity_error_code = reconcile_connector_identity(&cloud, &stores).await;
         let delay = match worker.reconcile_once().await {
             Ok(outcome) => {
                 if outcome.inventory_submitted {
@@ -5021,7 +5230,7 @@ async fn run_cloud_sync_loop(
                     }
                 } else {
                     *connection.write().await = ConnectionState::Connected;
-                    *last_sync_error_code.write().await = None;
+                    *last_sync_error_code.write().await = identity_error_code.map(str::to_owned);
                 }
                 outcome.next_poll_after
             }
@@ -5053,6 +5262,92 @@ async fn run_cloud_sync_loop(
             () = cloud_sync_wakeup.notified() => {}
             () = stop.cancelled() => break,
         }
+    }
+}
+
+async fn reconcile_connector_identity(
+    cloud: &CloudConfiguration,
+    stores: &Arc<Mutex<InstalledConnectorStores>>,
+) -> Option<&'static str> {
+    let (desired, expected_revision) = {
+        let stores = stores.lock().await;
+        let desired = stores
+            .queue
+            .setting(NODE_IDENTITY_DESIRED_SETTING)
+            .ok()
+            .flatten()
+            .filter(|value| !value.is_empty())?;
+        if stores
+            .queue
+            .setting(NODE_IDENTITY_CONFLICT_REVISION_SETTING)
+            .ok()
+            .flatten()
+            .is_some_and(|value| !value.is_empty())
+        {
+            return Some("node_identity_revision_conflict");
+        }
+        let expected_revision = stores
+            .queue
+            .setting(NODE_IDENTITY_SERVER_REVISION_SETTING)
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(1);
+        drop(stores);
+        (desired, expected_revision)
+    };
+    let Ok(identity) = serde_json::from_str::<piqae_protocol::agent::NodeDisplayIdentity>(&desired)
+    else {
+        return Some("node_identity_projection_invalid");
+    };
+    let request = piqae_protocol::agent::AgentIdentityUpdateRequest {
+        expected_revision,
+        display_name: identity.display_name,
+        site: identity.site,
+        location: identity.location,
+        labels: identity.labels,
+    };
+    match cloud
+        .client
+        .update_node_identity(cloud.identity.as_ref(), &request)
+        .await
+    {
+        Ok(updated) => {
+            let mut stores = stores.lock().await;
+            if stores
+                .queue
+                .set_setting(
+                    NODE_IDENTITY_SERVER_REVISION_SETTING,
+                    &updated.revision.to_string(),
+                )
+                .and_then(|()| {
+                    stores
+                        .queue
+                        .set_setting(NODE_IDENTITY_APPLIED_SETTING, &desired)
+                })
+                .and_then(|()| stores.queue.set_setting(NODE_IDENTITY_DESIRED_SETTING, ""))
+                .and_then(|()| {
+                    stores
+                        .queue
+                        .set_setting(NODE_IDENTITY_CONFLICT_REVISION_SETTING, "")
+                })
+                .is_err()
+            {
+                return Some("node_identity_sync_commit_deferred");
+            }
+            drop(stores);
+            None
+        }
+        Err(ClientError::NodeIdentityRevisionConflict { current_revision }) => {
+            let mut stores = stores.lock().await;
+            let _ = stores.queue.set_setting(
+                NODE_IDENTITY_CONFLICT_REVISION_SETTING,
+                &current_revision.to_string(),
+            );
+            drop(stores);
+            Some("node_identity_revision_conflict")
+        }
+        Err(_) => Some("node_identity_sync_deferred"),
     }
 }
 
@@ -6521,6 +6816,93 @@ mod tests {
             printer_grant: PrinterGrant::SelectedPrinters,
             allowed_printer_ids: vec!["prn_test".to_owned()],
         }
+    }
+
+    #[test]
+    fn connector_identity_projection_survives_restart_and_does_not_loop() {
+        let directory = tempfile::tempdir().expect("connector directory");
+        let connector_id = "ncon_identity_restart";
+        let mut registry =
+            connector_runtime::ConnectorRegistry::load(directory.path()).expect("load registry");
+        registry
+            .add(test_connector_record(connector_id))
+            .expect("add connector");
+        let paths = registry.paths(connector_id).expect("connector paths");
+        let identity = NodeIdentity::new(
+            "Dispatch Mac",
+            Some("Warehouse".into()),
+            None,
+            vec!["shipping".into()],
+        )
+        .expect("identity");
+
+        assert_eq!(
+            stage_connector_identity(directory.path(), &identity).expect("initial stage"),
+            vec![connector_id]
+        );
+        let mut store = AgentStore::open(&paths.database).expect("queue store");
+        let desired = store
+            .setting(NODE_IDENTITY_DESIRED_SETTING)
+            .expect("read desired")
+            .expect("desired value");
+        store
+            .set_setting(NODE_IDENTITY_APPLIED_SETTING, &desired)
+            .expect("simulate acknowledged projection");
+        store
+            .set_setting(NODE_IDENTITY_SERVER_REVISION_SETTING, "8")
+            .expect("server revision");
+        store
+            .set_setting(NODE_IDENTITY_DESIRED_SETTING, "")
+            .expect("clear desired");
+        drop(store);
+
+        assert_eq!(
+            stage_connector_identity(directory.path(), &identity).expect("restart stage"),
+            vec![connector_id]
+        );
+        let store = AgentStore::open(&paths.database).expect("reopened queue store");
+        assert_eq!(
+            store
+                .setting(NODE_IDENTITY_DESIRED_SETTING)
+                .expect("read pending"),
+            Some(String::new()),
+            "periodic restart recovery must not repeatedly increment cloud identity revision"
+        );
+        assert_eq!(
+            store
+                .setting(NODE_IDENTITY_SERVER_REVISION_SETTING)
+                .expect("read server revision"),
+            Some("8".into())
+        );
+        drop(store);
+
+        let mut store = AgentStore::open(&paths.database).expect("conflicted queue store");
+        store
+            .set_setting(NODE_IDENTITY_CONFLICT_REVISION_SETTING, "9")
+            .expect("record operator revision");
+        drop(store);
+        let replacement = NodeIdentity::new(
+            "Dispatch Mac 2",
+            Some("Warehouse".into()),
+            None,
+            vec!["shipping".into()],
+        )
+        .expect("replacement identity");
+        stage_connector_identity(directory.path(), &replacement).expect("explicit reconciliation");
+        let store = AgentStore::open(&paths.database).expect("reconciled queue store");
+        assert_eq!(
+            store
+                .setting(NODE_IDENTITY_SERVER_REVISION_SETTING)
+                .expect("read adopted revision"),
+            Some("9".into()),
+            "a deliberate local edit after conflict fences against the observed operator revision"
+        );
+        assert_eq!(
+            store
+                .setting(NODE_IDENTITY_CONFLICT_REVISION_SETTING)
+                .expect("read cleared conflict"),
+            Some(String::new())
+        );
     }
 
     async fn unsupported_connector_authority() -> (Url, tokio::task::JoinHandle<()>) {

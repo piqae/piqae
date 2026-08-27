@@ -184,7 +184,14 @@ final class LocalAPITests: XCTestCase {
               "queued_jobs": 2,
               "active_jobs": 1,
               "printer_warnings": 0,
-              "paused": false
+              "paused": false,
+              "node_identity": {
+                "display_name": "Dispatch Mac mini",
+                "site": "Warehouse",
+                "location": "Dispatch desk",
+                "labels": ["shipping"]
+              },
+              "node_identity_revision": 4
             }
             """.utf8
         )
@@ -193,6 +200,8 @@ final class LocalAPITests: XCTestCase {
         XCTAssertEqual(status.connection, "connected")
         XCTAssertEqual(status.queuedJobs, 2)
         XCTAssertEqual(status.activeJobs, 1)
+        XCTAssertEqual(status.nodeIdentity?.displayName, "Dispatch Mac mini")
+        XCTAssertEqual(status.nodeIdentityRevision, 4)
     }
 
     func testPerPrinterRoutesAndAuthentication() async throws {
@@ -256,6 +265,33 @@ final class LocalAPITests: XCTestCase {
             return Self.response(for: request, status: 200, body: "{}")
         }
         try await client.setExposure(printerID: "prn_test", exposed: true)
+
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "PUT")
+            XCTAssertEqual(request.url?.path, "/v1/local/node/identity")
+            let body = try XCTUnwrap(
+                try JSONSerialization.jsonObject(with: try Self.body(of: request))
+                    as? [String: Any]
+            )
+            XCTAssertEqual(body["expected_revision"] as? Int, 4)
+            XCTAssertEqual(body["display_name"] as? String, "Dispatch Mac mini")
+            XCTAssertEqual(body["site"] as? String, "Warehouse")
+            XCTAssertEqual(body["location"] as? String, "Dispatch desk")
+            return Self.response(
+                for: request,
+                body: """
+                {"revision":5,"identity":{"display_name":"Dispatch Mac mini","site":"Warehouse","location":"Dispatch desk","labels":[]}}
+                """
+            )
+        }
+        let identity = try await client.updateNodeIdentity(
+            expectedRevision: 4,
+            displayName: "Dispatch Mac mini",
+            site: "Warehouse",
+            location: "Dispatch desk"
+        )
+        XCTAssertEqual(identity.revision, 5)
+        XCTAssertEqual(identity.identity.location, "Dispatch desk")
 
         StubURLProtocol.handler = { request in
             XCTAssertEqual(request.httpMethod, "POST")
