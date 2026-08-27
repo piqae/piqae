@@ -16,9 +16,10 @@ use piqae_node_runtime::{
     AdapterOperationOutcome, AvailabilityClass, ConnectorInvitationExchange, ConnectorKeyError,
     EmbeddedAdapterRegistration, EmbeddedCloudSupervisor, EmbeddedJobRequest,
     EmbeddedPrinterObservation, EmbeddedQueue, GeneratedConnectorKey, HostCapabilities,
-    HostKeyError, HostKeyProvider, HostKind, LifecycleEvent, NodeRuntime, NodeRuntimeMode,
-    PrinterTransport, RuntimeConfiguration, SecureConnectorSigner, SecureKeyHandle,
-    ensure_installation_identity, exchange_connector_invitation, prepare_connector_identity,
+    HostConfiguration, HostConfigurationStore, HostKeyError, HostKeyProvider, HostKind,
+    LifecycleEvent, NodeIdentity, NodeRuntime, NodeRuntimeMode, PrinterTransport,
+    RuntimeConfiguration, SecureConnectorSigner, SecureKeyHandle, ensure_installation_identity,
+    exchange_connector_invitation, prepare_connector_identity,
 };
 use piqae_protocol::agent::PrinterGrant;
 use piqae_support_packs::SupportPackRegistry;
@@ -320,6 +321,10 @@ pub struct NativeRuntimeConfiguration {
     /// Relative, application-scoped path. SDK facades resolve it below their
     /// private container before calling the ABI.
     pub data_directory: String,
+    /// Additive v1 host contract. Older generated SDKs may omit it, but then
+    /// revision-fenced identity editing is deliberately unavailable.
+    #[serde(default)]
+    pub host_configuration: Option<HostConfiguration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -456,6 +461,14 @@ pub enum NativeCommand {
     RevokeConnector {
         connector_id: String,
     },
+    UpdateNodeIdentity {
+        expected_revision: u64,
+        display_name: String,
+        site: Option<String>,
+        location: Option<String>,
+        #[serde(default)]
+        labels: Vec<String>,
+    },
 }
 
 fn empty_json_object() -> String {
@@ -488,19 +501,34 @@ pub fn decode_configuration(bytes: &[u8]) -> Result<NativeRuntimeConfiguration, 
     {
         return Err(ContractError::InvalidApplicationScope);
     }
+    if let Some(host_configuration) = &configuration.host_configuration {
+        host_configuration
+            .validate()
+            .map_err(|_| ContractError::InvalidApplicationScope)?;
+        if host_configuration.application_id != configuration.application_id {
+            return Err(ContractError::InvalidApplicationScope);
+        }
+    }
     Ok(configuration)
 }
 
 fn valid_application_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_APPLICATION_ID_BYTES
-        && value.contains('.')
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-        && !value.starts_with('.')
-        && !value.ends_with('.')
-        && !value.contains("..")
+    (3..=MAX_APPLICATION_ID_BYTES).contains(&value.len())
+        && value.split('.').all(|segment| {
+            !segment.is_empty()
+                && segment.len() <= 63
+                && segment
+                    .bytes()
+                    .next()
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric())
+                && segment
+                    .bytes()
+                    .next_back()
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric())
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
 }
 
 fn valid_relative_data_directory(value: &str) -> bool {
@@ -527,6 +555,7 @@ struct Instance {
     work_notifier: Option<std::sync::Arc<FfiWorkAvailableNotifier>>,
     embedded_queue: Option<std::sync::Arc<Mutex<EmbeddedQueue>>>,
     connector_registry: Option<std::sync::Arc<Mutex<ConnectorRegistry>>>,
+    host_configuration: Option<std::sync::Arc<Mutex<HostConfigurationStore>>>,
     cloud_supervisor: Option<EmbeddedCloudSupervisor>,
     in_flight: std::sync::Arc<InFlight>,
     stopping: bool,
@@ -633,6 +662,7 @@ pub extern "C" fn piqae_node_create(data: *const u8, length: usize) -> PiqaeBuff
                 work_notifier: None,
                 embedded_queue: None,
                 connector_registry: None,
+                host_configuration: None,
                 cloud_supervisor: None,
                 in_flight: std::sync::Arc::new(InFlight::default()),
                 stopping: false,
@@ -740,6 +770,16 @@ pub extern "C" fn piqae_node_start(handle: u64) -> PiqaeBuffer {
                 .map_err(|_| FfiError::StartFailed)?;
             let mut connectors = ConnectorRegistry::load(root.join("embedded"))
                 .map_err(|_| FfiError::StartFailed)?;
+            let host_configuration = instance
+                .configuration
+                .host_configuration
+                .clone()
+                .map(|configuration| {
+                    HostConfigurationStore::open_or_create(&root, configuration)
+                        .map(|store| std::sync::Arc::new(Mutex::new(store)))
+                        .map_err(|_| FfiError::StartFailed)
+                })
+                .transpose()?;
             if !instance.configuration.local_only {
                 let provider = instance
                     .connector_key_provider
@@ -778,6 +818,7 @@ pub extern "C" fn piqae_node_start(handle: u64) -> PiqaeBuffer {
                         std::sync::Arc::clone(&connectors),
                         provider,
                         std::sync::Arc::clone(&runtime),
+                        host_configuration.clone(),
                         work_notifier.clone().map(|notifier| {
                             notifier
                                 as std::sync::Arc<dyn piqae_node_runtime::WorkAvailableNotifier>
@@ -789,6 +830,7 @@ pub extern "C" fn piqae_node_start(handle: u64) -> PiqaeBuffer {
             instance.runtime = Some(runtime);
             instance.embedded_queue = Some(queue);
             instance.connector_registry = Some(connectors);
+            instance.host_configuration = host_configuration;
             instance.cloud_supervisor = cloud_supervisor;
             instance.work_notifier = work_notifier;
         }
@@ -1038,6 +1080,7 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
             connector_provider,
             embedded_queue,
             connector_registry,
+            host_configuration,
             work_notifier,
             _in_flight,
         ) = {
@@ -1054,6 +1097,7 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
                 .connector_registry
                 .clone()
                 .ok_or(FfiError::NotStarted)?;
+            let host_configuration = instance.host_configuration.clone();
             let work_notifier = instance.work_notifier.clone();
             let in_flight = instance.in_flight.begin()?;
             drop(instances);
@@ -1063,6 +1107,7 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
                 connector_provider,
                 embedded_queue,
                 connector_registry,
+                host_configuration,
                 work_notifier,
                 in_flight,
             )
@@ -1431,6 +1476,40 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
                     json!({ "handle": handle, "revoked": revoked, "cleanup_pending": !registry.key_cleanup().is_empty() }),
                 );
             }
+            NativeCommand::UpdateNodeIdentity {
+                expected_revision,
+                display_name,
+                site,
+                location,
+                labels,
+            } => {
+                let host_configuration = host_configuration
+                    .as_ref()
+                    .ok_or(FfiError::HostConfigurationUnavailable)?;
+                let identity = NodeIdentity::new(display_name, site, location, labels)
+                    .map_err(|_| FfiError::InvalidNodeIdentity)?;
+                let mut store = host_configuration.lock().map_err(|_| FfiError::Internal)?;
+                if store.revision() != expected_revision {
+                    return Err(FfiError::NodeIdentityRevisionConflict {
+                        current_revision: store.revision(),
+                    });
+                }
+                let revision = store
+                    .update_identity(expected_revision, identity)
+                    .map_err(|_| FfiError::NodeIdentityUpdateFailed)?;
+                let (_, configuration) = store.snapshot();
+                drop(store);
+                if let Some(supervisor) = lock_instances()?
+                    .get(&handle)
+                    .and_then(|instance| instance.cloud_supervisor.as_ref())
+                {
+                    let _ = supervisor.request_reconcile();
+                }
+                return Ok(json!({
+                    "revision": revision,
+                    "identity": configuration.identity,
+                }));
+            }
         }
         let instances = lock_instances()?;
         let instance = instances.get(&handle).ok_or(FfiError::InvalidHandle)?;
@@ -1561,6 +1640,10 @@ enum FfiError {
     BrokerTransport,
     PrintPacket,
     Contract(String),
+    HostConfigurationUnavailable,
+    InvalidNodeIdentity,
+    NodeIdentityUpdateFailed,
+    NodeIdentityRevisionConflict { current_revision: u64 },
     Internal,
 }
 
@@ -1594,6 +1677,10 @@ impl FfiError {
             Self::BrokerTransport => "broker_transport_failed",
             Self::PrintPacket => "printpacket_invalid_or_unsupported",
             Self::Contract(_) => "invalid_configuration",
+            Self::HostConfigurationUnavailable => "host_configuration_unavailable",
+            Self::InvalidNodeIdentity => "invalid_node_identity",
+            Self::NodeIdentityUpdateFailed => "node_identity_update_failed",
+            Self::NodeIdentityRevisionConflict { .. } => "node_identity_revision_conflict",
             Self::Internal => "internal_error",
         }
     }
@@ -1601,6 +1688,14 @@ impl FfiError {
     fn safe_message(&self) -> &str {
         match self {
             Self::Contract(message) => message,
+            Self::HostConfigurationUnavailable => {
+                "this older runtime configuration has no editable host identity"
+            }
+            Self::InvalidNodeIdentity => "the node identity fields are invalid",
+            Self::NodeIdentityUpdateFailed => "the node identity could not be durably updated",
+            Self::NodeIdentityRevisionConflict { .. } => {
+                "the node identity changed; reconcile before saving"
+            }
             Self::InvalidInput => "the ABI input was null or exceeded its bound",
             Self::InvalidHandle => "the runtime handle is invalid",
             Self::InvalidCommand => "the runtime command is invalid",
@@ -1789,10 +1884,22 @@ const fn input_bytes<'a>(data: *const u8, length: usize) -> Result<&'a [u8], Ffi
 fn ffi_entry(operation: impl FnOnce() -> Result<Value, FfiError>) -> PiqaeBuffer {
     let envelope = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation)) {
         Ok(Ok(data)) => json!({ "ok": true, "data": data }),
-        Ok(Err(error)) => json!({
-            "ok": false,
-            "error": { "code": error.code(), "message": error.safe_message() }
-        }),
+        Ok(Err(error)) => {
+            let details = match &error {
+                FfiError::NodeIdentityRevisionConflict { current_revision } => {
+                    Some(json!({ "current_revision": current_revision }))
+                }
+                _ => None,
+            };
+            json!({
+                "ok": false,
+                "error": {
+                    "code": error.code(),
+                    "message": error.safe_message(),
+                    "details": details,
+                }
+            })
+        }
         Err(_) => json!({
             "ok": false,
             "error": { "code": "panic_contained", "message": "the native runtime operation failed" }
@@ -1818,6 +1925,28 @@ mod tests {
         ))
         .unwrap();
         fixture["data_directory"] = Value::String(format!("test-{}", uuid::Uuid::new_v4()));
+        serde_json::to_vec(&fixture).unwrap()
+    }
+
+    fn identity_fixture() -> Vec<u8> {
+        let mut fixture: Value = serde_json::from_slice(&unique_fixture()).unwrap();
+        fixture["host_configuration"] = json!({
+            "contract": 1,
+            "product": "embedded",
+            "application_id": "com.example.piqae-pos",
+            "identity": {
+                "display_name": "Piqae POS",
+                "site": null,
+                "location": null,
+                "labels": []
+            },
+            "installed_host_policy": "isolated_application",
+            "connection_policy": {
+                "management": "user_managed",
+                "allows_multiple": true,
+                "allowed_authority_origins": []
+            }
+        });
         serde_json::to_vec(&fixture).unwrap()
     }
 
@@ -1915,6 +2044,58 @@ mod tests {
         let invalid = read_and_free(piqae_node_snapshot(handle));
         assert_eq!(invalid["error"]["code"], "invalid_handle");
         assert!(!invalid.to_string().contains("app-state"));
+    }
+
+    #[test]
+    fn identity_update_is_revision_fenced_and_survives_runtime_restart() {
+        let fixture = identity_fixture();
+        let created = read_and_free(piqae_node_create(fixture.as_ptr(), fixture.len()));
+        let handle = created["data"]["handle"].as_u64().unwrap();
+        assert_eq!(read_and_free(piqae_node_start(handle))["ok"], true);
+        let updated = command(
+            handle,
+            json!({
+                "type": "update_node_identity",
+                "expected_revision": 1,
+                "display_name": "Kitchen iPad",
+                "site": "Main",
+                "location": null,
+                "labels": ["pos"]
+            }),
+        );
+        assert_eq!(updated["data"]["revision"], 2);
+        assert_eq!(updated["data"]["identity"]["display_name"], "Kitchen iPad");
+        let conflict = command(
+            handle,
+            json!({
+                "type": "update_node_identity",
+                "expected_revision": 1,
+                "display_name": "Stale",
+                "site": null,
+                "location": null,
+                "labels": []
+            }),
+        );
+        assert_eq!(conflict["error"]["code"], "node_identity_revision_conflict");
+        assert_eq!(conflict["error"]["details"]["current_revision"], 2);
+        assert_eq!(read_and_free(piqae_node_destroy(handle))["ok"], true);
+
+        let recreated = read_and_free(piqae_node_create(fixture.as_ptr(), fixture.len()));
+        let restarted = recreated["data"]["handle"].as_u64().unwrap();
+        assert_eq!(read_and_free(piqae_node_start(restarted))["ok"], true);
+        let after_restart = command(
+            restarted,
+            json!({
+                "type": "update_node_identity",
+                "expected_revision": 2,
+                "display_name": "Dispatch iPad",
+                "site": "Main",
+                "location": "Counter 2",
+                "labels": ["pos"]
+            }),
+        );
+        assert_eq!(after_restart["data"]["revision"], 3);
+        assert_eq!(read_and_free(piqae_node_destroy(restarted))["ok"], true);
     }
 
     #[test]

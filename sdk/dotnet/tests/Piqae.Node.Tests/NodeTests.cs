@@ -121,12 +121,19 @@ public sealed class NodeTests
     {
         if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("PIQAE_NODE_NATIVE_TEST") != "1") return;
         var unique = $"tests-{Guid.NewGuid():N}";
+        var hostConfiguration = new HostConfiguration(
+            NodeHostProduct.Embedded,
+            "com.piqae.tests",
+            new NodeIdentityConfiguration("Windows SDK node"),
+            InstalledHostPolicy.IsolatedApplication,
+            new ConnectionPolicy(ConnectionManagement.UserManaged));
         using var node = new PiqaeNode(new(
             HostMode.EmbeddedApplication,
             AvailabilityClass.ForegroundOnly,
             true,
             "com.piqae.tests",
-            unique));
+            unique,
+            hostConfiguration));
         Assert.True(node.Start().GetProperty("started").GetBoolean());
         var suspended = node.ApplyLifecycle(LifecycleEvent.SuspendImminent);
         Assert.False(suspended.GetProperty("lifecycle").GetProperty("accepting_cloud_leases").GetBoolean());
@@ -136,7 +143,34 @@ public sealed class NodeTests
         Assert.True(reconciliation.LoopCompleted);
         Assert.Equal(CloudReconcileSuccessScope.All, reconciliation.SuccessScope);
         Assert.Throws<ArgumentOutOfRangeException>(() => node.ReconcileCloud(TimeSpan.Zero));
+        var identity = node.UpdateNodeIdentity(
+            1,
+            new NodeIdentityConfiguration("Dispatch PC", site: "Warehouse", labels: ["sdk"]));
+        Assert.Equal((ulong)2, identity.Revision);
+        var conflict = Assert.Throws<PiqaeNodeException>(() => node.UpdateNodeIdentity(
+            1,
+            new NodeIdentityConfiguration("Stale PC")));
+        Assert.Equal("node_identity_revision_conflict", conflict.Code);
+        Assert.Equal((ulong)2, conflict.CurrentRevision);
         Assert.False(node.Stop().GetProperty("started").GetBoolean());
+    }
+
+    [Fact]
+    public void NativeAndPortableApplicationIdentifiersMustMatch()
+    {
+        var hostConfiguration = new HostConfiguration(
+            NodeHostProduct.Embedded,
+            "com.example.one",
+            new NodeIdentityConfiguration("Node"),
+            InstalledHostPolicy.IsolatedApplication,
+            new ConnectionPolicy(ConnectionManagement.UserManaged));
+        Assert.Throws<ArgumentException>(() => new PiqaeNode(new(
+            HostMode.EmbeddedApplication,
+            AvailabilityClass.ForegroundOnly,
+            true,
+            "com.example.two",
+            "state",
+            hostConfiguration)));
     }
 
     [Fact]

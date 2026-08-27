@@ -208,6 +208,13 @@ final class PiqaeNodeKitTests: XCTestCase {
 
     func testLinkedNativeRuntimeArtifactStartsWhenPresent() async throws {
         let applicationID = "com.piqae.tests.linked.\(UUID().uuidString.lowercased())"
+        let hostConfiguration = try PiqaeHostConfiguration(
+            product: .embedded,
+            applicationID: applicationID,
+            identity: try .init(displayName: "Linked test node"),
+            installedHostPolicy: .isolatedApplication,
+            connectionPolicy: try .init(management: .userManaged)
+        )
         let stateDirectory = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Piqae/embedded", isDirectory: true)
             .appendingPathComponent(applicationID, isDirectory: true)
@@ -216,7 +223,8 @@ final class PiqaeNodeKitTests: XCTestCase {
                 applicationID: applicationID,
                 dataDirectory: "linked-test",
                 availability: .continuousWhileAwake,
-                localOnly: true
+                localOnly: true,
+                hostConfiguration: hostConfiguration
             ),
             keyStore: PiqaeFixedHostKeyStore()
         )
@@ -239,7 +247,41 @@ final class PiqaeNodeKitTests: XCTestCase {
         let reconciliation = try await runtime.reconcileCloudOutcome(timeoutMilliseconds: 1_000)
         XCTAssertTrue(reconciliation.loopCompleted)
         XCTAssertFalse(reconciliation.cloudConfigured)
+        let identity = try PiqaeNodeIdentityConfiguration(
+            displayName: "Kitchen iPad", site: "Main", labels: ["pos"]
+        )
+        let updated = try await runtime.updateNodeIdentity(.init(
+            expectedRevision: 1, identity: identity
+        ))
+        XCTAssertEqual(updated.revision, 2)
+        do {
+            _ = try await runtime.updateNodeIdentity(.init(
+                expectedRevision: 1, identity: identity
+            ))
+            XCTFail("A stale native identity edit must fail closed")
+        } catch let PiqaeNativeRuntimeError.nodeIdentityRevisionConflict(currentRevision) {
+            XCTAssertEqual(currentRevision, 2)
+        }
         try await runtime.stop()
+        let restarted = PiqaeNativeRuntime(
+            configuration: PiqaeNativeRuntimeConfiguration(
+                applicationID: applicationID,
+                dataDirectory: "linked-test",
+                availability: .continuousWhileAwake,
+                localOnly: true,
+                hostConfiguration: hostConfiguration
+            ),
+            keyStore: PiqaeFixedHostKeyStore()
+        )
+        addTeardownBlock { try await restarted.stop() }
+        try await restarted.setWorkAvailableHandler {}
+        try await restarted.start()
+        let afterRestart = try await restarted.updateNodeIdentity(.init(
+            expectedRevision: 2,
+            identity: try .init(displayName: "Dispatch iPad", location: "Counter 2")
+        ))
+        XCTAssertEqual(afterRestart.revision, 3)
+        try await restarted.stop()
         XCTAssertEqual(workSignals.value, 0)
     }
 

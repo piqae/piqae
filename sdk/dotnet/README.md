@@ -24,15 +24,28 @@ Cloud-capable embedded hosts must install a connector-key provider before the
 runtime starts:
 
 ```csharp
+var host = new HostConfiguration(
+    NodeHostProduct.Embedded,
+    "com.example.shipping",
+    new NodeIdentityConfiguration("Shipping workstation", site: "Main warehouse"),
+    InstalledHostPolicy.IsolatedApplication,
+    new ConnectionPolicy(ConnectionManagement.UserManaged));
 var options = new PiqaeNodeOptions(
     HostMode.EmbeddedApplication,
     AvailabilityClass.ContinuousWhileAwake,
     LocalOnly: false,
     ApplicationId: "com.example.shipping",
-    DataDirectory: "node-runtime");
+    DataDirectory: "node-runtime",
+    HostConfiguration: host);
 var keys = new WindowsCredentialConnectorKeyProvider(options.ApplicationId);
 using var node = new PiqaeNode(options, keys);
 node.Start();
+
+// Revision-fenced display metadata is durable locally and reconciles to every
+// connector independently. It never rotates credentials, routes, or queues.
+var renamed = node.UpdateNodeIdentity(
+    expectedRevision: 1,
+    identity: new NodeIdentityConfiguration("Dispatch PC", site: "Main warehouse"));
 
 // The embedding host forwards real Windows resume/network facts. This asks
 // every configured connector for one immediate bounded sync; it does not wake
