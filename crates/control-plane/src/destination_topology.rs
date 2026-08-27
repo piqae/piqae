@@ -3645,8 +3645,6 @@ mod tests {
                     .create_job(&lifecycle_job, agent_id, None, b"lifecycle-replay-test")
                     .await
                     .expect("lifecycle job fixture");
-                sqlx::query("UPDATE jobs SET state='accepted_by_spooler' WHERE workspace_id=$1 AND environment_id=$2 AND id=$3")
-                    .bind(workspace_id.to_string()).bind(environment_id.to_string()).bind(lifecycle_job_id.to_string()).execute(&pool).await.expect("seed accepted lifecycle job");
                 let lifecycle = store
                     .begin_delivery_attempt(
                         tenant_scope,
@@ -3678,6 +3676,8 @@ mod tests {
                         .await
                         .expect("advance lifecycle attempt");
                 }
+                sqlx::query("UPDATE jobs SET state='accepted_by_spooler' WHERE workspace_id=$1 AND environment_id=$2 AND id=$3")
+                    .bind(workspace_id.to_string()).bind(environment_id.to_string()).bind(lifecycle_job_id.to_string()).execute(&pool).await.expect("seed accepted lifecycle job");
                 let mut last_sync = None;
                 for (sequence, state_name) in [
                     JobState::Spooling,
