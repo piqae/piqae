@@ -1511,7 +1511,10 @@ impl DestinationTopologyRepository for PostgresStore {
             return Err(StorageError::NotFound);
         }
         let job = sqlx::query(
-            "SELECT id,destination_id FROM jobs WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 FOR UPDATE",
+            "SELECT id,destination_id,state,final_at,expires_at>now() AS unexpired
+             FROM jobs
+             WHERE workspace_id=$1 AND environment_id=$2 AND id=$3
+             FOR UPDATE",
         )
         .bind(scope.workspace_id.to_string())
         .bind(scope.environment_id.to_string())
@@ -1519,6 +1522,21 @@ impl DestinationTopologyRepository for PostgresStore {
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(StorageError::NotFound)?;
+        let job_state: String = job.try_get("state")?;
+        let job_final_at: Option<DateTime<Utc>> = job.try_get("final_at")?;
+        let job_unexpired: bool = job.try_get("unexpired")?;
+        if job_final_at.is_some()
+            || !job_unexpired
+            || !matches!(
+                job_state.as_str(),
+                "registered" | "content_pending" | "waiting_for_agent" | "failed_retryable"
+            )
+        {
+            // The scheduler selected its candidate before acquiring this row
+            // lock. Revalidate after the lock so an expiry or responsibility
+            // transition that won the race cannot be followed by a new route.
+            return Err(StorageError::ConcurrentStateChange);
+        }
         let job_destination: Option<String> = job.try_get("destination_id")?;
         if job_destination
             .as_deref()
