@@ -1,0 +1,27 @@
+{
+  "suite": "printpacket.conformance/core-v1",
+  "profile": "printpacket.pdf-base14/v1",
+  "fixtures": {
+    "receipt-80mm": {
+      "template_sha256": "93554bac881890441088531a9030a2c7b89e7221400b1b8226aed33a86a25a1b",
+      "cache_key": "511ba47dd2e29e4df9c5d116ae58f6c3fa5ebc0ec1feb06c9430b78743f1dc19",
+      "output_sha256": "ed16c84b81b29ca03ca9f646e91a234b40286f581f012c84d7f4141fa8ab69db",
+      "output_bytes": 14786,
+      "pages": 1
+    },
+    "production-label-100x50": {
+      "template_sha256": "f9bb0f951e30f1a71768a4cd6821bfb2bded3b26062a4b29a344a02fec53107f",
+      "cache_key": "c00215a6077c02a590470b5c49eaefac84da57cf95b006b44b36e662a7723c85",
+      "output_sha256": "9db17f858486b78d69cf72edf87632e93b0cfcbc6913062df16e89c6b6e46971",
+      "output_bytes": 4659,
+      "pages": 1
+    },
+    "invoice-a4": {
+      "template_sha256": "89943b5462fbc9968d4f98c7b5e7a93b203e00b7976f54fe756467ee09a4ec17",
+      "cache_key": "0a4c4ef7988e18b3776d39f2e4531d87629df474462148107a7015f323c7c99f",
+      "output_sha256": "6cc1e18df2c73e8e7723b04393c0879563bf4fe6d7384d7c760699f99048d9e5",
+      "output_bytes": 1596,
+      "pages": 1
+    }
+  }
+}

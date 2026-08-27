@@ -1,0 +1,22 @@
+{
+  "template": {
+    "format": "printpacket/v1",
+    "media": { "kind": "continuous", "width_mm": 80, "margins": { "top_mm": 2, "right_mm": 2, "bottom_mm": 2, "left_mm": 2 } },
+    "theme": { "font_size_pt": 9, "line_height": 1.2, "text_color": { "red": 0, "green": 0, "blue": 0 } },
+    "body": [
+      { "type": "heading", "level": 1, "content": [{ "type": "text", "value": "Corner Store" }], "style": { "align": "center" } },
+      { "type": "divider", "width_pt": 0.5 },
+      { "type": "data_list", "items": { "type": "path", "path": ["lines"] }, "item": [
+        { "type": "row", "children": [
+          { "type": "paragraph", "content": [{ "type": "value", "value": { "type": "current_path", "path": ["name"] } }] },
+          { "type": "paragraph", "content": [{ "type": "value", "value": { "type": "current_path", "path": ["total"] } }], "style": { "align": "right" } }
+        ] }
+      ] },
+      { "type": "qr", "value": { "type": "path", "path": ["receipt_url"] }, "size_mm": 20, "error_correction": "M" }
+    ]
+  },
+  "data": {
+    "lines": [{ "name": "Flat white", "total": "$5.50" }, { "name": "Bagel", "total": "$8.00" }],
+    "receipt_url": "https://example.invalid/r/R-1042"
+  }
+}

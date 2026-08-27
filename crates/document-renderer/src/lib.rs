@@ -1,11 +1,12 @@
-//! Capability-free renderer for the Piqae Business Document open format.
+//! Capability-free reference renderer for the vendor-neutral `PrintPacket` format.
 //!
 //! The crate deliberately performs no file, font, or network I/O. It accepts a
 //! bounded semantic document and JSON data and produces deterministic PDF bytes.
 //! Renderer ABI v1 uses deterministic PDF Base-14 Helvetica with Windows-1252
 //! encoding. Characters outside that exact profile fail explicitly rather than
 //! being substituted. A later embedded-font ABI can extend scripts without
-//! changing the business-document semantics.
+//! changing the packet semantics. The legacy Piqae business-document identifier
+//! remains a lossless compatibility alias.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
@@ -23,7 +24,10 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
+/// Legacy compatibility identifier retained for stored Piqae revisions.
 pub const BUSINESS_DOCUMENT_FORMAT: &str = "piqae.business-document/v1";
+/// Canonical vendor-neutral `PrintPacket` identifier for new documents.
+pub const PRINT_PACKET_DOCUMENT_FORMAT: &str = "printpacket/v1";
 pub const RENDERER_VERSION: &str = concat!(
     "piqae-business-document-renderer/",
     env!("CARGO_PKG_VERSION")
@@ -35,6 +39,12 @@ const PAGE_COUNT_MARKER: &str = "\u{e001}\u{e001}\u{e001}\u{e001}";
 pub struct RenderLimits {
     pub max_nodes: usize,
     pub max_depth: usize,
+    pub max_expression_nodes: usize,
+    pub max_expression_depth: usize,
+    pub max_expression_values: usize,
+    pub max_path_segments: usize,
+    pub max_path_segment_bytes: usize,
+    pub max_literal_bytes: usize,
     pub max_repeat_items: usize,
     pub max_table_columns: usize,
     pub max_pages: usize,
@@ -47,6 +57,12 @@ impl Default for RenderLimits {
         Self {
             max_nodes: 20_000,
             max_depth: 32,
+            max_expression_nodes: 50_000,
+            max_expression_depth: 64,
+            max_expression_values: 1_024,
+            max_path_segments: 64,
+            max_path_segment_bytes: 120,
+            max_literal_bytes: 1024 * 1024,
             // A Shopify bulk run can contain 250 orders with many line items.
             // Keep the work strictly bounded while allowing that production
             // case without splitting it into slower independent renders.
@@ -757,7 +773,7 @@ pub fn render_with_metrics(
 /// # Errors
 /// Returns the first deterministic schema, capability, or configured-limit error.
 pub fn validate(spec: &BusinessDocumentV1, limits: RenderLimits) -> Result<(), RenderError> {
-    if spec.format != BUSINESS_DOCUMENT_FORMAT {
+    if spec.format != BUSINESS_DOCUMENT_FORMAT && spec.format != PRINT_PACKET_DOCUMENT_FORMAT {
         return Err(RenderError::UnsupportedVersion(spec.format.clone()));
     }
     if !(4.0..=72.0).contains(&spec.theme.font_size_pt)
@@ -783,14 +799,21 @@ pub fn validate(spec: &BusinessDocumentV1, limits: RenderLimits) -> Result<(), R
         }
     }
     let mut count = 0;
-    validate_nodes(&spec.body, 0, &mut count, limits)?;
+    let mut expression_count = 0;
+    validate_nodes(&spec.body, 0, &mut count, &mut expression_count, limits)?;
     if let Some(r) = &spec.header {
-        validate_nodes(&r.first, 1, &mut count, limits)?;
-        validate_nodes(&r.default, 1, &mut count, limits)?;
+        if !r.last.is_empty() {
+            return Err(RenderError::Unsupported("header.last"));
+        }
+        validate_nodes(&r.first, 1, &mut count, &mut expression_count, limits)?;
+        validate_nodes(&r.default, 1, &mut count, &mut expression_count, limits)?;
     }
     if let Some(r) = &spec.footer {
-        validate_nodes(&r.default, 1, &mut count, limits)?;
-        validate_nodes(&r.last, 1, &mut count, limits)?;
+        if !r.first.is_empty() {
+            return Err(RenderError::Unsupported("footer.first"));
+        }
+        validate_nodes(&r.default, 1, &mut count, &mut expression_count, limits)?;
+        validate_nodes(&r.last, 1, &mut count, &mut expression_count, limits)?;
     }
     Ok(())
 }
@@ -798,6 +821,7 @@ fn validate_nodes(
     nodes: &[Node],
     depth: usize,
     count: &mut usize,
+    expression_count: &mut usize,
     limits: RenderLimits,
 ) -> Result<(), RenderError> {
     if depth > limits.max_depth {
@@ -812,9 +836,14 @@ fn validate_nodes(
             Node::Section { children, .. }
             | Node::Stack { children, .. }
             | Node::Row { children, .. }
-            | Node::Repeat { children, .. }
             | Node::KeepTogether { children } => {
-                validate_nodes(children, depth + 1, count, limits)?
+                validate_nodes(children, depth + 1, count, expression_count, limits)?
+            }
+            Node::Repeat {
+                items, children, ..
+            } => {
+                validate_expr(items, 0, expression_count, limits)?;
+                validate_nodes(children, depth + 1, count, expression_count, limits)?
             }
             Node::Box { children, style } => {
                 if !style.padding_mm.is_finite()
@@ -824,7 +853,7 @@ fn validate_nodes(
                 {
                     return Err(RenderError::Invalid("box style"));
                 }
-                validate_nodes(children, depth + 1, count, limits)?
+                validate_nodes(children, depth + 1, count, expression_count, limits)?
             }
             Node::Grid {
                 columns, children, ..
@@ -832,15 +861,19 @@ fn validate_nodes(
                 if columns.is_empty() || columns.iter().any(|v| !v.is_finite() || *v <= 0.0) {
                     return Err(RenderError::Invalid("grid columns"));
                 }
-                validate_nodes(children, depth + 1, count, limits)?
+                validate_nodes(children, depth + 1, count, expression_count, limits)?
             }
             Node::Conditional {
-                then, otherwise, ..
+                condition,
+                then,
+                otherwise,
             } => {
-                validate_nodes(then, depth + 1, count, limits)?;
-                validate_nodes(otherwise, depth + 1, count, limits)?
+                validate_expr(condition, 0, expression_count, limits)?;
+                validate_nodes(then, depth + 1, count, expression_count, limits)?;
+                validate_nodes(otherwise, depth + 1, count, expression_count, limits)?
             }
             Node::DataList {
+                items,
                 header,
                 item,
                 empty,
@@ -850,11 +883,18 @@ fn validate_nodes(
                 if !gap_mm.is_finite() || !(0.0..=100.0).contains(gap_mm) {
                     return Err(RenderError::Invalid("data-list gap"));
                 }
-                validate_nodes(header, depth + 1, count, limits)?;
-                validate_nodes(item, depth + 1, count, limits)?;
-                validate_nodes(empty, depth + 1, count, limits)?;
+                validate_expr(items, 0, expression_count, limits)?;
+                validate_nodes(header, depth + 1, count, expression_count, limits)?;
+                validate_nodes(item, depth + 1, count, expression_count, limits)?;
+                validate_nodes(empty, depth + 1, count, expression_count, limits)?;
             }
-            Node::Table { columns, style, .. } => {
+            Node::Table {
+                items,
+                columns,
+                empty,
+                style,
+                ..
+            } => {
                 if columns.is_empty()
                     || columns.len() > limits.max_table_columns
                     || columns
@@ -870,9 +910,112 @@ fn validate_nodes(
                 {
                     return Err(RenderError::Invalid("table style"));
                 }
+                validate_expr(items, 0, expression_count, limits)?;
+                for column in columns {
+                    validate_inlines(&column.header, expression_count, limits)?;
+                    validate_inlines(&column.cell, expression_count, limits)?;
+                }
+                validate_nodes(empty, depth + 1, count, expression_count, limits)?;
             }
-            _ => {}
+            Node::Paragraph { content, .. } | Node::Heading { content, .. } => {
+                validate_inlines(content, expression_count, limits)?;
+            }
+            Node::ImageValue { resource, .. }
+            | Node::Qr {
+                value: resource, ..
+            }
+            | Node::Barcode {
+                value: resource, ..
+            } => validate_expr(resource, 0, expression_count, limits)?,
+            Node::Image { .. } | Node::Spacer { .. } | Node::Divider { .. } | Node::PageBreak => {}
         }
+    }
+    Ok(())
+}
+
+fn validate_inlines(
+    values: &[Inline],
+    expression_count: &mut usize,
+    limits: RenderLimits,
+) -> Result<(), RenderError> {
+    for value in values {
+        match value {
+            Inline::Text { value, .. } => {
+                if value.len() > limits.max_literal_bytes {
+                    return Err(RenderError::Limit("inline text bytes"));
+                }
+            }
+            Inline::Value { value, .. } => {
+                validate_expr(value, 0, expression_count, limits)?;
+            }
+            Inline::LineBreak => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_expr(
+    expression: &Expr,
+    depth: usize,
+    count: &mut usize,
+    limits: RenderLimits,
+) -> Result<(), RenderError> {
+    if depth > limits.max_expression_depth {
+        return Err(RenderError::Limit("expression depth"));
+    }
+    *count = count
+        .checked_add(1)
+        .ok_or(RenderError::Limit("expression nodes"))?;
+    if *count > limits.max_expression_nodes {
+        return Err(RenderError::Limit("expression nodes"));
+    }
+    let nested = |value: &Expr, count: &mut usize| validate_expr(value, depth + 1, count, limits);
+    match expression {
+        Expr::Literal { value } => {
+            if serde_json::to_vec(value)
+                .map_or(true, |bytes| bytes.len() > limits.max_literal_bytes)
+            {
+                return Err(RenderError::Limit("expression literal bytes"));
+            }
+        }
+        Expr::Path { path } | Expr::CurrentPath { path } => {
+            if path.len() > limits.max_path_segments
+                || path.iter().any(|segment| {
+                    segment.is_empty() || segment.len() > limits.max_path_segment_bytes
+                })
+            {
+                return Err(RenderError::Limit("expression path"));
+            }
+        }
+        Expr::Coalesce { values } | Expr::Concat { values } | Expr::Boolean { values, .. } => {
+            if values.len() > limits.max_expression_values {
+                return Err(RenderError::Limit("expression operands"));
+            }
+            for value in values {
+                nested(value, count)?;
+            }
+        }
+        Expr::Compare { left, right, .. }
+        | Expr::Arithmetic { left, right, .. }
+        | Expr::Contains {
+            collection: left,
+            value: right,
+        } => {
+            nested(left, count)?;
+            nested(right, count)?;
+        }
+        Expr::Not { value }
+        | Expr::Exists { value }
+        | Expr::FormatNumber { value, .. }
+        | Expr::FormatDate { value, .. }
+        | Expr::FormatString { value, .. } => nested(value, count)?,
+        Expr::FormatMoney {
+            amount, currency, ..
+        } => {
+            nested(amount, count)?;
+            nested(currency, count)?;
+        }
+        Expr::PageNumber | Expr::PageCount => {}
     }
     Ok(())
 }
@@ -3298,6 +3441,92 @@ mod tests {
             Err(RenderError::Unsupported(
                 "page context expressions are supported only as direct inline values"
             ))
+        );
+    }
+
+    #[test]
+    fn expression_depth_operands_paths_and_literals_are_bounded_before_render() {
+        let mut expression = Expr::Literal { value: json!(true) };
+        for _ in 0..66 {
+            expression = Expr::Not {
+                value: Box::new(expression),
+            };
+        }
+        let deep = document(vec![Node::Conditional {
+            condition: expression,
+            then: vec![text("unsafe")],
+            otherwise: vec![],
+        }]);
+        assert_eq!(
+            validate(&deep, RenderLimits::default()),
+            Err(RenderError::Limit("expression depth"))
+        );
+
+        let wide = document(vec![Node::Paragraph {
+            content: vec![Inline::Value {
+                value: Expr::Concat {
+                    values: (0..1_025)
+                        .map(|_| Expr::Literal { value: json!("x") })
+                        .collect(),
+                },
+                style: TextStyle::default(),
+            }],
+            style: TextStyle::default(),
+        }]);
+        assert_eq!(
+            validate(&wide, RenderLimits::default()),
+            Err(RenderError::Limit("expression operands"))
+        );
+
+        let path = document(vec![Node::Paragraph {
+            content: vec![Inline::Value {
+                value: Expr::Path {
+                    path: vec!["x".repeat(121)],
+                },
+                style: TextStyle::default(),
+            }],
+            style: TextStyle::default(),
+        }]);
+        assert_eq!(
+            validate(&path, RenderLimits::default()),
+            Err(RenderError::Limit("expression path"))
+        );
+
+        let literal = document(vec![Node::Conditional {
+            condition: Expr::Literal {
+                value: json!("x".repeat(1024 * 1024 + 1)),
+            },
+            then: vec![],
+            otherwise: vec![],
+        }]);
+        assert_eq!(
+            validate(&literal, RenderLimits::default()),
+            Err(RenderError::Limit("expression literal bytes"))
+        );
+    }
+
+    #[test]
+    fn region_fields_that_v1_cannot_render_are_rejected() {
+        let mut invalid_header = document(vec![]);
+        invalid_header.header = Some(Region {
+            first: vec![],
+            default: vec![],
+            last: vec![text("silently ignored before this fix")],
+        });
+        assert_eq!(
+            validate(&invalid_header, RenderLimits::default()),
+            Err(RenderError::Unsupported("header.last"))
+        );
+
+        let mut invalid_footer = document(vec![]);
+        invalid_footer.footer = Some(Region {
+            first: vec![text("silently ignored before this fix")],
+            default: vec![],
+            last: vec![],
+        });
+        assert_eq!(
+            validate(&invalid_footer, RenderLimits::default()),
+            Err(RenderError::Unsupported("footer.first"))
         );
     }
 }
