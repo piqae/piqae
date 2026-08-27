@@ -1653,9 +1653,13 @@ mod tests {
         );
         assert!(
             validate_document_spec(&serde_json::json!({
-                "format": "printpacket/v1", "media": {"kind": "paged", "size": "a4"},
-                "header": {"last": [{"type": "paragraph", "content": []}]},
-                "body": []
+                "format": "printpacket/v1",
+                "media": {
+                    "kind": "continuous",
+                    "width_mm": 58.0,
+                    "margins": {"top_mm": 2.0, "right_mm": 2.0, "bottom_mm": 2.0, "left_mm": 2.0}
+                },
+                "body": [{"type": "page_break"}]
             }))
             .is_err(),
             "semantic renderer constraints must be rejected before publishing"
