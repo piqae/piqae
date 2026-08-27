@@ -165,7 +165,7 @@ def generate_archive_sbom(archive: Path, package_name: str, version: str, output
                     {"algorithm": "SHA1", "checksumValue": entry["sha1"]},
                     {"algorithm": "SHA256", "checksumValue": entry["sha256"]},
                 ],
-                "licenseConcluded": "Apache-2.0",
+                "licenseConcluded": "NOASSERTION",
                 "licenseInfoInFiles": ["NOASSERTION"],
                 "copyrightText": "NOASSERTION",
             }
@@ -200,7 +200,7 @@ def generate_archive_sbom(archive: Path, package_name: str, version: str, output
                 "filesAnalyzed": True,
                 "packageVerificationCode": {"packageVerificationCodeValue": verification},
                 "checksums": [{"algorithm": "SHA256", "checksumValue": sha256(archive)}],
-                "licenseConcluded": "Apache-2.0",
+                "licenseConcluded": "NOASSERTION",
                 "licenseDeclared": "Apache-2.0",
                 "copyrightText": "NOASSERTION",
             }
@@ -259,6 +259,10 @@ def validate_archive_sbom(
         {"algorithm": "SHA256", "checksumValue": sha256(archive)}
     ]:
         raise ReleaseError("Apple archive SBOM package checksum is inconsistent")
+    if packages[0].get("licenseConcluded") != "NOASSERTION" or any(
+        entry.get("licenseConcluded") != "NOASSERTION" for entry in spdx_files.values()
+    ):
+        raise ReleaseError("Apple archive mixed-license conclusions must be NOASSERTION")
     verification = hashlib.sha1(
         "".join(sorted(sha1_values)).encode("ascii"), usedforsecurity=False
     ).hexdigest()
@@ -336,6 +340,11 @@ def stage(repository_root: Path, version: str, output: Path) -> None:
         shutil.copyfile(repository_root / "sdk/apple/README.md", package_root / "README.md")
         shutil.copyfile(repository_root / "LICENSE", package_root / "LICENSE")
         shutil.copyfile(repository_root / "NOTICE", package_root / "NOTICE")
+        native_cargo_sbom.write_third_party_license_report(
+            package_root / native_cargo_sbom.THIRD_PARTY_LICENSES_FILENAME,
+            repository_root,
+            APPLE_RUST_TARGETS,
+        )
         shutil.copyfile(
             repository_root / "sdk/native/include/piqae_node.h",
             package_root / "Sources/CPiqaeNodeABI/include/piqae_node.h",
@@ -462,6 +471,7 @@ def validate_stage(repository_root: Path, version: str, output: Path) -> dict[st
             manifest_name,
             f"{root}/LICENSE",
             f"{root}/NOTICE",
+            f"{root}/{native_cargo_sbom.THIRD_PARTY_LICENSES_FILENAME}",
             f"{root}/Sources/CPiqaeNodeABI/include/piqae_node.h",
             f"{root}/Sources/CPiqaeNodeABI/include/shim.h",
             f"{root}/Sources/PiqaeNodeKit/PiqaeNode.swift",
@@ -481,14 +491,25 @@ def validate_stage(repository_root: Path, version: str, output: Path) -> dict[st
         if not {
             "PiqaeNode.xcframework/LICENSE",
             "PiqaeNode.xcframework/NOTICE",
+            f"PiqaeNode.xcframework/{native_cargo_sbom.THIRD_PARTY_LICENSES_FILENAME}",
         }.issubset(native_names):
-            raise ReleaseError("Apple native archive is missing LICENSE or NOTICE")
+            raise ReleaseError("Apple native archive is missing licence evidence")
         if native_zip.read("PiqaeNode.xcframework/LICENSE") != (
             repository_root / "LICENSE"
         ).read_bytes() or native_zip.read("PiqaeNode.xcframework/NOTICE") != (
             repository_root / "NOTICE"
         ).read_bytes():
             raise ReleaseError("Apple native archive LICENSE or NOTICE does not match the repository")
+        try:
+            native_cargo_sbom.validate_third_party_license_report(
+                native_zip.read(
+                    f"PiqaeNode.xcframework/{native_cargo_sbom.THIRD_PARTY_LICENSES_FILENAME}"
+                ),
+                repository_root,
+                APPLE_RUST_TARGETS,
+            )
+        except native_cargo_sbom.NativeCargoSbomError as error:
+            raise ReleaseError(str(error)) from error
     with zipfile.ZipFile(package) as package_zip:
         package_root = f"PiqaeNodeKit-{version}"
         if package_zip.read(f"{package_root}/LICENSE") != (
@@ -497,6 +518,16 @@ def validate_stage(repository_root: Path, version: str, output: Path) -> dict[st
             repository_root / "NOTICE"
         ).read_bytes():
             raise ReleaseError("Apple source archive LICENSE or NOTICE does not match the repository")
+        try:
+            native_cargo_sbom.validate_third_party_license_report(
+                package_zip.read(
+                    f"{package_root}/{native_cargo_sbom.THIRD_PARTY_LICENSES_FILENAME}"
+                ),
+                repository_root,
+                APPLE_RUST_TARGETS,
+            )
+        except native_cargo_sbom.NativeCargoSbomError as error:
+            raise ReleaseError(str(error)) from error
     try:
         native_cargo_sbom.validate_native_sbom(
             archive,

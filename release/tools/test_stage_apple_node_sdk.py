@@ -33,11 +33,21 @@ class AppleNodeSdkStageTests(unittest.TestCase):
         self.revision = "a" * 40
         self.native_name = f"PiqaeNode.xcframework-{self.version}.zip"
         self.source_name = f"PiqaeNodeKit-{self.version}.zip"
+        with mock.patch.object(
+            MODULE.native_cargo_sbom, "load_cargo_graph", return_value=self.apple_graph
+        ):
+            third_party_licenses = MODULE.native_cargo_sbom.third_party_license_report_bytes(
+                self.repository_root, MODULE.APPLE_RUST_TARGETS
+            )
         with zipfile.ZipFile(self.stage / self.native_name, "w") as native:
             native.writestr("PiqaeNode.xcframework/LICENSE", (self.root / "LICENSE").read_bytes())
             native.writestr("PiqaeNode.xcframework/NOTICE", (self.root / "NOTICE").read_bytes())
             native.writestr("PiqaeNode.xcframework/Info.plist", "fixture")
             native.writestr("PiqaeNode.xcframework/macos/libPiqaeNode.a", "native")
+            native.writestr(
+                f"PiqaeNode.xcframework/{MODULE.native_cargo_sbom.THIRD_PARTY_LICENSES_FILENAME}",
+                third_party_licenses,
+            )
         package_root = f"PiqaeNodeKit-{self.version}"
         with zipfile.ZipFile(self.stage / self.source_name, "w") as package:
             package.writestr(
@@ -54,6 +64,10 @@ class AppleNodeSdkStageTests(unittest.TestCase):
             package.writestr(f"{package_root}/Sources/PiqaeNodeKit/PiqaeNode.swift", "source")
             package.writestr(f"{package_root}/LICENSE", (self.root / "LICENSE").read_bytes())
             package.writestr(f"{package_root}/NOTICE", (self.root / "NOTICE").read_bytes())
+            package.writestr(
+                f"{package_root}/{MODULE.native_cargo_sbom.THIRD_PARTY_LICENSES_FILENAME}",
+                third_party_licenses,
+            )
         native_hash = MODULE.sha256(self.stage / self.native_name)
         source_hash = MODULE.sha256(self.stage / self.source_name)
         self.native_sbom = f"PiqaeNode.xcframework-{self.version}.spdx.json"
@@ -165,6 +179,15 @@ class AppleNodeSdkStageTests(unittest.TestCase):
             archive.writestr(f"{package_root}/Sources/PiqaeNodeKit/PiqaeNode.swift", "s")
             archive.writestr(f"{package_root}/LICENSE", (self.root / "LICENSE").read_bytes())
             archive.writestr(f"{package_root}/NOTICE", (self.root / "NOTICE").read_bytes())
+            with mock.patch.object(
+                MODULE.native_cargo_sbom, "load_cargo_graph", return_value=self.apple_graph
+            ):
+                archive.writestr(
+                    f"{package_root}/{MODULE.native_cargo_sbom.THIRD_PARTY_LICENSES_FILENAME}",
+                    MODULE.native_cargo_sbom.third_party_license_report_bytes(
+                        self.repository_root, MODULE.APPLE_RUST_TARGETS
+                    ),
+                )
         source_hash = MODULE.sha256(package)
         self.manifest["source_package_sha256"] = source_hash
         self.write_manifest()
@@ -172,6 +195,24 @@ class AppleNodeSdkStageTests(unittest.TestCase):
             f"{source_hash}  {self.source_name}\n", encoding="ascii"
         )
         with self.assertRaisesRegex(MODULE.ReleaseError, "artifact URL"):
+            self.validate()
+
+    def test_rejects_tampered_third_party_licence_report(self) -> None:
+        archive_path = self.stage / self.native_name
+        rewritten = self.root / "tampered.zip"
+        report = f"PiqaeNode.xcframework/{MODULE.native_cargo_sbom.THIRD_PARTY_LICENSES_FILENAME}"
+        with zipfile.ZipFile(archive_path) as source, zipfile.ZipFile(rewritten, "w") as output:
+            for name in source.namelist():
+                contents = source.read(name)
+                output.writestr(name, b"{}\n" if name == report else contents)
+        rewritten.replace(archive_path)
+        native_hash = MODULE.sha256(archive_path)
+        self.manifest["sha256"] = native_hash
+        self.write_manifest()
+        (self.stage / f"{self.native_name}.sha256").write_text(
+            f"{native_hash}  {self.native_name}\n", encoding="ascii"
+        )
+        with self.assertRaisesRegex(MODULE.ReleaseError, "third-party licence report"):
             self.validate()
 
 

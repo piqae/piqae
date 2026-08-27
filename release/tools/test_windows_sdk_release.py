@@ -20,7 +20,7 @@ def nuspec(package_id: str, version: str, dependency: str = "[2.6.2]") -> str:
         if package_id == "Piqae.Node"
         else ""
     )
-    return f'''<?xml version="1.0"?><package><metadata><id>{package_id}</id><version>{version}</version>{dependency_xml}</metadata></package>'''
+    return f'''<?xml version="1.0"?><package><metadata><id>{package_id}</id><version>{version}</version><license type="expression">MIT</license>{dependency_xml}</metadata></package>'''
 
 
 class WindowsSdkReleaseTests(unittest.TestCase):
@@ -30,20 +30,24 @@ class WindowsSdkReleaseTests(unittest.TestCase):
         self.version = "1.2.3"
         self.package = self.root / f"Piqae.Node.{self.version}.nupkg"
         self.dependency = self.root / "BouncyCastle.Cryptography.2.6.2.nupkg"
-        self.write_package()
         with zipfile.ZipFile(self.dependency, "w") as archive:
             archive.writestr("BouncyCastle.Cryptography.nuspec", nuspec("BouncyCastle.Cryptography", "2.6.2"))
+            archive.writestr("LICENSE.md", "Copyright fixture\n\nMIT licence fixture\n")
+        self.write_package()
 
     def tearDown(self) -> None:
         self.fixture.cleanup()
 
     def write_package(self, dependency: str = "[2.6.2]", extra_runtime: bool = False) -> None:
+        report = self.root / MODULE.THIRD_PARTY_LICENSES_ENTRY
+        MODULE.generate_windows_third_party_license_report(self.dependency, report)
         with zipfile.ZipFile(self.package, "w") as archive:
             archive.writestr("Piqae.Node.nuspec", nuspec("Piqae.Node", self.version, dependency))
             archive.writestr(MODULE.MANAGED_ENTRY, b"managed")
             archive.writestr(MODULE.NATIVE_ENTRY, b"native")
             archive.writestr("LICENSE", (MODULE.REPOSITORY_ROOT / "LICENSE").read_bytes())
             archive.writestr("NOTICE", (MODULE.REPOSITORY_ROOT / "NOTICE").read_bytes())
+            archive.writestr(MODULE.THIRD_PARTY_LICENSES_ENTRY, report.read_bytes())
             if extra_runtime:
                 archive.writestr("runtimes/win-arm64/native/piqae_node_ffi.dll", b"wrong")
 
@@ -54,6 +58,65 @@ class WindowsSdkReleaseTests(unittest.TestCase):
         document = json.loads(output.read_text(encoding="utf-8"))
         names = {package["name"] for package in document["packages"]}
         self.assertEqual(names, {"Piqae.Node", "BouncyCastle.Cryptography", "piqae-node-ffi"})
+        packages = {package["name"]: package for package in document["packages"]}
+        self.assertEqual(packages["Piqae.Node"]["licenseConcluded"], "NOASSERTION")
+        self.assertEqual(packages["piqae-node-ffi"]["licenseConcluded"], "NOASSERTION")
+        native = next(
+            file for file in document["files"] if file["fileName"] == f"./{MODULE.NATIVE_ENTRY}"
+        )
+        self.assertEqual(native["licenseConcluded"], "NOASSERTION")
+
+    def test_rejects_unsafe_apache_only_native_license_conclusions(self) -> None:
+        output = self.root / "sdk.spdx.json"
+        MODULE.generate_sbom(self.package, self.dependency, self.version, output)
+        document = json.loads(output.read_text(encoding="utf-8"))
+        piqae = next(package for package in document["packages"] if package["name"] == "Piqae.Node")
+        piqae["licenseConcluded"] = "Apache-2.0"
+        output.write_text(json.dumps(document), encoding="utf-8")
+        with self.assertRaisesRegex(MODULE.ReleaseError, "mixed-license"):
+            MODULE.validate_sbom(output, self.package, self.version)
+
+        MODULE.generate_sbom(self.package, self.dependency, self.version, output)
+        document = json.loads(output.read_text(encoding="utf-8"))
+        native = next(
+            file for file in document["files"] if file["fileName"] == f"./{MODULE.NATIVE_ENTRY}"
+        )
+        native["licenseConcluded"] = "Apache-2.0"
+        output.write_text(json.dumps(document), encoding="utf-8")
+        with self.assertRaisesRegex(MODULE.ReleaseError, "native runtime"):
+            MODULE.validate_sbom(output, self.package, self.version)
+
+    def test_rejects_tampered_third_party_licence_report(self) -> None:
+        rewritten = self.root / "tampered.nupkg"
+        with zipfile.ZipFile(self.package) as source, zipfile.ZipFile(rewritten, "w") as output:
+            for name in source.namelist():
+                output.writestr(
+                    name,
+                    b"{}\n" if name == MODULE.THIRD_PARTY_LICENSES_ENTRY else source.read(name),
+                )
+        rewritten.replace(self.package)
+        with self.assertRaisesRegex(MODULE.ReleaseError, "third-party licence report"):
+            MODULE.validate_package(self.package, self.dependency, self.version)
+
+    def test_rejects_dependency_without_exact_licence_text(self) -> None:
+        with zipfile.ZipFile(self.dependency, "w") as archive:
+            archive.writestr(
+                "BouncyCastle.Cryptography.nuspec",
+                nuspec("BouncyCastle.Cryptography", "2.6.2"),
+            )
+        with self.assertRaisesRegex(MODULE.ReleaseError, "no exact bundled LICENSE.md text"):
+            MODULE.managed_dependency_license_package(self.dependency)
+
+    def test_rejects_dependency_with_changed_licence_declaration(self) -> None:
+        changed = nuspec("BouncyCastle.Cryptography", "2.6.2").replace(
+            '>MIT</license>',
+            '>Apache-2.0</license>',
+        )
+        with zipfile.ZipFile(self.dependency, "w") as archive:
+            archive.writestr("BouncyCastle.Cryptography.nuspec", changed)
+            archive.writestr("LICENSE.md", "Copyright fixture\n\nMIT licence fixture\n")
+        with self.assertRaisesRegex(MODULE.ReleaseError, "declaration"):
+            MODULE.managed_dependency_license_package(self.dependency)
 
     def test_rejects_floating_dependency(self) -> None:
         self.write_package(dependency="2.6.2")
@@ -119,11 +182,7 @@ class WindowsSdkReleaseTests(unittest.TestCase):
         archive_path = self.root / f"PiqaeNode-native-windows-x64-{self.version}.zip"
         with zipfile.ZipFile(archive_path, "w") as archive:
             for name in MODULE.NATIVE_ARCHIVE_ENTRIES:
-                contents = (
-                    (MODULE.REPOSITORY_ROOT / name).read_bytes()
-                    if name in MODULE.LICENSE_ENTRIES
-                    else f"fixture {name}".encode()
-                )
+                contents = self.native_entry_contents(name)
                 archive.writestr(name, contents)
         output = self.root / "native.spdx.json"
         MODULE.generate_native_sbom(archive_path, self.version, output)
@@ -139,24 +198,29 @@ class WindowsSdkReleaseTests(unittest.TestCase):
         archive_path = self.root / f"PiqaeNode-native-windows-x64-{self.version}.zip"
         with zipfile.ZipFile(archive_path, "w") as archive:
             for name in MODULE.NATIVE_ARCHIVE_ENTRIES - {"NOTICE"}:
-                contents = (
-                    (MODULE.REPOSITORY_ROOT / name).read_bytes()
-                    if name in MODULE.LICENSE_ENTRIES
-                    else f"fixture {name}".encode()
-                )
+                contents = self.native_entry_contents(name)
                 archive.writestr(name, contents)
         with self.assertRaisesRegex(MODULE.ReleaseError, "incomplete"):
+            MODULE.validate_native_archive(archive_path, self.version)
+
+    def test_native_archive_rejects_tampered_third_party_licence_report(self) -> None:
+        archive_path = self.root / f"PiqaeNode-native-windows-x64-{self.version}.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            for name in MODULE.NATIVE_ARCHIVE_ENTRIES:
+                contents = (
+                    b"{}\n"
+                    if name == MODULE.THIRD_PARTY_LICENSES_ENTRY
+                    else self.native_entry_contents(name)
+                )
+                archive.writestr(name, contents)
+        with self.assertRaisesRegex(MODULE.ReleaseError, "third-party licence report"):
             MODULE.validate_native_archive(archive_path, self.version)
 
     def test_sdk_manifest_binds_abi_contract_capabilities_and_both_archives(self) -> None:
         native_archive = self.root / f"PiqaeNode-native-windows-x64-{self.version}.zip"
         with zipfile.ZipFile(native_archive, "w") as archive:
             for name in MODULE.NATIVE_ARCHIVE_ENTRIES:
-                contents = (
-                    (MODULE.REPOSITORY_ROOT / name).read_bytes()
-                    if name in MODULE.LICENSE_ENTRIES
-                    else f"fixture {name}".encode()
-                )
+                contents = self.native_entry_contents(name)
                 archive.writestr(name, contents)
         nuget_sbom = self.root / "nuget.spdx.json"
         native_sbom = self.root / "native.spdx.json"
@@ -191,6 +255,15 @@ class WindowsSdkReleaseTests(unittest.TestCase):
                 self.version,
                 manifest,
             )
+
+    def native_entry_contents(self, name: str) -> bytes:
+        if name in MODULE.LICENSE_ENTRIES:
+            return (MODULE.REPOSITORY_ROOT / name).read_bytes()
+        if name == MODULE.THIRD_PARTY_LICENSES_ENTRY:
+            return MODULE.native_cargo_sbom.third_party_license_report_bytes(
+                MODULE.REPOSITORY_ROOT, (MODULE.WINDOWS_RUST_TARGET,)
+            )
+        return f"fixture {name}".encode()
 
 
 if __name__ == "__main__":

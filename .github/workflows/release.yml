@@ -244,6 +244,7 @@ jobs:
           $stage = "artifacts\windows-node-sdk\native"
           New-Item -ItemType Directory -Force $stage | Out-Null
           Copy-Item "target\x86_64-pc-windows-msvc\release\piqae_node_ffi.dll", "target\x86_64-pc-windows-msvc\release\piqae_node_ffi.dll.lib", "sdk\native\include\piqae_node.h", "LICENSE", "NOTICE", "sdk\dotnet\README.md" $stage
+          python release/tools/native_cargo_sbom.py generate-license-report --repository-root $PWD --target x86_64-pc-windows-msvc --output "$stage\THIRD_PARTY_LICENSES.json"
           $archive = "artifacts\windows-node-sdk\PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.zip"
           Compress-Archive -Path "$stage\*" -DestinationPath $archive
           Get-ChildItem "artifacts\windows-node-sdk\*.nupkg", $archive | ForEach-Object {

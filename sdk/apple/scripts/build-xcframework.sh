@@ -85,6 +85,14 @@ xcodebuild -create-xcframework \
 # travels inside the exact bytes covered by SwiftPM checksum and provenance.
 cp "$repository_root/LICENSE" "$output/LICENSE"
 cp "$repository_root/NOTICE" "$output/NOTICE"
+python3 "$repository_root/release/tools/native_cargo_sbom.py" generate-license-report \
+  --repository-root "$repository_root" \
+  --target aarch64-apple-darwin \
+  --target x86_64-apple-darwin \
+  --target aarch64-apple-ios \
+  --target aarch64-apple-ios-sim \
+  --target x86_64-apple-ios \
+  --output "$output/THIRD_PARTY_LICENSES.json"
 
 # Xcode emits AvailableLibraries in a nondeterministic order. Canonicalize that
 # array and the plist keys before normalizing filesystem metadata and zip order.

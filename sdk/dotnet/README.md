@@ -148,7 +148,9 @@ NuGet and dependency from an isolated local feed into a new consumer, publishes
 for `win-x64`, executes the packaged native ABI, requires ABI 1/contract 2, and
 checks the PrintPacket capability response, managed facade, dependency, and
 runtime DLL in the output. The NuGet and native C archives each contain the
-repository LICENSE and NOTICE and each has exact-file SPDX checksum and
+repository LICENSE and NOTICE and a regenerated locked target-specific
+`THIRD_PARTY_LICENSES.json`; the NuGet report also includes the pinned managed
+dependency. Each archive has exact-file SPDX checksum and
 containment evidence. The native C archive SBOM also contains the locked
 `x86_64-pc-windows-msvc` Cargo dependency graph with package sources, purls,
 checksums, declared licences, and exact `DEPENDS_ON` relationships; its

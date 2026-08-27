@@ -17,3 +17,9 @@ The generated report and SBOM for a specific artifact are authoritative because
 the exact dependency graph differs by platform and release. Maintainers must
 run `cargo xtask release check` before publishing and must not remove a
 third-party notice merely because Piqae itself is Apache-2.0.
+
+Embedded native SDK archives use `THIRD_PARTY_LICENSES.json`. The release gate
+regenerates it from the locked target-resolved dependency graph and requires
+exact bundled licence/attribution text for every reachable third-party package;
+it fails closed when package source has no reliable text. Windows NuGet evidence
+also includes the exact pinned managed dependency package licence.

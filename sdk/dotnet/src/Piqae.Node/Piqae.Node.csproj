@@ -26,5 +26,9 @@
           Include="$(PiqaeNativeLibrary)"
           Pack="true"
           PackagePath="runtimes/win-x64/native" />
+    <None Condition="'$(PiqaeThirdPartyLicenses)' != ''"
+          Include="$(PiqaeThirdPartyLicenses)"
+          Pack="true"
+          PackagePath="THIRD_PARTY_LICENSES.json" />
   </ItemGroup>
 </Project>
