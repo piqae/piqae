@@ -65,12 +65,14 @@ async fn stable_local_idempotency_job_reaches_the_fake_spooler() {
         .submit(LocalSubmission {
             job_id: "job_local_1b50fe719e9491e92621324d46b437b9".into(),
             submission_id: "local:fixture".into(),
+            printer_id: "printer-1".into(),
             printer_native_id: "fake-printer".into(),
             title: "virtual idempotency fixture".into(),
             content_path: PathBuf::from("/does/not/matter"),
             content_kind: "pdf".into(),
             options: JobOptions::default(),
             native_profile: None,
+            printer_native_binding: None,
             deadline_unix_ms: i64::MAX,
             route_fence: None,
         })

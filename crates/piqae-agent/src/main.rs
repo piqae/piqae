@@ -22,8 +22,8 @@ use hkdf::Hkdf;
 use p256::{PublicKey, SecretKey, ecdh::diffie_hellman, pkcs8::EncodePublicKey as _};
 use piqae_agent_client::{AgentClient, ClientError, DeviceIdentity, DeviceRequestSigner};
 use piqae_agent_core::{
-    AgentEngine, ContentStore, Executor, ExecutorFailure, FakeExecutor, LocalSubmission,
-    NativeAcceptance, NativeJobReference, SystemClock,
+    AgentEngine, ContentStore, DurableProfileSnapshot, Executor, ExecutorFailure, FakeExecutor,
+    LocalSubmission, NativeAcceptance, NativeJobReference, SystemClock,
     document_render::{
         NodeDocumentCapabilities, NodeRenderRequirement, NodeRenderResult, RENDERER_ABI,
         render_with_resources_or_fallback,
@@ -31,8 +31,9 @@ use piqae_agent_core::{
     document_resources::{DocumentResourceCache, NodeResourceDescriptor, RESOURCE_ABI},
 };
 use piqae_agent_storage::{
-    AcceptedJob, AgentStore, CloudAcceptIntent, CloudRouteProof, NativeProfileCapture,
-    PendingEvent, QueueCounts, StorageError, StoredLoadedMedia, StoredNamedProfile, StoredPrinter,
+    AcceptedJob, AgentStore, CloudAcceptIntent, CloudRouteProof, JobPersistenceFacts,
+    NativeProfileCapture, PendingEvent, PrinterNativeBindingPin, QueueCounts, StorageError,
+    StoredLoadedMedia, StoredNamedProfile, StoredPrinter,
 };
 use piqae_domain::{
     AgentId, ContentKind, EventId, JobEvent, JobFailureReason, JobId, JobState, NativeProfileKind,
@@ -529,6 +530,31 @@ impl Executor for SharedRuntimeExecutor {
         &mut self,
         mut submission: LocalSubmission,
     ) -> Result<NativeAcceptance, ExecutorFailure> {
+        // Serialize binding refresh with the complete RAW handoff. The pin is
+        // process/session scoped, so restart or any inventory generation
+        // change fails before route reservation or spooler contact.
+        let _native_binding_guard = if submission.content_kind == "raw" {
+            let guard = self.native_binding_session.refresh_lock.lock().await;
+            let valid = submission
+                .printer_native_binding
+                .as_ref()
+                .is_some_and(|pin| {
+                    pin.printer_id == submission.printer_id
+                        && self.native_binding_session.matches_pin(pin)
+                });
+            if !valid {
+                return Err(ExecutorFailure {
+                    code: "printer_native_binding_stale".into(),
+                    message: "the durable printer-native binding is no longer current".into(),
+                    retryable: false,
+                    handoff_may_have_succeeded: false,
+                    native_code: None,
+                });
+            }
+            Some(guard)
+        } else {
+            None
+        };
         let now = Utc::now();
         let reservation = self
             .coordinator
@@ -3447,6 +3473,22 @@ async fn submit_local_job(
     } else {
         None
     };
+    let printer_native_binding = if request.content_kind == ContentKind::Raw {
+        let session = Arc::clone(&engine.executor_mut().native_binding_session);
+        let matches = current_printer_native_bindings(engine.store(), &session)
+            .into_iter()
+            .filter(|binding| binding.printer_id == request.printer_id)
+            .collect::<Vec<_>>();
+        let [binding] = matches.as_slice() else {
+            return Err(control_failure(
+                "printer_native_binding_ambiguous",
+                "RAW local printing requires exactly one current printer-native language binding",
+            ));
+        };
+        Some(binding_pin(&session, binding))
+    } else {
+        None
+    };
     let mut request = request;
     request.printer_native_id = Some(printer.native_id);
     let input: Box<dyn tokio::io::AsyncRead + Unpin + Send> = match &request.content {
@@ -3461,14 +3503,21 @@ async fn submit_local_job(
                 .fetch_to_store(content_store, uri, None, None)
                 .await
                 .map_err(|error| control_failure("content_unavailable", &error.to_string()))?;
-            return accept_stored_local_job(engine, request, stored, profile_pin).await;
+            return accept_stored_local_job(
+                engine,
+                request,
+                stored,
+                profile_pin,
+                printer_native_binding,
+            )
+            .await;
         }
     };
     let stored = content_store
         .put(input)
         .await
         .map_err(|error| control_failure("content_store_failed", &error.to_string()))?;
-    accept_stored_local_job(engine, request, stored, profile_pin).await
+    accept_stored_local_job(engine, request, stored, profile_pin, printer_native_binding).await
 }
 
 async fn refresh_local_printers(
@@ -4115,6 +4164,16 @@ fn reprint_local_job(
         ));
     }
     let (job_id, digest) = reprint_job_identity(original_job_id, idempotency_key);
+    let facts = JobPersistenceFacts {
+        target_id: original.target_id.clone(),
+        binding_id: original.binding_id.clone(),
+        profile_id: original.profile_id.clone(),
+        profile_revision: original.profile_revision,
+        stock_id: original.stock_id.clone(),
+        loaded_media_snapshot_json: original.loaded_media_snapshot_json.clone(),
+        profile_snapshot_json: original.profile_snapshot_json.clone(),
+        printer_native_binding: original.printer_native_binding.clone(),
+    };
     let accepted = piqae_agent_storage::AcceptedJob {
         job_id,
         submission_id: format!("reprint:{original_job_id}:{digest}"),
@@ -4133,7 +4192,7 @@ fn reprint_local_job(
         cloud_managed: false,
     };
     let job = engine
-        .accept(&accepted)
+        .accept_with_facts(&accepted, &facts)
         .map_err(|error| control_failure("reprint_failed", &error.to_string()))?;
     Ok(LocalJobAccepted {
         job_id: job.job_id,
@@ -4148,6 +4207,7 @@ fn reprint_job_identity(original_job_id: &str, idempotency_key: &str) -> (String
     (format!("job_reprint_{}", &digest[..32]), digest)
 }
 
+#[allow(clippy::too_many_lines)]
 async fn submit_test_page(
     engine: &mut AgentEngine<SharedRuntimeExecutor>,
     content_store: &ContentStore,
@@ -4241,6 +4301,7 @@ async fn submit_test_page(
         },
         stored,
         Some((profile.profile_id.clone(), profile.revision)),
+        None,
     )
     .await?;
     engine
@@ -4357,6 +4418,7 @@ async fn accept_stored_local_job(
     request: LocalCreateJob,
     stored: piqae_agent_core::StoredContent,
     profile_pin: Option<(String, u64)>,
+    printer_native_binding: Option<PrinterNativeBindingPin>,
 ) -> Result<LocalJobAccepted, ControlFailure> {
     let (job_id, submission_id) = request.idempotency_key.as_deref().map_or_else(
         || {
@@ -4369,37 +4431,56 @@ async fn accept_stored_local_job(
     );
     let options_json = serde_json::to_string(&request.options)
         .map_err(|_| control_failure("invalid_options", "print options are invalid"))?;
+    let facts = JobPersistenceFacts {
+        profile_id: profile_pin
+            .as_ref()
+            .map(|(profile_id, _)| profile_id.clone()),
+        profile_revision: profile_pin.as_ref().map(|(_, revision)| *revision),
+        printer_native_binding,
+        ..JobPersistenceFacts::default()
+    };
+    let native_binding_session = Arc::clone(&engine.executor_mut().native_binding_session);
+    let native_binding_guard = if let Some(pin) = facts.printer_native_binding.as_ref() {
+        let guard = native_binding_session.refresh_lock.lock().await;
+        if !native_binding_session.matches_pin(pin) {
+            return Err(control_failure(
+                "printer_native_binding_stale",
+                "the selected printer-native language binding changed before local acceptance",
+            ));
+        }
+        Some(guard)
+    } else {
+        None
+    };
     engine
-        .accept(&AcceptedJob {
-            job_id: job_id.clone(),
-            submission_id,
-            printer_id: request.printer_id,
-            printer_native_id: request.printer_native_id.ok_or_else(|| {
-                control_failure(
-                    "printer_not_resolved",
-                    "the logical printer has no resolved native queue",
-                )
-            })?,
-            title: request.title,
-            content_sha256: stored.sha256,
-            content_path: stored.path.to_string_lossy().into_owned(),
-            content_kind: match request.content_kind {
-                ContentKind::Pdf => "pdf",
-                ContentKind::Raw => "raw",
-            }
-            .into(),
-            options_json,
-            expires_unix_ms: request.expires_unix_ms,
-            accepted_unix_ms: Utc::now().timestamp_millis(),
-            cloud_managed: false,
-        })
+        .accept_with_facts(
+            &AcceptedJob {
+                job_id: job_id.clone(),
+                submission_id,
+                printer_id: request.printer_id,
+                printer_native_id: request.printer_native_id.ok_or_else(|| {
+                    control_failure(
+                        "printer_not_resolved",
+                        "the logical printer has no resolved native queue",
+                    )
+                })?,
+                title: request.title,
+                content_sha256: stored.sha256,
+                content_path: stored.path.to_string_lossy().into_owned(),
+                content_kind: match request.content_kind {
+                    ContentKind::Pdf => "pdf",
+                    ContentKind::Raw => "raw",
+                }
+                .into(),
+                options_json,
+                expires_unix_ms: request.expires_unix_ms,
+                accepted_unix_ms: Utc::now().timestamp_millis(),
+                cloud_managed: false,
+            },
+            &facts,
+        )
         .map_err(|error| control_failure("local_accept_failed", &error.to_string()))?;
-    if let Some((profile_id, revision)) = &profile_pin {
-        engine
-            .store_mut()
-            .pin_job_profile(&job_id, None, None, profile_id, *revision, None, None)
-            .map_err(storage_control_failure)?;
-    }
+    drop(native_binding_guard);
     engine
         .run_once()
         .await
@@ -4690,7 +4771,8 @@ struct InstalledMaterializedOffer {
     stored: piqae_agent_core::StoredContent,
     printer: StoredPrinter,
     profile_pin: Option<ProfilePinMetadata>,
-    uses_current_printer_defaults: bool,
+    profile_snapshot_json: Option<String>,
+    printer_native_binding: Option<PrinterNativeBindingPin>,
 }
 
 #[derive(Clone)]
@@ -4764,12 +4846,50 @@ impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor
     }
 
     async fn invalid_pending(&mut self) -> Result<Vec<PendingCloudRelease>, CloudWorkerError> {
+        let observed_unix_ms = Utc::now().timestamp_millis();
         let intents = {
-            self.stores
-                .lock()
-                .await
+            let mut stores = self.stores.lock().await;
+            stores
                 .queue
-                .quarantine_invalid_cloud_accepts(Utc::now().timestamp_millis())
+                .quarantine_invalid_cloud_accepts(observed_unix_ms)
+                .map_err(|_| CloudWorkerError::new("pending_accept_quarantine_failed"))?;
+            let native_binding_session = Arc::clone(&stores.native_binding_session);
+            let _binding_guard = native_binding_session.refresh_lock.lock().await;
+            let pending = stores
+                .queue
+                .pending_cloud_accepts()
+                .map_err(|_| CloudWorkerError::new("pending_accept_read_failed"))?;
+            for intent in pending {
+                if intent.remote_accept_confirmed {
+                    continue;
+                }
+                let job = stores
+                    .queue
+                    .get_job(&intent.job_id)
+                    .map_err(|_| CloudWorkerError::new("pending_accept_read_failed"))?
+                    .ok_or_else(|| CloudWorkerError::new("pending_accept_invalid"))?;
+                let reason = if job.content_kind == "raw"
+                    && !job
+                        .printer_native_binding
+                        .as_ref()
+                        .is_some_and(|pin| native_binding_session.matches_pin(pin))
+                {
+                    Some("printer_native_binding_stale")
+                } else if job.profile_id.is_some() && job.profile_snapshot_json.is_none() {
+                    Some("profile_snapshot_required")
+                } else {
+                    None
+                };
+                if let Some(reason) = reason {
+                    stores
+                        .queue
+                        .quarantine_prepared_cloud_accept(&intent.job_id, reason, observed_unix_ms)
+                        .map_err(|_| CloudWorkerError::new("pending_accept_quarantine_failed"))?;
+                }
+            }
+            stores
+                .queue
+                .pending_cloud_release_cleanups()
                 .map_err(|_| CloudWorkerError::new("pending_accept_quarantine_failed"))?
         };
         let mut releases = Vec::new();
@@ -4787,7 +4907,7 @@ impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor
                 request: AgentReleaseLeaseRequest {
                     lease_id,
                     lease_token: intent.lease_token,
-                    reason: "route_reservation_required".into(),
+                    reason: intent.reason,
                 },
             });
         }
@@ -4803,6 +4923,7 @@ impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor
             .map_err(|_| CloudWorkerError::new("release_cleanup_complete_failed"))
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn prepare(
         &mut self,
         offer: &JobOffer,
@@ -4830,9 +4951,47 @@ impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor
             fencing_token: reservation.fencing_token.clone(),
         };
         let mut stores = self.stores.lock().await;
+        let native_binding_session = Arc::clone(&stores.native_binding_session);
+        let native_binding_guard = native_binding_session.refresh_lock.lock().await;
+        if offer.job.content_kind == ContentKind::Raw
+            && !materialized
+                .printer_native_binding
+                .as_ref()
+                .is_some_and(|pin| native_binding_session.matches_pin(pin))
+        {
+            return Err(CloudWorkerError::new("printer_native_binding_stale"));
+        }
+        let facts = JobPersistenceFacts {
+            target_id: materialized
+                .profile_pin
+                .as_ref()
+                .and_then(|pin| pin.target_id.clone()),
+            binding_id: materialized
+                .profile_pin
+                .as_ref()
+                .and_then(|pin| pin.binding_id.clone()),
+            profile_id: materialized
+                .profile_pin
+                .as_ref()
+                .map(|pin| pin.profile_id.clone()),
+            profile_revision: materialized
+                .profile_pin
+                .as_ref()
+                .map(|pin| pin.profile_revision),
+            stock_id: materialized
+                .profile_pin
+                .as_ref()
+                .and_then(|pin| pin.stock_id.clone()),
+            loaded_media_snapshot_json: materialized
+                .profile_pin
+                .as_ref()
+                .and_then(|pin| pin.loaded_media_snapshot_json.clone()),
+            profile_snapshot_json: materialized.profile_snapshot_json,
+            printer_native_binding: materialized.printer_native_binding,
+        };
         let local = stores
             .queue
-            .prepare_cloud_job(
+            .prepare_cloud_job_with_facts(
                 &AcceptedJob {
                     job_id: job_id.to_string(),
                     submission_id: format!("sub_{job_id}"),
@@ -4856,25 +5015,9 @@ impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor
                 &offer.lease_token,
                 offer.lease_expires_at.timestamp_millis(),
                 &route_proof,
+                &facts,
             )
             .map_err(|_| CloudWorkerError::new("durable_accept_prepare_failed"))?;
-        if let Some(pin) = materialized
-            .profile_pin
-            .filter(|_| !materialized.uses_current_printer_defaults)
-        {
-            stores
-                .queue
-                .pin_job_profile(
-                    &job_id.to_string(),
-                    pin.target_id.as_deref(),
-                    pin.binding_id.as_deref(),
-                    &pin.profile_id,
-                    pin.profile_revision,
-                    pin.stock_id.as_deref(),
-                    pin.loaded_media_snapshot_json.as_deref(),
-                )
-                .map_err(|_| CloudWorkerError::new("profile_pin_failed"))?;
-        }
         let intent = CloudAcceptIntent {
             job_id: job_id.to_string(),
             lease_id: offer.lease_id.to_string(),
@@ -4887,6 +5030,7 @@ impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor
             route_fencing_token: Some(route_proof.fencing_token),
             remote_accept_confirmed: false,
         };
+        drop(native_binding_guard);
         drop(stores);
         pending_cloud_acceptance(intent)
     }
@@ -5007,21 +5151,21 @@ async fn materialize_installed_offer(
     {
         return Err(CloudWorkerError::new("encrypted_profile_pin_required"));
     }
-    let (printer, uses_current_printer_defaults) = {
+    let (printer, profile_snapshot_json, printer_native_binding) = {
         let stores = stores.lock().await;
         let printer = resolve_cloud_offer_printer(&stores.inventory, &logical_printer_id)
             .map_err(|_| CloudWorkerError::new("printer_not_found"))?;
         if !printer.present {
             return Err(CloudWorkerError::new("printer_not_present"));
         }
-        validate_current_printer_native_offer(
+        let printer_native_binding = validate_current_printer_native_offer(
             offer.job.content_kind,
             &stores.inventory,
             &stores.native_binding_session,
             &offer.job.metadata,
             &logical_printer_id,
         )?;
-        let mut uses_current_printer_defaults = false;
+        let mut profile_snapshot_json = None;
         if let Some(pin) = &profile_pin {
             let profile = stores
                 .inventory
@@ -5034,7 +5178,7 @@ async fn materialize_installed_offer(
             if !status.permits_jobs() {
                 return Err(CloudWorkerError::new("profile_not_ready"));
             }
-            uses_current_printer_defaults = profile.uses_current_printer_defaults;
+            profile_snapshot_json = Some(durable_profile_snapshot(&stores.inventory, &profile)?);
             if let ContentDescriptor::EncryptedDownload { manifest, .. } = &offer.content {
                 let expected = format!("{}:{}", pin.profile_id, pin.profile_revision);
                 if manifest.binding.profile_revision != expected
@@ -5054,7 +5198,7 @@ async fn materialize_installed_offer(
         }
         validate_options(&printer, &offer.job.options)
             .map_err(|_| CloudWorkerError::new("unsupported_profile_option"))?;
-        (printer, uses_current_printer_defaults)
+        (printer, profile_snapshot_json, printer_native_binding)
     };
     let stored_content = materialize_descriptor(
         cloud,
@@ -5071,8 +5215,51 @@ async fn materialize_installed_offer(
         stored: stored_content,
         printer,
         profile_pin,
-        uses_current_printer_defaults,
+        profile_snapshot_json,
+        printer_native_binding,
     })
+}
+
+fn durable_profile_snapshot(
+    store: &AgentStore,
+    profile: &StoredNamedProfile,
+) -> Result<String, CloudWorkerError> {
+    let kind = serde_json::from_value::<NativeProfileKind>(serde_json::Value::String(
+        profile.native_kind.clone(),
+    ))
+    .map_err(|_| CloudWorkerError::new("profile_invalid"))?;
+    let snapshot = if kind == NativeProfileKind::PortableOptions {
+        DurableProfileSnapshot::Portable {
+            profile_id: profile.profile_id.clone(),
+            revision: profile.revision,
+        }
+    } else {
+        let native = store
+            .native_profile_blob(&profile.profile_id, profile.revision)
+            .map_err(|_| CloudWorkerError::new("profile_read_failed"))?
+            .ok_or_else(|| CloudWorkerError::new("profile_native_payload_missing"))?;
+        if profile.native_blob_id.as_deref() != Some(native.blob_id.as_str())
+            || profile.native_digest.as_deref() != Some(native.digest.as_str())
+            || profile.native_kind != native.native_kind
+        {
+            return Err(CloudWorkerError::new("profile_native_payload_mismatch"));
+        }
+        DurableProfileSnapshot::Native {
+            payload: Box::new(piqae_protocol::executor::NativeProfilePayload {
+                profile_id: profile.profile_id.clone(),
+                revision: profile.revision,
+                kind,
+                schema_version: native.schema_version,
+                digest: native.digest,
+                blob: native.native_blob,
+                safe_overrides: serde_json::from_str(&profile.safe_overrides_json)
+                    .map_err(|_| CloudWorkerError::new("profile_invalid"))?,
+                driver_fingerprint: serde_json::from_str(&profile.driver_fingerprint_json)
+                    .map_err(|_| CloudWorkerError::new("profile_invalid"))?,
+            }),
+        }
+    };
+    serde_json::to_string(&snapshot).map_err(|_| CloudWorkerError::new("profile_invalid"))
 }
 
 #[allow(
@@ -6369,6 +6556,7 @@ struct PrinterNativeBindingSession {
     process_session_id: String,
     generation: AtomicU64,
     refresh_lock: Mutex<()>,
+    current: std::sync::RwLock<Option<LocalPrinterNativeBindingEnvelope>>,
 }
 
 impl PrinterNativeBindingSession {
@@ -6377,6 +6565,7 @@ impl PrinterNativeBindingSession {
             process_session_id: uuid::Uuid::new_v4().simple().to_string(),
             generation: AtomicU64::new(0),
             refresh_lock: Mutex::new(()),
+            current: std::sync::RwLock::new(None),
         }
     }
 
@@ -6386,17 +6575,51 @@ impl PrinterNativeBindingSession {
             process_session_id: process_session_id.to_owned(),
             generation: AtomicU64::new(0),
             refresh_lock: Mutex::new(()),
+            current: std::sync::RwLock::new(None),
         }
     }
 
     fn begin_refresh(&self) -> u64 {
-        self.generation
+        let generation = self
+            .generation
             .fetch_add(1, Ordering::AcqRel)
-            .saturating_add(1)
+            .saturating_add(1);
+        if let Ok(mut current) = self.current.write() {
+            *current = None;
+        }
+        generation
     }
 
     fn current_generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
+    }
+
+    fn publish(&self, envelope: LocalPrinterNativeBindingEnvelope) -> Result<()> {
+        let mut current = self
+            .current
+            .write()
+            .map_err(|_| anyhow::anyhow!("printer-native binding session lock poisoned"))?;
+        *current = Some(envelope);
+        drop(current);
+        Ok(())
+    }
+
+    fn current_envelope(&self) -> Option<LocalPrinterNativeBindingEnvelope> {
+        self.current.read().ok()?.clone()
+    }
+
+    fn matches_pin(&self, pin: &PrinterNativeBindingPin) -> bool {
+        let Some(envelope) = self.current_envelope() else {
+            return false;
+        };
+        envelope.version == PRINTER_NATIVE_BINDING_ENVELOPE_VERSION
+            && envelope.process_session_id == pin.process_session_id
+            && envelope.generation == pin.generation
+            && envelope.generation == self.current_generation()
+            && envelope
+                .bindings
+                .iter()
+                .any(|binding| binding_matches_pin(binding, pin))
     }
 }
 
@@ -6433,6 +6656,7 @@ fn persist_printer_native_binding_envelope(
         PRINTER_NATIVE_BINDINGS_SETTING,
         &serde_json::to_string(&envelope)?,
     )?;
+    session.publish(envelope)?;
     Ok(())
 }
 
@@ -6440,7 +6664,7 @@ fn current_printer_native_bindings(
     store: &AgentStore,
     session: &PrinterNativeBindingSession,
 ) -> Vec<LocalPrinterNativeBinding> {
-    let envelope = match store.setting(PRINTER_NATIVE_BINDINGS_SETTING) {
+    let persisted = match store.setting(PRINTER_NATIVE_BINDINGS_SETTING) {
         Ok(Some(encoded)) => serde_json::from_str::<LocalPrinterNativeBindingEnvelope>(&encoded),
         Ok(None) => return Vec::new(),
         Err(error) => {
@@ -6448,11 +6672,15 @@ fn current_printer_native_bindings(
             return Vec::new();
         }
     };
-    let Ok(envelope) = envelope else {
+    let Ok(persisted) = persisted else {
         warn!("printer-native binding evidence was invalid; withdrawing native output");
         return Vec::new();
     };
-    if envelope.version != PRINTER_NATIVE_BINDING_ENVELOPE_VERSION
+    let Some(envelope) = session.current_envelope() else {
+        return Vec::new();
+    };
+    if envelope != persisted
+        || envelope.version != PRINTER_NATIVE_BINDING_ENVELOPE_VERSION
         || envelope.process_session_id != session.process_session_id
         || envelope.generation != session.current_generation()
     {
@@ -6479,18 +6707,53 @@ fn validate_current_printer_native_offer(
     session: &PrinterNativeBindingSession,
     metadata: &std::collections::BTreeMap<String, String>,
     printer_id: &str,
-) -> Result<(), CloudWorkerError> {
+) -> Result<Option<PrinterNativeBindingPin>, CloudWorkerError> {
     if content_kind != ContentKind::Raw {
-        return Ok(());
+        return Ok(None);
     }
-    if current_printer_native_bindings(store, session)
-        .iter()
-        .any(|binding| printer_native_offer_matches(metadata, printer_id, binding))
-    {
-        Ok(())
-    } else {
-        Err(CloudWorkerError::new("printer_native_binding_stale"))
+    current_printer_native_bindings(store, session)
+        .into_iter()
+        .find(|binding| printer_native_offer_matches(metadata, printer_id, binding))
+        .map(|binding| binding_pin(session, &binding))
+        .map(Some)
+        .ok_or_else(|| CloudWorkerError::new("printer_native_binding_stale"))
+}
+
+fn binding_pin(
+    session: &PrinterNativeBindingSession,
+    binding: &LocalPrinterNativeBinding,
+) -> PrinterNativeBindingPin {
+    let language = &binding.language_profile;
+    PrinterNativeBindingPin {
+        process_session_id: session.process_session_id.clone(),
+        generation: session.current_generation(),
+        printer_id: binding.printer_id.clone(),
+        output_profile_id: binding.output_profile_id.clone(),
+        language_profile_id: language.id.clone(),
+        language: language.language.clone(),
+        language_version: language.language_version.clone(),
+        profile_version: language.profile_version.clone(),
+        media_type: language.media_type.clone(),
+        driver_fingerprint_sha256: language.driver_fingerprint_sha256.clone(),
+        support_pack_digest_sha256: language.support_pack_digest_sha256.clone(),
     }
+}
+
+#[allow(
+    clippy::suspicious_operation_groupings,
+    reason = "the durable pin deliberately flattens nested language-profile field names"
+)]
+fn binding_matches_pin(binding: &LocalPrinterNativeBinding, pin: &PrinterNativeBindingPin) -> bool {
+    let language = &binding.language_profile;
+    binding.printer_id == pin.printer_id
+        && binding.output_profile_id == pin.output_profile_id
+        && language.id == pin.language_profile_id
+        && language.language == pin.language
+        && language.language_version == pin.language_version
+        && language.profile_version == pin.profile_version
+        && language.media_type == pin.media_type
+        && language.driver_fingerprint_sha256 == pin.driver_fingerprint_sha256
+        && language.support_pack_digest_sha256 == pin.support_pack_digest_sha256
 }
 
 fn printer_native_offer_matches(
@@ -8370,6 +8633,179 @@ mod tests {
             .is_ok(),
             "stale native evidence must not disable PDF"
         );
+    }
+
+    fn native_test_submission(
+        job_id: &str,
+        content_kind: &str,
+        pin: Option<PrinterNativeBindingPin>,
+    ) -> LocalSubmission {
+        LocalSubmission {
+            job_id: job_id.into(),
+            submission_id: format!("sub-{job_id}"),
+            printer_id: "ptr_fixture".into(),
+            printer_native_id: "native-fixture".into(),
+            title: "virtual binding fence".into(),
+            content_path: PathBuf::from("/virtual/not-read"),
+            content_kind: content_kind.into(),
+            options: piqae_domain::JobOptions::default(),
+            native_profile: None,
+            printer_native_binding: pin,
+            deadline_unix_ms: i64::MAX,
+            route_fence: None,
+        }
+    }
+
+    fn native_test_executor(
+        directory: &Path,
+        session: Arc<PrinterNativeBindingSession>,
+    ) -> SharedRuntimeExecutor {
+        SharedRuntimeExecutor {
+            runtime: Arc::new(Mutex::new(RuntimeExecutor::Fake(FakeExecutor::default()))),
+            coordinator: Arc::new(Mutex::new(
+                route_coordinator::RouteCoordinator::open(directory).expect("route coordinator"),
+            )),
+            observation_cache: Arc::new(Mutex::new(RouteObservationCache::default())),
+            native_binding_session: session,
+            connector_id: "virtual-connector".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_handoff_rejects_changed_generation_before_virtual_executor() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut store = AgentStore::in_memory().expect("store");
+        let binding = test_printer_native_binding();
+        let session = Arc::new(PrinterNativeBindingSession::fixture("current-process"));
+        let generation = session.begin_refresh();
+        persist_printer_native_binding_envelope(
+            &mut store,
+            &session,
+            generation,
+            std::slice::from_ref(&binding),
+        )
+        .expect("publish binding");
+        let pin = binding_pin(&session, &binding);
+        session.begin_refresh();
+
+        let mut executor = native_test_executor(directory.path(), Arc::clone(&session));
+        let failure = executor
+            .submit(native_test_submission("raw-changed", "raw", Some(pin)))
+            .await
+            .expect_err("changed generation must fail closed");
+        assert_eq!(failure.code, "printer_native_binding_stale");
+        assert!(!failure.retryable);
+        assert!(!failure.handoff_may_have_succeeded);
+        let runtime = executor.runtime.lock().await;
+        let RuntimeExecutor::Fake(fake) = &*runtime else {
+            panic!("virtual executor expected");
+        };
+        assert!(fake.submitted.is_empty());
+        drop(runtime);
+    }
+
+    #[tokio::test]
+    async fn raw_handoff_rejects_restart_pin_while_pdf_still_reaches_virtual_executor() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut store = AgentStore::in_memory().expect("store");
+        let binding = test_printer_native_binding();
+        let old_session = PrinterNativeBindingSession::fixture("old-process");
+        let generation = old_session.begin_refresh();
+        persist_printer_native_binding_envelope(
+            &mut store,
+            &old_session,
+            generation,
+            std::slice::from_ref(&binding),
+        )
+        .expect("publish old binding");
+        let pin = binding_pin(&old_session, &binding);
+        let restarted = Arc::new(PrinterNativeBindingSession::fixture("restarted-process"));
+        let mut executor = native_test_executor(directory.path(), restarted);
+
+        let failure = executor
+            .submit(native_test_submission("raw-restart", "raw", Some(pin)))
+            .await
+            .expect_err("restart pin must fail closed");
+        assert_eq!(failure.code, "printer_native_binding_stale");
+        executor
+            .submit(native_test_submission("pdf-restart", "pdf", None))
+            .await
+            .expect("PDF is not subject to printer-native binding fence");
+        let runtime = executor.runtime.lock().await;
+        let RuntimeExecutor::Fake(fake) = &*runtime else {
+            panic!("virtual executor expected");
+        };
+        assert_eq!(fake.submitted.len(), 1);
+        assert_eq!(fake.submitted[0].content_kind, "pdf");
+        drop(runtime);
+    }
+
+    #[tokio::test]
+    async fn accepted_raw_restart_failure_is_durable_and_never_claims_handoff() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let binding = test_printer_native_binding();
+        let old_session = PrinterNativeBindingSession::fixture("accepted-process");
+        let generation = old_session.begin_refresh();
+        let mut inventory = AgentStore::in_memory().expect("inventory");
+        persist_printer_native_binding_envelope(
+            &mut inventory,
+            &old_session,
+            generation,
+            std::slice::from_ref(&binding),
+        )
+        .expect("publish binding");
+        let pin = binding_pin(&old_session, &binding);
+        let executor = native_test_executor(
+            directory.path(),
+            Arc::new(PrinterNativeBindingSession::fixture("restarted-process")),
+        );
+        let mut engine = AgentEngine::new(
+            AgentStore::in_memory().expect("queue"),
+            executor,
+            SystemClock,
+        );
+        engine
+            .accept_with_facts(
+                &AcceptedJob {
+                    job_id: "accepted-raw-restart".into(),
+                    submission_id: "sub-accepted-raw-restart".into(),
+                    printer_id: "ptr_fixture".into(),
+                    printer_native_id: "native-fixture".into(),
+                    title: "accepted RAW restart".into(),
+                    content_sha256: "virtual-digest".into(),
+                    content_path: "/virtual/not-read".into(),
+                    content_kind: "raw".into(),
+                    options_json: "{}".into(),
+                    expires_unix_ms: None,
+                    accepted_unix_ms: Utc::now().timestamp_millis(),
+                    cloud_managed: true,
+                },
+                &JobPersistenceFacts {
+                    printer_native_binding: Some(pin),
+                    ..JobPersistenceFacts::default()
+                },
+            )
+            .expect("durable accepted responsibility");
+        engine.run_once().await.expect("bounded local failure");
+        let job = engine
+            .store()
+            .get_job("accepted-raw-restart")
+            .expect("query")
+            .expect("job");
+        assert_eq!(job.state, "failed_terminal");
+        let events = engine.store().pending_events(0, 20).expect("events");
+        let terminal = events.last().expect("terminal event");
+        assert_eq!(terminal.state, "failed_terminal");
+        assert_eq!(
+            terminal.reason.as_deref(),
+            Some("printer_native_binding_stale")
+        );
+        let runtime = engine.executor_mut().runtime.lock().await;
+        let RuntimeExecutor::Fake(fake) = &*runtime else {
+            panic!("virtual executor expected");
+        };
+        assert!(fake.submitted.is_empty());
+        drop(runtime);
     }
 
     #[tokio::test]

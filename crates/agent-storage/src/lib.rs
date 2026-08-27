@@ -114,6 +114,40 @@ pub struct AcceptedJob {
     pub cloud_managed: bool,
 }
 
+/// Exact printer-native language and process-generation facts authorized when
+/// a RAW job became durable. Every field is immutable with the job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrinterNativeBindingPin {
+    pub process_session_id: String,
+    pub generation: u64,
+    pub printer_id: String,
+    pub output_profile_id: String,
+    pub language_profile_id: String,
+    pub language: String,
+    pub language_version: String,
+    pub profile_version: String,
+    pub media_type: String,
+    pub driver_fingerprint_sha256: String,
+    pub support_pack_digest_sha256: String,
+}
+
+/// Immutable routing/profile facts committed with job responsibility.
+///
+/// `profile_snapshot_json` is the executor-ready portable or native profile
+/// selected from the shared node inventory.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JobPersistenceFacts {
+    pub target_id: Option<String>,
+    pub binding_id: Option<String>,
+    pub profile_id: Option<String>,
+    pub profile_revision: Option<u64>,
+    pub stock_id: Option<String>,
+    pub loaded_media_snapshot_json: Option<String>,
+    pub profile_snapshot_json: Option<String>,
+    pub printer_native_binding: Option<PrinterNativeBindingPin>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalJob {
     pub job_id: String,
@@ -135,6 +169,9 @@ pub struct LocalJob {
     pub profile_revision: Option<u64>,
     pub stock_id: Option<String>,
     pub loaded_media_snapshot_json: Option<String>,
+    pub cloud_managed: bool,
+    pub profile_snapshot_json: Option<String>,
+    pub printer_native_binding: Option<PrinterNativeBindingPin>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -779,6 +816,14 @@ impl AgentStore {
             (
                 "loaded_media_snapshot_json",
                 "TEXT CHECK (loaded_media_snapshot_json IS NULL OR json_valid(loaded_media_snapshot_json))",
+            ),
+            (
+                "profile_snapshot_json",
+                "TEXT CHECK (profile_snapshot_json IS NULL OR json_valid(profile_snapshot_json))",
+            ),
+            (
+                "printer_native_binding_json",
+                "TEXT CHECK (printer_native_binding_json IS NULL OR json_valid(printer_native_binding_json))",
             ),
         ] {
             ensure_column(&connection, "jobs", name, definition)?;
@@ -2320,21 +2365,38 @@ impl AgentStore {
     /// Returns an error for conflicting immutable metadata or if any part of
     /// the acceptance transaction fails.
     pub fn accept_job(&mut self, job: &AcceptedJob) -> Result<LocalJob, StorageError> {
+        self.accept_job_with_facts(job, &JobPersistenceFacts::default())
+    }
+
+    /// Atomically accepts a job together with its immutable routing, profile,
+    /// and printer-native facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error before responsibility is committed when any pinned
+    /// fact is incomplete, invalid, or conflicts with an existing job.
+    #[allow(clippy::too_many_lines)]
+    pub fn accept_job_with_facts(
+        &mut self,
+        job: &AcceptedJob,
+        facts: &JobPersistenceFacts,
+    ) -> Result<LocalJob, StorageError> {
+        validate_job_persistence_facts(facts)?;
+        validate_job_native_binding(job, facts)?;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         if let Some(existing) = query_job(&tx, &job.job_id)? {
-            let same = existing.submission_id == job.submission_id
-                && existing.printer_id == job.printer_id
-                && existing.content_sha256 == job.content_sha256
-                && existing.content_kind == job.content_kind;
+            let same = accepted_job_matches(&existing, job)
+                && job_persistence_facts_match(&existing, facts);
             if !same {
                 return Err(StorageError::JobConflict(job.job_id.clone()));
             }
             tx.commit()?;
             return Ok(existing);
         }
+        validate_profile_fact_tx(&tx, facts)?;
 
         tx.execute(
             "INSERT INTO printer_sequences (printer_id, next_sequence)
@@ -2379,9 +2441,13 @@ impl AgentStore {
              (job_id, submission_id, printer_id, printer_native_id,
               printer_sequence, title, content_sha256, content_path,
               content_kind, options_json, state, expires_unix_ms,
-              accepted_unix_ms, updated_unix_ms, cloud_managed)
+              accepted_unix_ms, updated_unix_ms, cloud_managed,
+              target_id, binding_id, profile_id, profile_revision, stock_id,
+              loaded_media_snapshot_json, profile_snapshot_json,
+              printer_native_binding_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                     'queued_local', ?11, ?12, ?12, ?13)",
+                     'queued_local', ?11, ?12, ?12, ?13, ?14, ?15, ?16,
+                     ?17, ?18, ?19, ?20, ?21)",
             params![
                 job.job_id,
                 job.submission_id,
@@ -2396,6 +2462,14 @@ impl AgentStore {
                 job.expires_unix_ms,
                 job.accepted_unix_ms,
                 job.cloud_managed,
+                facts.target_id,
+                facts.binding_id,
+                facts.profile_id,
+                facts.profile_revision,
+                facts.stock_id,
+                facts.loaded_media_snapshot_json,
+                facts.profile_snapshot_json,
+                encode_native_binding(facts)?,
             ],
         )?;
         append_event_tx(
@@ -2434,6 +2508,35 @@ impl AgentStore {
         lease_expires_unix_ms: i64,
         route: &CloudRouteProof,
     ) -> Result<LocalJob, StorageError> {
+        self.prepare_cloud_job_with_facts(
+            job,
+            lease_id,
+            lease_token,
+            lease_expires_unix_ms,
+            route,
+            &JobPersistenceFacts::default(),
+        )
+    }
+
+    /// Durably prepares cloud responsibility and every immutable execution
+    /// fact in one `SQLite` transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without leaving an acceptance intent when the profile
+    /// snapshot or printer-native binding is incomplete or invalid.
+    #[allow(clippy::too_many_lines)]
+    pub fn prepare_cloud_job_with_facts(
+        &mut self,
+        job: &AcceptedJob,
+        lease_id: &str,
+        lease_token: &str,
+        lease_expires_unix_ms: i64,
+        route: &CloudRouteProof,
+        facts: &JobPersistenceFacts,
+    ) -> Result<LocalJob, StorageError> {
+        validate_job_persistence_facts(facts)?;
+        validate_job_native_binding(job, facts)?;
         if !job.cloud_managed
             || lease_token.is_empty()
             || route.reservation_id.is_empty()
@@ -2449,10 +2552,8 @@ impl AgentStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(existing) = query_job(&transaction, &job.job_id)? {
-            let same = existing.submission_id == job.submission_id
-                && existing.printer_id == job.printer_id
-                && existing.content_sha256 == job.content_sha256
-                && existing.content_kind == job.content_kind;
+            let same = accepted_job_matches(&existing, job)
+                && job_persistence_facts_match(&existing, facts);
             if !same {
                 return Err(StorageError::JobConflict(job.job_id.clone()));
             }
@@ -2474,6 +2575,7 @@ impl AgentStore {
             transaction.commit()?;
             return Ok(existing);
         }
+        validate_profile_fact_tx(&transaction, facts)?;
 
         transaction.execute(
             "INSERT INTO printer_sequences (printer_id, next_sequence)
@@ -2522,9 +2624,13 @@ impl AgentStore {
               printer_sequence, title, content_sha256, content_path,
               content_kind, options_json, state, expires_unix_ms,
               accepted_unix_ms, updated_unix_ms, cloud_managed,
-              confidential, confidential_delete_after_unix_ms)
+              confidential, confidential_delete_after_unix_ms,
+              target_id, binding_id, profile_id, profile_revision, stock_id,
+              loaded_media_snapshot_json, profile_snapshot_json,
+              printer_native_binding_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                     'cloud_accept_pending', ?11, ?12, ?12, 1, ?13, NULL)",
+                     'cloud_accept_pending', ?11, ?12, ?12, 1, ?13, NULL,
+                     ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 job.job_id,
                 job.submission_id,
@@ -2539,6 +2645,14 @@ impl AgentStore {
                 job.expires_unix_ms,
                 job.accepted_unix_ms,
                 i64::from(confidential),
+                facts.target_id,
+                facts.binding_id,
+                facts.profile_id,
+                facts.profile_revision,
+                facts.stock_id,
+                facts.loaded_media_snapshot_json,
+                facts.profile_snapshot_json,
+                encode_native_binding(facts)?,
             ],
         )?;
         let local = query_job(&transaction, &job.job_id)?
@@ -2854,6 +2968,74 @@ impl AgentStore {
             .map_err(Into::into)
     }
 
+    /// Quarantines one not-yet-confirmed cloud intent whose immutable local
+    /// execution facts are no longer valid. Remote responsibility has not
+    /// transferred, so the lease can be released without making the job runnable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid reason or failed quarantine transaction.
+    pub fn quarantine_prepared_cloud_accept(
+        &mut self,
+        job_id: &str,
+        reason: &str,
+        observed_unix_ms: i64,
+    ) -> Result<Option<CloudReleaseCleanup>, StorageError> {
+        if reason.is_empty() || reason.len() > 128 {
+            return Err(StorageError::InvalidLocalEvent(
+                "cloud quarantine reason is invalid".into(),
+            ));
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let cleanup = transaction
+            .query_row(
+                "SELECT job_id, lease_id, lease_token
+                 FROM cloud_accept_intents
+                 WHERE job_id = ?1 AND acceptance_state = 'prepared'",
+                [job_id],
+                |row| {
+                    Ok(CloudReleaseCleanup {
+                        job_id: row.get(0)?,
+                        lease_id: row.get(1)?,
+                        lease_token: row.get(2)?,
+                        reason: reason.to_owned(),
+                    })
+                },
+            )
+            .optional()?;
+        let Some(cleanup) = cleanup else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        transaction.execute(
+            "INSERT INTO cloud_release_cleanups
+             (job_id, lease_id, lease_token, reason, quarantined_unix_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(job_id) DO NOTHING",
+            params![
+                cleanup.job_id,
+                cleanup.lease_id,
+                cleanup.lease_token,
+                cleanup.reason,
+                observed_unix_ms
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM cloud_accept_intents
+             WHERE job_id = ?1 AND acceptance_state = 'prepared'",
+            [job_id],
+        )?;
+        transaction.execute(
+            "UPDATE jobs SET state = 'cancelled', updated_unix_ms = ?2
+             WHERE job_id = ?1 AND state = 'cloud_accept_pending'",
+            params![job_id, observed_unix_ms],
+        )?;
+        transaction.commit()?;
+        Ok(Some(cleanup))
+    }
+
     /// Removes one cleanup only after the authority has reached a safe disposition.
     ///
     /// # Errors
@@ -3083,7 +3265,8 @@ impl AgentStore {
                     printer_sequence, title, content_sha256, content_path,
                     content_kind, options_json, state, expires_unix_ms,
                     native_job_id, target_id, binding_id, profile_id,
-                    profile_revision, stock_id, loaded_media_snapshot_json
+                    profile_revision, stock_id, loaded_media_snapshot_json,
+                    cloud_managed, profile_snapshot_json, printer_native_binding_json
              FROM jobs WHERE printer_id = ?1
              ORDER BY printer_sequence DESC LIMIT ?2",
         )?;
@@ -3111,7 +3294,8 @@ impl AgentStore {
                     printer_sequence, title, content_sha256, content_path,
                     content_kind, options_json, state, expires_unix_ms,
                     native_job_id, target_id, binding_id, profile_id,
-                    profile_revision, stock_id, loaded_media_snapshot_json
+                    profile_revision, stock_id, loaded_media_snapshot_json,
+                    cloud_managed, profile_snapshot_json, printer_native_binding_json
              FROM jobs ORDER BY accepted_unix_ms DESC, job_id DESC LIMIT ?1 OFFSET ?2",
         )?;
         let rows = statement.query_map(params![bounded_limit, bounded_offset], row_to_job)?;
@@ -3160,7 +3344,8 @@ impl AgentStore {
                     j.content_kind, j.options_json, j.state, j.expires_unix_ms,
                     j.native_job_id, j.target_id, j.binding_id, j.profile_id,
                     j.profile_revision, j.stock_id,
-                    j.loaded_media_snapshot_json
+                    j.loaded_media_snapshot_json, j.cloud_managed,
+                    j.profile_snapshot_json, j.printer_native_binding_json
              FROM jobs j
              WHERE j.state IN ('queued_local', 'failed_retryable')
                AND (j.next_attempt_unix_ms IS NULL OR j.next_attempt_unix_ms <= ?1)
@@ -3416,6 +3601,8 @@ impl AgentStore {
                     j.content_kind, j.options_json, j.state, j.expires_unix_ms,
                     j.native_job_id, j.target_id, j.binding_id, j.profile_id,
                     j.profile_revision, j.stock_id, j.loaded_media_snapshot_json,
+                    j.cloud_managed, j.profile_snapshot_json,
+                    j.printer_native_binding_json,
                     r.next_observe_unix_ms,
                     r.uncertainty_deadline_unix_ms, r.attempt_count,
                     r.cancel_requested
@@ -3451,11 +3638,14 @@ impl AgentStore {
                     profile_revision: row.get(16)?,
                     stock_id: row.get(17)?,
                     loaded_media_snapshot_json: row.get(18)?,
+                    cloud_managed: row.get(19)?,
+                    profile_snapshot_json: row.get(20)?,
+                    printer_native_binding: decode_native_binding(row, 21)?,
                 },
-                next_observe_unix_ms: row.get(19)?,
-                uncertainty_deadline_unix_ms: row.get(20)?,
-                attempt_count: row.get(21)?,
-                cancel_requested: row.get(22)?,
+                next_observe_unix_ms: row.get(22)?,
+                uncertainty_deadline_unix_ms: row.get(23)?,
+                attempt_count: row.get(24)?,
+                cancel_requested: row.get(25)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -3847,7 +4037,8 @@ fn query_job(connection: &Connection, job_id: &str) -> Result<Option<LocalJob>, 
                     printer_sequence, title, content_sha256, content_path,
                     content_kind, options_json, state, expires_unix_ms,
                     native_job_id, target_id, binding_id, profile_id,
-                    profile_revision, stock_id, loaded_media_snapshot_json
+                    profile_revision, stock_id, loaded_media_snapshot_json,
+                    cloud_managed, profile_snapshot_json, printer_native_binding_json
              FROM jobs WHERE job_id = ?1",
             [job_id],
             row_to_job,
@@ -4226,6 +4417,157 @@ fn row_to_cloud_accept_intent(
     })
 }
 
+fn accepted_job_matches(existing: &LocalJob, offered: &AcceptedJob) -> bool {
+    existing.submission_id == offered.submission_id
+        && existing.printer_id == offered.printer_id
+        && existing.printer_native_id == offered.printer_native_id
+        && existing.title == offered.title
+        && existing.content_sha256 == offered.content_sha256
+        && existing.content_kind == offered.content_kind
+        && existing.options_json == offered.options_json
+        && existing.expires_unix_ms == offered.expires_unix_ms
+        && existing.cloud_managed == offered.cloud_managed
+}
+
+fn validate_job_persistence_facts(facts: &JobPersistenceFacts) -> Result<(), StorageError> {
+    if facts.profile_id.is_some() != facts.profile_revision.is_some() {
+        return Err(StorageError::InvalidLocalEvent(
+            "profile identity and revision must be pinned together".into(),
+        ));
+    }
+    if facts.profile_snapshot_json.is_some() && facts.profile_id.is_none() {
+        return Err(StorageError::InvalidLocalEvent(
+            "profile snapshot requires an exact profile revision".into(),
+        ));
+    }
+    for encoded in [
+        facts.loaded_media_snapshot_json.as_deref(),
+        facts.profile_snapshot_json.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if encoded.len() > MAX_NATIVE_PROFILE_BLOB_BYTES.saturating_mul(2) {
+            return Err(StorageError::InvalidLocalEvent(
+                "job persistence snapshot exceeds the local limit".into(),
+            ));
+        }
+        serde_json::from_str::<serde_json::Value>(encoded)?;
+    }
+    if let Some(pin) = &facts.printer_native_binding {
+        let bounded = [
+            &pin.process_session_id,
+            &pin.printer_id,
+            &pin.output_profile_id,
+            &pin.language_profile_id,
+            &pin.language,
+            &pin.language_version,
+            &pin.profile_version,
+            &pin.media_type,
+        ];
+        if pin.generation == 0
+            || bounded
+                .into_iter()
+                .any(|value| value.is_empty() || value.len() > 512)
+            || !is_sha256_hex(&pin.driver_fingerprint_sha256)
+            || !is_sha256_hex(&pin.support_pack_digest_sha256)
+        {
+            return Err(StorageError::InvalidLocalEvent(
+                "printer-native binding pin is invalid".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_job_native_binding(
+    job: &AcceptedJob,
+    facts: &JobPersistenceFacts,
+) -> Result<(), StorageError> {
+    if let Some(pin) = &facts.printer_native_binding
+        && pin.printer_id != job.printer_id
+    {
+        return Err(StorageError::InvalidLocalEvent(
+            "printer-native binding does not match the job printer".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn encode_native_binding(facts: &JobPersistenceFacts) -> Result<Option<String>, StorageError> {
+    facts
+        .printer_native_binding
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(Into::into)
+}
+
+fn validate_profile_fact_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    facts: &JobPersistenceFacts,
+) -> Result<(), StorageError> {
+    let (Some(profile_id), Some(revision)) = (&facts.profile_id, facts.profile_revision) else {
+        return Ok(());
+    };
+    // Cloud connector queues carry an immutable executor-ready snapshot from
+    // their separate shared inventory. Local queues instead prove the exact
+    // revision exists in this same transaction.
+    if facts.profile_snapshot_json.is_some() {
+        return Ok(());
+    }
+    let exists: bool = transaction.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM printer_profiles
+           WHERE profile_id = ?1 AND revision = ?2 AND deleted = 0
+         )",
+        params![profile_id, revision],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Err(StorageError::InvalidPrinterProfile(format!(
+            "profile {profile_id} revision {revision} was not found"
+        )));
+    }
+    Ok(())
+}
+
+fn job_persistence_facts_match(existing: &LocalJob, facts: &JobPersistenceFacts) -> bool {
+    existing.target_id == facts.target_id
+        && existing.binding_id == facts.binding_id
+        && existing.profile_id == facts.profile_id
+        && existing.profile_revision == facts.profile_revision
+        && existing.stock_id == facts.stock_id
+        && existing.loaded_media_snapshot_json == facts.loaded_media_snapshot_json
+        && existing.profile_snapshot_json == facts.profile_snapshot_json
+        && existing.printer_native_binding == facts.printer_native_binding
+}
+
+fn decode_native_binding(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> Result<Option<PrinterNativeBindingPin>, rusqlite::Error> {
+    let encoded = row.get::<_, Option<String>>(index)?;
+    encoded
+        .map(|encoded| {
+            serde_json::from_str(&encoded).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    index,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()
+}
+
 fn row_to_job(row: &rusqlite::Row<'_>) -> Result<LocalJob, rusqlite::Error> {
     Ok(LocalJob {
         job_id: row.get(0)?,
@@ -4247,6 +4589,9 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> Result<LocalJob, rusqlite::Error> {
         profile_revision: row.get(16)?,
         stock_id: row.get(17)?,
         loaded_media_snapshot_json: row.get(18)?,
+        cloud_managed: row.get(19)?,
+        profile_snapshot_json: row.get(20)?,
+        printer_native_binding: decode_native_binding(row, 21)?,
     })
 }
 
@@ -4480,6 +4825,171 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].state, "queued_local");
         assert!(store.integrity_check().unwrap());
+    }
+
+    fn native_binding_pin() -> PrinterNativeBindingPin {
+        PrinterNativeBindingPin {
+            process_session_id: "session-a".into(),
+            generation: 7,
+            printer_id: "p1".into(),
+            output_profile_id: "zpl/v1".into(),
+            language_profile_id: "zpl/v1".into(),
+            language: "zpl".into(),
+            language_version: "2".into(),
+            profile_version: "1.0.0".into(),
+            media_type: "application/vnd.zebra-zpl".into(),
+            driver_fingerprint_sha256: "a".repeat(64),
+            support_pack_digest_sha256: "b".repeat(64),
+        }
+    }
+
+    #[test]
+    fn cloud_execution_facts_are_atomic_durable_and_exactly_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("atomic-facts.sqlite");
+        let mut cloud = job("cloud-facts", "p1", 10);
+        cloud.cloud_managed = true;
+        cloud.content_kind = "raw".into();
+        let facts = JobPersistenceFacts {
+            profile_id: Some("profile-a".into()),
+            profile_revision: Some(3),
+            profile_snapshot_json: Some(
+                r#"{"kind":"portable","profile_id":"profile-a","revision":3}"#.into(),
+            ),
+            printer_native_binding: Some(native_binding_pin()),
+            ..JobPersistenceFacts::default()
+        };
+        {
+            let mut store = AgentStore::open(&database).unwrap();
+            let first = store
+                .prepare_cloud_job_with_facts(
+                    &cloud,
+                    "lease-a",
+                    "token-a",
+                    100,
+                    &cloud_route_proof(),
+                    &facts,
+                )
+                .unwrap();
+            assert_eq!(first.profile_snapshot_json, facts.profile_snapshot_json);
+            assert_eq!(first.printer_native_binding, facts.printer_native_binding);
+        }
+        let mut restarted = AgentStore::open(&database).unwrap();
+        let replay = restarted
+            .prepare_cloud_job_with_facts(
+                &cloud,
+                "lease-a",
+                "token-a",
+                100,
+                &cloud_route_proof(),
+                &facts,
+            )
+            .unwrap();
+        assert_eq!(replay.printer_native_binding, facts.printer_native_binding);
+
+        let mut changed_options = cloud.clone();
+        changed_options.options_json = r#"{"copies":2}"#.into();
+        assert!(matches!(
+            restarted.prepare_cloud_job_with_facts(
+                &changed_options,
+                "lease-a",
+                "token-a",
+                100,
+                &cloud_route_proof(),
+                &facts,
+            ),
+            Err(StorageError::JobConflict(_))
+        ));
+        let mut changed_facts = facts.clone();
+        changed_facts
+            .printer_native_binding
+            .as_mut()
+            .unwrap()
+            .generation = 8;
+        assert!(matches!(
+            restarted.prepare_cloud_job_with_facts(
+                &cloud,
+                "lease-a",
+                "token-a",
+                100,
+                &cloud_route_proof(),
+                &changed_facts,
+            ),
+            Err(StorageError::JobConflict(_))
+        ));
+    }
+
+    #[test]
+    fn invalid_atomic_profile_facts_leave_no_job_or_cloud_intent() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let mut cloud = job("invalid-facts", "p1", 10);
+        cloud.cloud_managed = true;
+        let facts = JobPersistenceFacts {
+            profile_id: Some("missing-profile".into()),
+            profile_revision: Some(1),
+            profile_snapshot_json: Some("not-json".into()),
+            ..JobPersistenceFacts::default()
+        };
+        assert!(
+            store
+                .prepare_cloud_job_with_facts(
+                    &cloud,
+                    "lease",
+                    "token",
+                    100,
+                    &cloud_route_proof(),
+                    &facts,
+                )
+                .is_err()
+        );
+        assert!(store.get_job("invalid-facts").unwrap().is_none());
+        assert!(store.pending_cloud_accepts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stale_prepared_native_intent_quarantines_but_confirmed_responsibility_does_not() {
+        let mut store = AgentStore::in_memory().unwrap();
+        for job_id in ["prepared", "confirmed"] {
+            let mut cloud = job(job_id, "p1", 10);
+            cloud.cloud_managed = true;
+            cloud.content_kind = "raw".into();
+            store
+                .prepare_cloud_job_with_facts(
+                    &cloud,
+                    &format!("lease-{job_id}"),
+                    "token",
+                    100,
+                    &cloud_route_proof(),
+                    &JobPersistenceFacts {
+                        printer_native_binding: Some(native_binding_pin()),
+                        ..JobPersistenceFacts::default()
+                    },
+                )
+                .unwrap();
+        }
+        store.confirm_cloud_accept("confirmed", 11).unwrap();
+        let cleanup = store
+            .quarantine_prepared_cloud_accept("prepared", "printer_native_binding_stale", 12)
+            .unwrap()
+            .expect("prepared cleanup");
+        assert_eq!(cleanup.reason, "printer_native_binding_stale");
+        assert_eq!(
+            store.get_job("prepared").unwrap().unwrap().state,
+            "cancelled"
+        );
+        assert!(
+            store
+                .quarantine_prepared_cloud_accept("confirmed", "printer_native_binding_stale", 12,)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .pending_cloud_accepts()
+                .unwrap()
+                .iter()
+                .any(|intent| intent.job_id == "confirmed" && intent.remote_accept_confirmed)
+        );
     }
 
     #[test]
