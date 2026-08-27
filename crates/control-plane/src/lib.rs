@@ -3738,7 +3738,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
-    async fn cancellation_is_redelivered_until_the_agent_acknowledges_its_cursor() {
+    async fn preaccept_cancellation_is_terminal_and_stale_n_minus_one_command_is_retired() {
         let application = application().await;
         let created = application
             .router
@@ -3781,17 +3781,6 @@ mod tests {
                 .await,
             Err(crate::repository::RepositoryError::NotFound)
         ));
-        let rerouted_agent = AgentId::new();
-        application
-            .repository
-            .add_printer(
-                application.tenant.workspace_id,
-                application.tenant.environment_id,
-                application.printer_id,
-                rerouted_agent,
-            )
-            .await;
-
         let cancelled = application
             .router
             .clone()
@@ -3808,69 +3797,246 @@ mod tests {
         assert_eq!(cancelled.status(), StatusCode::ACCEPTED);
 
         let first = sync_test_agent(&application, None).await;
-        assert!(matches!(
-            first.commands.as_slice(),
-            [AgentCommand::CancelJob { job_id: command_job_id }] if *command_job_id == job_id
-        ));
-        let cursor = first.command_cursor.expect("command cursor");
-        let rerouted = application
-            .repository
-            .sync_agent_commands(
-                application.tenant.workspace_id,
-                application.tenant.environment_id,
-                rerouted_agent,
-                None,
-                100,
-            )
-            .await
-            .expect("rerouted agent command batch");
-        assert!(rerouted.commands.is_empty());
-
-        let retry = sync_test_agent(&application, None).await;
-        assert_eq!(retry.command_cursor.as_deref(), Some(cursor.as_str()));
-        assert_eq!(retry.commands.len(), 1);
-
-        let acknowledged = sync_test_agent(&application, Some(cursor.clone())).await;
-        assert!(acknowledged.commands.is_empty());
-        assert!(acknowledged.command_cursor.is_none());
-
-        application
-            .repository
-            .transition_job(
-                application.tenant.workspace_id,
-                application.tenant.environment_id,
-                job_id,
-                JobState::Cancelled,
-                None,
-                Some("Cancellation completed".into()),
-                Some(application.agent_id),
-                None,
-            )
-            .await
-            .expect("terminal cancellation");
-        assert!(matches!(
+        assert!(first.commands.is_empty());
+        assert_eq!(
             application
                 .repository
-                .request_job_cancellation(
+                .get_job(
                     application.tenant.workspace_id,
                     application.tenant.environment_id,
                     job_id,
                 )
-                .await,
-            Err(crate::repository::RepositoryError::InvalidTransition)
-        ));
-        let after_rejected_cancel = application
+                .await
+                .expect("cancelled job")
+                .state,
+            JobState::Cancelled
+        );
+
+        // Simulate a cancellation stored by an N-1 server before the direct
+        // pre-accept terminalization existed. The current server proves the
+        // exact tenant/node job was never accepted and retires it without
+        // relying on a new command shape the old node would ignore.
+        application
+            .repository
+            .enqueue_agent_command(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                &AgentCommand::CancelJob { job_id },
+            )
+            .await
+            .expect("legacy command");
+        let repaired = sync_test_agent(&application, None).await;
+        assert!(repaired.commands.is_empty());
+        assert!(repaired.command_cursor.is_some());
+        let after_repair = application
             .repository
             .sync_agent_commands(
                 application.tenant.workspace_id,
                 application.tenant.environment_id,
                 application.agent_id,
-                Some(&cursor),
+                None,
                 100,
             )
             .await
-            .expect("no command after rejected cancellation");
-        assert!(after_rejected_cancel.commands.is_empty());
+            .expect("retired command");
+        assert!(after_repair.commands.is_empty());
+
+        // Model the narrower N-1 crash window: CancelRequested and its command
+        // committed, but the server did not yet complete the pre-accept
+        // cancellation. Retrying the repair must create exactly one durable
+        // tenant event while still retiring the command on every replay.
+        let repair_created = application
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/jobs")
+                    .header("authorization", "Bearer piq_test_integration")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"printer_id":"{}","title":"Repair cancel","content_type":"pdf","content":{{"type":"base64","data":"cHJpbnQ="}}}}"#,
+                        application.printer_id
+                    )))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("repair create response");
+        let repair_body: serde_json::Value = serde_json::from_slice(
+            &repair_created
+                .into_body()
+                .collect()
+                .await
+                .expect("repair create body")
+                .to_bytes(),
+        )
+        .expect("repair create JSON");
+        let repair_job_id = JobId::from_str(repair_body["id"].as_str().expect("repair job ID"))
+            .expect("typed repair job ID");
+        application
+            .repository
+            .transition_job(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                repair_job_id,
+                JobState::CancelRequested,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("legacy cancel-requested state");
+        application
+            .repository
+            .enqueue_agent_command(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                &AgentCommand::CancelJob {
+                    job_id: repair_job_id,
+                },
+            )
+            .await
+            .expect("legacy repair command");
+        let job_updated_before = application
+            .repository
+            .list_tenant_events(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                None,
+                500,
+            )
+            .await
+            .expect("tenant events before repair")
+            .into_iter()
+            .filter(|event| event.event_type == "job.updated")
+            .count();
+        for _ in 0..2 {
+            assert!(
+                application
+                    .repository
+                    .retire_terminal_absent_local_cancellation(
+                        application.tenant.workspace_id,
+                        application.tenant.environment_id,
+                        application.agent_id,
+                        repair_job_id,
+                    )
+                    .await
+                    .expect("idempotent repair")
+            );
+        }
+        let job_updated_after = application
+            .repository
+            .list_tenant_events(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                None,
+                500,
+            )
+            .await
+            .expect("tenant events")
+            .into_iter()
+            .filter(|event| event.event_type == "job.updated")
+            .count();
+        assert_eq!(job_updated_after, job_updated_before + 1);
+
+        let accepted_created = application
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/jobs")
+                    .header("authorization", "Bearer piq_test_integration")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"printer_id":"{}","title":"Accepted cancel","content_type":"pdf","content":{{"type":"base64","data":"cHJpbnQ="}}}}"#,
+                        application.printer_id
+                    )))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("create accepted response");
+        let accepted_body: serde_json::Value = serde_json::from_slice(
+            &accepted_created
+                .into_body()
+                .collect()
+                .await
+                .expect("accepted create body")
+                .to_bytes(),
+        )
+        .expect("accepted create JSON");
+        let accepted_job_id =
+            JobId::from_str(accepted_body["id"].as_str().expect("accepted job ID"))
+                .expect("typed accepted job ID");
+        let lease = application
+            .repository
+            .claim_jobs(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                "accepted-cancel-test",
+                1,
+            )
+            .await
+            .expect("claim accepted job")
+            .into_iter()
+            .find(|lease| lease.job.id == accepted_job_id)
+            .expect("accepted job lease");
+        application
+            .repository
+            .accept_agent_job(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                accepted_job_id,
+                lease.lease_id,
+                &lease.lease_token,
+                None,
+                1,
+            )
+            .await
+            .expect("durable acceptance");
+        application
+            .repository
+            .request_job_cancellation(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                accepted_job_id,
+            )
+            .await
+            .expect("accepted cancellation request");
+        assert!(
+            !application
+                .repository
+                .retire_terminal_absent_local_cancellation(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    application.agent_id,
+                    accepted_job_id,
+                )
+                .await
+                .expect("accepted proof")
+        );
+        assert!(
+            !application
+                .repository
+                .retire_terminal_absent_local_cancellation(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    AgentId::new(),
+                    accepted_job_id,
+                )
+                .await
+                .expect("wrong-agent proof")
+        );
+        let accepted_command = sync_test_agent(&application, None).await;
+        assert!(matches!(
+            accepted_command.commands.as_slice(),
+            [AgentCommand::CancelJob { job_id: candidate }] if *candidate == accepted_job_id
+        ));
     }
 
     #[tokio::test]

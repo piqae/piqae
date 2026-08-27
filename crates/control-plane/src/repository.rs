@@ -29,6 +29,7 @@ use piqae_storage_postgres::{
     StoredWorkspaceMember, StripeBillingEvent, StripeProjectionResult, SyncedPrinter,
     UpsertedPlatformAccount, WebhookDeliveryWork, WorkOsIdentityEvent, WorkOsProjectionResult,
     acceptance_revocation_webhook_idempotency_key, agent_acceptance_webhook_idempotency_key,
+    preaccept_cancellation_webhook_idempotency_key,
 };
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -1048,6 +1049,13 @@ pub trait Repository: Send + Sync + 'static {
         environment_id: EnvironmentId,
         job_id: JobId,
     ) -> Result<Job, RepositoryError>;
+    async fn retire_terminal_absent_local_cancellation(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+    ) -> Result<bool, RepositoryError>;
     async fn claim_jobs(
         &self,
         workspace_id: WorkspaceId,
@@ -3141,6 +3149,24 @@ impl Repository for PostgresStore {
             job_id,
             &serde_json::to_value(AgentCommand::CancelJob { job_id })
                 .map_err(|error| RepositoryError::Persistence(error.to_string()))?,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn retire_terminal_absent_local_cancellation(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+    ) -> Result<bool, RepositoryError> {
+        Self::retire_terminal_absent_local_cancellation(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
         )
         .await
         .map_err(Into::into)
@@ -7255,11 +7281,11 @@ impl Repository for MemoryRepository {
         job_id: JobId,
     ) -> Result<Job, RepositoryError> {
         let mut state = self.state.write().await;
-        let (job, assigned_agent) = {
-            let record = state
-                .jobs
-                .get_mut(&job_id)
-                .ok_or(RepositoryError::NotFound)?;
+        let accepted = state.job_acceptances.contains_key(&job_id);
+        let (job, assigned_agent, terminalized_locally) = {
+            let Some(record) = state.jobs.get_mut(&job_id) else {
+                return Err(RepositoryError::NotFound);
+            };
             if record.job.workspace_id != workspace_id
                 || record.job.environment_id != environment_id
             {
@@ -7280,8 +7306,26 @@ impl Repository for MemoryRepository {
                 native_job_id: None,
                 occurred_at: Utc::now(),
             });
-            (record.job.clone(), record.agent_id)
+            if !accepted {
+                record.job.state = JobState::Cancelled;
+                record.sequence = record.sequence.saturating_add(1);
+                record.events.push(JobEvent {
+                    id: EventId::new(),
+                    job_id,
+                    sequence: record.sequence,
+                    state: JobState::Cancelled,
+                    reason: Some(JobFailureReason::CancelledByUser),
+                    message: Some("Cancellation completed before node acceptance".into()),
+                    agent_id: None,
+                    native_job_id: None,
+                    occurred_at: Utc::now(),
+                });
+            }
+            (record.job.clone(), record.agent_id, !accepted)
         };
+        if terminalized_locally {
+            return Ok(job);
+        }
         state.next_agent_command_cursor = state.next_agent_command_cursor.saturating_add(1);
         let cursor = state.next_agent_command_cursor;
         state
@@ -7295,6 +7339,74 @@ impl Repository for MemoryRepository {
                 acknowledged: false,
             });
         Ok(job)
+    }
+
+    async fn retire_terminal_absent_local_cancellation(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+    ) -> Result<bool, RepositoryError> {
+        let mut state = self.state.write().await;
+        let accepted = state.job_acceptances.contains_key(&job_id);
+        let updated_job = {
+            let Some(record) = state.jobs.get_mut(&job_id) else {
+                return Ok(false);
+            };
+            if record.job.workspace_id != workspace_id
+                || record.job.environment_id != environment_id
+                || record.agent_id != agent_id
+                || accepted
+                || (!record.job.state.is_terminal()
+                    && record.job.state != JobState::CancelRequested)
+            {
+                return Ok(false);
+            }
+            if record.job.state.is_terminal() {
+                None
+            } else {
+                record.job.state = JobState::Cancelled;
+                record.sequence = record.sequence.saturating_add(1);
+                record.events.push(JobEvent {
+                    id: EventId::new(),
+                    job_id,
+                    sequence: record.sequence,
+                    state: JobState::Cancelled,
+                    reason: Some(JobFailureReason::CancelledByUser),
+                    message: Some("Cancellation completed before node acceptance".into()),
+                    agent_id: Some(agent_id),
+                    native_job_id: None,
+                    occurred_at: Utc::now(),
+                });
+                Some(record.job.clone())
+            }
+        };
+        if let Some(job) = updated_job {
+            let payload = serde_json::to_value(&job)
+                .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+            enqueue_memory_webhook_event(
+                &mut state,
+                Some(&preaccept_cancellation_webhook_idempotency_key(
+                    workspace_id,
+                    environment_id,
+                    job_id,
+                )),
+                workspace_id,
+                environment_id,
+                "job.updated",
+                &payload,
+            );
+        }
+        if let Some(commands) = state.agent_commands.get_mut(&agent_id) {
+            for stored in commands {
+                if matches!(stored.command, AgentCommand::CancelJob { job_id: candidate } if candidate == job_id)
+                {
+                    stored.acknowledged = true;
+                }
+            }
+        }
+        Ok(true)
     }
 
     async fn claim_jobs(

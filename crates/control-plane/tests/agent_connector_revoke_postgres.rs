@@ -13,8 +13,8 @@ use piqae_control_plane::{
     AppState, authentication::PostgresAuthenticator, repository::Repository, router,
 };
 use piqae_domain::{
-    AgentId, ContentKind, ContentSource, EnvironmentId, Job, JobId, JobOptions, JobState,
-    PrinterId, WorkspaceId,
+    AgentId, ContentKind, ContentSource, EnvironmentId, EventId, Job, JobEvent, JobId, JobOptions,
+    JobState, PrinterId, WorkspaceId,
 };
 use piqae_protocol::agent::{
     AgentAcceptJobRequest, AgentAcceptanceReconciliationResponse, AgentReleaseLeaseRequest,
@@ -22,6 +22,7 @@ use piqae_protocol::agent::{
 use piqae_storage_postgres::{
     DeliveryAttemptProof, PostgresStore, StorageError,
     acceptance_revocation_webhook_idempotency_key, agent_acceptance_webhook_idempotency_key,
+    preaccept_cancellation_webhook_idempotency_key,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -241,6 +242,114 @@ async fn insert_fixture(pool: &PgPool, store: &PostgresStore) -> Fixture {
             fencing_token,
         },
     }
+}
+
+#[tokio::test]
+async fn preaccept_cancel_repair_commits_one_durable_event_across_retries() {
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL for cancellation repair evidence");
+        return;
+    };
+    let schema = format!("piqae_cancel_repair_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect PostgreSQL test database");
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create disposable schema");
+    let pool = schema_pool(&database_url, &schema).await;
+    let store = PostgresStore::from_pool(pool.clone());
+    store.migrate().await.expect("apply migrations");
+    let fixture = insert_fixture(&pool, &store).await;
+    let sequence = store
+        .list_job_events(fixture.workspace_id, fixture.environment_id, fixture.job_id)
+        .await
+        .expect("job events")
+        .last()
+        .map_or(1, |event| event.sequence.saturating_add(1));
+    store
+        .append_event(
+            fixture.workspace_id,
+            fixture.environment_id,
+            &JobEvent {
+                id: EventId::new(),
+                job_id: fixture.job_id,
+                sequence,
+                state: JobState::CancelRequested,
+                reason: None,
+                message: Some("legacy cancellation request".into()),
+                agent_id: None,
+                native_job_id: None,
+                occurred_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("legacy cancel-requested state");
+    store
+        .enqueue_agent_command(
+            fixture.workspace_id,
+            fixture.environment_id,
+            fixture.agent_id,
+            &serde_json::to_value(piqae_protocol::agent::AgentCommand::CancelJob {
+                job_id: fixture.job_id,
+            })
+            .expect("command JSON"),
+        )
+        .await
+        .expect("legacy cancel command");
+
+    for _ in 0..2 {
+        assert!(
+            store
+                .retire_terminal_absent_local_cancellation(
+                    fixture.workspace_id,
+                    fixture.environment_id,
+                    fixture.agent_id,
+                    fixture.job_id,
+                )
+                .await
+                .expect("idempotent repair")
+        );
+    }
+    let idempotency_key = preaccept_cancellation_webhook_idempotency_key(
+        fixture.workspace_id,
+        fixture.environment_id,
+        fixture.job_id,
+    );
+    let event_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM webhook_events
+         WHERE workspace_id=$1 AND environment_id=$2 AND idempotency_key=$3
+           AND event_type='job.updated'",
+    )
+    .bind(fixture.workspace_id.to_string())
+    .bind(fixture.environment_id.to_string())
+    .bind(idempotency_key)
+    .fetch_one(&pool)
+    .await
+    .expect("repair event count");
+    assert_eq!(event_count, 1);
+    let command_acknowledged: bool = sqlx::query_scalar(
+        "SELECT acknowledged_at IS NOT NULL FROM agent_commands
+         WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3
+           AND command->'cancel_job'->>'job_id'=$4",
+    )
+    .bind(fixture.workspace_id.to_string())
+    .bind(fixture.environment_id.to_string())
+    .bind(fixture.agent_id.to_string())
+    .bind(fixture.job_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("command acknowledgement");
+    assert!(command_acknowledged);
+
+    pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop disposable schema");
 }
 
 #[tokio::test]
