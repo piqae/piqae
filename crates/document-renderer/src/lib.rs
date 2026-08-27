@@ -716,6 +716,7 @@ pub fn render_with_metrics(
     limits: RenderLimits,
 ) -> Result<RenderOutput, RenderError> {
     validate(spec, limits)?;
+    validate_resolved_resources(spec, resolved)?;
     let (width, height, margins, continuous) = media_geometry(&spec.media, limits)?;
     let mut state = State {
         doc: spec,
@@ -766,6 +767,53 @@ pub fn render_with_metrics(
         page_count: u32::try_from(state.pages.len()).map_err(|_| RenderError::Limit("pages"))?,
         pdf,
     })
+}
+
+/// Verifies that every declared resource has exact, renderer-compatible bytes.
+///
+/// Hosts remain responsible for bounded acquisition and tenant authorization;
+/// this shared check is the final capability, length, digest, and JPEG-structure
+/// gate used by both cloud and node rendering.
+///
+/// # Errors
+/// Returns an error for missing, undeclared, malformed, or mismatched resources.
+pub fn validate_resolved_resources(
+    spec: &BusinessDocumentV1,
+    resolved: &ResolvedResources,
+) -> Result<(), RenderError> {
+    if resolved.images.len() != spec.resources.len()
+        || resolved
+            .images
+            .keys()
+            .any(|resource_id| !spec.resources.contains_key(resource_id))
+    {
+        return Err(RenderError::Invalid("resolved resource set mismatch"));
+    }
+    for (resource_id, resource) in &spec.resources {
+        let Resource::Image {
+            digest,
+            media_type,
+            byte_length,
+        } = resource;
+        if media_type != "image/jpeg" {
+            return Err(RenderError::Unsupported(
+                "renderer ABI v1 supports resolved JPEG images only",
+            ));
+        }
+        let bytes = resolved
+            .images
+            .get(resource_id)
+            .ok_or(RenderError::Invalid("resolved resource set mismatch"))?;
+        if u64::try_from(bytes.len()).ok() != Some(*byte_length) {
+            return Err(RenderError::Invalid("image byte length mismatch"));
+        }
+        let actual = format!("sha256:{:x}", Sha256::digest(bytes));
+        if !actual.eq_ignore_ascii_case(digest) {
+            return Err(RenderError::Invalid("image digest mismatch"));
+        }
+        let _ = jpeg_dimensions(bytes)?;
+    }
+    Ok(())
 }
 
 /// Validate a business document without performing rendering or external I/O.
@@ -1951,11 +1999,7 @@ fn image(
         .resources
         .get(resource_id)
         .ok_or(RenderError::Invalid("image resource is not declared"))?;
-    let Resource::Image {
-        digest,
-        media_type,
-        byte_length,
-    } = declared;
+    let Resource::Image { media_type, .. } = declared;
     if media_type != "image/jpeg" {
         return Err(RenderError::Unsupported(
             "renderer ABI v1 supports resolved JPEG images only",
@@ -1968,13 +2012,6 @@ fn image(
         .ok_or(RenderError::Unsupported(
             "image bytes must be supplied through ResolvedResources",
         ))?;
-    if u64::try_from(bytes.len()).ok() != Some(*byte_length) {
-        return Err(RenderError::Invalid("image byte length mismatch"));
-    }
-    let actual = format!("sha256:{:x}", Sha256::digest(bytes));
-    if !actual.eq_ignore_ascii_case(digest) {
-        return Err(RenderError::Invalid("image digest mismatch"));
-    }
     let (pixel_width, pixel_height) = jpeg_dimensions(bytes)?;
     let box_width = checked_mm(width_mm, "image width")?;
     let box_height = checked_mm(height_mm, "image height")?;
@@ -3189,6 +3226,51 @@ mod tests {
                 &d,
                 &json!({"product_image": "logo"}),
                 &wrong,
+                RenderLimits::default()
+            ),
+            Err(RenderError::Invalid("image digest mismatch"))
+        );
+    }
+
+    #[test]
+    fn every_declared_resource_is_verified_even_when_not_laid_out() {
+        let jpeg = vec![
+            0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x01, 0x00, 0x01, 0x03, 0x01, 0x11,
+            0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0xff, 0xd9,
+        ];
+        let mut document = document(vec![Node::Paragraph {
+            content: vec![Inline::Text {
+                value: "No image node".into(),
+                style: TextStyle::default(),
+            }],
+            style: TextStyle::default(),
+        }]);
+        document.resources.insert(
+            "unused".into(),
+            Resource::Image {
+                digest: format!("sha256:{:x}", Sha256::digest(&jpeg)),
+                media_type: "image/jpeg".into(),
+                byte_length: jpeg.len() as u64,
+            },
+        );
+        assert_eq!(
+            render_with_resources(
+                &document,
+                &json!({}),
+                &ResolvedResources::default(),
+                RenderLimits::default()
+            ),
+            Err(RenderError::Invalid("resolved resource set mismatch"))
+        );
+        let mut corrupt = jpeg;
+        corrupt[3] ^= 1;
+        assert_eq!(
+            render_with_resources(
+                &document,
+                &json!({}),
+                &ResolvedResources {
+                    images: BTreeMap::from([("unused".into(), corrupt)])
+                },
                 RenderLimits::default()
             ),
             Err(RenderError::Invalid("image digest mismatch"))

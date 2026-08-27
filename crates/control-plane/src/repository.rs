@@ -3518,6 +3518,8 @@ struct MemoryState {
     targets: HashMap<String, (WorkspaceId, EnvironmentId, StoredTarget)>,
     target_bindings: HashMap<String, (WorkspaceId, EnvironmentId, StoredTargetBinding)>,
     agents: HashMap<AgentId, (WorkspaceId, EnvironmentId, StoredAgent)>,
+    document_render_capabilities:
+        HashMap<AgentId, piqae_protocol::agent::DocumentRenderCapabilities>,
     /// Which node owns each installation, so pairing rebinds an existing node
     /// instead of admitting a duplicate — matching the `PostgreSQL` behaviour
     /// that in-place key rotation depends on.
@@ -4628,7 +4630,7 @@ impl Repository for MemoryRepository {
         agent_id: AgentId,
         version: &str,
         health: &piqae_protocol::agent::AgentHealth,
-        _document_render: &piqae_protocol::agent::DocumentRenderCapabilities,
+        document_render: &piqae_protocol::agent::DocumentRenderCapabilities,
         printers: Option<&[SyncedPrinter]>,
     ) -> Result<(), RepositoryError> {
         let mut state = self.state.write().await;
@@ -4647,6 +4649,9 @@ impl Repository for MemoryRepository {
         agent.sqlite_integrity_ok = Some(health.sqlite_integrity_ok);
         agent.executor_crashes = health.executor_crashes;
         agent.last_error_code.clone_from(&health.last_error_code);
+        state
+            .document_render_capabilities
+            .insert(agent_id, document_render.clone());
         if let Some(printers) = printers {
             state
                 .printers
@@ -4691,7 +4696,11 @@ impl Repository for MemoryRepository {
             .agents
             .get(&printer.agent_id)
             .ok_or(RepositoryError::NotFound)?;
-        Ok(piqae_protocol::agent::DocumentRenderCapabilities::default())
+        Ok(state
+            .document_render_capabilities
+            .get(&printer.agent_id)
+            .cloned()
+            .unwrap_or_default())
     }
     async fn register_business_document_resource(
         &self,

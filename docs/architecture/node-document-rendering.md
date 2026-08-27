@@ -7,8 +7,12 @@ be forwarded as printer RAW data. RAW output remains limited to an explicitly
 authorised, printer-specific native profile.
 
 The reusable negotiation and parity implementation lives in
-`piqae_agent_core::document_render`. It is not yet advertised over the public
-agent protocol, so the production path continues to transfer the server PDF.
+`piqae_agent_core::document_render`. Installed standalone nodes advertise the
+optional renderer and resource ABIs during authenticated sync. A selected job
+offer carries the immutable specification and input, the server PDF digest and
+byte length, the completed render's authoritative page count, tenant-scoped
+resource descriptors, and the ordinary server PDF fallback. Older nodes and
+offers without an authoritative page count fail closed to that PDF.
 
 ## Contract
 
@@ -31,15 +35,22 @@ This exact-build rule is intentionally conservative. A future compatibility
 fixture suite may allow distinct builds to share an ABI only after byte-level
 golden parity has been demonstrated on every supported platform.
 
-## Future protocol integration gate
+Cloud rendering resolves every declared JPEG from the tenant/environment object
+namespace under 4 MiB per-resource and 16 MiB aggregate in-memory bounds. The
+shared renderer verifies the complete resolved set's descriptor length, SHA-256,
+JPEG structure, dimensions, and decoded-pixel bound before layout, including
+declared resources that are not selected by a dynamic expression.
 
-Before adding wire fields, define an additive optional capability on agent sync
-and a document content descriptor containing only immutable spec/input object
-references, digests, limits and the ordinary PDF fallback. Unknown fields must
-remain ignorable by old nodes. Offers must be claim- and tenant-bound, bounded,
-encrypted like other document content, and idempotent across reconnects.
+## Support boundary and rollout gates
 
-Enabling the optimisation requires:
+The additive wire contract and virtual fallback/require-node coverage are
+implemented. `prefer_node` keeps byte-identical PDF fallback; `require_node`
+fails before job creation when the exact destination capability is unavailable,
+and fails closed on the node if acquisition or deterministic parity later fails.
+This is evidence for protocol and virtual execution only, not proof of paper
+delivery or physical-printer certification.
+
+Broader production support claims still require:
 
 1. cross-platform deterministic golden fixtures;
 2. a fault test that interrupts download, render and fallback selection;

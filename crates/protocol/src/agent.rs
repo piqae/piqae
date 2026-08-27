@@ -451,6 +451,11 @@ pub struct BusinessDocumentNodeRender {
     pub resources: Vec<BusinessDocumentResourceDescriptor>,
     pub expected_pdf_sha256: String,
     pub expected_pdf_bytes: u64,
+    /// Authoritative page count produced with the same immutable specification,
+    /// input, resources, renderer build, and PDF digest. Nodes use this value as
+    /// the render page limit instead of substituting a local guess.
+    #[serde(default)]
+    pub expected_page_count: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1073,6 +1078,24 @@ mod route_protocol_tests {
         };
         assert!(!response.inventory_projection_acknowledgement_supported);
         assert!(response.inventory_projection.is_none());
+    }
+
+    #[test]
+    fn legacy_document_offer_without_page_count_fails_closed_additively() {
+        let Ok(render): Result<BusinessDocumentNodeRender, _> =
+            serde_json::from_value(serde_json::json!({
+                "renderer_abi": "piqae.business-document-pdf/v1",
+                "resource_abi": "piqae.document-resources/v1",
+                "specification": {},
+                "input": {},
+                "resources": [],
+                "expected_pdf_sha256": "a".repeat(64),
+                "expected_pdf_bytes": 100
+            }))
+        else {
+            panic!("legacy document offer must remain decodable");
+        };
+        assert_eq!(render.expected_page_count, 0);
     }
 
     #[test]

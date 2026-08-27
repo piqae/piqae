@@ -1763,6 +1763,272 @@ mod tests {
         serde_json::from_slice(&body).expect("JSON body")
     }
 
+    async fn sync_virtual_document_node(
+        application: &TestApplication,
+        document_render: piqae_protocol::agent::DocumentRenderCapabilities,
+        observe_route: bool,
+    ) -> AgentSyncResponse {
+        let now = Utc::now();
+        let sync = AgentSyncRequest {
+            agent_id: application.agent_id,
+            protocol_version: 1,
+            agent_version: "virtual-document-node".into(),
+            printer_revision: 1,
+            acknowledged_command_cursor: None,
+            event_cursor: None,
+            queue: QueueSnapshot {
+                queued_jobs: 0,
+                active_jobs: 0,
+                content_bytes: 0,
+                accepts_jobs: true,
+            },
+            health: AgentHealth {
+                started_at: now,
+                observed_at: now,
+                sqlite_integrity_ok: true,
+                executor_crashes: 0,
+                last_error_code: None,
+            },
+            printers: Some(vec![profiled_printer_snapshot(application.printer_id)]),
+            events: Vec::new(),
+            diagnostics: Vec::new(),
+            document_render,
+            capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
+            route_observations: observe_route
+                .then(|| live_route_observation(application.printer_id, 1))
+                .into_iter()
+                .collect(),
+            topology_changes: Vec::new(),
+            native_handoffs: Vec::new(),
+            runtime: None,
+        };
+        let response = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                application,
+                "POST",
+                "/v1/agent/sync",
+                serde_json::to_vec(&sync).expect("virtual node sync JSON"),
+            ))
+            .await
+            .expect("virtual node sync response");
+        let status = response.status();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("virtual node sync body")
+            .to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "virtual sync failed: {}",
+            String::from_utf8_lossy(&body)
+        );
+        serde_json::from_slice(&body).expect("virtual node sync response JSON")
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the virtual end-to-end flow keeps setup, offer, fallback, and fail-closed assertions together"
+    )]
+    async fn node_render_selection_fallback_and_requirement_are_end_to_end() {
+        let application = application().await;
+        let specification = serde_json::json!({
+            "format": "piqae.business-document/v1",
+            "media": {"kind": "paged", "size": "a4"},
+            "body": [{"type": "paragraph", "content": [{"type": "text", "value": "Virtual"}]}]
+        });
+        let template = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                "/v1/business-document-templates",
+                "piq_test_integration",
+                "node-render-template",
+                Some(
+                    &serde_json::json!({"name": "Node render", "specification": specification})
+                        .to_string(),
+                ),
+            ),
+        )
+        .await;
+        let template_id = template["id"].as_str().expect("template id");
+        let revision = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                &format!("/v1/business-document-templates/{template_id}/publish"),
+                "piq_test_integration",
+                "node-render-publish",
+                Some(&serde_json::json!({"specification": specification}).to_string()),
+            ),
+        )
+        .await;
+        let render = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                "/v1/business-document-renders",
+                "piq_test_integration",
+                "node-render-register",
+                Some(
+                    &serde_json::json!({
+                        "template_revision_id": revision["id"],
+                        "input": {}
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        let render_id = render["id"].as_str().expect("render id");
+        let worker = crate::document_render_worker::DocumentRenderWorker::new(
+            application.state.clone(),
+            "virtual-node-render-worker",
+        );
+        assert_eq!(worker.run_once(1).await.expect("render"), 1);
+        let completed = json_response(
+            &application.router,
+            api_request(
+                "GET",
+                &format!("/v1/business-document-renders/{render_id}"),
+                "piq_test_integration",
+                None,
+            ),
+        )
+        .await;
+        let page_count = completed["page_count"].as_u64().expect("completed pages");
+
+        let supported = piqae_protocol::agent::DocumentRenderCapabilities {
+            renderer_abi: Some("piqae.business-document-pdf/v1".into()),
+            resource_abi: Some("piqae.document-resources/v1".into()),
+            persistent_cache: true,
+            image_media_types: vec!["image/jpeg".into()],
+            ..Default::default()
+        };
+        assert!(
+            sync_virtual_document_node(&application, supported.clone(), false)
+                .await
+                .candidate_jobs
+                .is_empty()
+        );
+        let readiness = json_response(
+            &application.router,
+            api_request(
+                "POST",
+                &format!("/v1/business-document-renders/{render_id}/render-readiness"),
+                "piq_test_integration",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "render_policy": "prefer_node"
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(readiness["selected_mode"], "node_render");
+        assert_eq!(readiness["destination"]["ready"], true);
+
+        let required = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                &format!("/v1/business-document-renders/{render_id}/print"),
+                "piq_test_integration",
+                "node-render-required",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "title": "Required node render",
+                        "render_policy": "require_node"
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        let required_job: JobId = required["id"]
+            .as_str()
+            .expect("required job id")
+            .parse()
+            .expect("typed job id");
+        let offer = sync_virtual_document_node(&application, supported, true)
+            .await
+            .candidate_jobs
+            .into_iter()
+            .find(|offer| offer.job.id == required_job)
+            .expect("required node-render offer");
+        let piqae_protocol::agent::ContentDescriptor::BusinessDocument {
+            policy,
+            render,
+            fallback_allowed,
+            ..
+        } = offer.content
+        else {
+            panic!("require_node must produce a business-document offer");
+        };
+        assert_eq!(
+            policy,
+            piqae_protocol::agent::BusinessDocumentRenderPolicy::RequireNode
+        );
+        assert!(!fallback_allowed);
+        assert_eq!(u64::from(render.expected_page_count), page_count);
+
+        let _ = sync_virtual_document_node(
+            &application,
+            piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            false,
+        )
+        .await;
+        let preferred = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                &format!("/v1/business-document-renders/{render_id}/print"),
+                "piq_test_integration",
+                "node-render-preferred-fallback",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "title": "Preferred fallback",
+                        "render_policy": "prefer_node"
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(
+            preferred["metadata"]["piqae.document.render_mode"],
+            "cloud_pdf"
+        );
+        let unavailable = application
+            .router
+            .clone()
+            .oneshot(idempotent_api_request(
+                "POST",
+                &format!("/v1/business-document-renders/{render_id}/print"),
+                "piq_test_integration",
+                "node-render-required-unavailable",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "title": "Required unavailable",
+                        "render_policy": "require_node"
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .expect("require_node unavailable response");
+        assert_eq!(unavailable.status(), StatusCode::CONFLICT);
+    }
+
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn document_template_publish_and_render_is_tenant_scoped_end_to_end() {

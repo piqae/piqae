@@ -1,8 +1,9 @@
 # Business documents
 
-`piqae.business-document/v1` is Piqae's portable, bounded business-document
-format. It is optional: callers can continue submitting PDF or RAW jobs without
-using templates.
+`printpacket/v1` is the canonical vendor-neutral, portable, bounded packet
+format. The frozen `piqae.business-document/v1` identifier remains a lossless
+compatibility alias for stored revisions and existing integrations. The format
+is optional: callers can continue submitting PDF or RAW jobs without templates.
 
 Use `/v1/business-document-templates` to create encrypted drafts and publish
 immutable revisions. Register an asynchronous render with
@@ -12,20 +13,27 @@ gate. Preview, download, and print all refer to the same immutable bytes.
 
 Print and preview approval accept `render_policy`: `automatic` (the default),
 `cloud_only`, `prefer_node`, or `require_node`. Automatic uses a conservative,
-versioned cost model with server-measured PDF and input byte lengths. Call the
+versioned cost model with server-measured PDF and input byte lengths and the
+completed render's authoritative page count. Call the
 render's `render-readiness` endpoint for an authenticated destination capability
 snapshot and explicit decision reason. `prefer_node` falls back only to the
 exact approved server PDF; `require_node` rejects approval unless the selected
 printer reports the exact renderer/resource ABIs and can acquire every
 referenced resource through the active lease. A cold cache is reported as
 `resources_warming`; it is compatible and remains digest-verified before use.
+Legacy node offers without the authoritative page count are accepted for
+rolling-upgrade compatibility but select the retained server PDF rather than an
+unbounded node render.
 
 JPEG resources are uploaded once by lowercase SHA-256 using
 `PUT /v1/business-document-resources/{digest}`. Uploads are bounded to 4 MiB,
 verified before registration, tenant-scoped, retained while referenced by a
 render, and downloaded by nodes only through an authenticated active job lease.
 Nodes verify the same digest and length before admitting bytes to their local
-content-addressed cache. The renderer itself never fetches URLs.
+content-addressed cache. Cloud rendering resolves them from the same
+tenant/environment namespace with a 16 MiB aggregate bound. The shared renderer
+verifies the complete declared set, including JPEG structure and pixel bounds;
+the renderer itself never fetches URLs.
 
 The TypeScript SDK exposes these operations as `client.businessDocuments`.
 MCP exposes metadata-safe operations through `piqae_business_documents`; it

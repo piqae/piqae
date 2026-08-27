@@ -5,8 +5,8 @@
 //! the node proves that the exact deterministic renderer contract is present.
 
 use piqae_document_renderer::{
-    BUSINESS_DOCUMENT_FORMAT, BusinessDocumentV1, RENDERER_VERSION, RenderLimits,
-    ResolvedResources, render, render_with_resources,
+    BUSINESS_DOCUMENT_FORMAT, BusinessDocumentV1, PRINT_PACKET_DOCUMENT_FORMAT, RENDERER_VERSION,
+    RenderLimits, ResolvedResources, render, render_with_resources,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -44,7 +44,10 @@ impl NodeDocumentCapabilities {
             negotiation_version: 1,
             renderer_abi: RENDERER_ABI.into(),
             renderer_build: RENDERER_VERSION.into(),
-            spec_versions: vec![BUSINESS_DOCUMENT_FORMAT.into()],
+            spec_versions: vec![
+                PRINT_PACKET_DOCUMENT_FORMAT.into(),
+                BUSINESS_DOCUMENT_FORMAT.into(),
+            ],
             deterministic: true,
             max_input_bytes: 4 * 1024 * 1024,
             max_output_bytes: u64::try_from(limits.max_output_bytes).unwrap_or(u64::MAX),
@@ -205,7 +208,7 @@ pub fn negotiate(
     if requirement.maximum_pdf_bytes > capabilities.max_output_bytes {
         return fallback(FallbackReason::OutputLimit);
     }
-    if requirement.maximum_pages > capabilities.max_pages {
+    if requirement.maximum_pages == 0 || requirement.maximum_pages > capabilities.max_pages {
         return fallback(FallbackReason::PageLimit);
     }
     if !is_sha256(&requirement.expected_pdf_sha256) {
@@ -331,6 +334,78 @@ mod tests {
                 &input
             ),
             NodeRenderResult::Pdf(expected)
+        );
+    }
+
+    #[test]
+    fn authoritative_completed_page_count_is_the_node_render_bound() {
+        let input = serde_json::json!({"order":"#1001"});
+        let expected = render(&spec(), &input, RenderLimits::default()).expect("fixture render");
+        let mut requirement = requirement(&expected);
+        requirement.maximum_pages = 1;
+        assert!(matches!(
+            render_or_fallback(
+                &NodeDocumentCapabilities::local(),
+                &requirement,
+                &spec(),
+                &input
+            ),
+            NodeRenderResult::Pdf(_)
+        ));
+
+        // This was the installed agent's old guessed requirement. It exceeds
+        // the renderer capability and therefore made every offer fall back.
+        requirement.maximum_pages = 10_000;
+        assert_eq!(
+            render_or_fallback(
+                &NodeDocumentCapabilities::local(),
+                &requirement,
+                &spec(),
+                &input
+            ),
+            NodeRenderResult::UseServerPdf {
+                reason: FallbackReason::PageLimit
+            }
+        );
+    }
+
+    #[test]
+    fn canonical_and_frozen_alias_formats_negotiate_exactly() {
+        let input = serde_json::json!({"order":"#1001"});
+        let capabilities = NodeDocumentCapabilities::local();
+        assert_eq!(
+            capabilities.spec_versions,
+            [PRINT_PACKET_DOCUMENT_FORMAT, BUSINESS_DOCUMENT_FORMAT]
+        );
+        for format in [PRINT_PACKET_DOCUMENT_FORMAT, BUSINESS_DOCUMENT_FORMAT] {
+            let mut document = spec();
+            document.format = format.into();
+            let expected = render(&document, &input, RenderLimits::default()).expect("render");
+            let mut requirement = requirement(&expected);
+            requirement.spec_version = format.into();
+            assert_eq!(
+                render_or_fallback(&capabilities, &requirement, &document, &input),
+                NodeRenderResult::Pdf(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_offer_without_authoritative_pages_falls_back_before_rendering() {
+        let input = serde_json::json!({"order":"#1001"});
+        let expected = render(&spec(), &input, RenderLimits::default()).expect("render");
+        let mut requirement = requirement(&expected);
+        requirement.maximum_pages = 0;
+        assert_eq!(
+            render_or_fallback(
+                &NodeDocumentCapabilities::local(),
+                &requirement,
+                &spec(),
+                &input
+            ),
+            NodeRenderResult::UseServerPdf {
+                reason: FallbackReason::PageLimit
+            }
         );
     }
 

@@ -15,7 +15,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::BytesMut;
 use futures::StreamExt as _;
 use piqae_auth::Scope;
-use piqae_document_renderer::BusinessDocumentV1;
+use piqae_document_renderer::{
+    BUSINESS_DOCUMENT_FORMAT, BusinessDocumentV1, PRINT_PACKET_DOCUMENT_FORMAT,
+};
 use piqae_domain::{ContentKind, ContentSource, JobOptions};
 use piqae_protocol::agent::{BusinessDocumentNodeRender, BusinessDocumentResourceDescriptor};
 use piqae_storage_postgres::{CreateDocumentResult, StoredDocumentPreview, StoredDocumentRender};
@@ -1372,6 +1374,14 @@ pub(crate) async fn node_render_payload(
                 .ok_or_else(|| AppError::service_unavailable("document_artifact_unavailable"))?,
         )
         .map_err(|_| AppError::service_unavailable("invalid_stored_content_length"))?,
+        expected_page_count: u32::try_from(
+            render
+                .page_count
+                .ok_or_else(|| AppError::service_unavailable("document_page_count_unavailable"))?,
+        )
+        .ok()
+        .filter(|page_count| *page_count > 0)
+        .ok_or_else(|| AppError::service_unavailable("document_page_count_invalid"))?,
     })
 }
 fn document_aad_for(domain: &str, workspace: &str, environment: &str, resource: &str) -> Vec<u8> {
@@ -1379,10 +1389,13 @@ fn document_aad_for(domain: &str, workspace: &str, environment: &str, resource: 
         .into_bytes()
 }
 fn validate_document_spec(value: &Value) -> Result<Vec<u8>, AppError> {
-    if value.get("format").and_then(Value::as_str) != Some("piqae.business-document/v1") {
+    if !matches!(
+        value.get("format").and_then(Value::as_str),
+        Some(PRINT_PACKET_DOCUMENT_FORMAT | BUSINESS_DOCUMENT_FORMAT)
+    ) {
         return Err(AppError::invalid(
             "invalid_document_spec",
-            "format must be piqae.business-document/v1.",
+            "format must be printpacket/v1 (or the frozen piqae.business-document/v1 alias).",
         ));
     }
     let encoded = validate_json(value, true)?;
@@ -1471,13 +1484,15 @@ mod tests {
 
     #[test]
     fn document_specs_are_bounded_and_reject_runtime_urls() {
-        assert!(
-            validate_document_spec(&serde_json::json!({
-                "format": "piqae.business-document/v1", "media": {"kind": "paged", "size": "a4"},
-                "body": [{"type": "paragraph", "content": [{"type": "text", "value": "Receipt"}]}]
-            }))
-            .is_ok()
-        );
+        for format in [PRINT_PACKET_DOCUMENT_FORMAT, BUSINESS_DOCUMENT_FORMAT] {
+            assert!(
+                validate_document_spec(&serde_json::json!({
+                    "format": format, "media": {"kind": "paged", "size": "a4"},
+                    "body": [{"type": "paragraph", "content": [{"type": "text", "value": "Receipt"}]}]
+                }))
+                .is_ok()
+            );
+        }
         assert!(
             validate_document_spec(&serde_json::json!({
                 "format": "piqae.business-document/v1", "media": {"kind": "paged", "size": "a4"},

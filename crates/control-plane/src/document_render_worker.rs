@@ -5,14 +5,19 @@ use crate::{
     documents::{artifact_key_aad, document_aad, render_input_aad},
     repository::RepositoryError,
 };
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
+use futures::StreamExt as _;
 use piqae_document_renderer::{
-    BusinessDocumentV1, RenderLimits, ResolvedResources, render_with_metrics,
+    BusinessDocumentV1, RenderLimits, ResolvedResources, Resource, render_with_metrics, validate,
+    validate_resolved_resources,
 };
 use piqae_storage_postgres::DocumentRenderWork;
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
+
+const MAX_CLOUD_RENDER_RESOURCE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_CLOUD_RENDER_RESOURCE_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct DocumentRenderWorker {
@@ -232,6 +237,9 @@ impl DocumentRenderWorker {
             serde_json::from_slice(&spec_bytes).map_err(|_| ("invalid_document_spec", false))?;
         let input: Value =
             serde_json::from_slice(&input_bytes).map_err(|_| ("invalid_document_input", false))?;
+        let resolved = tokio::time::timeout(self.timeout, self.resolve_resources(work, &spec))
+            .await
+            .map_err(|_| ("document_resource_timeout", true))??;
         // A timed-out blocking task keeps running. Holding this permit inside
         // the closure bounds those stragglers across worker polling cycles.
         let permit =
@@ -241,12 +249,7 @@ impl DocumentRenderWorker {
                 .map_err(|_| ("renderer_unavailable", true))?;
         let task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            render_with_metrics(
-                &spec,
-                &input,
-                &ResolvedResources::default(),
-                RenderLimits::default(),
-            )
+            render_with_metrics(&spec, &input, &resolved, RenderLimits::default())
         });
         let output = tokio::time::timeout(self.timeout, task)
             .await
@@ -291,9 +294,81 @@ impl DocumentRenderWorker {
             .map_err(|_| ("render_lease_lost", true))?;
         Ok(())
     }
+
+    async fn resolve_resources(
+        &self,
+        work: &DocumentRenderWork,
+        specification: &BusinessDocumentV1,
+    ) -> Result<ResolvedResources, (&'static str, bool)> {
+        validate(specification, RenderLimits::default())
+            .map_err(|_| ("invalid_document_spec", false))?;
+        let total_bytes = specification
+            .resources
+            .values()
+            .try_fold(0_u64, |total, resource| {
+                let Resource::Image { byte_length, .. } = resource;
+                total.checked_add(*byte_length)
+            })
+            .filter(|total| *total <= MAX_CLOUD_RENDER_RESOURCE_TOTAL_BYTES)
+            .ok_or(("document_resource_aggregate_too_large", false))?;
+        let mut resolved = ResolvedResources::default();
+        let mut loaded_bytes = 0_u64;
+        for (resource_id, resource) in &specification.resources {
+            let Resource::Image {
+                digest,
+                byte_length,
+                ..
+            } = resource;
+            if *byte_length > MAX_CLOUD_RENDER_RESOURCE_BYTES {
+                return Err(("document_resource_too_large", false));
+            }
+            let digest = digest
+                .strip_prefix("sha256:")
+                .ok_or(("invalid_document_spec", false))?
+                .to_ascii_lowercase();
+            let object_key = crate::documents::document_resource_object_key(
+                &work.workspace_id.to_string(),
+                &work.environment_id.to_string(),
+                &digest,
+            );
+            let mut stream = self
+                .state
+                .object_store
+                .get_stream(&object_key)
+                .await
+                .map_err(|_| ("document_resource_unavailable", true))?;
+            let expected_bytes = usize::try_from(*byte_length)
+                .map_err(|_| ("document_resource_too_large", false))?;
+            let mut bytes = BytesMut::with_capacity(expected_bytes.min(64 * 1024));
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|_| ("document_resource_unavailable", true))?;
+                if chunk.len() > expected_bytes.saturating_sub(bytes.len()) {
+                    return Err(("document_resource_integrity_failed", false));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            if bytes.len() != expected_bytes {
+                return Err(("document_resource_integrity_failed", false));
+            }
+            let resource_bytes =
+                u64::try_from(bytes.len()).map_err(|_| ("document_resource_too_large", false))?;
+            loaded_bytes = loaded_bytes
+                .checked_add(resource_bytes)
+                .filter(|loaded| *loaded <= total_bytes)
+                .ok_or(("document_resource_aggregate_too_large", false))?;
+            resolved.images.insert(resource_id.clone(), bytes.to_vec());
+        }
+        validate_resolved_resources(specification, &resolved)
+            .map_err(|_| ("document_resource_integrity_failed", false))?;
+        Ok(resolved)
+    }
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "deterministic renderer fixtures should fail at their construction site"
+)]
 mod tests {
     use super::*;
     use crate::{
@@ -301,6 +376,7 @@ mod tests {
         repository::{MemoryRepository, Repository},
     };
     use piqae_domain::{EnvironmentId, WorkspaceId};
+    use piqae_object_store::{MemoryObjectStore, ObjectStore};
     use piqae_storage_postgres::CreateDocumentResult;
     use sha2::{Digest, Sha256};
     use std::str::FromStr;
@@ -315,12 +391,36 @@ mod tests {
         ),
         Box<dyn std::error::Error>,
     > {
+        queued_with_spec(
+            br#"{"format":"piqae.business-document/v1","media":{"kind":"paged","size":"a4"},"body":[{"type":"paragraph","content":[{"type":"text","value":"Hello"}]}]}"#,
+            Arc::new(MemoryObjectStore::default()),
+        )
+        .await
+    }
+
+    async fn queued_with_spec(
+        spec: &[u8],
+        object_store: Arc<MemoryObjectStore>,
+    ) -> Result<
+        (
+            DocumentRenderWorker,
+            Arc<MemoryRepository>,
+            WorkspaceId,
+            EnvironmentId,
+            String,
+        ),
+        Box<dyn std::error::Error>,
+    > {
         let repo = Arc::new(MemoryRepository::default());
-        let state = AppState::new_for_tests(repo.clone(), Arc::new(StaticAuthenticator::default()))
-            .with_document_key([7; 32]);
+        let state = AppState::new_with_resources(
+            repo.clone(),
+            Arc::new(StaticAuthenticator::default()),
+            [0; 32],
+            crate::document_crypto::DocumentSecretBox::new([7; 32]),
+            object_store,
+        );
         let w = WorkspaceId::from_str("wsp_01J00000000000000000000000")?;
         let e = EnvironmentId::from_str("env_01J00000000000000000000000")?;
-        let spec = br#"{"format":"piqae.business-document/v1","media":{"kind":"paged","size":"a4"},"body":[{"type":"paragraph","content":[{"type":"text","value":"Hello"}]}]}"#;
         let tpl_aad = document_aad(&w.to_string(), &e.to_string(), "tpl_test01");
         let enc = state.document_secrets.encrypt(&tpl_aad, spec)?;
         repo.create_document_template(
@@ -355,6 +455,52 @@ mod tests {
         Ok((DocumentRenderWorker::new(state, "worker-a"), repo, w, e, id))
     }
 
+    fn jpeg_fixture() -> Vec<u8> {
+        vec![
+            0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x01, 0x00, 0x01, 0x03, 0x01, 0x11,
+            0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0xff, 0xd9,
+        ]
+    }
+
+    fn image_spec(jpeg: &[u8], include_image_node: bool) -> Vec<u8> {
+        let digest = format!("sha256:{:x}", Sha256::digest(jpeg));
+        let body = if include_image_node {
+            serde_json::json!([{
+                "type": "image",
+                "resource": "logo",
+                "width_mm": 20.0,
+                "height_mm": 10.0
+            }])
+        } else {
+            serde_json::json!([{
+                "type": "paragraph",
+                "content": [{"type": "text", "value": "Resource declaration"}]
+            }])
+        };
+        serde_json::to_vec(&serde_json::json!({
+            "format": "piqae.business-document/v1",
+            "media": {"kind": "paged", "size": "a4"},
+            "resources": {
+                "logo": {
+                    "type": "image",
+                    "digest": digest,
+                    "media_type": "image/jpeg",
+                    "byte_length": jpeg.len()
+                }
+            },
+            "body": body
+        }))
+        .expect("image specification")
+    }
+
+    fn resource_key(workspace: WorkspaceId, environment: EnvironmentId, bytes: &[u8]) -> String {
+        crate::documents::document_resource_object_key(
+            &workspace.to_string(),
+            &environment.to_string(),
+            &format!("{:x}", Sha256::digest(bytes)),
+        )
+    }
+
     #[tokio::test]
     async fn completes_once_and_cannot_be_reclaimed() -> Result<(), Box<dyn std::error::Error>> {
         let (worker, repo, w, e, id) = queued().await?;
@@ -364,6 +510,162 @@ mod tests {
             "completed"
         );
         assert_eq!(worker.run_once(10).await?, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resolves_tenant_resource_and_completes_image_render()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let jpeg = jpeg_fixture();
+        let store = Arc::new(MemoryObjectStore::default());
+        let (worker, repo, workspace, environment, id) =
+            queued_with_spec(&image_spec(&jpeg, true), store.clone()).await?;
+        store
+            .put(
+                &resource_key(workspace, environment, &jpeg),
+                Bytes::from(jpeg),
+                None,
+            )
+            .await?;
+        assert_eq!(worker.run_once(1).await?, 1);
+        let render = repo
+            .get_document_render(workspace, environment, &id)
+            .await?;
+        assert_eq!(render.state, "completed");
+        assert_eq!(render.page_count, Some(1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_resource_retries_then_recovers_without_re_registration()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let jpeg = jpeg_fixture();
+        let store = Arc::new(MemoryObjectStore::default());
+        let (worker, repo, workspace, environment, id) =
+            queued_with_spec(&image_spec(&jpeg, true), store.clone()).await?;
+        assert_eq!(worker.run_once(1).await?, 1);
+        assert_eq!(
+            repo.get_document_render(workspace, environment, &id)
+                .await?
+                .state,
+            "registered"
+        );
+        store
+            .put(
+                &resource_key(workspace, environment, &jpeg),
+                Bytes::from(jpeg),
+                None,
+            )
+            .await?;
+        assert_eq!(worker.run_once(1).await?, 1);
+        assert_eq!(
+            repo.get_document_render(workspace, environment, &id)
+                .await?
+                .state,
+            "completed"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn corrupt_resource_fails_terminal_even_when_declaration_is_unused()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let jpeg = jpeg_fixture();
+        let store = Arc::new(MemoryObjectStore::default());
+        let (worker, repo, workspace, environment, id) =
+            queued_with_spec(&image_spec(&jpeg, false), store.clone()).await?;
+        let mut corrupt = jpeg.clone();
+        corrupt[3] ^= 1;
+        store
+            .put(
+                &resource_key(workspace, environment, &jpeg),
+                Bytes::from(corrupt),
+                None,
+            )
+            .await?;
+        assert_eq!(worker.run_once(1).await?, 1);
+        let render = repo
+            .get_document_render(workspace, environment, &id)
+            .await?;
+        assert_eq!(render.state, "failed_terminal");
+        assert_eq!(
+            render.failure_code.as_deref(),
+            Some("document_resource_integrity_failed")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resource_in_another_tenant_is_never_resolved() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let jpeg = jpeg_fixture();
+        let store = Arc::new(MemoryObjectStore::default());
+        let (worker, repo, workspace, environment, id) =
+            queued_with_spec(&image_spec(&jpeg, true), store.clone()).await?;
+        store
+            .put(
+                &resource_key(WorkspaceId::new(), EnvironmentId::new(), &jpeg),
+                Bytes::from(jpeg.clone()),
+                None,
+            )
+            .await?;
+        assert_eq!(worker.run_once(1).await?, 1);
+        assert_eq!(
+            repo.get_document_render(workspace, environment, &id)
+                .await?
+                .state,
+            "registered"
+        );
+        store
+            .put(
+                &resource_key(workspace, environment, &jpeg),
+                Bytes::from(jpeg),
+                None,
+            )
+            .await?;
+        assert_eq!(worker.run_once(1).await?, 1);
+        assert_eq!(
+            repo.get_document_render(workspace, environment, &id)
+                .await?
+                .state,
+            "completed"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aggregate_resource_bound_is_enforced_before_acquisition()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let resources = (0..5)
+            .map(|index| {
+                (
+                    format!("image-{index}"),
+                    serde_json::json!({
+                        "type": "image",
+                        "digest": format!("sha256:{}", "a".repeat(64)),
+                        "media_type": "image/jpeg",
+                        "byte_length": 4 * 1024 * 1024
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let specification = serde_json::to_vec(&serde_json::json!({
+            "format": "piqae.business-document/v1",
+            "media": {"kind": "paged", "size": "a4"},
+            "resources": resources,
+            "body": [{"type": "paragraph", "content": [{"type": "text", "value": "bounded"}]}]
+        }))?;
+        let (worker, repo, workspace, environment, id) =
+            queued_with_spec(&specification, Arc::new(MemoryObjectStore::default())).await?;
+        assert_eq!(worker.run_once(1).await?, 1);
+        let render = repo
+            .get_document_render(workspace, environment, &id)
+            .await?;
+        assert_eq!(render.state, "failed_terminal");
+        assert_eq!(
+            render.failure_code.as_deref(),
+            Some("document_resource_aggregate_too_large")
+        );
         Ok(())
     }
 

@@ -5915,11 +5915,10 @@ async fn materialize_descriptor(
                                 negotiation_version: 1,
                                 renderer_abi: render.renderer_abi.clone(),
                                 renderer_build: piqae_document_renderer::RENDERER_VERSION.into(),
-                                spec_version: piqae_document_renderer::BUSINESS_DOCUMENT_FORMAT
-                                    .into(),
+                                spec_version: specification.format.clone(),
                                 input_bytes,
                                 maximum_pdf_bytes: render.expected_pdf_bytes,
-                                maximum_pages: 10_000,
+                                maximum_pages: render.expected_page_count,
                                 expected_pdf_sha256: render.expected_pdf_sha256.clone(),
                             },
                             &specification,
