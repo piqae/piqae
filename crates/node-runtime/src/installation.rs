@@ -125,7 +125,24 @@ impl InstallationGuard {
             use std::os::unix::fs::OpenOptionsExt as _;
             options.mode(0o600);
         }
-        let file = options.open(&path).map_err(InstallationLockError::Open)?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            // Windows byte-range locks are process scoped, so a second handle
+            // in this process can otherwise appear to acquire the same lock.
+            // Denying handle sharing makes ownership exclusive across handles
+            // and processes; Windows releases it automatically after a crash.
+            options.share_mode(0);
+        }
+        let file = options.open(&path).map_err(|error| {
+            #[cfg(windows)]
+            if error.raw_os_error()
+                == Some(windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION as i32)
+            {
+                return InstallationLockError::AlreadyRunning;
+            }
+            InstallationLockError::Open(error)
+        })?;
         file.try_lock_exclusive().map_err(|error| {
             if error.kind() == std::io::ErrorKind::WouldBlock {
                 InstallationLockError::AlreadyRunning
