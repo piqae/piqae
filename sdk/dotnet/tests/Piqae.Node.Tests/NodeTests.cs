@@ -372,6 +372,10 @@ public sealed class NodeTests
             PiqaeNode.EnsureCompatibleAbi(new NativeAbiDescriptor(1, 1, 1)));
         Assert.Throws<PiqaeNodeException>(() =>
             PiqaeNode.EnsureCompatibleAbi(new NativeAbiDescriptor(1, 3, 3)));
+        Assert.Throws<PiqaeNodeException>(() =>
+            PiqaeNode.EnsureCompatibleAbi(new NativeAbiDescriptor(1, 1, 2)));
+        Assert.Equal((ushort)1, PiqaeNode.NativeAbiVersion);
+        Assert.Equal((ushort)2, PiqaeNode.NativeContractVersion);
         PiqaeNode.EnsureCompatibleAbi(new NativeAbiDescriptor(1, 2, 2));
     }
 

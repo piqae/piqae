@@ -976,7 +976,7 @@ impl PostgresStore {
         migrator: &sqlx::migrate::Migrator,
     ) -> Result<(), StorageError> {
         let migration_table_exists: bool = sqlx::query_scalar(
-            "SELECT to_regclass(current_schema() || '._sqlx_migrations') IS NOT NULL",
+            "SELECT to_regclass(format('%I.%I', current_schema(), '_sqlx_migrations')) IS NOT NULL",
         )
         .fetch_one(&self.pool)
         .await?;

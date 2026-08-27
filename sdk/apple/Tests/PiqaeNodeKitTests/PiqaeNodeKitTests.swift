@@ -419,6 +419,14 @@ final class PiqaeNodeKitTests: XCTestCase {
         )
     }
 
+    func testNativeABIRequiresExactlyContractTwo() {
+        XCTAssertEqual(PiqaeNativeRuntime.nativeABIVersion, 1)
+        XCTAssertEqual(PiqaeNativeRuntime.nativeContractVersion, 2)
+        XCTAssertTrue(PiqaeNativeRuntime.supportsNativeContract(abi: 1, minimum: 2, maximum: 2))
+        XCTAssertFalse(PiqaeNativeRuntime.supportsNativeContract(abi: 1, minimum: 1, maximum: 2))
+        XCTAssertFalse(PiqaeNativeRuntime.supportsNativeContract(abi: 2, minimum: 2, maximum: 2))
+    }
+
     func testPrintPacketFacadeValidatesReceiptAndLabelAndSubmitsIdempotentlyOffline() async throws {
         try requireLinkedRuntime()
         let fixture = nativeFixture("printpacket")

@@ -310,9 +310,10 @@ monorepo.
 - Windows applications consume the safe `Piqae.Node` .NET facade. A tagged
   NuGet package contains the matching native runtime for supported RIDs and is
   validated in a clean consumer before publication.
-- Both packages expose their native ABI and local broker protocol ranges. A
-  desktop client attaches only when those ranges overlap; it never guesses or
-  opens the installed node's database as a fallback.
+- Both packages require native ABI 1 and native SDK contract 2 exactly. This is
+  a pre-release hard cut with no contract-1 fallback. The separately versioned
+  installed-node broker still negotiates its documented protocol range; a
+  client never guesses or opens the installed node's database as a fallback.
 - Installed-node execution requires protocol-v4 authenticated proofs. Older
   secret-bearing execution is rejected instead of being accepted as an N/N-1
   downgrade; presence and consent remain data-minimizing discovery operations.
@@ -323,10 +324,12 @@ monorepo.
 The tagged prerelease workflow builds both SDK candidates from the same source
 revision as the server and node: a versioned Apple package-source archive,
 XCFramework, and cross-referencing manifest, and a Windows native C bundle plus
-`Piqae.Node` NuGet package. Each candidate is published with a SHA-256 checksum,
-complete SPDX evidence, and GitHub build provenance. Clean consumers link and
-execute the staged Apple binary and restore/execute the exact Windows NuGet from
-an isolated feed before attestation. These are Preview engineering artifacts,
+`Piqae.Node` NuGet package. Every native/source archive contains the repository
+LICENSE and NOTICE, has an exact-file SPDX document and SHA-256 checksum, and is
+covered by GitHub build provenance. Clean consumers require ABI 1/contract 2,
+execute the capability command, and reject a runtime that cannot report the
+canonical PrintPacket contract before attestation. These are Preview
+engineering artifacts,
 not a public package-registry promise: the Apple framework and Windows DLL
 remain unsigned until their dedicated signing gates are configured.
 Applications must pin the exact tag, verify the checksum and provenance, and

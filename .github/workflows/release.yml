@@ -192,14 +192,10 @@ jobs:
           release/tools/test_apple_node_sdk_release.sh
           "${{ needs.prepare.outputs.version }}"
           artifacts/apple-node-sdk
-      - name: Generate Apple SDK SPDX SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
-        with:
-          path: sdk/apple/.artifacts/PiqaeNode.xcframework
-          format: spdx-json
-          output-file: artifacts/apple-node-sdk/PiqaeNode.xcframework.spdx.json
-          upload-artifact: false
-          upload-release-assets: false
+      - name: Gate complete Apple archive SPDX coverage
+        run: |
+          python3 release/tools/release_bundle.py validate-sbom "artifacts/apple-node-sdk/PiqaeNode.xcframework-${{ needs.prepare.outputs.version }}.spdx.json"
+          python3 release/tools/release_bundle.py validate-sbom "artifacts/apple-node-sdk/PiqaeNodeKit-${{ needs.prepare.outputs.version }}.spdx.json"
       - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         if: github.event.repository.private == false
         with:
@@ -251,11 +247,16 @@ jobs:
             $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
             "$hash  $($_.Name)" | Out-File -Encoding ascii "$($_.FullName).sha256"
           }
+          python release/tools/windows_sdk_release.py generate-native-sbom --archive $archive --version "${{ needs.prepare.outputs.version }}" --output "artifacts\windows-node-sdk\PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.spdx.json"
+          python release/tools/windows_sdk_release.py generate-sdk-manifest --package "artifacts\windows-node-sdk\Piqae.Node.${{ needs.prepare.outputs.version }}.nupkg" --native-archive $archive --nuget-sbom "artifacts\windows-node-sdk\Piqae.Node.${{ needs.prepare.outputs.version }}.spdx.json" --native-sbom "artifacts\windows-node-sdk\PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.spdx.json" --version "${{ needs.prepare.outputs.version }}" --output "artifacts\windows-node-sdk\PiqaeNode.windows-sdk-artifact.json"
       - name: Gate the complete Windows SDK SPDX SBOM
         shell: pwsh
         run: |
-          python release/tools/windows_sdk_release.py validate-sbom --input artifacts/windows-node-sdk/PiqaeNode-native-windows-x64.spdx.json --version "${{ needs.prepare.outputs.version }}"
-          python release/tools/release_bundle.py validate-sbom artifacts/windows-node-sdk/PiqaeNode-native-windows-x64.spdx.json
+          python release/tools/windows_sdk_release.py validate-sbom --input "artifacts/windows-node-sdk/Piqae.Node.${{ needs.prepare.outputs.version }}.spdx.json" --package "artifacts/windows-node-sdk/Piqae.Node.${{ needs.prepare.outputs.version }}.nupkg" --version "${{ needs.prepare.outputs.version }}"
+          python release/tools/release_bundle.py validate-sbom "artifacts/windows-node-sdk/Piqae.Node.${{ needs.prepare.outputs.version }}.spdx.json"
+          python release/tools/windows_sdk_release.py validate-native-sbom --archive "artifacts/windows-node-sdk/PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.zip" --input "artifacts/windows-node-sdk/PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.spdx.json" --version "${{ needs.prepare.outputs.version }}"
+          python release/tools/release_bundle.py validate-sbom "artifacts/windows-node-sdk/PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.spdx.json"
+          python release/tools/windows_sdk_release.py validate-sdk-manifest --package "artifacts/windows-node-sdk/Piqae.Node.${{ needs.prepare.outputs.version }}.nupkg" --native-archive "artifacts/windows-node-sdk/PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.zip" --nuget-sbom "artifacts/windows-node-sdk/Piqae.Node.${{ needs.prepare.outputs.version }}.spdx.json" --native-sbom "artifacts/windows-node-sdk/PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.spdx.json" --version "${{ needs.prepare.outputs.version }}" --input artifacts/windows-node-sdk/PiqaeNode.windows-sdk-artifact.json
       - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         if: github.event.repository.private == false
         with:

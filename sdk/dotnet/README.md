@@ -145,7 +145,11 @@ The product release candidate is `Piqae.Node.<version>.nupkg`. Its only native
 RID is currently `win-x64`, and the package pins
 `BouncyCastle.Cryptography` 2.6.2 exactly. The release gate restores that exact
 NuGet and dependency from an isolated local feed into a new consumer, publishes
-for `win-x64`, executes the packaged native ABI, and checks the managed facade,
-dependency, and runtime DLL in the output. The accompanying SPDX document lists
-all three components and their staged checksums. These unsigned candidates
+for `win-x64`, executes the packaged native ABI, requires ABI 1/contract 2, and
+checks the PrintPacket capability response, managed facade, dependency, and
+runtime DLL in the output. The NuGet and native C archives each contain the
+repository LICENSE and NOTICE and each has exact-file SPDX checksum and
+containment evidence. These unsigned candidates
 remain engineering evidence rather than a public NuGet publication promise.
+The staged `PiqaeNode.windows-sdk-artifact.json` binds both archives and their
+SBOMs to ABI 1, native contract 2, and the PrintPacket capability response.

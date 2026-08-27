@@ -35,6 +35,14 @@ class ProductReleaseTest < Minitest::Test
     assert_equal workspace_version, ProductRelease.version(project, "dotnet")
   end
 
+  def test_embedded_sdks_require_only_native_contract_two
+    root = File.expand_path("../..", __dir__)
+    document = ProductRelease.load_yaml(File.join(root, "release/product-release.yaml"))
+    assert_equal({"current" => 2, "supported" => [2]}, document.dig("contracts", "native_sdk"))
+    assert_equal 2, document.dig("components", "apple_node_sdk", "consumes", "native_sdk")
+    assert_equal 2, document.dig("components", "dotnet_node_sdk", "consumes", "native_sdk")
+  end
+
   def test_release_locked_sdk_version_must_match_product
     root = File.expand_path("../..", __dir__)
     failures = ProductRelease.check(

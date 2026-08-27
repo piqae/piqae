@@ -81,6 +81,11 @@ xcodebuild -create-xcframework \
   -library "$simulator_library" -headers "$headers" \
   -output "$output"
 
+# The native archive is independently downloadable, so its licensing evidence
+# travels inside the exact bytes covered by SwiftPM checksum and provenance.
+cp "$repository_root/LICENSE" "$output/LICENSE"
+cp "$repository_root/NOTICE" "$output/NOTICE"
+
 # Xcode emits AvailableLibraries in a nondeterministic order. Canonicalize that
 # array and the plist keys before normalizing filesystem metadata and zip order.
 python3 - "$output/Info.plist" <<'PY'
@@ -114,6 +119,10 @@ revision=$(git -C "$repository_root" rev-parse HEAD)
 cat > "$manifest" <<EOF
 {
   "schema": 1,
+  "native_abi": 1,
+  "native_contract": {"current": 2, "supported": [2]},
+  "capability_command": "print_packet_capabilities",
+  "capability_contract": "printpacket/v1",
   "git_revision": "$revision",
   "artifact": "PiqaeNode.xcframework.zip",
   "swiftpm_checksum": "$swiftpm_checksum",

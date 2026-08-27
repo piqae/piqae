@@ -4,6 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define PIQAE_NODE_ABI_VERSION 1
+#define PIQAE_NODE_CONTRACT_VERSION 2
+
 #if defined(_WIN32) && !defined(PIQAE_NODE_STATIC)
 #  if defined(PIQAE_NODE_BUILD)
 #    define PIQAE_NODE_API __declspec(dllexport)

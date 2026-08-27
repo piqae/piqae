@@ -261,7 +261,9 @@ sdk/apple/scripts/build-xcframework.sh
 
 The script builds universal macOS, iOS arm64, and arm64/x86_64 iOS Simulator
 static-library slices, assembles `sdk/apple/.artifacts/PiqaeNode.xcframework`,
-archives it, and writes a local JSON manifest with SHA-256 and SwiftPM checksum.
+adds the repository LICENSE and NOTICE, archives it, and writes a local JSON
+manifest with SHA-256, SwiftPM checksum, ABI 1, native contract 2, and the
+PrintPacket capability command/contract.
 Pass `--replace` only to replace those generated outputs. Repository builds use
 the source facade unless `PIQAE_REQUIRE_LINKED_RUNTIME_TESTS=1` explicitly opts
 into the local XCFramework; opting in without a built artifact fails during
