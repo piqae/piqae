@@ -373,6 +373,8 @@ jobs:
           pnpm --filter @printpacket/core check
           pnpm --filter @printpacket/core test
           pnpm --filter @printpacket/core build
+          pnpm --filter @printpacket/core lint
+          pnpm --filter @printpacket/core smoke:package
       - name: Build and lint the SDK package
         run: |
           pnpm --filter @piqae/sdk build

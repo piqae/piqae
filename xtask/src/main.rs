@@ -918,6 +918,8 @@ const CHECKS: &[Check] = &[
             &["pnpm", "--filter", "@printpacket/core", "check"],
             &["pnpm", "--filter", "@printpacket/core", "test"],
             &["pnpm", "--filter", "@printpacket/core", "build"],
+            &["pnpm", "--filter", "@printpacket/core", "lint"],
+            &["pnpm", "--filter", "@printpacket/core", "smoke:package"],
             &["pnpm", "--filter", "@piqae/sdk", "build"],
             &["pnpm", "--filter", "@piqae/sdk", "lint"],
             &["pnpm", "--filter", "@piqae/sdk", "smoke:package"],

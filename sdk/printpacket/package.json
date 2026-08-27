@@ -7,6 +7,12 @@
   "type": "module",
   "sideEffects": false,
   "engines": { "node": ">=20" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/piqae/piqae.git",
+    "directory": "sdk/printpacket"
+  },
+  "bugs": { "url": "https://github.com/piqae/piqae/issues" },
   "exports": {
     ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
     "./schema": "./schema/printpacket-v1.schema.json"
@@ -18,10 +24,13 @@
     "check": "tsc --noEmit",
     "generate": "node scripts/sync-schema.mjs && node scripts/sync-license.mjs",
     "generate:check": "node scripts/sync-schema.mjs --check && node scripts/sync-license.mjs --check",
+    "lint": "publint",
+    "smoke:package": "node scripts/smoke-package.mjs",
     "test": "vitest run",
-    "prepack": "pnpm generate:check && pnpm build"
+    "prepack": "pnpm generate:check && pnpm build && publint"
   },
   "devDependencies": {
+    "publint": "0.3.22",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   }
