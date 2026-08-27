@@ -277,6 +277,16 @@ lease capability. A server cancellation or policy expiry terminalises a
 prepared job and deletes the capability without inventing a transient-failure
 cancellation.
 
+The control plane expires pre-acceptance work in bounded oldest-first batches.
+Expiry commits the `expired` lifecycle event, current-state payload, tenant
+outbox item, lease removal, capability-recovery removal, and any still
+`route_leased` attempt/reservation in one transaction. A durable node
+acceptance or a delivery attempt beyond `route_leased` is an ownership fence:
+the server leaves that job unchanged because the node may still print it.
+Unsafe rows are excluded before applying the batch limit so they cannot starve
+later safe expiries. Embedded hosts apply the same local expiry transition to
+each isolated connector queue on restart and before exposing adapter work.
+
 ### Agent event outbox
 
 The agent writes events and local state changes in the same SQLite transaction.

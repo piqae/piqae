@@ -175,6 +175,21 @@ pub fn prehandoff_failure_webhook_idempotency_key(
     format!("prehandoff-failure:{digest:x}")
 }
 
+/// Returns the stable outbox key for a server-side expiry before node
+/// responsibility was accepted.
+#[must_use]
+pub fn prehandoff_expiry_webhook_idempotency_key(
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+    sequence: u64,
+) -> String {
+    let digest = Sha256::digest(
+        format!("{workspace_id}\n{environment_id}\n{job_id}\n{sequence}").as_bytes(),
+    );
+    format!("prehandoff-expiry:{digest:x}")
+}
+
 #[derive(Clone, Debug)]
 pub enum CreateJobResult {
     Created(Job),
@@ -197,6 +212,15 @@ pub struct JobLease {
 pub struct DurableJobTransition {
     pub job: Job,
     pub webhook_idempotency_key: String,
+}
+
+/// Tenant-scoped expiry transition returned to the worker for advisory live
+/// publication after the durable job event and webhook outbox have committed.
+#[derive(Clone, Debug)]
+pub struct ExpiredJobTransition {
+    pub workspace_id: WorkspaceId,
+    pub environment_id: EnvironmentId,
+    pub transition: DurableJobTransition,
 }
 
 /// Result of a server-side pre-handoff transition. Local responsibility is a
@@ -10484,15 +10508,159 @@ impl PostgresStore {
         rows.iter().map(stuck_uncertain_from_row).collect()
     }
 
-    pub async fn release_expired_jobs(&self) -> Result<u64, StorageError> {
-        let result = sqlx::query(
-            "UPDATE jobs SET state = 'expired', final_at = now(), updated_at = now()
-             WHERE final_at IS NULL AND expires_at <= now()
-               AND state NOT IN ('spool_intent','accepted_by_spooler','spooling','printing')",
+    /// Atomically expires a bounded batch which has never crossed node
+    /// acceptance or a physical handoff boundary.
+    ///
+    /// The job event, tenant webhook outbox, lease cleanup, capability-recovery
+    /// cleanup, and pre-handoff route release commit together. Jobs with an
+    /// acceptance proof or an attempt later than `route_leased` are skipped:
+    /// their node may still print and expiry must not create a second route.
+    pub async fn expire_jobs_before_handoff(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<ExpiredJobTransition>, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let rows = sqlx::query(
+            "SELECT job.id,job.workspace_id,job.environment_id,job.payload,
+                    job.state,job.state_sequence
+             FROM jobs AS job
+             WHERE job.final_at IS NULL AND job.expires_at<=now()
+               AND job.state IN (
+                 'registered','content_pending','waiting_for_agent',
+                 'failed_retryable','blocked'
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM job_acceptances AS acceptance
+                 WHERE acceptance.workspace_id=job.workspace_id
+                   AND acceptance.environment_id=job.environment_id
+                   AND acceptance.job_id=job.id
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM delivery_attempts AS attempt
+                 WHERE attempt.workspace_id=job.workspace_id
+                   AND attempt.environment_id=job.environment_id
+                   AND attempt.job_id=job.id AND attempt.final_at IS NULL
+                   AND attempt.state<>'route_leased'
+               )
+               AND (
+                 job.state<>'blocked' OR EXISTS (
+                   SELECT 1 FROM node_capability_recovery_checks AS recovery
+                   WHERE recovery.workspace_id=job.workspace_id
+                     AND recovery.environment_id=job.environment_id
+                     AND recovery.agent_id=job.agent_id
+                     AND recovery.job_id=job.id
+                     AND (
+                       SELECT event.payload->>'reason'='node_update_required'
+                              AND event.payload->>'agent_id' IS NULL
+                       FROM job_events AS event
+                       WHERE event.workspace_id=job.workspace_id
+                         AND event.environment_id=job.environment_id
+                         AND event.job_id=job.id
+                       ORDER BY event.sequence DESC LIMIT 1
+                     )=TRUE
+                 )
+               )
+             ORDER BY job.expires_at,job.created_at,job.id
+             LIMIT $1 FOR UPDATE OF job SKIP LOCKED",
         )
-        .execute(&self.pool)
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&mut *transaction)
         .await?;
-        Ok(result.rows_affected())
+        let mut expired = Vec::with_capacity(rows.len());
+        for row in rows {
+            let workspace_id = WorkspaceId::from_str(&row.try_get::<String, _>("workspace_id")?)
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            let environment_id =
+                EnvironmentId::from_str(&row.try_get::<String, _>("environment_id")?)
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            let job_id = JobId::from_str(&row.try_get::<String, _>("id")?)
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            if !supersede_pre_handoff_delivery_attempts(
+                &mut transaction,
+                workspace_id,
+                environment_id,
+                job_id,
+            )
+            .await?
+            {
+                continue;
+            }
+            let current_state: String = row.try_get("state")?;
+            let mut job = job_from_row(row.try_get("payload")?, &current_state)?;
+            let sequence = row.try_get::<i64, _>("state_sequence")? + 1;
+            let sequence_u64 = u64::try_from(sequence)
+                .map_err(|error| StorageError::InvalidData(format!("event sequence: {error}")))?;
+            let now = Utc::now();
+            job.state = JobState::Expired;
+            insert_event(
+                &mut transaction,
+                &job,
+                &JobEvent {
+                    id: EventId::new(),
+                    job_id,
+                    sequence: sequence_u64,
+                    state: JobState::Expired,
+                    reason: Some(JobFailureReason::Expired),
+                    message: Some("Job expired before node or native handoff".into()),
+                    agent_id: None,
+                    native_job_id: None,
+                    occurred_at: now,
+                },
+            )
+            .await?;
+            let updated = sqlx::query(
+                "UPDATE jobs SET payload=$4,state='expired',state_sequence=$5,
+                        final_at=$6,lease_owner=NULL,lease_id=NULL,
+                        lease_token_hash=NULL,lease_until=NULL,updated_at=$6
+                 WHERE id=$1 AND workspace_id=$2 AND environment_id=$3
+                   AND final_at IS NULL",
+            )
+            .bind(job_id.to_string())
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(serde_json::to_value(&job)?)
+            .bind(sequence)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+            if updated.rows_affected() != 1 {
+                return Err(StorageError::ConcurrentStateChange);
+            }
+            sqlx::query(
+                "DELETE FROM node_capability_recovery_checks
+                 WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(job_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+            let webhook_idempotency_key = prehandoff_expiry_webhook_idempotency_key(
+                workspace_id,
+                environment_id,
+                job_id,
+                sequence_u64,
+            );
+            enqueue_webhook_event_in_transaction(
+                &mut transaction,
+                Some(&webhook_idempotency_key),
+                workspace_id,
+                environment_id,
+                "job.updated",
+                &serde_json::to_value(&job)?,
+            )
+            .await?;
+            expired.push(ExpiredJobTransition {
+                workspace_id,
+                environment_id,
+                transition: DurableJobTransition {
+                    job,
+                    webhook_idempotency_key,
+                },
+            });
+        }
+        transaction.commit().await?;
+        Ok(expired)
     }
 
     pub async fn readiness(&self) -> Result<(), StorageError> {

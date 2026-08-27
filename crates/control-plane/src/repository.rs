@@ -17,11 +17,11 @@ use piqae_storage_postgres::destination_topology::{
 use piqae_storage_postgres::{
     AgentAuthenticationRecord, CreateDocumentResult, CreateJobResult as PgCreateJobResult,
     DeliveryAttemptProof, DestinationRouteReassignment, DocumentRenderWork, DurableJobTransition,
-    EnrolledAgent, ExpiredDocumentArtifactWork, JobLease, NewDeviceAuthorization, NodeUpdatePolicy,
-    NodeUpdateState, PendingWakeHintDispatch, PostgresStore, PreHandoffTransitionOutcome,
-    StorageError, StoredAgent, StoredAgentCommandBatch, StoredApiKey, StoredBillingSummary,
-    StoredConnectSessionPreview, StoredContentEncryptionKey, StoredDeviceAuthorization,
-    StoredDocumentPreview, StoredDocumentRender, StoredDocumentTemplate,
+    EnrolledAgent, ExpiredDocumentArtifactWork, ExpiredJobTransition, JobLease,
+    NewDeviceAuthorization, NodeUpdatePolicy, NodeUpdateState, PendingWakeHintDispatch,
+    PostgresStore, PreHandoffTransitionOutcome, StorageError, StoredAgent, StoredAgentCommandBatch,
+    StoredApiKey, StoredBillingSummary, StoredConnectSessionPreview, StoredContentEncryptionKey,
+    StoredDeviceAuthorization, StoredDocumentPreview, StoredDocumentRender, StoredDocumentTemplate,
     StoredDocumentTemplateRevision, StoredLoadedMedia, StoredNodeConnector, StoredNodeDiagnostic,
     StoredNodeUpdate, StoredPlatformAccount, StoredPlatformCredential, StoredPrintWorkflow,
     StoredPrinter, StoredResolvedPrintTicket, StoredStock, StoredTarget, StoredTargetBinding,
@@ -31,7 +31,7 @@ use piqae_storage_postgres::{
     WorkOsProjectionResult, acceptance_revocation_webhook_idempotency_key,
     agent_acceptance_webhook_idempotency_key, node_capability_recovered_webhook_idempotency_key,
     node_update_required_webhook_idempotency_key, preaccept_cancellation_webhook_idempotency_key,
-    prehandoff_failure_webhook_idempotency_key,
+    prehandoff_expiry_webhook_idempotency_key, prehandoff_failure_webhook_idempotency_key,
 };
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -1147,6 +1147,10 @@ pub trait Repository: Send + Sync + 'static {
         agent_id: AgentId,
         job_id: JobId,
     ) -> Result<Option<DurableJobTransition>, RepositoryError>;
+    async fn expire_jobs_before_handoff(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<ExpiredJobTransition>, RepositoryError>;
     async fn validate_agent_lease(
         &self,
         workspace_id: WorkspaceId,
@@ -3341,6 +3345,15 @@ impl Repository for PostgresStore {
         job_id: JobId,
     ) -> Result<Option<DurableJobTransition>, RepositoryError> {
         Self::recover_node_update_required_job(self, workspace_id, environment_id, agent_id, job_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn expire_jobs_before_handoff(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<ExpiredJobTransition>, RepositoryError> {
+        Self::expire_jobs_before_handoff(self, limit)
             .await
             .map_err(Into::into)
     }
@@ -7973,6 +7986,90 @@ impl Repository for MemoryRepository {
             job,
             webhook_idempotency_key,
         }))
+    }
+
+    async fn expire_jobs_before_handoff(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<ExpiredJobTransition>, RepositoryError> {
+        let mut state = self.state.write().await;
+        let now = Utc::now();
+        let mut candidates = state
+            .jobs
+            .values()
+            .filter(|record| {
+                record.job.expires_at <= now
+                    && !record.job.state.is_terminal()
+                    && !state.job_acceptances.contains_key(&record.job.id)
+                    && (matches!(
+                        record.job.state,
+                        JobState::Registered
+                            | JobState::ContentPending
+                            | JobState::WaitingForAgent
+                            | JobState::FailedRetryable
+                    ) || (record.job.state == JobState::Blocked
+                        && state
+                            .capability_recovery_next_checks
+                            .contains_key(&record.job.id)
+                        && record.events.last().is_some_and(|event| {
+                            event.reason == Some(JobFailureReason::NodeUpdateRequired)
+                                && event.agent_id.is_none()
+                        })))
+            })
+            .map(|record| (record.job.expires_at, record.job.created_at, record.job.id))
+            .collect::<Vec<_>>();
+        candidates.sort();
+        candidates.truncate(usize::try_from(limit.clamp(1, 100)).unwrap_or(100));
+        let mut expired = Vec::with_capacity(candidates.len());
+        for (_, _, job_id) in candidates {
+            let (job, sequence) = {
+                let record = state
+                    .jobs
+                    .get_mut(&job_id)
+                    .ok_or(RepositoryError::ConcurrentStateChange)?;
+                record.sequence = record.sequence.saturating_add(1);
+                record.job.state = JobState::Expired;
+                record.events.push(JobEvent {
+                    id: EventId::new(),
+                    job_id,
+                    sequence: record.sequence,
+                    state: JobState::Expired,
+                    reason: Some(JobFailureReason::Expired),
+                    message: Some("Job expired before node or native handoff".into()),
+                    agent_id: None,
+                    native_job_id: None,
+                    occurred_at: now,
+                });
+                (record.job.clone(), record.sequence)
+            };
+            state.leases.remove(&job_id);
+            state.capability_recovery_next_checks.remove(&job_id);
+            let webhook_idempotency_key = prehandoff_expiry_webhook_idempotency_key(
+                job.workspace_id,
+                job.environment_id,
+                job_id,
+                sequence,
+            );
+            let payload = serde_json::to_value(&job)
+                .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+            enqueue_memory_webhook_event(
+                &mut state,
+                Some(&webhook_idempotency_key),
+                job.workspace_id,
+                job.environment_id,
+                "job.updated",
+                &payload,
+            );
+            expired.push(ExpiredJobTransition {
+                workspace_id: job.workspace_id,
+                environment_id: job.environment_id,
+                transition: DurableJobTransition {
+                    job,
+                    webhook_idempotency_key,
+                },
+            });
+        }
+        Ok(expired)
     }
 
     async fn validate_agent_lease(

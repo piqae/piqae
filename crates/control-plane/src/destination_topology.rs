@@ -1817,6 +1817,10 @@ pub(crate) async fn reconcile_post_spooler_event(
         | piqae_domain::JobState::Blocked => Some(DeliveryAttemptState::PrintingReported),
         piqae_domain::JobState::CompletedReported => Some(DeliveryAttemptState::CompletedReported),
         piqae_domain::JobState::FailedTerminal => Some(DeliveryAttemptState::Failed),
+        // Node-local expiry is emitted only for work still queued before a
+        // native handoff. Retire the accepted route rather than leaving an
+        // active reservation behind after the job becomes terminal.
+        piqae_domain::JobState::Expired => Some(DeliveryAttemptState::Cancelled),
         // Cancellation after native acceptance cannot prove the spooler did
         // not print. Preserve duplicate risk instead of claiming a clean stop.
         piqae_domain::JobState::Cancelled | piqae_domain::JobState::DeliveryUncertain => {

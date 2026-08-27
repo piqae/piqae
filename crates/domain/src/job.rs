@@ -346,7 +346,7 @@ impl JobState {
                 QueuedLocal | CancelRequested | FailedRetryable
             ) | (
                 QueuedLocal,
-                Preparing | CancelRequested | Blocked | FailedRetryable
+                Preparing | CancelRequested | Blocked | Expired | FailedRetryable
             ) | (
                 Preparing,
                 Rendering | SpoolIntent | CancelRequested | FailedRetryable | FailedTerminal
@@ -515,5 +515,11 @@ mod tests {
             assert!(state.is_terminal());
             assert!(validate_transition(state, JobState::WaitingForAgent).is_err());
         }
+    }
+
+    #[test]
+    fn locally_queued_work_can_expire_before_native_handoff() {
+        assert!(validate_transition(JobState::QueuedLocal, JobState::Expired).is_ok());
+        assert!(validate_transition(JobState::SpoolIntent, JobState::Expired).is_err());
     }
 }
