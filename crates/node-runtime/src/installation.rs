@@ -136,8 +136,10 @@ impl InstallationGuard {
         }
         let file = options.open(&path).map_err(|error| {
             #[cfg(windows)]
-            if error.raw_os_error()
-                == Some(windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION as i32)
+            if error
+                .raw_os_error()
+                .and_then(|code| u32::try_from(code).ok())
+                == Some(windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION)
             {
                 return InstallationLockError::AlreadyRunning;
             }
