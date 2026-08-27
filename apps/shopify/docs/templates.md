@@ -1,6 +1,6 @@
-# Shopify business documents
+# Shopify PrintPacket
 
-The Shopify app owns authoring and Shopify data adaptation. Piqae receives only a validated `piqae.business-document/v1` document and normalized data; Piqae has no Shopify or Liquid behavior.
+The Shopify app owns authoring and Shopify data adaptation. Piqae receives only a validated `printpacket/v1` document and normalized data; Piqae has no Shopify or Liquid behavior.
 
 Four immutable, dynamic starters are seeded: Invoice, Packing slip, 80 mm Receipt and Credit note. All use semantic flow tables backed by line-item collections. They reflow and paginate rather than placing fields at fixed coordinates. **Customize** creates a merchant draft. Publishing pins one immutable Piqae revision used by preview, PDF download and direct print.
 
@@ -8,7 +8,7 @@ Four immutable, dynamic starters are seeded: Invoice, Packing slip, 80 mm Receip
 
 The visual editor is a schema-controlled ProseMirror document surface. Paragraphs and headings are edited directly. Shopify values are inserted as typed variable chips. Line-item tables, repeaters, conditions, images, QR codes and barcodes are semantic blocks. The editor stores no HTML and has no unrestricted coordinate layout.
 
-One template has Document, Advanced Liquid and Piqae source views. Supported Liquid is compiled into the same business-document tree. Visual changes regenerate normalized Liquid. A view switch with invalid source is stopped with a line/column diagnostic; content is never silently flattened.
+One template has Document, Advanced Liquid and Piqae source views. Supported Liquid is compiled into the same PrintPacket tree. Visual changes regenerate normalized Liquid. A view switch with invalid source is stopped with a line/column diagnostic; content is never silently flattened.
 
 ## Shopify Liquid profile
 

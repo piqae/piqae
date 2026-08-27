@@ -2,9 +2,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:printpacket:schema:v1",
   "title": "PrintPacket v1",
-  "$ref": "#/$defs/BusinessDocumentV1",
+  "$ref": "#/$defs/PrintPacketV1",
   "$defs": {
-    "BusinessDocumentEdges": {
+    "PrintPacketEdges": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -36,7 +36,7 @@
         }
       }
     },
-    "BusinessDocumentExpression": {
+    "PrintPacketExpression": {
       "oneOf": [
         {
           "type": "object",
@@ -96,7 +96,7 @@
               "minItems": 1,
               "maxItems": 100,
               "items": {
-                "$ref": "#/$defs/BusinessDocumentExpression"
+                "$ref": "#/$defs/PrintPacketExpression"
               }
             }
           }
@@ -125,10 +125,10 @@
               ]
             },
             "left": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             },
             "right": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             }
           }
         },
@@ -155,7 +155,7 @@
               "minItems": 1,
               "maxItems": 100,
               "items": {
-                "$ref": "#/$defs/BusinessDocumentExpression"
+                "$ref": "#/$defs/PrintPacketExpression"
               }
             }
           }
@@ -172,7 +172,7 @@
               "const": "not"
             },
             "value": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             }
           }
         },
@@ -188,7 +188,7 @@
               "const": "exists"
             },
             "value": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             }
           }
         },
@@ -205,10 +205,10 @@
               "const": "contains"
             },
             "collection": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             },
             "value": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             }
           }
         },
@@ -249,10 +249,10 @@
               ]
             },
             "left": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             },
             "right": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             }
           }
         },
@@ -268,7 +268,7 @@
               "const": "format_number"
             },
             "value": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             },
             "decimals": {
               "type": "integer",
@@ -291,10 +291,10 @@
               "const": "format_money"
             },
             "amount": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             },
             "currency": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             },
             "decimals": {
               "type": "integer",
@@ -317,7 +317,7 @@
               "const": "format_date"
             },
             "value": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             },
             "format": {
               "enum": [
@@ -341,7 +341,7 @@
               "const": "format_string"
             },
             "value": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             },
             "operation": {
               "enum": [
@@ -354,7 +354,7 @@
         }
       ]
     },
-    "BusinessDocumentTextStyle": {
+    "PrintPacketTextStyle": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -387,11 +387,11 @@
           "default": "left"
         },
         "color": {
-          "$ref": "#/$defs/BusinessDocumentColor"
+          "$ref": "#/$defs/PrintPacketColor"
         }
       }
     },
-    "BusinessDocumentColor": {
+    "PrintPacketColor": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -417,7 +417,7 @@
         }
       }
     },
-    "BusinessDocumentBoxStyle": {
+    "PrintPacketBoxStyle": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -428,10 +428,10 @@
           "default": 0
         },
         "background": {
-          "$ref": "#/$defs/BusinessDocumentColor"
+          "$ref": "#/$defs/PrintPacketColor"
         },
         "border_color": {
-          "$ref": "#/$defs/BusinessDocumentColor"
+          "$ref": "#/$defs/PrintPacketColor"
         },
         "border_width_pt": {
           "type": "number",
@@ -441,7 +441,7 @@
         }
       }
     },
-    "BusinessDocumentTableStyle": {
+    "PrintPacketTableStyle": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -452,13 +452,13 @@
           "default": 1
         },
         "header_background": {
-          "$ref": "#/$defs/BusinessDocumentColor"
+          "$ref": "#/$defs/PrintPacketColor"
         },
         "header_text_color": {
-          "$ref": "#/$defs/BusinessDocumentColor"
+          "$ref": "#/$defs/PrintPacketColor"
         },
         "border_color": {
-          "$ref": "#/$defs/BusinessDocumentColor"
+          "$ref": "#/$defs/PrintPacketColor"
         },
         "border_width_pt": {
           "type": "number",
@@ -468,7 +468,7 @@
         }
       }
     },
-    "BusinessDocumentInline": {
+    "PrintPacketInline": {
       "oneOf": [
         {
           "type": "object",
@@ -486,7 +486,7 @@
               "maxLength": 100000
             },
             "style": {
-              "$ref": "#/$defs/BusinessDocumentTextStyle"
+              "$ref": "#/$defs/PrintPacketTextStyle"
             }
           }
         },
@@ -502,10 +502,10 @@
               "const": "value"
             },
             "value": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             },
             "style": {
-              "$ref": "#/$defs/BusinessDocumentTextStyle"
+              "$ref": "#/$defs/PrintPacketTextStyle"
             }
           }
         },
@@ -523,7 +523,7 @@
         }
       ]
     },
-    "BusinessDocumentNode": {
+    "PrintPacketNode": {
       "oneOf": [
         {
           "type": "object",
@@ -536,21 +536,46 @@
             "type": {
               "enum": [
                 "section",
-                "stack",
-                "row"
+                "stack"
               ]
             },
             "children": {
               "type": "array",
               "maxItems": 20000,
               "items": {
-                "$ref": "#/$defs/BusinessDocumentNode"
+                "$ref": "#/$defs/PrintPacketNode"
               }
             },
             "gap_mm": {
               "type": "number",
               "minimum": 0,
-              "maximum": 100,
+              "maximum": 2000,
+              "default": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "children"
+          ],
+          "properties": {
+            "type": {
+              "const": "row"
+            },
+            "children": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "$ref": "#/$defs/PrintPacketNode"
+              }
+            },
+            "gap_mm": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2000,
               "default": 0
             }
           }
@@ -570,11 +595,11 @@
               "type": "array",
               "maxItems": 20000,
               "items": {
-                "$ref": "#/$defs/BusinessDocumentNode"
+                "$ref": "#/$defs/PrintPacketNode"
               }
             },
             "style": {
-              "$ref": "#/$defs/BusinessDocumentBoxStyle"
+              "$ref": "#/$defs/PrintPacketBoxStyle"
             }
           }
         },
@@ -593,11 +618,11 @@
               "type": "array",
               "maxItems": 10000,
               "items": {
-                "$ref": "#/$defs/BusinessDocumentInline"
+                "$ref": "#/$defs/PrintPacketInline"
               }
             },
             "style": {
-              "$ref": "#/$defs/BusinessDocumentTextStyle"
+              "$ref": "#/$defs/PrintPacketTextStyle"
             }
           }
         },
@@ -616,7 +641,7 @@
               "type": "array",
               "maxItems": 10000,
               "items": {
-                "$ref": "#/$defs/BusinessDocumentInline"
+                "$ref": "#/$defs/PrintPacketInline"
               }
             },
             "level": {
@@ -626,7 +651,7 @@
               "default": 1
             },
             "style": {
-              "$ref": "#/$defs/BusinessDocumentTextStyle"
+              "$ref": "#/$defs/PrintPacketTextStyle"
             }
           }
         },
@@ -654,15 +679,15 @@
             },
             "children": {
               "type": "array",
-              "maxItems": 20000,
+              "maxItems": 32,
               "items": {
-                "$ref": "#/$defs/BusinessDocumentNode"
+                "$ref": "#/$defs/PrintPacketNode"
               }
             },
             "gap_mm": {
               "type": "number",
               "minimum": 0,
-              "maximum": 100,
+              "maximum": 2000,
               "default": 0
             }
           }
@@ -680,14 +705,14 @@
               "const": "table"
             },
             "items": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             },
             "columns": {
               "type": "array",
               "minItems": 1,
               "maxItems": 32,
               "items": {
-                "$ref": "#/$defs/BusinessDocumentTableColumn"
+                "$ref": "#/$defs/PrintPacketTableColumn"
               }
             },
             "repeat_header": {
@@ -698,11 +723,11 @@
               "type": "array",
               "maxItems": 20000,
               "items": {
-                "$ref": "#/$defs/BusinessDocumentNode"
+                "$ref": "#/$defs/PrintPacketNode"
               }
             },
             "style": {
-              "$ref": "#/$defs/BusinessDocumentTableStyle"
+              "$ref": "#/$defs/PrintPacketTableStyle"
             }
           }
         },
@@ -719,19 +744,19 @@
               "const": "repeat"
             },
             "items": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             },
             "children": {
               "type": "array",
               "maxItems": 20000,
               "items": {
-                "$ref": "#/$defs/BusinessDocumentNode"
+                "$ref": "#/$defs/PrintPacketNode"
               }
             },
             "gap_mm": {
               "type": "number",
               "minimum": 0,
-              "maximum": 100,
+              "maximum": 2000,
               "default": 0
             }
           }
@@ -749,27 +774,27 @@
               "const": "data_list"
             },
             "items": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             },
             "header": {
               "type": "array",
               "maxItems": 20000,
               "items": {
-                "$ref": "#/$defs/BusinessDocumentNode"
+                "$ref": "#/$defs/PrintPacketNode"
               }
             },
             "item": {
               "type": "array",
               "maxItems": 20000,
               "items": {
-                "$ref": "#/$defs/BusinessDocumentNode"
+                "$ref": "#/$defs/PrintPacketNode"
               }
             },
             "empty": {
               "type": "array",
               "maxItems": 20000,
               "items": {
-                "$ref": "#/$defs/BusinessDocumentNode"
+                "$ref": "#/$defs/PrintPacketNode"
               }
             },
             "repeat_header": {
@@ -797,20 +822,20 @@
               "const": "conditional"
             },
             "condition": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             },
             "then": {
               "type": "array",
               "maxItems": 20000,
               "items": {
-                "$ref": "#/$defs/BusinessDocumentNode"
+                "$ref": "#/$defs/PrintPacketNode"
               }
             },
             "else": {
               "type": "array",
               "maxItems": 20000,
               "items": {
-                "$ref": "#/$defs/BusinessDocumentNode"
+                "$ref": "#/$defs/PrintPacketNode"
               }
             }
           }
@@ -845,9 +870,9 @@
             },
             "width_pt": {
               "type": "number",
-              "exclusiveMinimum": 0,
               "maximum": 10,
-              "default": 0.5
+              "default": 0.5,
+              "minimum": 0.1
             }
           }
         },
@@ -878,7 +903,7 @@
               "type": "array",
               "maxItems": 20000,
               "items": {
-                "$ref": "#/$defs/BusinessDocumentNode"
+                "$ref": "#/$defs/PrintPacketNode"
               }
             }
           }
@@ -934,7 +959,7 @@
               "const": "image_value"
             },
             "resource": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             },
             "width_mm": {
               "type": "number",
@@ -969,12 +994,12 @@
               "const": "qr"
             },
             "value": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             },
             "size_mm": {
               "type": "number",
-              "minimum": 10,
-              "maximum": 100
+              "minimum": 8,
+              "maximum": 2000
             },
             "error_correction": {
               "enum": [
@@ -1002,7 +1027,7 @@
               "const": "barcode"
             },
             "value": {
-              "$ref": "#/$defs/BusinessDocumentExpression"
+              "$ref": "#/$defs/PrintPacketExpression"
             },
             "symbology": {
               "const": "code128"
@@ -1025,7 +1050,7 @@
         }
       ]
     },
-    "BusinessDocumentTableColumn": {
+    "PrintPacketTableColumn": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -1037,14 +1062,14 @@
           "type": "array",
           "maxItems": 10000,
           "items": {
-            "$ref": "#/$defs/BusinessDocumentInline"
+            "$ref": "#/$defs/PrintPacketInline"
           }
         },
         "cell": {
           "type": "array",
           "maxItems": 10000,
           "items": {
-            "$ref": "#/$defs/BusinessDocumentInline"
+            "$ref": "#/$defs/PrintPacketInline"
           }
         },
         "width": {
@@ -1063,7 +1088,7 @@
         }
       }
     },
-    "BusinessDocumentRegion": {
+    "PrintPacketRegion": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -1071,26 +1096,26 @@
           "type": "array",
           "maxItems": 20000,
           "items": {
-            "$ref": "#/$defs/BusinessDocumentNode"
+            "$ref": "#/$defs/PrintPacketNode"
           }
         },
         "default": {
           "type": "array",
           "maxItems": 20000,
           "items": {
-            "$ref": "#/$defs/BusinessDocumentNode"
+            "$ref": "#/$defs/PrintPacketNode"
           }
         },
         "last": {
           "type": "array",
           "maxItems": 20000,
           "items": {
-            "$ref": "#/$defs/BusinessDocumentNode"
+            "$ref": "#/$defs/PrintPacketNode"
           }
         }
       }
     },
-    "BusinessDocumentV1": {
+    "PrintPacketV1": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -1100,10 +1125,7 @@
       ],
       "properties": {
         "format": {
-          "enum": [
-            "printpacket/v1",
-            "piqae.business-document/v1"
-          ]
+          "const": "printpacket/v1"
         },
         "media": {
           "oneOf": [
@@ -1133,7 +1155,7 @@
                   "default": "portrait"
                 },
                 "margins": {
-                  "$ref": "#/$defs/BusinessDocumentEdges"
+                  "$ref": "#/$defs/PrintPacketEdges"
                 }
               }
             },
@@ -1154,7 +1176,7 @@
                   "maximum": 500
                 },
                 "margins": {
-                  "$ref": "#/$defs/BusinessDocumentEdges"
+                  "$ref": "#/$defs/PrintPacketEdges"
                 }
               }
             },
@@ -1181,7 +1203,7 @@
                   "maximum": 500
                 },
                 "margins": {
-                  "$ref": "#/$defs/BusinessDocumentEdges"
+                  "$ref": "#/$defs/PrintPacketEdges"
                 }
               }
             }
@@ -1269,7 +1291,7 @@
           "type": "array",
           "maxItems": 20000,
           "items": {
-            "$ref": "#/$defs/BusinessDocumentNode"
+            "$ref": "#/$defs/PrintPacketNode"
           }
         },
         "footer": {
@@ -1277,7 +1299,7 @@
         }
       }
     },
-    "BusinessDocumentTemplate": {
+    "PrintPacketTemplate": {
       "type": "object",
       "required": [
         "id",
@@ -1302,7 +1324,7 @@
           ]
         },
         "specification": {
-          "$ref": "#/$defs/BusinessDocumentV1"
+          "$ref": "#/$defs/PrintPacketV1"
         },
         "published_revision_id": {
           "type": [
@@ -1320,7 +1342,7 @@
         }
       }
     },
-    "BusinessDocumentTemplateRevision": {
+    "PrintPacketTemplateRevision": {
       "type": "object",
       "required": [
         "id",
@@ -1338,7 +1360,7 @@
           "type": "string"
         },
         "specification": {
-          "$ref": "#/$defs/BusinessDocumentV1"
+          "$ref": "#/$defs/PrintPacketV1"
         },
         "revision": {
           "type": "integer",
@@ -1346,7 +1368,7 @@
         },
         "renderer_profile": {
           "type": "string",
-          "const": "piqae.business-document/v1"
+          "const": "printpacket/v1"
         },
         "created_at": {
           "type": "string",
@@ -1354,7 +1376,7 @@
         }
       }
     },
-    "BusinessDocumentRender": {
+    "PrintPacketRender": {
       "type": "object",
       "required": [
         "id",
@@ -1428,7 +1450,7 @@
         }
       }
     },
-    "BusinessDocumentRenderPolicy": {
+    "PrintPacketRenderPolicy": {
       "type": "string",
       "enum": [
         "automatic",
@@ -1439,7 +1461,7 @@
       "default": "automatic",
       "description": "automatic uses bounded measured costs; cloud_only always delivers the approved PDF; prefer_node uses exact node rendering only when compatible and otherwise delivers the approved PDF; require_node fails closed when exact compatibility is unavailable."
     },
-    "BusinessDocumentRenderCost": {
+    "PrintPacketRenderCost": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -1473,7 +1495,7 @@
         }
       }
     },
-    "BusinessDocumentResourceDescriptor": {
+    "PrintPacketResourceDescriptor": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -1500,7 +1522,7 @@
         }
       }
     },
-    "BusinessDocumentRenderReadiness": {
+    "PrintPacketRenderReadiness": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -1512,7 +1534,7 @@
       ],
       "properties": {
         "requested_policy": {
-          "$ref": "#/$defs/BusinessDocumentRenderPolicy"
+          "$ref": "#/$defs/PrintPacketRenderPolicy"
         },
         "selected_mode": {
           "type": "string",
@@ -1579,7 +1601,7 @@
         }
       }
     },
-    "BusinessDocumentPreview": {
+    "PrintPacketPreview": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -1635,14 +1657,14 @@
           "type": "array",
           "maxItems": 20000,
           "items": {
-            "$ref": "#/$defs/BusinessDocumentNode"
+            "$ref": "#/$defs/PrintPacketNode"
           }
         },
         "default": {
           "type": "array",
           "maxItems": 20000,
           "items": {
-            "$ref": "#/$defs/BusinessDocumentNode"
+            "$ref": "#/$defs/PrintPacketNode"
           }
         }
       }
@@ -1655,14 +1677,14 @@
           "type": "array",
           "maxItems": 20000,
           "items": {
-            "$ref": "#/$defs/BusinessDocumentNode"
+            "$ref": "#/$defs/PrintPacketNode"
           }
         },
         "last": {
           "type": "array",
           "maxItems": 20000,
           "items": {
-            "$ref": "#/$defs/BusinessDocumentNode"
+            "$ref": "#/$defs/PrintPacketNode"
           }
         }
       }

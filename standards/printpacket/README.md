@@ -3,7 +3,7 @@
 PrintPacket is an open, vendor-neutral format for small, data-driven print
 layouts. One bounded language covers:
 
-- paged business documents such as invoices, packing slips, purchase orders,
+- paged PrintPacket such as invoices, packing slips, purchase orders,
   CRM/ERP forms, and pick lists;
 - continuous receipts and kitchen/customer tickets;
 - fixed production, shipping, price, shelf, and barcode labels.
@@ -13,9 +13,8 @@ an arbitrary-position design canvas. Templates can still produce clean,
 professional layouts with text, tables, images, icons, QR codes, Code 128,
 repeated data, conditions, and basic arithmetic/formatting.
 
-The canonical v1 identifier is `printpacket/v1`. The older
-`piqae.business-document/v1` identifier is a lossless compatibility alias; it
-normalizes to the same canonical template digest.
+The sole v1 identifier is `printpacket/v1`. Preview identifiers are not
+accepted, normalized, migrated, or included in canonical template digests.
 
 PrintPacket is independent of Piqae. Piqae is one transport, queue, node, and
 reference-renderer implementation. A POS, ERP, browser service, desktop app, or

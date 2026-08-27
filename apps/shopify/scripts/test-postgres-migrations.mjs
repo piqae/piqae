@@ -127,7 +127,7 @@ async function assertions(client) {
     [
       templateId,
       "alpha.myshopify.com",
-      '{"schema":"piqae.shopify-business-template/v1","document":{"format":"piqae.business-document/v1","media":{"kind":"paged","size":"a4","margins":{"top_mm":10,"right_mm":10,"bottom_mm":10,"left_mm":10}},"theme":{"font_size_pt":10,"line_height":1.25,"text_color":{"red":0,"green":0,"blue":0}},"resources":{},"body":[]},"editor":{"mode":"visual","liquid":"","roundTrip":"lossless","warnings":[]},"assets":[]}',
+      '{"schema":"piqae.shopify-printpacket-template/v1","document":{"format":"printpacket/v1","media":{"kind":"paged","size":"a4","margins":{"top_mm":10,"right_mm":10,"bottom_mm":10,"left_mm":10}},"theme":{"font_size_pt":10,"line_height":1.25,"text_color":{"red":0,"green":0,"blue":0}},"resources":{},"body":[]},"editor":{"mode":"visual","liquid":"","roundTrip":"lossless","warnings":[]},"assets":[]}',
     ],
   );
   const crossRead = await client.query(

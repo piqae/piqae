@@ -16,7 +16,7 @@ describe("Order Printer Pro import", () => {
     const result = importOrderPrinterProTemplate(fixture);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.document.format).toBe("piqae.business-document/v1");
+    expect(result.document.format).toBe("printpacket/v1");
     expect(result.document.theme?.font_size_pt).toBe(9);
     expect(result.document.body[0]).toMatchObject({
       type: "repeat",
@@ -30,7 +30,7 @@ describe("Order Printer Pro import", () => {
     expect(result.originalSource).toBe(fixture);
     const envelope = parseTemplateEnvelope(
       serializeTemplateEnvelope({
-        schema: "piqae.shopify-business-template/v1",
+        schema: "piqae.shopify-printpacket-template/v1",
         document: result.document,
         editor: {
           mode: "visual",

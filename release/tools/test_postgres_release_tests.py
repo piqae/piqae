@@ -33,7 +33,7 @@ class PostgresReleaseEvidenceTest(unittest.TestCase):
             [gate.expected_test for gate in topology],
             [
                 "postgres_topology_is_tenant_isolated_and_fences_delivery",
-                "migration_42_upgrades_41_and_backfills_without_inferring_route_merges",
+                "migration_40_upgrades_39_and_backfills_without_inferring_route_merges",
             ],
         )
         for gate in topology:

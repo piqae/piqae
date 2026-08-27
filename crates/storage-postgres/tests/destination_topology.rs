@@ -1709,7 +1709,7 @@ async fn revocation_serializes_with_route_projection_and_retires_the_winner() {
 }
 
 #[tokio::test]
-async fn migration_42_upgrades_41_and_backfills_without_inferring_route_merges() {
+async fn migration_40_upgrades_39_and_backfills_without_inferring_route_merges() {
     let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
         eprintln!("skipped: set PIQAE_TEST_DATABASE_URL for PostgreSQL migration evidence");
         return;
@@ -1729,7 +1729,7 @@ async fn migration_42_upgrades_41_and_backfills_without_inferring_route_merges()
     let previous = Migrator {
         migrations: Cow::Owned(
             all.iter()
-                .filter(|migration| migration.version < 42)
+                .filter(|migration| migration.version < 40)
                 .cloned()
                 .collect(),
         ),
@@ -1737,7 +1737,7 @@ async fn migration_42_upgrades_41_and_backfills_without_inferring_route_merges()
         locking: true,
         no_tx: false,
     };
-    previous.run(&pool).await.expect("apply schema version 41");
+    previous.run(&pool).await.expect("apply schema version 39");
     let store = PostgresStore::from_pool(pool.clone());
     let scope = TenantScope {
         workspace_id: WorkspaceId::new(),
@@ -1747,7 +1747,7 @@ async fn migration_42_upgrades_41_and_backfills_without_inferring_route_merges()
     store
         .migrate()
         .await
-        .expect("upgrade application from 41 to 42");
+        .expect("upgrade application from 39 to 40");
     sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at) VALUES ('job_upgrade_legacy_writer',$1,$2,'ptr_upgrade','agt_upgrade','{}'::jsonb,'registered',2,now()+interval '1 hour')")
         .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).execute(&pool).await.expect("N-1 writer remains compatible while destination columns are nullable");
     let legacy_destination: Option<String> = sqlx::query_scalar("SELECT destination_id FROM jobs WHERE workspace_id=$1 AND environment_id=$2 AND id='job_upgrade_legacy_writer'")

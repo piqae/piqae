@@ -22,9 +22,8 @@ suite. Existing identifiers and fixtures are immutable once marked Stable.
 The checked-in v1 contract is Preview while the independent package/repository,
 media-type registration strategy, Unicode/font profile, GS1 validation, and
 physical printer-language certification are still being completed. Preview
-does not weaken compatibility inside a released Piqae build: existing stored
-`piqae.business-document/v1` revisions remain readable through the frozen
-adapter.
+packets use only `printpacket/v1`; pre-release identifiers have no compatibility
+or migration promise.
 
 Issues and proposals must not include customer print data, credentials, device
 keys, printer addresses, or production logs.

@@ -11,11 +11,11 @@ import {
   removeBlockAtPath,
   replaceBlockAtPath,
   searchDocumentFields,
-} from "../app/components/BusinessDocumentEditor";
+} from "../app/components/PrintPacketEditor";
 import type { ShopifyDocumentField } from "../app/core/shopify-document-fields";
 import type { Block } from "../app/core/template-model";
 
-describe("business document editor serialization", () => {
+describe("PrintPacket editor serialization", () => {
   it("preserves computed values, line breaks, and non-text layout blocks", () => {
     const blocks: Block[] = [
       {

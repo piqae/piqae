@@ -111,7 +111,7 @@ $$;
 -- safely be reactivated after upgrade: the node may or may not have crossed
 -- the native handoff boundary.  Fence these historical rows conservatively and
 -- keep every delivery projection consistent with the job terminal state.
-CREATE TEMP TABLE migration_0045_revoked_acceptances ON COMMIT DROP AS
+CREATE TEMP TABLE migration_0043_revoked_acceptances ON COMMIT DROP AS
 SELECT DISTINCT ON (job.workspace_id, job.environment_id, job.id)
     job.workspace_id,
     job.environment_id,
@@ -142,7 +142,7 @@ ORDER BY job.workspace_id, job.environment_id, job.id, connector.revoked_at DESC
 
 UPDATE physical_destinations AS destination
 SET state = 'attention', updated_at = affected.terminalized_at
-FROM migration_0045_revoked_acceptances AS affected
+FROM migration_0043_revoked_acceptances AS affected
 WHERE destination.workspace_id = affected.workspace_id
   AND destination.environment_id = affected.environment_id
   AND destination.id IN (
@@ -158,7 +158,7 @@ UPDATE delivery_attempts AS attempt
 SET state = 'delivery_uncertain',
     final_at = affected.terminalized_at,
     updated_at = affected.terminalized_at
-FROM migration_0045_revoked_acceptances AS affected
+FROM migration_0043_revoked_acceptances AS affected
 WHERE attempt.workspace_id = affected.workspace_id
   AND attempt.environment_id = affected.environment_id
   AND attempt.job_id = affected.job_id
@@ -168,7 +168,7 @@ UPDATE route_reservations AS reservation
 SET state = 'released',
     released_at = affected.terminalized_at,
     updated_at = affected.terminalized_at
-FROM migration_0045_revoked_acceptances AS affected
+FROM migration_0043_revoked_acceptances AS affected
 WHERE reservation.workspace_id = affected.workspace_id
   AND reservation.environment_id = affected.environment_id
   AND reservation.job_id = affected.job_id
@@ -196,7 +196,7 @@ SELECT
         'occurred_at', affected.terminalized_at
     ),
     affected.terminalized_at
-FROM migration_0045_revoked_acceptances AS affected;
+FROM migration_0043_revoked_acceptances AS affected;
 
 UPDATE jobs AS job
 SET state = 'delivery_uncertain',
@@ -208,7 +208,7 @@ SET state = 'delivery_uncertain',
         '{delivery_uncertain_since}', to_jsonb(affected.terminalized_at), true
     ),
     updated_at = affected.terminalized_at
-FROM migration_0045_revoked_acceptances AS affected
+FROM migration_0043_revoked_acceptances AS affected
 WHERE job.workspace_id = affected.workspace_id
   AND job.environment_id = affected.environment_id
   AND job.id = affected.job_id;

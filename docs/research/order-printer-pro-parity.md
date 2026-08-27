@@ -2,7 +2,7 @@
 
 Status: pre-release implementation direction, August 2026.
 
-Piqae Order Printing uses a structured, Word-like Shopify authoring experience backed by the open `piqae.business-document/v1` format. It is deliberately not a general graphic-design or arbitrary-position PDF tool. Its priorities are dynamic commerce documents, deterministic pagination, fast rendering, exact preview-to-print artifacts, and eventual node-local rendering.
+Piqae Order Printing uses a structured, Word-like Shopify authoring experience backed by the open `printpacket/v1` format. It is deliberately not a general graphic-design or arbitrary-position PDF tool. Its priorities are dynamic commerce documents, deterministic pagination, fast rendering, exact preview-to-print artifacts, and eventual node-local rendering.
 
 ## Product boundary
 
@@ -12,7 +12,7 @@ Shopify owns its editor, Liquid profile, variable catalogue and normalized order
 
 ## Editor
 
-The Shopify editor is a schema-controlled ProseMirror surface with direct text editing, variable chips and semantic business-document blocks. It offers Document, Advanced Liquid and Piqae source views. Supported Liquid compiles into the same typed tree; unsupported executable or presentation constructs fail with stable diagnostics. HTML, CSS, includes, plugins, scripts, filesystem and network access are not execution options.
+The Shopify editor is a schema-controlled ProseMirror surface with direct text editing, variable chips and semantic PrintPacket blocks. It offers Document, Advanced Liquid and Piqae source views. Supported Liquid compiles into the same typed tree; unsupported executable or presentation constructs fail with stable diagnostics. HTML, CSS, includes, plugins, scripts, filesystem and network access are not execution options.
 
 Four dynamic starters ship initially: Invoice, Packing slip, 80 mm Receipt and Credit note. Each uses collection-backed tables and is tested against empty, small and large line-item collections.
 

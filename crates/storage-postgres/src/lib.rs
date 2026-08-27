@@ -135,7 +135,7 @@ pub struct PendingWakeHintDispatch {
 }
 
 #[derive(Clone, Debug)]
-pub struct ExpiredBusinessDocumentResource {
+pub struct ExpiredPrintPacketResource {
     pub workspace_id: WorkspaceId,
     pub environment_id: EnvironmentId,
     pub digest: String,
@@ -3236,7 +3236,7 @@ impl PostgresStore {
         agent_id: AgentId,
         version: &str,
         health: &piqae_protocol::agent::AgentHealth,
-        document_render: &piqae_protocol::agent::DocumentRenderCapabilities,
+        printpacket_render: &piqae_protocol::agent::DocumentRenderCapabilities,
         printers: Option<&[SyncedPrinter]>,
     ) -> Result<(), StorageError> {
         let mut transaction = self.pool.begin().await?;
@@ -3244,7 +3244,7 @@ impl PostgresStore {
             "UPDATE agents SET state = 'connected', version = $4, last_seen_at = now(),
                  health_started_at = $5, health_observed_at = $6,
                  sqlite_integrity_ok = $7, executor_crashes = $8,
-                 last_error_code = $9, document_render_capabilities = $10
+                 last_error_code = $9, printpacket_render_capabilities = $10
              WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
                AND revoked_at IS NULL
                AND (
@@ -3257,7 +3257,7 @@ impl PostgresStore {
                  OR last_error_code IS DISTINCT FROM $9
                  OR last_seen_at IS NULL
                  OR last_seen_at < now() - interval '55 seconds'
-                 OR document_render_capabilities IS DISTINCT FROM $10
+                 OR printpacket_render_capabilities IS DISTINCT FROM $10
                  OR $11::boolean
                )",
         )
@@ -3272,8 +3272,8 @@ impl PostgresStore {
             StorageError::InvalidData(format!("executor crash count overflow: {error}"))
         })?)
         .bind(&health.last_error_code)
-        .bind(serde_json::to_value(document_render).map_err(|error| {
-            StorageError::InvalidData(format!("invalid document render capabilities: {error}"))
+        .bind(serde_json::to_value(printpacket_render).map_err(|error| {
+            StorageError::InvalidData(format!("invalid PrintPacket render capabilities: {error}"))
         })?)
         .bind(printers.is_some())
         .execute(&mut *transaction)
@@ -3345,14 +3345,14 @@ impl PostgresStore {
         Ok(())
     }
 
-    pub async fn document_render_capabilities_for_printer(
+    pub async fn printpacket_render_capabilities_for_printer(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         printer_id: PrinterId,
     ) -> Result<piqae_protocol::agent::DocumentRenderCapabilities, StorageError> {
         let value: serde_json::Value = sqlx::query_scalar(
-            "SELECT agent.document_render_capabilities
+            "SELECT agent.printpacket_render_capabilities
              FROM printers printer
              JOIN agents agent ON agent.id=printer.agent_id
                AND agent.workspace_id=printer.workspace_id
@@ -3368,11 +3368,11 @@ impl PostgresStore {
         .await?
         .ok_or(StorageError::NotFound)?;
         serde_json::from_value(value).map_err(|error| {
-            StorageError::InvalidData(format!("invalid document render capabilities: {error}"))
+            StorageError::InvalidData(format!("invalid PrintPacket render capabilities: {error}"))
         })
     }
 
-    pub async fn register_business_document_resource(
+    pub async fn register_printpacket_resource(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
@@ -3381,13 +3381,13 @@ impl PostgresStore {
         byte_length: i64,
     ) -> Result<(), StorageError> {
         let result = sqlx::query(
-            "INSERT INTO business_document_resources(workspace_id,environment_id,digest,media_type,byte_length)
+            "INSERT INTO printpacket_resources(workspace_id,environment_id,digest,media_type,byte_length)
              VALUES($1,$2,$3,$4,$5)
              ON CONFLICT(workspace_id,environment_id,digest) DO UPDATE SET
-               last_used_at=now(), expires_at=GREATEST(business_document_resources.expires_at,now()+interval '30 days'),
+               last_used_at=now(), expires_at=GREATEST(printpacket_resources.expires_at,now()+interval '30 days'),
                cleanup_state='active', cleanup_lease_until=NULL, cleanup_lease_token=NULL
-             WHERE business_document_resources.media_type=EXCLUDED.media_type
-               AND business_document_resources.byte_length=EXCLUDED.byte_length",
+             WHERE printpacket_resources.media_type=EXCLUDED.media_type
+               AND printpacket_resources.byte_length=EXCLUDED.byte_length",
         )
         .bind(workspace_id.to_string()).bind(environment_id.to_string()).bind(digest)
         .bind(media_type).bind(byte_length).execute(&self.pool).await?;
@@ -3398,7 +3398,7 @@ impl PostgresStore {
         }
     }
 
-    pub async fn link_business_document_render_resources(
+    pub async fn link_printpacket_render_resources(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
@@ -3408,12 +3408,12 @@ impl PostgresStore {
         let mut transaction = self.pool.begin().await?;
         for digest in digests {
             sqlx::query(
-                "INSERT INTO business_document_resource_references(workspace_id,environment_id,render_id,resource_digest)
+                "INSERT INTO printpacket_resource_references(workspace_id,environment_id,render_id,resource_digest)
                  VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING",
             ).bind(workspace_id.to_string()).bind(environment_id.to_string()).bind(render_id)
                 .bind(digest).execute(&mut *transaction).await?;
             sqlx::query(
-                "UPDATE business_document_resources SET last_used_at=now(),expires_at=GREATEST(expires_at,now()+interval '30 days'),
+                "UPDATE printpacket_resources SET last_used_at=now(),expires_at=GREATEST(expires_at,now()+interval '30 days'),
                    cleanup_state='active',cleanup_lease_until=NULL,cleanup_lease_token=NULL
                  WHERE workspace_id=$1 AND environment_id=$2 AND digest=$3",
             ).bind(workspace_id.to_string()).bind(environment_id.to_string()).bind(digest)
@@ -3423,13 +3423,13 @@ impl PostgresStore {
         Ok(())
     }
 
-    pub async fn claim_expired_business_document_resources(
+    pub async fn claim_expired_printpacket_resources(
         &self,
         limit: i64,
-    ) -> Result<Vec<ExpiredBusinessDocumentResource>, StorageError> {
+    ) -> Result<Vec<ExpiredPrintPacketResource>, StorageError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query(
-            "DELETE FROM business_document_resource_references reference
+            "DELETE FROM printpacket_resource_references reference
              USING document_renders render
              WHERE reference.render_id=render.id AND reference.workspace_id=render.workspace_id
                AND reference.environment_id=render.environment_id AND render.state='expired'",
@@ -3437,13 +3437,13 @@ impl PostgresStore {
         .execute(&mut *transaction)
         .await?;
         let rows = sqlx::query(
-            "UPDATE business_document_resources resource SET cleanup_state='expiring',cleanup_lease_until=now()+interval '5 minutes',cleanup_lease_token=gen_random_uuid()
+            "UPDATE printpacket_resources resource SET cleanup_state='expiring',cleanup_lease_until=now()+interval '5 minutes',cleanup_lease_token=gen_random_uuid()
              WHERE (resource.workspace_id,resource.environment_id,resource.digest) IN (
                SELECT candidate.workspace_id,candidate.environment_id,candidate.digest
-               FROM business_document_resources candidate
+               FROM printpacket_resources candidate
                WHERE candidate.expires_at < now()
                  AND (candidate.cleanup_state='active' OR candidate.cleanup_lease_until < now())
-                 AND NOT EXISTS (SELECT 1 FROM business_document_resource_references reference
+                 AND NOT EXISTS (SELECT 1 FROM printpacket_resource_references reference
                    WHERE reference.workspace_id=candidate.workspace_id
                      AND reference.environment_id=candidate.environment_id
                      AND reference.resource_digest=candidate.digest)
@@ -3456,7 +3456,7 @@ impl PostgresStore {
         transaction.commit().await?;
         rows.into_iter()
             .map(|row| {
-                Ok(ExpiredBusinessDocumentResource {
+                Ok(ExpiredPrintPacketResource {
                     workspace_id: row.try_get::<String, _>("workspace_id")?.parse().map_err(
                         |error| StorageError::InvalidData(format!("invalid workspace id: {error}")),
                     )?,
@@ -3473,11 +3473,11 @@ impl PostgresStore {
             .collect()
     }
 
-    pub async fn complete_expired_business_document_resource(
+    pub async fn complete_expired_printpacket_resource(
         &self,
-        resource: &ExpiredBusinessDocumentResource,
+        resource: &ExpiredPrintPacketResource,
     ) -> Result<(), StorageError> {
-        let result = sqlx::query("DELETE FROM business_document_resources resource WHERE workspace_id=$1 AND environment_id=$2 AND digest=$3 AND cleanup_state='expiring' AND cleanup_lease_token=$4 AND NOT EXISTS (SELECT 1 FROM business_document_resource_references reference WHERE reference.workspace_id=resource.workspace_id AND reference.environment_id=resource.environment_id AND reference.resource_digest=resource.digest)")
+        let result = sqlx::query("DELETE FROM printpacket_resources resource WHERE workspace_id=$1 AND environment_id=$2 AND digest=$3 AND cleanup_state='expiring' AND cleanup_lease_token=$4 AND NOT EXISTS (SELECT 1 FROM printpacket_resource_references reference WHERE reference.workspace_id=resource.workspace_id AND reference.environment_id=resource.environment_id AND reference.resource_digest=resource.digest)")
             .bind(resource.workspace_id.to_string()).bind(resource.environment_id.to_string()).bind(&resource.digest)
             .bind(resource.cleanup_lease_token).execute(&self.pool).await?;
         if result.rows_affected() == 1 {
@@ -9219,7 +9219,7 @@ impl PostgresStore {
         let row = sqlx::query(
             "INSERT INTO document_template_revisions
              (id,workspace_id,environment_id,template_id,revision,spec_ciphertext,spec_sha256,renderer_profile)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,'piqae.business-document/v1') RETURNING *",
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'printpacket/v1') RETURNING *",
         ).bind(revision_id).bind(workspace_id.to_string()).bind(environment_id.to_string())
         .bind(template_id).bind(revision).bind(template.try_get::<Vec<u8>, _>("draft_ciphertext")?)
         .bind(template.try_get::<String, _>("draft_sha256")?).fetch_one(&mut *transaction).await?;

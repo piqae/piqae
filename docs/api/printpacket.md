@@ -1,13 +1,13 @@
-# Business documents
+# PrintPacket
 
-`printpacket/v1` is the canonical vendor-neutral, portable, bounded packet
-format. The frozen `piqae.business-document/v1` identifier remains a lossless
-compatibility alias for stored revisions and existing integrations. The format
-is optional: callers can continue submitting PDF or RAW jobs without templates.
+`printpacket/v1` is the sole vendor-neutral, portable, bounded packet format.
+Pre-release identifiers are rejected rather than normalized or migrated. The
+format is optional: callers can continue submitting PDF or RAW jobs without
+templates.
 
-Use `/v1/business-document-templates` to create encrypted drafts and publish
+Use `/v1/printpacket/templates` to create encrypted drafts and publish
 immutable revisions. Register an asynchronous render with
-`/v1/business-document-renders`, then poll its metadata. A completed artifact
+`/v1/printpacket/renders`, then poll its metadata. A completed artifact
 can be downloaded, printed directly, or retained in an expiring preview approval
 gate. Preview, download, and print all refer to the same immutable bytes.
 
@@ -21,12 +21,12 @@ exact approved server PDF; `require_node` rejects approval unless the selected
 printer reports the exact renderer/resource ABIs and can acquire every
 referenced resource through the active lease. A cold cache is reported as
 `resources_warming`; it is compatible and remains digest-verified before use.
-Legacy node offers without the authoritative page count are accepted for
-rolling-upgrade compatibility but select the retained server PDF rather than an
-unbounded node render.
+Node offers without the authoritative page count are incompatible and cannot
+select node rendering. Policy may select the retained server PDF only when the
+caller explicitly permits cloud fallback.
 
 JPEG resources are uploaded once by lowercase SHA-256 using
-`PUT /v1/business-document-resources/{digest}`. Uploads are bounded to 4 MiB,
+`PUT /v1/printpacket/resources/{digest}`. Uploads are bounded to 4 MiB,
 verified before registration, tenant-scoped, retained while referenced by a
 render, and downloaded by nodes only through an authenticated active job lease.
 Nodes verify the same digest and length before admitting bytes to their local
@@ -35,8 +35,8 @@ tenant/environment namespace with a 16 MiB aggregate bound. The shared renderer
 verifies the complete declared set, including JPEG structure and pixel bounds;
 the renderer itself never fetches URLs.
 
-The TypeScript SDK exposes these operations as `client.businessDocuments`.
-MCP exposes metadata-safe operations through `piqae_business_documents`; it
+The TypeScript SDK exposes these operations as `client.printPackets`.
+MCP exposes metadata-safe operations through `piqae_print_packets`; it
 never returns template source or render input.
 
 The format supports paged A4/A5/Letter media, bounded continuous media, and

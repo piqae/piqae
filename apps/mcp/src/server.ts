@@ -88,7 +88,7 @@ export function createPiqaeMcpServer(config: McpConfig): McpServer {
   registerTargetTool(server, config);
   registerUploadTool(server, config);
   registerJobTool(server, config);
-  registerDocumentTool(server, config);
+  registerPrintPacketTool(server, config);
   registerWebhookTool(server, config);
   registerPlatformTool(server, config);
   registerDocumentationTool(server);
@@ -818,13 +818,13 @@ function registerJobTool(server: McpServer, config: McpConfig): void {
   );
 }
 
-function registerDocumentTool(server: McpServer, config: McpConfig): void {
+function registerPrintPacketTool(server: McpServer, config: McpConfig): void {
   server.registerTool(
-    "piqae_business_documents",
+    "piqae_print_packets",
     {
-      title: "Validate and operate Piqae Business Documents",
+      title: "Validate and operate PrintPacket",
       description:
-        "Validate piqae.business-document/v1 templates, publish immutable revisions, register renders, inspect metadata, or print a completed render. Template and input content are never returned by this tool.",
+        "Validate printpacket/v1 templates, publish immutable revisions, register renders, inspect metadata, or print a completed render. Template and input content are never returned by this tool.",
       inputSchema: z.object({
         action: z.enum(["validate", "publish", "render", "get", "print"]),
         template_id: z.string().min(1).optional(),
@@ -841,45 +841,42 @@ function registerDocumentTool(server: McpServer, config: McpConfig): void {
         fixture: z.string().min(3).max(300).optional(),
         ...selectionShape,
       }),
-      annotations: mutationAnnotations(
-        "Operate Piqae Business Documents",
-        true,
-      ),
+      annotations: mutationAnnotations("Operate PrintPacket", true),
     },
     (input, extra) =>
       result(async () => {
         const specification = input.specification;
         if (input.action === "validate") {
-          validateDocumentSpecification(specification);
+          validatePrintPacketSpecification(specification);
           return {
             valid: true,
-            format: "piqae.business-document/v1",
+            format: "printpacket/v1",
             top_level_nodes: specification.body.length,
           };
         }
         const client = clientFor(config, extra, input);
         if (input.action === "publish") {
-          const revision = await client.businessDocuments.templates.publish(
+          const revision = await client.printPackets.templates.publish(
             required(input.template_id, "template_id"),
             required(specification, "specification") as never,
             required(input.idempotency_key, "idempotency_key"),
           );
-          return documentMetadata(revision);
+          return printPacketMetadata(revision);
         }
         if (input.action === "render") {
-          const render = await client.businessDocuments.renders.create(
+          const render = await client.printPackets.renders.create(
             {
               template_revision_id: required(input.template_id, "template_id"),
               input: required(input.input, "input"),
             },
             required(input.idempotency_key, "idempotency_key"),
           );
-          return documentMetadata(render);
+          return printPacketMetadata(render);
         }
         const renderId = required(input.render_id, "render_id");
         if (input.action === "get")
-          return documentMetadata(
-            await client.businessDocuments.renders.retrieve(renderId),
+          return printPacketMetadata(
+            await client.printPackets.renders.retrieve(renderId),
           );
         enforceJobPolicy(config, bearer(config, extra));
         const destination = input.printer_id ?? input.target_id;
@@ -889,7 +886,7 @@ function registerDocumentTool(server: McpServer, config: McpConfig): void {
           );
         requireConfirmation(destination, input.confirm_destination);
         required(input.fixture, "fixture");
-        const job = await client.businessDocuments.renders.print(
+        const job = await client.printPackets.renders.print(
           renderId,
           withoutUndefined({
             printer_id: input.printer_id,
@@ -900,21 +897,21 @@ function registerDocumentTool(server: McpServer, config: McpConfig): void {
           }) as never,
           required(input.idempotency_key, "idempotency_key"),
         );
-        return documentMetadata(job);
+        return printPacketMetadata(job);
       }),
   );
 }
 
-function validateDocumentSpecification(
+function validatePrintPacketSpecification(
   specification: Record<string, unknown> | undefined,
 ): asserts specification is Record<string, unknown> & { body: unknown[] } {
   if (
     !specification ||
-    specification.format !== "piqae.business-document/v1" ||
+    specification.format !== "printpacket/v1" ||
     !Array.isArray(specification.body)
   )
     throw new Error(
-      "A bounded piqae.business-document/v1 specification with a body array is required.",
+      "A bounded printpacket/v1 specification with a body array is required.",
     );
   const page = specification.media;
   if (
@@ -924,7 +921,7 @@ function validateDocumentSpecification(
       String((page as Record<string, unknown>).kind),
     )
   )
-    throw new Error("Business-document media kind is unsupported.");
+    throw new Error("PrintPacket media kind is unsupported.");
   let nodes = 0;
   const visit = (values: unknown[], depth: number): void => {
     if (depth > 32) throw new Error("Document nesting exceeds 32 levels.");
@@ -981,7 +978,7 @@ function validateDocumentSpecification(
   visit(specification.body, 0);
 }
 
-function documentMetadata(value: unknown): Record<string, unknown> {
+function printPacketMetadata(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object") return {};
   const {
     specification: _specification,

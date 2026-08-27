@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import {
   PiqaeClient,
-  type BusinessDocumentRender,
-  type BusinessDocumentRenderCost,
+  type PrintPacketRender,
+  type PrintPacketRenderCost,
 } from "@piqae/sdk";
 import type { ShopLink, ShopRepository } from "./model";
 import { normalizeShopDomain } from "./model";
@@ -21,7 +21,7 @@ import type { DownloadTokenVault } from "./download-token.server";
 export type PrintResult =
   | { mode: "direct"; renderId: string; jobId: string }
   | { mode: "download"; renderId: string; downloadUrl: string };
-type Client = Pick<PiqaeClient, "businessDocuments">;
+type Client = Pick<PiqaeClient, "printPackets">;
 
 export class ShopifyPrintingService {
   constructor(
@@ -77,7 +77,7 @@ export class ShopifyPrintingService {
       .digest("hex");
     const client = this.clientFor(link, shop);
     const renderInput = { shop, orders };
-    const render = await client.businessDocuments.renders.create(
+    const render = await client.printPackets.renders.create(
       {
         template_revision_id: templateRevisionId,
         input: renderInput,
@@ -94,7 +94,7 @@ export class ShopifyPrintingService {
       throw new Error(
         `document render failed: ${completed.failure_code ?? completed.state}`,
       );
-    const preview = await client.businessDocuments.previews.create(
+    const preview = await client.printPackets.previews.create(
       completed.id,
       { expires_in_seconds: 900 },
       `shopify-preview-${digest}`,
@@ -116,7 +116,7 @@ export class ShopifyPrintingService {
     renderId: string;
     printerId: string;
     requestKey: string;
-    renderCost?: BusinessDocumentRenderCost;
+    renderCost?: PrintPacketRenderCost;
   }) {
     const shop = normalizeShopDomain(input.shop);
     if (!(await this.shops.ownsRender(shop, input.renderId)))
@@ -125,12 +125,12 @@ export class ShopifyPrintingService {
     if (!link) throw new Error("Connect a Piqae account before printing");
     const client = this.clientFor(link, shop);
     const settings = await this.workflow.getSettings(shop);
-    const preview = await client.businessDocuments.previews.retrieve(
+    const preview = await client.printPackets.previews.retrieve(
       input.previewId,
     );
     if (preview.render_id !== input.renderId)
       throw new Error("Preview not found");
-    const approved = await client.businessDocuments.previews.approve(
+    const approved = await client.printPackets.previews.approve(
       input.previewId,
       {
         printer_id: input.printerId,
@@ -147,7 +147,7 @@ export class ShopifyPrintingService {
     shop: string;
     renderId: string;
     printerId: string;
-    renderCost?: BusinessDocumentRenderCost;
+    renderCost?: PrintPacketRenderCost;
   }) {
     const shop = normalizeShopDomain(input.shop);
     if (!(await this.shops.ownsRender(shop, input.renderId)))
@@ -156,7 +156,7 @@ export class ShopifyPrintingService {
     if (!link) throw new Error("Connect a Piqae account before printing");
     const settings = await this.workflow.getSettings(shop);
     const client = this.clientFor(link, shop);
-    return client.businessDocuments.renders.readiness(input.renderId, {
+    return client.printPackets.renders.readiness(input.renderId, {
       printer_id: input.printerId,
       render_policy: settings.renderExecutionPolicy,
       render_cost: input.renderCost,
@@ -175,12 +175,12 @@ export class ShopifyPrintingService {
     const link = await this.shops.get(shop);
     if (!link) throw new Error("Preview not found");
     const client = this.clientFor(link, shop);
-    const preview = await client.businessDocuments.previews.retrieve(
+    const preview = await client.printPackets.previews.retrieve(
       input.previewId,
     );
     if (preview.render_id !== input.renderId)
       throw new Error("Preview not found");
-    return client.businessDocuments.previews.cancel(
+    return client.printPackets.previews.cancel(
       input.previewId,
       input.requestKey,
     );
@@ -239,7 +239,7 @@ export class ShopifyPrintingService {
       .digest("hex");
     const client = this.clientFor(link, shop);
     const renderInput = { shop, orders };
-    const render = await client.businessDocuments.renders.create(
+    const render = await client.printPackets.renders.create(
       {
         template_revision_id: templateRevisionId,
         input: renderInput,
@@ -266,7 +266,7 @@ export class ShopifyPrintingService {
         throw new Error(
           `document render failed: ${completed.failure_code ?? completed.state}`,
         );
-      const job = await client.businessDocuments.renders.print(
+      const job = await client.printPackets.renders.print(
         completed.id,
         {
           printer_id: input.printerId,
@@ -305,10 +305,10 @@ export class ShopifyPrintingService {
 }
 
 function measuredRenderCost(
-  render: BusinessDocumentRender,
+  render: PrintPacketRender,
   input: Record<string, unknown>,
   documentCount: number,
-): BusinessDocumentRenderCost | undefined {
+): PrintPacketRenderCost | undefined {
   const pdfBytes = render.artifact_byte_length;
   const pageCount = render.page_count;
   if (
@@ -328,7 +328,7 @@ function measuredRenderCost(
 
 export function parseRenderCost(
   value: unknown,
-): BusinessDocumentRenderCost | undefined {
+): PrintPacketRenderCost | undefined {
   if (value === undefined || value === null) return undefined;
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("render cost is invalid");
@@ -371,8 +371,8 @@ function stableActivityId(hexDigest: string): string {
 
 async function waitForRender(
   client: Client,
-  initial: BusinessDocumentRender,
-): Promise<BusinessDocumentRender> {
+  initial: PrintPacketRender,
+): Promise<PrintPacketRender> {
   let render = initial;
   for (
     let attempt = 0;
@@ -381,7 +381,7 @@ async function waitForRender(
     attempt += 1
   ) {
     await new Promise((resolve) => setTimeout(resolve, 250));
-    render = await client.businessDocuments.renders.retrieve(render.id);
+    render = await client.printPackets.renders.retrieve(render.id);
   }
   if (render.state === "registered" || render.state === "rendering")
     throw new Error("document render timed out");

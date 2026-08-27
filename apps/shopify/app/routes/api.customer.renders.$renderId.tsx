@@ -38,7 +38,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     return cors(Response.json({ error: "PDF not found" }, { status: 404 }));
   const upstream = await services
     .clientForLink(link)
-    .businessDocuments.renders.download(renderId);
+    .printPackets.renders.download(renderId);
   if (!upstream.ok || !upstream.body)
     return cors(
       Response.json(

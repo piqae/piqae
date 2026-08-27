@@ -189,7 +189,7 @@ describe("Piqae MCP server", () => {
         "piqae_targets",
         "piqae_uploads",
         "piqae_jobs",
-        "piqae_business_documents",
+        "piqae_print_packets",
         "piqae_webhooks",
         "piqae_platform_accounts",
         "piqae_search_docs",
@@ -199,6 +199,46 @@ describe("Piqae MCP server", () => {
     expect(resources.resources.map((resource) => resource.uri)).toContain(
       "piqae://openapi/v1",
     );
+    await client.close();
+    await server.close();
+  });
+
+  it("accepts only the canonical PrintPacket identifier", async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as typeof fetch;
+    const { client, server } = await linked(config());
+    const valid = await client.callTool({
+      name: "piqae_print_packets",
+      arguments: {
+        action: "validate",
+        specification: {
+          format: "printpacket/v1",
+          media: { kind: "continuous", width_mm: 80 },
+          body: [],
+        },
+      },
+    });
+    expect(valid.isError).not.toBe(true);
+    expect(valid.structuredContent).toMatchObject({
+      valid: true,
+      format: "printpacket/v1",
+    });
+    const removed = await client.callTool({
+      name: "piqae_print_packets",
+      arguments: {
+        action: "validate",
+        specification: {
+          format: "piqae.business-document/v1",
+          media: { kind: "continuous", width_mm: 80 },
+          body: [],
+        },
+      },
+    });
+    expect(removed.isError).toBe(true);
+    expect(JSON.stringify(removed.structuredContent)).toContain(
+      "printpacket/v1",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
     await client.close();
     await server.close();
   });
@@ -253,7 +293,7 @@ describe("Piqae MCP server", () => {
     globalThis.fetch = fetchMock as typeof fetch;
     const { client, server } = await linked(config());
     const response = await client.callTool({
-      name: "piqae_business_documents",
+      name: "piqae_print_packets",
       arguments: {
         action: "print",
         render_id: "drnd_test",

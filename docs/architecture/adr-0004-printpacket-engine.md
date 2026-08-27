@@ -1,9 +1,9 @@
-# ADR-0004: Portable business-document format
+# ADR-0004: Portable PrintPacket format
 
 Status: accepted
 
 Piqae exposes one editor- and provider-neutral wire format:
-`piqae.business-document/v1`. It is a bounded semantic document tree for
+`printpacket/v1`. It is a bounded semantic document tree for
 invoices, receipts, purchase orders, packing documents, and simple labels.
 
 Applications own authoring. A Shopify application may offer a Word-like editor

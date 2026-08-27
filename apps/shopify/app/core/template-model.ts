@@ -1,11 +1,11 @@
 /** Shopify-owned authoring envelope. Piqae only receives `document`. */
 import type {
-  BusinessDocumentExpression,
-  BusinessDocumentInline,
-  BusinessDocumentNode,
-  BusinessDocumentV1,
+  PrintPacketExpression,
+  PrintPacketInline,
+  PrintPacketNode,
+  PrintPacketV1,
 } from "@piqae/sdk";
-export type Expression = BusinessDocumentExpression;
+export type Expression = PrintPacketExpression;
 export type TextStyle = {
   bold?: boolean;
   italic?: boolean;
@@ -13,9 +13,9 @@ export type TextStyle = {
   font_size_pt?: number;
   align?: "left" | "center" | "right";
 };
-export type Inline = BusinessDocumentInline;
-export type Block = BusinessDocumentNode;
-export type BusinessDocument = BusinessDocumentV1;
+export type Inline = PrintPacketInline;
+export type Block = PrintPacketNode;
+export type PrintPacket = PrintPacketV1;
 export type TemplateEditorMode = "visual" | "liquid" | "source";
 export type ExternalAsset = {
   id: string;
@@ -30,8 +30,8 @@ export const ASSET_LIMITS = {
   cacheSeconds: 3600,
 } as const;
 export type TemplateEnvelope = {
-  schema: "piqae.shopify-business-template/v1";
-  document: BusinessDocument;
+  schema: "piqae.shopify-printpacket-template/v1";
+  document: PrintPacket;
   editor: {
     mode: TemplateEditorMode;
     liquid: string;
@@ -66,11 +66,9 @@ export function parseTemplateEnvelope(source: string): TemplateEnvelope {
     throw new Error("Document source must be valid JSON");
   }
   const envelope = value as TemplateEnvelope;
-  if (envelope?.schema !== "piqae.shopify-business-template/v1")
-    throw new Error(
-      "Legacy templates are not supported; create a new business document",
-    );
-  validateBusinessDocument(envelope.document);
+  if (envelope?.schema !== "piqae.shopify-printpacket-template/v1")
+    throw new Error("Template must use piqae.shopify-printpacket-template/v1");
+  validatePrintPacket(envelope.document);
   if (
     !envelope.editor ||
     !["visual", "liquid", "source"].includes(envelope.editor.mode)
@@ -81,7 +79,7 @@ export function parseTemplateEnvelope(source: string): TemplateEnvelope {
 }
 export function serializeTemplateEnvelope(value: TemplateEnvelope): string {
   validateAssets(value.assets);
-  validateBusinessDocument(value.document);
+  validatePrintPacket(value.document);
   validateImportMetadata(value.editor.import);
   const source = JSON.stringify(value);
   if (new TextEncoder().encode(source).byteLength > 262_144)
@@ -132,12 +130,9 @@ export function validateAssets(assets: ExternalAsset[]) {
     }
   }
 }
-export function validateBusinessDocument(document: BusinessDocument): void {
-  if (
-    document?.format !== "piqae.business-document/v1" ||
-    !Array.isArray(document.body)
-  )
-    throw new Error("Document must use piqae.business-document/v1");
+export function validatePrintPacket(document: PrintPacket): void {
+  if (document?.format !== "printpacket/v1" || !Array.isArray(document.body))
+    throw new Error("Document must use printpacket/v1");
   let count = 0;
   const walk = (blocks: Block[], depth: number) => {
     if (depth > 12) throw new Error("Document nesting exceeds 12 levels");

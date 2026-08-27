@@ -53,7 +53,7 @@ describe("template resource publication", () => {
       assetFetcher: vi.fn(async () => new Uint8Array([1, 2, 3])),
       clientFactory: () =>
         ({
-          businessDocuments: {
+          printPackets: {
             resources: { putJpeg },
             templates: { create, publish },
           },
@@ -99,7 +99,7 @@ describe("template resource publication", () => {
         assetFetcher: vi.fn(async () => new Uint8Array([1])),
         clientFactory: () =>
           ({
-            businessDocuments: {
+            printPackets: {
               resources: {
                 putJpeg: vi.fn(async () => {
                   throw new Error("resource unavailable");

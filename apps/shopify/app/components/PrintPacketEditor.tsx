@@ -11,7 +11,7 @@ import { keymap } from "prosemirror-keymap";
 import { baseKeymap } from "prosemirror-commands";
 import type {
   Block,
-  BusinessDocument,
+  PrintPacket,
   Expression,
   Inline,
   TextStyle,
@@ -155,16 +155,16 @@ const AUTHORING_FIELDS: readonly ShopifyDocumentField[] = [
 ];
 export const SHOPIFY_VARIABLES = AUTHORING_FIELDS.map((field) => field.path);
 
-export function BusinessDocumentEditor({
+export function PrintPacketEditor({
   value,
   disabled,
   customFields = [],
   onChange,
 }: {
-  value: BusinessDocument;
+  value: PrintPacket;
   disabled?: boolean;
   customFields?: readonly ShopifyDocumentField[];
-  onChange(document: BusinessDocument): void;
+  onChange(document: PrintPacket): void;
 }) {
   const authoringFields = [...AUTHORING_FIELDS, ...customFields];
   const host = useRef<HTMLDivElement>(null);
@@ -568,11 +568,7 @@ export type BlockPathPart = {
 };
 export type BlockPath = BlockPathPart[];
 
-export function BusinessDocumentPreview({
-  value,
-}: {
-  value: BusinessDocument;
-}) {
+export function PrintPacketPreview({ value }: { value: PrintPacket }) {
   return (
     <div className="piqae-preview-stage" aria-label="Rendered document preview">
       <div className="piqae-page-sheet piqae-rendered-canvas">
@@ -1181,9 +1177,9 @@ export function DocumentSettingsFields({
   disabled,
   onChange,
 }: {
-  value: BusinessDocument;
+  value: PrintPacket;
   disabled?: boolean;
-  onChange(document: BusinessDocument): void;
+  onChange(document: PrintPacket): void;
 }) {
   const theme = value.theme ?? {};
   const updateRegion = (region: "header" | "footer", content: string) =>

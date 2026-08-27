@@ -63,6 +63,16 @@ schema or could make an old v1 validator misinterpret a packet requires a new
 format identifier. Clarifications that preserve the same accepted documents
 and bytes may update this text and conformance suite metadata.
 
+Rows and grids contain at most 32 children; a grid has exactly one positive
+column weight for each child. Layout gaps are finite and between 0 and 2,000 mm.
+Image dimensions are greater than 0 and at most 2,000 mm; v1 supports
+`contain`, `fill`, and `scale_down`, with `scale_down` never enlarging an image.
+QR size is 8 through 2,000 mm, Code 128 is at least 20 by 8 mm and at most 2,000
+by 2,000 mm, divider width is 0.1 through 10 pt, and headings use levels 1
+through 6. Continuous media rejects a `page_break` anywhere in its recursive
+node tree. Header and footer variants are measured before body layout and each
+region's maximum rendered height is 60 mm.
+
 ## 5. Typography and resources
 
 The initial `printpacket.pdf-base14/v1` profile uses deterministic PDF Base-14
@@ -99,11 +109,22 @@ application, missing capability, safe fallback, and update action.
 
 ## 7. Caching
 
-`printpacket.canonical-json/v1` normalizes the format alias, serializes typed
-template fields in declaration order, sorts declared resource-map keys, and
-sorts every data-object key recursively. Numbers use the reference JSON
-serializer's finite JSON spelling. This algorithm is versioned and is not an
-RFC 8785 claim.
+`printpacket.canonical-template/v1` serializes typed template fields in
+declaration order and sorts declared resource-map keys. Template
+canonicalization has its own version and never accepts or normalizes a format
+alias.
+
+`printpacket.canonical-data/v1` starts with that UTF-8 domain followed by a NUL
+byte and encodes data without JSON number spelling ambiguity. Null, false, and
+true are `n`, `f`, and `t`. A string is `s<byte_length>:` followed by its UTF-8
+bytes. A number is `d` followed by the 16 lowercase hexadecimal digits of its
+IEEE 754 binary64 bits; negative zero is normalized to positive zero, non-finite
+values are rejected, and integral values with an absolute value greater than
+2^53 - 1 are rejected. An array is `a<count>:` followed by its encoded values.
+An object is `o<count>:` followed by each encoded key and value, with keys
+ordered by Unicode scalar value and then UTF-8 bytes. Canonical data is bounded
+to 4 MiB and 128 levels. This is a versioned typed encoding, not an RFC 8785
+claim.
 
 The render-cache identity is SHA-256 over a domain separator, canonical template
 digest, conformance suite, explicit output target, and canonical data. Resource

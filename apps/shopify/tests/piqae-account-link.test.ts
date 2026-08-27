@@ -30,7 +30,7 @@ describe("existing Piqae account linking", () => {
           workspaces: {
             current: async () => ({ id: "ws_fixture", status: "active" }),
           },
-          businessDocuments: { templates: { create, publish } },
+          printPackets: { templates: { create, publish } },
         }) as never,
     );
 
@@ -73,7 +73,7 @@ describe("existing Piqae account linking", () => {
           workspaces: {
             current: async () => ({ id: "ws_fixture", status: "suspended" }),
           },
-          businessDocuments: {
+          printPackets: {
             templates: { create: vi.fn(), publish: vi.fn() },
           },
         }) as never,

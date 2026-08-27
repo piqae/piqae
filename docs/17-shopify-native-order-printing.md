@@ -5,7 +5,7 @@
 The current implementation includes Shopify Admin order/detail and bulk print
 actions, a preview approval gate, PDF fallback, direct Piqae destinations,
 durable tenant-scoped templates, four dynamic starters, a bounded Liquid adapter
-and a ProseMirror semantic business-document editor. Preview,
+and a ProseMirror semantic PrintPacket editor. Preview,
 download and print reuse one verified immutable artifact. The Shopify app can
 explicitly target fake, local or live Piqae; selecting live does not authorize a
 physical-printer test.
@@ -59,14 +59,14 @@ ink reached paper. Never label spooler acceptance as “printed successfully.”
 
 Order Printer Pro publicly lists the following baseline:
 
-| Area | Baseline to match |
-| --- | --- |
-| Documents | Invoices, receipts, gift receipts, credit notes, quotes, draft orders, delivery notes, packing slips, refunds, returns |
-| Output | Print, PDF export/download, bulk download, email automation, customer PDF links |
-| Workflow | Individual and bulk selection, filters, Shopify Admin, mobile, and POS |
-| Templates | Logo, colour, fonts, fields, invoice numbers, tax calculation, HTML/CSS/Liquid customization, barcodes |
-| Commerce | Metafields, multi-currency, multi-language, VAT/tax, B2B, sequential numbering |
-| Specialist | E-invoicing/Peppol add-on |
+| Area       | Baseline to match                                                                                                      |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Documents  | Invoices, receipts, gift receipts, credit notes, quotes, draft orders, delivery notes, packing slips, refunds, returns |
+| Output     | Print, PDF export/download, bulk download, email automation, customer PDF links                                        |
+| Workflow   | Individual and bulk selection, filters, Shopify Admin, mobile, and POS                                                 |
+| Templates  | Logo, colour, fonts, fields, invoice numbers, tax calculation, HTML/CSS/Liquid customization, barcodes                 |
+| Commerce   | Metafields, multi-currency, multi-language, VAT/tax, B2B, sequential numbering                                         |
+| Specialist | E-invoicing/Peppol add-on                                                                                              |
 
 Its published price bands are free through 50 monthly orders, USD $10 for
 51–500, $20 for 501–5,000, and $40 for 5,001 or more. Feature parity is necessary
@@ -176,14 +176,14 @@ continue when one order is malformed.
 
 ### Recovery instead of blind reprint
 
-| Observed state | Merchant language | Primary action |
-| --- | --- | --- |
-| Registered/queued | Queued | View activity |
-| Node accepted/printing | Printing | View details |
-| Completed reported | Reported complete | Print another copy |
-| Failed before acceptance | Not printed | Retry failed items |
-| Delivery uncertain | Check the printer | Confirm outcome or print replacement |
-| Printer/profile unavailable | Printer needs attention | Fix destination |
+| Observed state              | Merchant language       | Primary action                       |
+| --------------------------- | ----------------------- | ------------------------------------ |
+| Registered/queued           | Queued                  | View activity                        |
+| Node accepted/printing      | Printing                | View details                         |
+| Completed reported          | Reported complete       | Print another copy                   |
+| Failed before acceptance    | Not printed             | Retry failed items                   |
+| Delivery uncertain          | Check the printer       | Confirm outcome or print replacement |
+| Printer/profile unavailable | Printer needs attention | Fix destination                      |
 
 A retry repeats the same idempotent attempt only when safe. A merchant-requested
 replacement creates a new linked attempt and audit record. Never turn a timeout
@@ -226,9 +226,9 @@ Pipeline:
 Shopify IDs from authenticated action
   -> bulk GraphQL fetch with bounded pagination/cost
   -> normalized immutable document model
-  -> Shopify Liquid/visual source compiled into typed business-document nodes
+  -> Shopify Liquid/visual source compiled into typed PrintPacket nodes
   -> deterministic Piqae flow layout with content-addressed assets
-  -> business-document PDF generation per order (parallel, bounded)
+  -> PrintPacket PDF generation per order (parallel, bounded)
   -> PDF structural and visual preflight
   -> immutable object + SHA-256
   -> preview/download/email and/or idempotent Piqae print attempt
@@ -239,7 +239,7 @@ and forbid arbitrary remote images or scripts in templates. Preflight rasterizes
 at the destination's effective DPI, decodes every expected symbol from the
 rendered page, and compares the decoded payload with the source. A missing or
 incorrect symbol fails that document before printing. Maintain golden visual
-tests across business-document format, PDF-library, font and renderer-profile
+tests across PrintPacket format, PDF-library, font and renderer-profile
 upgrades.
 
 ## Performance contract
@@ -247,16 +247,16 @@ upgrades.
 Measure with warm and cold workers, realistic Shopify API latency, long orders,
 custom fonts, and batches of 1, 50, 500, and 5,000 orders.
 
-| Measure | Launch objective |
-| --- | ---: |
-| Embedded shell usable, p75 | < 1.0 s after iframe navigation |
+| Measure                                        |                            Launch objective |
+| ---------------------------------------------- | ------------------------------------------: |
+| Embedded shell usable, p75                     |             < 1.0 s after iframe navigation |
 | Single-order native render execution, warm p95 | < 300 ms after normalized data is available |
-| Direct-print intent durably registered, p95 | < 250 ms after confirmation |
-| First batch item ready, p95 | < 750 ms |
-| 50 simple documents rendered, warm p95 | < 5 s |
-| 500 simple documents rendered, warm p95 | < 30 s, progressive |
-| Duplicate physical jobs caused by app retry | 0 |
-| Expected QR/barcodes decoded in preflight | 100% |
+| Direct-print intent durably registered, p95    |                 < 250 ms after confirmation |
+| First batch item ready, p95                    |                                    < 750 ms |
+| 50 simple documents rendered, warm p95         |                                       < 5 s |
+| 500 simple documents rendered, warm p95        |                         < 30 s, progressive |
+| Duplicate physical jobs caused by app retry    |                                           0 |
+| Expected QR/barcodes decoded in preflight      |                                        100% |
 
 These are objectives until load evidence exists, not marketing claims. Keep
 Shopify API calls out of the critical print-confirmation path when a fresh,
@@ -329,12 +329,12 @@ version sunset.
 Lead with simple Shopify-hosted plans and make bring-your-own-Piqae genuinely
 free, not a crippled tier:
 
-| Plan | Shopify price | Included monthly orders | Intended merchant |
-| --- | ---: | ---: | --- |
-| Connect | $0 | App features; printing billed by existing Piqae plan | Existing Piqae customer |
-| Starter | $10/month | 500 | Small shop |
-| Growth | $20/month | 5,000 | Growing operation |
-| Scale | $40/month | 25,000, then transparent usage | High volume |
+| Plan    | Shopify price |                              Included monthly orders | Intended merchant       |
+| ------- | ------------: | ---------------------------------------------------: | ----------------------- |
+| Connect |            $0 | App features; printing billed by existing Piqae plan | Existing Piqae customer |
+| Starter |     $10/month |                                                  500 | Small shop              |
+| Growth  |     $20/month |                                                5,000 | Growing operation       |
+| Scale   |     $40/month |                       25,000, then transparent usage | High volume             |
 
 This matches the competitor's public $10/$20/$40 bands. Compete on value,
 reliability, direct printing, and usability rather than signaling a cheaper
@@ -435,7 +435,7 @@ The detailed editor evaluation and verified surface-by-surface competitor matrix
 are in [Order Printer Pro parity and editor assessment](research/order-printer-pro-parity.md).
 The accepted provider-neutral format, rendering boundary, and thin Shopify
 profile are in
-[ADR-0004: Portable business-document format](architecture/adr-0004-core-document-engine.md).
+[ADR-0004: Portable PrintPacket format](architecture/adr-0004-printpacket-engine.md).
 
 ## Sources checked for this concept
 

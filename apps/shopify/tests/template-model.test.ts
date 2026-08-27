@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   parseTemplateEnvelope,
   serializeTemplateEnvelope,
-  validateBusinessDocument,
+  validatePrintPacket,
 } from "../app/core/template-model";
 import { starterTemplates } from "../app/core/starter-templates";
 const allNodes = (nodes: any[]): any[] =>
@@ -12,10 +12,10 @@ const allNodes = (nodes: any[]): any[] =>
     ...(Array.isArray(node.then) ? allNodes(node.then) : []),
     ...(Array.isArray(node.else) ? allNodes(node.else) : []),
   ]);
-describe("business document model", () => {
+describe("PrintPacket model", () => {
   it("ships only semantic, reflowable starters", () => {
     for (const starter of starterTemplates) {
-      expect(starter.specification.format).toBe("piqae.business-document/v1");
+      expect(starter.specification.format).toBe("printpacket/v1");
       expect(JSON.stringify(starter.specification)).not.toContain("canvas");
       expect(
         allNodes(starter.specification.body).some(
@@ -27,10 +27,17 @@ describe("business document model", () => {
       );
     }
   });
-  it("rejects legacy documents and excessive nesting", () => {
-    expect(() => parseTemplateEnvelope('{"schema":"legacy-template"}')).toThrow(
-      "Legacy templates",
+  it("rejects noncanonical packets and excessive nesting", () => {
+    expect(() => parseTemplateEnvelope('{"schema":"unsupported"}')).toThrow(
+      "piqae.shopify-printpacket-template/v1",
     );
+    const removed = structuredClone(starterTemplates[0]!.specification);
+    expect(() =>
+      validatePrintPacket({
+        ...removed,
+        format: "piqae.business-document/v1",
+      } as never),
+    ).toThrow("printpacket/v1");
     const document = structuredClone(starterTemplates[0]!.specification);
     let children = document.body;
     for (let index = 0; index < 14; index++) {
@@ -38,7 +45,7 @@ describe("business document model", () => {
       children.push({ type: "section", children: next });
       children = next;
     }
-    expect(() => validateBusinessDocument(document)).toThrow("12 levels");
+    expect(() => validatePrintPacket(document)).toThrow("12 levels");
   });
 
   it.each([0, 1, 50, 200])(
@@ -73,5 +80,5 @@ describe("business document model", () => {
       serializeTemplateEnvelope(
         parseTemplateEnvelope(starterTemplates[0]!.source),
       ),
-    ).toContain("piqae.business-document/v1"));
+    ).toContain("printpacket/v1"));
 });

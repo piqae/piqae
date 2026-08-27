@@ -22,7 +22,7 @@ struct AcceptanceMigrationFixture {
 }
 
 #[tokio::test]
-async fn automatic_wake_outbox_upgrades_43_and_is_tenant_isolated() {
+async fn automatic_wake_outbox_upgrades_41_and_is_tenant_isolated() {
     let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
         eprintln!("skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL migration evidence");
         return;
@@ -42,7 +42,7 @@ async fn automatic_wake_outbox_upgrades_43_and_is_tenant_isolated() {
     let previous = Migrator {
         migrations: Cow::Owned(
             all.iter()
-                .filter(|migration| migration.version < 44)
+                .filter(|migration| migration.version < 42)
                 .cloned()
                 .collect(),
         ),
@@ -50,7 +50,7 @@ async fn automatic_wake_outbox_upgrades_43_and_is_tenant_isolated() {
         locking: true,
         no_tx: false,
     };
-    previous.run(&pool).await.expect("apply version 43 schema");
+    previous.run(&pool).await.expect("apply version 41 schema");
     for suffix in ["a", "b"] {
         sqlx::query("INSERT INTO workspaces (id,name,slug) VALUES ($1,$2,$3)")
             .bind(format!("wsp_wake_{suffix}"))
@@ -111,7 +111,7 @@ async fn automatic_wake_outbox_upgrades_43_and_is_tenant_isolated() {
         .fetch_one(&pool)
         .await
         .expect("read schema version");
-    assert_eq!(latest, 46);
+    assert_eq!(latest, 44);
 
     pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
@@ -122,7 +122,7 @@ async fn automatic_wake_outbox_upgrades_43_and_is_tenant_isolated() {
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn acceptance_route_reconciliation_upgrades_44_and_fences_tenants() {
+async fn acceptance_route_reconciliation_upgrades_42_and_fences_tenants() {
     let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
         eprintln!("skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL migration evidence");
         return;
@@ -144,7 +144,7 @@ async fn acceptance_route_reconciliation_upgrades_44_and_fences_tenants() {
     let previous = Migrator {
         migrations: Cow::Owned(
             all.iter()
-                .filter(|migration| migration.version < 45)
+                .filter(|migration| migration.version < 43)
                 .cloned()
                 .collect(),
         ),
@@ -155,7 +155,7 @@ async fn acceptance_route_reconciliation_upgrades_44_and_fences_tenants() {
     previous
         .run(&upgrade_pool)
         .await
-        .expect("apply version 44 schema");
+        .expect("apply version 42 schema");
 
     let fixtures = [
         AcceptanceMigrationFixture {
@@ -395,12 +395,12 @@ async fn acceptance_route_reconciliation_upgrades_44_and_fences_tenants() {
     .bind(fixtures[4].job_id)
     .execute(&upgrade_pool)
     .await
-    .expect("forge a pre-0045 cross-tenant acceptance probe");
+    .expect("forge a pre-0043 cross-tenant acceptance probe");
 
     PostgresStore::from_pool(upgrade_pool.clone())
         .migrate()
         .await
-        .expect("upgrade version 44 to acceptance route reconciliation");
+        .expect("upgrade version 42 to acceptance route reconciliation");
 
     let store = PostgresStore::from_pool(upgrade_pool.clone());
     let exact_proof: (Option<String>, Option<i64>, Option<Vec<u8>>, Option<i64>) = sqlx::query_as(
@@ -879,7 +879,7 @@ async fn acceptance_route_reconciliation_upgrades_44_and_fences_tenants() {
             .fetch_one(&upgrade_pool)
             .await
             .expect("read upgraded schema version");
-    assert_eq!(upgraded_latest, 46);
+    assert_eq!(upgraded_latest, 44);
 
     upgrade_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {upgrade_schema} CASCADE"))
@@ -896,13 +896,13 @@ async fn acceptance_route_reconciliation_upgrades_44_and_fences_tenants() {
     PostgresStore::from_pool(fresh_pool.clone())
         .migrate()
         .await
-        .expect("application startup migrates an empty database to version 46");
+        .expect("application startup migrates an empty database to version 44");
     let fresh_latest: i64 =
         sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
             .fetch_one(&fresh_pool)
             .await
             .expect("read fresh schema version");
-    assert_eq!(fresh_latest, 46);
+    assert_eq!(fresh_latest, 44);
     let fresh_columns: Vec<(String, String)> = sqlx::query_as(
         "SELECT column_name,data_type
          FROM information_schema.columns
@@ -1002,7 +1002,7 @@ async fn runtime_availability_upgrade_is_additive_and_tenant_isolated() {
             let previous = Migrator {
                 migrations: Cow::Owned(
                     all.iter()
-                        .filter(|migration| migration.version < 43)
+                        .filter(|migration| migration.version < 41)
                         .cloned()
                         .collect(),
                 ),
@@ -1010,7 +1010,7 @@ async fn runtime_availability_upgrade_is_additive_and_tenant_isolated() {
                 locking: true,
                 no_tx: false,
             };
-            previous.run(&pool).await.expect("apply version 42 schema");
+            previous.run(&pool).await.expect("apply version 40 schema");
         }
         PostgresStore::from_pool(pool.clone())
             .migrate()
@@ -1171,86 +1171,6 @@ async fn schema_pool(database_url: &str, schema: &str) -> PgPool {
         .expect("connect disposable PostgreSQL schema")
 }
 
-#[tokio::test]
-async fn business_document_cutover_resets_only_prerelease_document_rows() {
-    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
-        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL migration evidence");
-        return;
-    };
-    let schema = format!("piqae_business_cutover_{}", ulid::Ulid::new()).to_ascii_lowercase();
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
-        .await
-        .expect("connect PostgreSQL test database");
-    sqlx::query(&format!("CREATE SCHEMA {schema}"))
-        .execute(&admin)
-        .await
-        .expect("create disposable schema");
-    let pool = schema_pool(&database_url, &schema).await;
-    let all = sqlx::migrate!("../../migrations/postgres");
-    let previous = Migrator {
-        migrations: Cow::Owned(
-            all.iter()
-                .filter(|migration| migration.version < 38)
-                .cloned()
-                .collect(),
-        ),
-        ignore_missing: false,
-        locking: true,
-        no_tx: false,
-    };
-    previous
-        .run(&pool)
-        .await
-        .expect("apply prerelease document schema");
-    sqlx::query("INSERT INTO workspaces (id,name,slug) VALUES ('wsp_cutover','Cutover','cutover')")
-        .execute(&pool)
-        .await
-        .expect("workspace fixture");
-    sqlx::query("INSERT INTO environments (id,workspace_id,kind,name) VALUES ('env_cutover','wsp_cutover','live','Live')")
-        .execute(&pool).await.expect("environment fixture");
-    sqlx::query("INSERT INTO agents (id,workspace_id,environment_id,name,installation_id,os,architecture,version,protocol_version) VALUES ('agt_cutover','wsp_cutover','env_cutover','Node','install-cutover','linux','x86_64','test',1)")
-        .execute(&pool).await.expect("agent fixture");
-    sqlx::query("INSERT INTO printers (id,workspace_id,environment_id,agent_id,native_id,name) VALUES ('prn_cutover','wsp_cutover','env_cutover','agt_cutover','virtual','Virtual')")
-        .execute(&pool).await.expect("printer fixture");
-    sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at) VALUES ('job_cutover','wsp_cutover','env_cutover','prn_cutover','agt_cutover','{}'::jsonb,'registered',1,now()+interval '1 hour')")
-        .execute(&pool).await.expect("unrelated job fixture");
-    let ciphertext = vec![7_u8; 29];
-    sqlx::query("INSERT INTO document_templates (id,workspace_id,environment_id,name,draft_ciphertext,draft_sha256) VALUES ('dtpl_cutover','wsp_cutover','env_cutover','Old',$1,$2)")
-        .bind(&ciphertext).bind("a".repeat(64)).execute(&pool).await.expect("old template fixture");
-    sqlx::query("INSERT INTO document_conversions (id,workspace_id,environment_id,adapter_id,adapter_version,adapter_api_version,source_format,source_sha256,strict,fidelity,renderer_version,result_ciphertext,result_sha256,idempotency_key,request_sha256) VALUES ('dcnv_cutover','wsp_cutover','env_cutover','pdfme','1.0.0','piqae.adapter/v1','pdfme.template',$1,true,'exact','old',$2,$1,'conversion-cutover',$1)")
-        .bind("a".repeat(64)).bind(&ciphertext).execute(&pool).await.expect("old conversion fixture");
-    PostgresStore::from_pool(pool.clone())
-        .migrate()
-        .await
-        .expect("apply hard cutover");
-    let documents: i64 = sqlx::query_scalar("SELECT count(*) FROM document_templates")
-        .fetch_one(&pool)
-        .await
-        .expect("count reset templates");
-    let unrelated_jobs: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE id='job_cutover' AND workspace_id='wsp_cutover' AND environment_id='env_cutover'")
-        .fetch_one(&pool).await.expect("count retained job");
-    let account: i64 = sqlx::query_scalar("SELECT count(*) FROM workspaces WHERE id='wsp_cutover'")
-        .fetch_one(&pool)
-        .await
-        .expect("count retained workspace");
-    let conversion_table_removed: bool =
-        sqlx::query_scalar("SELECT to_regclass('document_conversions') IS NULL")
-            .fetch_one(&pool)
-            .await
-            .expect("inspect removed conversion table");
-    assert_eq!(documents, 0);
-    assert_eq!(unrelated_jobs, 1);
-    assert_eq!(account, 1);
-    assert!(conversion_table_removed);
-    pool.close().await;
-    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-        .execute(&admin)
-        .await
-        .expect("drop exact disposable schema");
-}
-
 async fn wait_for_database_blocker(pool: &PgPool, pid: i32) {
     for _ in 0..50 {
         let blocked: bool = sqlx::query_scalar(
@@ -1315,7 +1235,7 @@ async fn postgres_reported_complete_billing_upgrades_from_previous_schema() {
         .fetch_one(&pool)
         .await
         .expect("read latest schema version");
-    assert_eq!(latest, 46);
+    assert_eq!(latest, 44);
     let billable_index: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('usage_one_billable_print_per_job_idx')::text")
             .fetch_one(&pool)
@@ -1356,6 +1276,27 @@ async fn documents_migrate_and_enforce_tenant_scoped_references() {
         .migrate()
         .await
         .expect("migrate empty database through documents");
+    let printpacket_tables: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM unnest(ARRAY[
+             'printpacket_resources',
+             'printpacket_resource_references'
+         ]) AS name
+         WHERE to_regclass(current_schema() || '.' || name) IS NOT NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("inspect canonical PrintPacket tables");
+    assert_eq!(printpacket_tables, 2);
+    let predecessor_tables: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_class relation
+         JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+         WHERE namespace.nspname=current_schema()
+           AND relation.relname LIKE 'business\\_document%' ESCAPE '\\'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("inspect removed pre-release table names");
+    assert_eq!(predecessor_tables, 0);
     for suffix in ["a", "b"] {
         sqlx::query("INSERT INTO workspaces (id,name,slug) VALUES ($1,$2,$3)")
             .bind(format!("wsp_doc_{suffix}"))
@@ -1386,16 +1327,29 @@ async fn documents_migrate_and_enforce_tenant_scoped_references() {
     .expect("tenant document template");
     let cross_tenant_revision = sqlx::query("INSERT INTO document_template_revisions
         (id,workspace_id,environment_id,template_id,revision,spec_ciphertext,spec_sha256,renderer_profile)
-        VALUES ('drev_cross','wsp_doc_b','env_doc_b','dtpl_doc_a',1,$1,$2,'piqae.business-document/v1')")
+        VALUES ('drev_cross','wsp_doc_b','env_doc_b','dtpl_doc_a',1,$1,$2,'printpacket/v1')")
         .bind(ciphertext.as_slice()).bind("a".repeat(64)).execute(&pool).await;
     assert!(
         cross_tenant_revision.is_err(),
         "composite tenant foreign key must reject probing"
     );
+    let removed_format = sqlx::query(
+        "INSERT INTO document_template_revisions
+         (id,workspace_id,environment_id,template_id,revision,spec_ciphertext,spec_sha256,renderer_profile)
+         VALUES ('drev_removed','wsp_doc_a','env_doc_a','dtpl_doc_a',2,$1,$2,'piqae.business-document/v1')",
+    )
+    .bind(ciphertext.as_slice())
+    .bind("a".repeat(64))
+    .execute(&pool)
+    .await;
+    assert!(
+        removed_format.is_err(),
+        "the pre-release format identifier must fail the database constraint"
+    );
     sqlx::query(
         "INSERT INTO document_template_revisions
          (id,workspace_id,environment_id,template_id,revision,spec_ciphertext,spec_sha256,renderer_profile)
-         VALUES ('drev_doc_a','wsp_doc_a','env_doc_a','dtpl_doc_a',1,$1,$2,'piqae.business-document/v1')",
+         VALUES ('drev_doc_a','wsp_doc_a','env_doc_a','dtpl_doc_a',1,$1,$2,'printpacket/v1')",
     )
     .bind(ciphertext.as_slice())
     .bind("a".repeat(64))
@@ -1415,6 +1369,32 @@ async fn documents_migrate_and_enforce_tenant_scoped_references() {
     .execute(&pool)
     .await
     .expect("completed render fixture");
+    let resource_digest = "b".repeat(64);
+    for suffix in ["a", "b"] {
+        sqlx::query(
+            "INSERT INTO printpacket_resources
+             (workspace_id,environment_id,digest,media_type,byte_length)
+             VALUES ($1,$2,$3,'image/jpeg',128)",
+        )
+        .bind(format!("wsp_doc_{suffix}"))
+        .bind(format!("env_doc_{suffix}"))
+        .bind(&resource_digest)
+        .execute(&pool)
+        .await
+        .expect("tenant PrintPacket resource fixture");
+    }
+    let cross_tenant_resource_link = sqlx::query(
+        "INSERT INTO printpacket_resource_references
+         (workspace_id,environment_id,render_id,resource_digest)
+         VALUES ('wsp_doc_b','env_doc_b','drnd_doc_a',$1)",
+    )
+    .bind(&resource_digest)
+    .execute(&pool)
+    .await;
+    assert!(
+        cross_tenant_resource_link.is_err(),
+        "resource references must not cross a tenant boundary"
+    );
     sqlx::query(
         "INSERT INTO uploads
          (id,workspace_id,environment_id,object_key,media_type,expected_sha256,expected_bytes,state,
@@ -1517,17 +1497,11 @@ async fn documents_migrate_and_enforce_tenant_scoped_references() {
     .await
     .expect("inspect render revision delete policy");
     assert_eq!(render_revision_delete_action, "c");
-    let hosted_conversion_removed: bool =
-        sqlx::query_scalar("SELECT to_regclass('document_conversions') IS NULL")
-            .fetch_one(&pool)
-            .await
-            .expect("inspect hosted conversion removal");
-    assert!(hosted_conversion_removed);
     let latest: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
         .fetch_one(&pool)
         .await
         .expect("read schema version");
-    assert_eq!(latest, 46);
+    assert_eq!(latest, 44);
     pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
@@ -1921,7 +1895,7 @@ async fn agent_health_migrates_empty_and_previous_schemas_with_tenant_fencing() 
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(latest, 46);
+    assert_eq!(latest, 44);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -2070,7 +2044,7 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .fetch_one(&empty_pool)
         .await
         .expect("read empty-database schema version");
-    assert_eq!(empty_latest, 46);
+    assert_eq!(empty_latest, 44);
     empty_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {empty_schema} CASCADE"))
         .execute(&admin)
@@ -2138,7 +2112,7 @@ async fn content_encryption_key_algorithm_migrates_fresh_and_legacy_schemas() {
         .fetch_one(&upgrade_pool)
         .await
         .expect("read upgraded schema version");
-    assert_eq!(latest, 46);
+    assert_eq!(latest, 44);
     let reference_guard_config: Vec<String> = sqlx::query_scalar(
         "SELECT coalesce(proconfig, ARRAY[]::text[])
          FROM pg_proc JOIN pg_namespace ON pg_namespace.oid = pg_proc.pronamespace

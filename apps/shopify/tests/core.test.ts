@@ -278,7 +278,7 @@ describe("Shopify boundary", () => {
       vault,
       () =>
         ({
-          businessDocuments: {
+          printPackets: {
             renders: { create, print, retrieve: vi.fn() },
             templates: {},
             conversions: {},
@@ -326,7 +326,7 @@ describe("Shopify boundary", () => {
     const service = new ShopifyPrintingService(
       repository,
       vault,
-      () => ({ businessDocuments: {} }) as never,
+      () => ({ printPackets: {} }) as never,
       "https://app.example",
       undefined,
       workflow,
@@ -381,7 +381,7 @@ describe("Shopify boundary", () => {
       estimates: { cloud_ms: 0, node_ms: 0 },
     }));
     const client = {
-      businessDocuments: {
+      printPackets: {
         renders: {
           create: createRender,
           retrieve: vi.fn(),
@@ -728,13 +728,13 @@ describe("Shopify document experience", () => {
     ]);
     expect(new Set(starterTemplates.map(({ id }) => id)).size).toBe(2);
     for (const template of starterTemplates) {
-      expect(template.specification.format).toBe("piqae.business-document/v1");
+      expect(template.specification.format).toBe("printpacket/v1");
       expect(template.specification.body.length).toBeGreaterThan(0);
       expect(JSON.stringify(template.specification)).toContain(
         '"type":"table"',
       );
     }
-    expect(editorDocument.format).toBe("piqae.business-document/v1");
+    expect(editorDocument.format).toBe("printpacket/v1");
   });
 
   it("customizes an immutable system document into an editable draft", () => {
