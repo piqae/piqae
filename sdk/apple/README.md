@@ -284,6 +284,15 @@ xcodebuild -scheme PiqaeNodeKitConsumerFixture \
 The artifact is unsigned. Signing, provenance, notarization where applicable,
 publication, and App Store review evidence belong to the native release gate.
 
+The versioned XCFramework release SBOM is generated from the union of the
+locked Cargo graphs for both macOS architectures, iOS arm64, and both simulator
+architectures. It binds every archive entry and static library hash to the outer
+archive SHA-256, records dependency sources, purls, checksums, declared
+licences, and `DEPENDS_ON` edges, and is revalidated against target-filtered
+`cargo metadata`. The aggregate binary licence conclusion remains
+`NOASSERTION`; the repository `LICENSE` and `NOTICE` are retained inside the
+exact SwiftPM archive.
+
 A product `v<version>` candidate additionally contains two versioned assets:
 `PiqaeNodeKit-<version>.zip` (the Swift package sources) and
 `PiqaeNode.xcframework-<version>.zip` (the binary target). The package manifest

@@ -149,7 +149,10 @@ for `win-x64`, executes the packaged native ABI, requires ABI 1/contract 2, and
 checks the PrintPacket capability response, managed facade, dependency, and
 runtime DLL in the output. The NuGet and native C archives each contain the
 repository LICENSE and NOTICE and each has exact-file SPDX checksum and
-containment evidence. These unsigned candidates
+containment evidence. The native C archive SBOM also contains the locked
+`x86_64-pc-windows-msvc` Cargo dependency graph with package sources, purls,
+checksums, declared licences, and exact `DEPENDS_ON` relationships; its
+aggregate concluded licence remains `NOASSERTION`. These unsigned candidates
 remain engineering evidence rather than a public NuGet publication promise.
 The staged `PiqaeNode.windows-sdk-artifact.json` binds both archives and their
 SBOMs to ABI 1, native contract 2, and the PrintPacket capability response.

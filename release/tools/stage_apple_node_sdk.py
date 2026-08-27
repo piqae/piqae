@@ -14,10 +14,22 @@ import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 
+try:
+    from release.tools import native_cargo_sbom
+except ModuleNotFoundError:  # Direct script execution uses release/tools as sys.path[0].
+    import native_cargo_sbom  # type: ignore[no-redef]
+
 
 SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
 REPOSITORY = "piqae/piqae"
 FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
+APPLE_RUST_TARGETS = (
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-apple-ios",
+    "aarch64-apple-ios-sim",
+    "x86_64-apple-ios",
+)
 
 
 class ReleaseError(RuntimeError):
@@ -293,6 +305,8 @@ def stage(repository_root: Path, version: str, output: Path) -> None:
         "capability_contract"
     ) != "printpacket/v1":
         raise ReleaseError("source Apple artifact must expose PrintPacket capabilities")
+    if metadata.get("rust_targets") != list(APPLE_RUST_TARGETS):
+        raise ReleaseError("source Apple artifact must record all five locked Rust target graphs")
     if metadata.get("artifact") != source_archive.name:
         raise ReleaseError("source Apple manifest does not name the built archive")
     if metadata.get("git_revision") != revision:
@@ -346,7 +360,18 @@ def stage(repository_root: Path, version: str, output: Path) -> None:
     )
     native_sbom_name = f"PiqaeNode.xcframework-{version}.spdx.json"
     source_sbom_name = f"PiqaeNodeKit-{version}.spdx.json"
-    generate_archive_sbom(staged_archive, "PiqaeNodeNative", version, output / native_sbom_name)
+    try:
+        native_cargo_sbom.generate_native_sbom(
+            staged_archive,
+            output / native_sbom_name,
+            repository_root,
+            APPLE_RUST_TARGETS,
+            "PiqaeNodeNative",
+            version,
+            (".a",),
+        )
+    except native_cargo_sbom.NativeCargoSbomError as error:
+        raise ReleaseError(str(error)) from error
     generate_archive_sbom(package_archive, "PiqaeNodeKit", version, output / source_sbom_name)
     release_manifest = {
         "schema": 2,
@@ -354,6 +379,7 @@ def stage(repository_root: Path, version: str, output: Path) -> None:
         "native_contract": {"current": 2, "supported": [2]},
         "capability_command": "print_packet_capabilities",
         "capability_contract": "printpacket/v1",
+        "rust_targets": list(APPLE_RUST_TARGETS),
         "version": version,
         "tag": f"v{version}",
         "git_revision": revision,
@@ -390,6 +416,7 @@ def validate_stage(repository_root: Path, version: str, output: Path) -> dict[st
         "native_contract": {"current": 2, "supported": [2]},
         "capability_command": "print_packet_capabilities",
         "capability_contract": "printpacket/v1",
+        "rust_targets": list(APPLE_RUST_TARGETS),
         "version": version,
         "tag": f"v{version}",
         "git_revision": exact_git_revision(repository_root),
@@ -470,11 +497,18 @@ def validate_stage(repository_root: Path, version: str, output: Path) -> dict[st
             repository_root / "NOTICE"
         ).read_bytes():
             raise ReleaseError("Apple source archive LICENSE or NOTICE does not match the repository")
-    validate_archive_sbom(
-        archive,
-        output / metadata["sboms"][versioned_archive],
-        {"PiqaeNode.xcframework/LICENSE", "PiqaeNode.xcframework/NOTICE"},
-    )
+    try:
+        native_cargo_sbom.validate_native_sbom(
+            archive,
+            output / metadata["sboms"][versioned_archive],
+            repository_root,
+            APPLE_RUST_TARGETS,
+            "PiqaeNodeNative",
+            version,
+            (".a",),
+        )
+    except native_cargo_sbom.NativeCargoSbomError as error:
+        raise ReleaseError(str(error)) from error
     validate_archive_sbom(
         package,
         output / metadata["sboms"][source_package],
@@ -497,7 +531,14 @@ def main() -> int:
             stage(repository_root, args.version, output)
         else:
             validate_stage(repository_root, args.version, output)
-    except (OSError, KeyError, ValueError, subprocess.CalledProcessError, ReleaseError) as error:
+    except (
+        OSError,
+        KeyError,
+        ValueError,
+        subprocess.CalledProcessError,
+        ReleaseError,
+        native_cargo_sbom.NativeCargoSbomError,
+    ) as error:
         parser.error(str(error))
     return 0
 

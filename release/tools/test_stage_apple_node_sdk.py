@@ -15,13 +15,20 @@ SPEC.loader.exec_module(MODULE)
 
 
 class AppleNodeSdkStageTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.repository_root = MODULE_PATH.parents[2]
+        cls.apple_graph = MODULE.native_cargo_sbom.load_cargo_graph(
+            cls.repository_root, MODULE.APPLE_RUST_TARGETS
+        )
+
     def setUp(self) -> None:
         self.fixture = tempfile.TemporaryDirectory()
         self.root = Path(self.fixture.name)
         self.stage = self.root / "stage"
         self.stage.mkdir()
-        (self.root / "LICENSE").write_text("Apache-2.0 fixture", encoding="utf-8")
-        (self.root / "NOTICE").write_text("Piqae fixture", encoding="utf-8")
+        (self.root / "LICENSE").write_bytes((self.repository_root / "LICENSE").read_bytes())
+        (self.root / "NOTICE").write_bytes((self.repository_root / "NOTICE").read_bytes())
         self.version = "1.2.3"
         self.revision = "a" * 40
         self.native_name = f"PiqaeNode.xcframework-{self.version}.zip"
@@ -30,6 +37,7 @@ class AppleNodeSdkStageTests(unittest.TestCase):
             native.writestr("PiqaeNode.xcframework/LICENSE", (self.root / "LICENSE").read_bytes())
             native.writestr("PiqaeNode.xcframework/NOTICE", (self.root / "NOTICE").read_bytes())
             native.writestr("PiqaeNode.xcframework/Info.plist", "fixture")
+            native.writestr("PiqaeNode.xcframework/macos/libPiqaeNode.a", "native")
         package_root = f"PiqaeNodeKit-{self.version}"
         with zipfile.ZipFile(self.stage / self.source_name, "w") as package:
             package.writestr(
@@ -50,12 +58,18 @@ class AppleNodeSdkStageTests(unittest.TestCase):
         source_hash = MODULE.sha256(self.stage / self.source_name)
         self.native_sbom = f"PiqaeNode.xcframework-{self.version}.spdx.json"
         self.source_sbom = f"PiqaeNodeKit-{self.version}.spdx.json"
-        MODULE.generate_archive_sbom(
-            self.stage / self.native_name,
-            "PiqaeNodeNative",
-            self.version,
-            self.stage / self.native_sbom,
-        )
+        with mock.patch.object(
+            MODULE.native_cargo_sbom, "load_cargo_graph", return_value=self.apple_graph
+        ):
+            MODULE.native_cargo_sbom.generate_native_sbom(
+                self.stage / self.native_name,
+                self.stage / self.native_sbom,
+                self.repository_root,
+                MODULE.APPLE_RUST_TARGETS,
+                "PiqaeNodeNative",
+                self.version,
+                (".a",),
+            )
         MODULE.generate_archive_sbom(
             self.stage / self.source_name,
             "PiqaeNodeKit",
@@ -74,6 +88,7 @@ class AppleNodeSdkStageTests(unittest.TestCase):
             "native_contract": {"current": 2, "supported": [2]},
             "capability_command": "print_packet_capabilities",
             "capability_contract": "printpacket/v1",
+            "rust_targets": list(MODULE.APPLE_RUST_TARGETS),
             "version": self.version,
             "tag": f"v{self.version}",
             "git_revision": self.revision,
@@ -103,8 +118,10 @@ class AppleNodeSdkStageTests(unittest.TestCase):
     def validate(self) -> None:
         with mock.patch.object(MODULE, "exact_git_revision", return_value=self.revision), mock.patch.object(
             MODULE, "swiftpm_checksum", return_value="native-checksum"
+        ), mock.patch.object(
+            MODULE.native_cargo_sbom, "load_cargo_graph", return_value=self.apple_graph
         ):
-            MODULE.validate_stage(self.root, self.version, self.stage)
+            MODULE.validate_stage(self.repository_root, self.version, self.stage)
 
     def test_accepts_exact_versioned_distribution(self) -> None:
         self.validate()

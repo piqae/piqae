@@ -123,6 +123,13 @@ cat > "$manifest" <<EOF
   "native_contract": {"current": 2, "supported": [2]},
   "capability_command": "print_packet_capabilities",
   "capability_contract": "printpacket/v1",
+  "rust_targets": [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-apple-ios",
+    "aarch64-apple-ios-sim",
+    "x86_64-apple-ios"
+  ],
   "git_revision": "$revision",
   "artifact": "PiqaeNode.xcframework.zip",
   "swiftpm_checksum": "$swiftpm_checksum",

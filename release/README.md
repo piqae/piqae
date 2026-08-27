@@ -16,6 +16,19 @@ manifest and checksums, verifies the provenance against the repository
 identity, and uploads the audited candidate. Native release workflows should
 call it only after platform signing and packaging have succeeded.
 
+Embedded Apple and Windows native SDK candidates use a stricter native SBOM
+gate. The SPDX document contains the exact outer archive SHA-256, every archived
+binary and licence file hash, and the complete non-development dependency graph
+reachable from `piqae-node-ffi`. That graph is regenerated from `Cargo.lock` and
+`cargo metadata --locked --filter-platform`: all five Apple build targets are
+unioned, while Windows is evaluated for `x86_64-pc-windows-msvc`. Each Cargo
+package records its name, version, source, purl, source checksum, declared
+licence, and `DEPENDS_ON` edges. Validation recomputes the target graph and
+fails for an omitted package, forged checksum, or changed relationship. Because
+the compiled archive aggregates third-party code, its SPDX
+`licenseConcluded` deliberately remains `NOASSERTION`; the exact repository
+`LICENSE` and `NOTICE` still travel inside each archive.
+
 ## Local audit
 
 Use structural verification while developing fixtures:

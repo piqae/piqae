@@ -176,8 +176,11 @@ jobs:
         run: sdk/apple/scripts/build-xcframework.sh
       - name: Validate the linked XCFramework and consumers
         run: release/tools/test_apple_node_sdk_linked.sh verify-existing
-      - name: Validate Apple release staging failure paths
-        run: python3 -m unittest release/tools/test_stage_apple_node_sdk.py
+      - name: Validate Apple release staging and native SBOM failure paths
+        run: >-
+          python3 -m unittest
+          release/tools/test_native_cargo_sbom.py
+          release/tools/test_stage_apple_node_sdk.py
       - name: Stage versioned Apple SDK evidence
         shell: bash
         run: |
@@ -247,14 +250,14 @@ jobs:
             $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
             "$hash  $($_.Name)" | Out-File -Encoding ascii "$($_.FullName).sha256"
           }
-          python release/tools/windows_sdk_release.py generate-native-sbom --archive $archive --version "${{ needs.prepare.outputs.version }}" --output "artifacts\windows-node-sdk\PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.spdx.json"
+          python release/tools/windows_sdk_release.py generate-native-sbom --archive $archive --repository-root $PWD --version "${{ needs.prepare.outputs.version }}" --output "artifacts\windows-node-sdk\PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.spdx.json"
           python release/tools/windows_sdk_release.py generate-sdk-manifest --package "artifacts\windows-node-sdk\Piqae.Node.${{ needs.prepare.outputs.version }}.nupkg" --native-archive $archive --nuget-sbom "artifacts\windows-node-sdk\Piqae.Node.${{ needs.prepare.outputs.version }}.spdx.json" --native-sbom "artifacts\windows-node-sdk\PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.spdx.json" --version "${{ needs.prepare.outputs.version }}" --output "artifacts\windows-node-sdk\PiqaeNode.windows-sdk-artifact.json"
       - name: Gate the complete Windows SDK SPDX SBOM
         shell: pwsh
         run: |
           python release/tools/windows_sdk_release.py validate-sbom --input "artifacts/windows-node-sdk/Piqae.Node.${{ needs.prepare.outputs.version }}.spdx.json" --package "artifacts/windows-node-sdk/Piqae.Node.${{ needs.prepare.outputs.version }}.nupkg" --version "${{ needs.prepare.outputs.version }}"
           python release/tools/release_bundle.py validate-sbom "artifacts/windows-node-sdk/Piqae.Node.${{ needs.prepare.outputs.version }}.spdx.json"
-          python release/tools/windows_sdk_release.py validate-native-sbom --archive "artifacts/windows-node-sdk/PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.zip" --input "artifacts/windows-node-sdk/PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.spdx.json" --version "${{ needs.prepare.outputs.version }}"
+          python release/tools/windows_sdk_release.py validate-native-sbom --archive "artifacts/windows-node-sdk/PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.zip" --input "artifacts/windows-node-sdk/PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.spdx.json" --repository-root $PWD --version "${{ needs.prepare.outputs.version }}"
           python release/tools/release_bundle.py validate-sbom "artifacts/windows-node-sdk/PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.spdx.json"
           python release/tools/windows_sdk_release.py validate-sdk-manifest --package "artifacts/windows-node-sdk/Piqae.Node.${{ needs.prepare.outputs.version }}.nupkg" --native-archive "artifacts/windows-node-sdk/PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.zip" --nuget-sbom "artifacts/windows-node-sdk/Piqae.Node.${{ needs.prepare.outputs.version }}.spdx.json" --native-sbom "artifacts/windows-node-sdk/PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.spdx.json" --version "${{ needs.prepare.outputs.version }}" --input artifacts/windows-node-sdk/PiqaeNode.windows-sdk-artifact.json
       - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
