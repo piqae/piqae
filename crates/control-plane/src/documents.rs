@@ -538,6 +538,12 @@ async fn register_render(
             "Template revision is invalid.",
         ));
     }
+    if !request.input.is_object() {
+        return Err(AppError::invalid(
+            "invalid_document_input",
+            "PrintPacket render input must be a JSON object.",
+        ));
+    }
     let plaintext = validate_json(&request.input, false)?;
     let input_sha256 = hex::encode(Sha256::digest(&plaintext));
     let request_sha256 = hex::encode(Sha256::digest(

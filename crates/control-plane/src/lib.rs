@@ -2177,6 +2177,24 @@ mod tests {
             .await
             .expect("mismatched replay response");
         assert_eq!(mismatch.status(), StatusCode::CONFLICT);
+        let scalar_input = application
+            .router
+            .clone()
+            .oneshot(idempotent_api_request(
+                "POST",
+                "/v1/printpacket/renders",
+                "piq_test_integration",
+                "render-invalid-scalar",
+                Some(
+                    &serde_json::json!({
+                        "template_revision_id": revision_id, "input":["not", "an", "object"],
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .expect("scalar render input response");
+        assert_eq!(scalar_input.status(), StatusCode::BAD_REQUEST);
         let render = json_response(
             &application.router,
             idempotent_api_request(
@@ -3713,11 +3731,14 @@ mod tests {
             .push(piqae_protocol::agent::PrinterNativeLanguageProfile {
                 id: "escpos.generic/v1".into(),
                 language: "escpos".into(),
-                version: "1".into(),
+                language_version: "1".into(),
+                profile_version: "1.0.0".into(),
                 media_type: "application/vnd.escpos".into(),
+                driver_fingerprint_sha256: "b".repeat(64),
+                support_pack_digest_sha256: "c".repeat(64),
                 printer_ids: vec![application.printer_id.to_string()],
             });
-        let _ = sync_virtual_document_node(&application, capabilities, false).await;
+        let _ = sync_virtual_document_node(&application, capabilities.clone(), false).await;
 
         let wrong = application
             .router
@@ -3759,6 +3780,40 @@ mod tests {
             accepted["metadata"]["piqae.printer_native.language_profile"],
             "escpos.generic/v1"
         );
+        assert_eq!(
+            accepted["metadata"]["piqae.printer_native.language"],
+            "escpos"
+        );
+        assert_eq!(
+            accepted["metadata"]["piqae.printer_native.language_version"],
+            "1"
+        );
+        assert_eq!(
+            accepted["metadata"]["piqae.printer_native.profile_version"],
+            "1.0.0"
+        );
+        assert_eq!(
+            accepted["metadata"]["piqae.printer_native.driver_fingerprint_sha256"],
+            "b".repeat(64)
+        );
+        assert_eq!(
+            accepted["metadata"]["piqae.printer_native.support_pack_digest_sha256"],
+            "c".repeat(64)
+        );
+        assert_eq!(
+            accepted["metadata"]["piqae.printer_native.printer_id"],
+            application.printer_id.to_string()
+        );
+
+        let mut changed = capabilities.clone();
+        changed
+            .print_packet
+            .as_mut()
+            .and_then(|packet| packet.native_language_profiles.first_mut())
+            .expect("native language profile")
+            .language_version = "2".into();
+        let withheld = sync_virtual_document_node(&application, changed, false).await;
+        assert!(withheld.candidate_jobs.is_empty());
     }
 
     #[tokio::test]

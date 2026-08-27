@@ -4961,18 +4961,6 @@ async fn materialize_installed_offer(
     if !printer_is_allowed(cloud.allowed_printer_ids.as_ref(), &logical_printer_id) {
         return Err(CloudWorkerError::new("printer_not_granted"));
     }
-    if offer.job.content_kind == ContentKind::Raw
-        && (!offer
-            .job
-            .metadata
-            .contains_key("piqae.printer_native.output_profile")
-            || !offer
-                .job
-                .metadata
-                .contains_key("piqae.printer_native.language_profile"))
-    {
-        return Err(CloudWorkerError::new("printer_native_descriptor_required"));
-    }
     let profile_pin = profile_pin_metadata(&offer.job.metadata)
         .map_err(|_| CloudWorkerError::new("profile_pin_invalid"))?;
     if matches!(&offer.content, ContentDescriptor::EncryptedDownload { .. })
@@ -4986,6 +4974,23 @@ async fn materialize_installed_offer(
             .map_err(|_| CloudWorkerError::new("printer_not_found"))?;
         if !printer.present {
             return Err(CloudWorkerError::new("printer_not_present"));
+        }
+        if offer.job.content_kind == ContentKind::Raw {
+            let bindings = stores
+                .inventory
+                .setting(PRINTER_NATIVE_BINDINGS_SETTING)
+                .map_err(|_| CloudWorkerError::new("printer_native_binding_unavailable"))?
+                .map(|encoded| {
+                    serde_json::from_str::<Vec<LocalPrinterNativeBinding>>(&encoded)
+                        .map_err(|_| CloudWorkerError::new("printer_native_binding_unavailable"))
+                })
+                .transpose()?
+                .unwrap_or_default();
+            if !bindings.iter().any(|binding| {
+                printer_native_offer_matches(&offer.job.metadata, &logical_printer_id, binding)
+            }) {
+                return Err(CloudWorkerError::new("printer_native_binding_stale"));
+            }
         }
         let mut uses_current_printer_defaults = false;
         if let Some(pin) = &profile_pin {
@@ -5432,10 +5437,14 @@ async fn prepare_sync_request(
         )
         .await
         {
-            Ok(mut printers) => {
+            Ok((mut printers, native_bindings)) => {
                 printers.retain(|printer| {
                     printer_is_allowed(allowed_printer_ids, &printer.id.to_string())
                 });
+                inventory_store.set_setting(
+                    PRINTER_NATIVE_BINDINGS_SETTING,
+                    &serde_json::to_string(&native_bindings)?,
+                )?;
                 store.set_setting("printer_inventory_revision", &next.to_string())?;
                 inventory_revision = next;
                 Some(printers)
@@ -5474,6 +5483,15 @@ async fn prepare_sync_request(
         )
     };
     let mut request = sync_request(store, agent_id, started_at, paused, printers)?;
+    let native_bindings = inventory_store
+        .setting(PRINTER_NATIVE_BINDINGS_SETTING)?
+        .map(|encoded| serde_json::from_str::<Vec<LocalPrinterNativeBinding>>(&encoded))
+        .transpose()?
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|binding| printer_is_allowed(allowed_printer_ids, &binding.printer_id))
+        .collect::<Vec<_>>();
+    apply_printer_native_bindings(&mut request, &native_bindings);
     request.route_observations = route_observations;
     request.topology_changes = topology_changes;
     request.native_handoffs = native_handoffs;
@@ -5923,6 +5941,7 @@ async fn materialize_descriptor(
                 total.saturating_add(resource.byte_length)
             });
             let rendered = if render.negotiation_version == 2
+                && render.input.is_object()
                 && render.packet_version == printpacket::DOCUMENT_V1
                 && render
                     .required_feature_ids
@@ -6261,6 +6280,61 @@ fn print_packet_feature_id(feature: &printpacket::Feature) -> String {
         .unwrap_or_else(|| "invalid_feature_serialization".into())
 }
 
+const PRINTER_NATIVE_BINDINGS_SETTING: &str = "printer_native_bindings_v2";
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct LocalPrinterNativeBinding {
+    printer_id: String,
+    output_profile_id: String,
+    language_profile: piqae_protocol::agent::PrinterNativeLanguageProfile,
+}
+
+fn printer_native_offer_matches(
+    metadata: &std::collections::BTreeMap<String, String>,
+    printer_id: &str,
+    binding: &LocalPrinterNativeBinding,
+) -> bool {
+    let language = &binding.language_profile;
+    binding.printer_id == printer_id
+        && language
+            .printer_ids
+            .iter()
+            .any(|bound_printer| bound_printer == printer_id)
+        && metadata.get("piqae.printer_native.output_profile") == Some(&binding.output_profile_id)
+        && metadata.get("piqae.printer_native.language_profile") == Some(&language.id)
+        && metadata.get("piqae.printer_native.language") == Some(&language.language)
+        && metadata.get("piqae.printer_native.language_version") == Some(&language.language_version)
+        && metadata.get("piqae.printer_native.profile_version") == Some(&language.profile_version)
+        && metadata.get("piqae.printer_native.media_type") == Some(&language.media_type)
+        && metadata.get("piqae.printer_native.driver_fingerprint_sha256")
+            == Some(&language.driver_fingerprint_sha256)
+        && metadata.get("piqae.printer_native.support_pack_digest_sha256")
+            == Some(&language.support_pack_digest_sha256)
+        && metadata.get("piqae.printer_native.printer_id") == Some(&binding.printer_id)
+}
+
+fn apply_printer_native_bindings(
+    request: &mut AgentSyncRequest,
+    bindings: &[LocalPrinterNativeBinding],
+) {
+    let Some(packet) = request.document_render.print_packet.as_mut() else {
+        return;
+    };
+    for binding in bindings {
+        let language = &binding.language_profile;
+        let output = piqae_protocol::agent::PrintPacketOutputProfile::PrinterNative {
+            id: binding.output_profile_id.clone(),
+            media_type: language.media_type.clone(),
+            language_profile_id: language.id.clone(),
+        };
+        if !packet.output_profiles.contains(&output) {
+            packet.output_profiles.push(output);
+        }
+        packet.native_language_profiles.push(language.clone());
+    }
+}
+
 fn sync_request(
     store: &AgentStore,
     agent_id: AgentId,
@@ -6380,7 +6454,7 @@ async fn discover_cloud_printers(
     route_coordinator: &Arc<Mutex<route_coordinator::RouteCoordinator>>,
     support_packs: &SupportPackRegistry,
     inventory_revision: u64,
-) -> Result<Vec<PrinterSnapshot>> {
+) -> Result<(Vec<PrinterSnapshot>, Vec<LocalPrinterNativeBinding>)> {
     let discovered = run_printer_discovery(discovery).await?;
     let observed_at = Utc::now();
     let mut routes =
@@ -6393,6 +6467,7 @@ async fn discover_cloud_printers(
         .map(|printer| printer.native_id.clone())
         .collect::<Vec<_>>();
     let observed_unix_ms = Utc::now().timestamp_millis();
+    let mut native_bindings = Vec::new();
     let snapshots = discovered
         .into_iter()
         .map(|printer| {
@@ -6409,6 +6484,24 @@ async fn discover_cloud_printers(
                 &capabilities,
                 observed_unix_ms,
             )?;
+            for profile in
+                support_packs.native_language_profiles(printer.driver_fingerprint.as_ref())?
+            {
+                native_bindings.push(LocalPrinterNativeBinding {
+                    printer_id: stored.printer_id.clone(),
+                    output_profile_id: profile.output_profile_id,
+                    language_profile: piqae_protocol::agent::PrinterNativeLanguageProfile {
+                        id: profile.id,
+                        language: profile.language,
+                        language_version: profile.language_version,
+                        profile_version: profile.profile_version,
+                        media_type: profile.media_type,
+                        driver_fingerprint_sha256: profile.driver_fingerprint_sha256,
+                        support_pack_digest_sha256: profile.support_pack_digest_sha256,
+                        printer_ids: vec![stored.printer_id.clone()],
+                    },
+                });
+            }
             let native_options = serde_json::to_string(&printer.native_options)?;
             let profile = store.store_printer_profile(
                 &stored.printer_id,
@@ -6467,7 +6560,12 @@ async fn discover_cloud_printers(
         })
         .collect::<Result<Vec<Option<PrinterSnapshot>>>>()?;
     store.reconcile_printer_presence(&present_native_ids)?;
-    Ok(snapshots.into_iter().flatten().collect())
+    native_bindings.sort_by(|left, right| {
+        (&left.printer_id, &left.language_profile.id)
+            .cmp(&(&right.printer_id, &right.language_profile.id))
+    });
+    native_bindings.truncate(32);
+    Ok((snapshots.into_iter().flatten().collect(), native_bindings))
 }
 
 fn route_observation_inputs(
@@ -7883,6 +7981,86 @@ mod tests {
     }
 
     #[test]
+    fn stale_or_forged_printer_native_offer_is_rejected_against_local_binding() {
+        let binding = LocalPrinterNativeBinding {
+            printer_id: "ptr_fixture".into(),
+            output_profile_id: "escpos.example/v1".into(),
+            language_profile: piqae_protocol::agent::PrinterNativeLanguageProfile {
+                id: "escpos.example/v1".into(),
+                language: "escpos".into(),
+                language_version: "1".into(),
+                profile_version: "3.2.0".into(),
+                media_type: "application/vnd.escpos".into(),
+                driver_fingerprint_sha256: "a".repeat(64),
+                support_pack_digest_sha256: "b".repeat(64),
+                printer_ids: vec!["ptr_fixture".into()],
+            },
+        };
+        let mut metadata = std::collections::BTreeMap::from([
+            (
+                "piqae.printer_native.output_profile".into(),
+                binding.output_profile_id.clone(),
+            ),
+            (
+                "piqae.printer_native.language_profile".into(),
+                binding.language_profile.id.clone(),
+            ),
+            (
+                "piqae.printer_native.language".into(),
+                binding.language_profile.language.clone(),
+            ),
+            (
+                "piqae.printer_native.language_version".into(),
+                binding.language_profile.language_version.clone(),
+            ),
+            (
+                "piqae.printer_native.profile_version".into(),
+                binding.language_profile.profile_version.clone(),
+            ),
+            (
+                "piqae.printer_native.media_type".into(),
+                binding.language_profile.media_type.clone(),
+            ),
+            (
+                "piqae.printer_native.driver_fingerprint_sha256".into(),
+                binding.language_profile.driver_fingerprint_sha256.clone(),
+            ),
+            (
+                "piqae.printer_native.support_pack_digest_sha256".into(),
+                binding.language_profile.support_pack_digest_sha256.clone(),
+            ),
+            (
+                "piqae.printer_native.printer_id".into(),
+                binding.printer_id.clone(),
+            ),
+        ]);
+        assert!(printer_native_offer_matches(
+            &metadata,
+            "ptr_fixture",
+            &binding
+        ));
+        metadata.insert(
+            "piqae.printer_native.driver_fingerprint_sha256".into(),
+            "c".repeat(64),
+        );
+        assert!(!printer_native_offer_matches(
+            &metadata,
+            "ptr_fixture",
+            &binding
+        ));
+        metadata.insert(
+            "piqae.printer_native.driver_fingerprint_sha256".into(),
+            "a".repeat(64),
+        );
+        metadata.insert("piqae.printer_native.language_version".into(), "2".into());
+        assert!(!printer_native_offer_matches(
+            &metadata,
+            "ptr_fixture",
+            &binding
+        ));
+    }
+
+    #[test]
     fn local_driver_test_can_resolve_present_unexposed_printer_but_jobs_cannot() {
         let mut store = AgentStore::in_memory().expect("store");
         let printer = store
@@ -7932,11 +8110,12 @@ mod tests {
         )
         .await
         .expect("discovery");
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].profiles.len(), 1);
-        assert_eq!(first[0].profiles[0].name, "Current printer defaults");
-        assert!(first[0].profiles[0].is_default);
-        assert!(first[0].profiles[0].published);
+        assert_eq!(first.0.len(), 1);
+        assert!(first.1.is_empty());
+        assert_eq!(first.0[0].profiles.len(), 1);
+        assert_eq!(first.0[0].profiles[0].name, "Current printer defaults");
+        assert!(first.0[0].profiles[0].is_default);
+        assert!(first.0[0].profiles[0].published);
         let printer = store
             .present_printers()
             .expect("printers")
@@ -7961,10 +8140,10 @@ mod tests {
         )
         .await
         .expect("restart discovery");
-        assert_eq!(restarted[0].id, first[0].id);
+        assert_eq!(restarted.0[0].id, first.0[0].id);
         assert_eq!(
-            restarted[0].profiles[0].profile_id,
-            first[0].profiles[0].profile_id
+            restarted.0[0].profiles[0].profile_id,
+            first.0[0].profiles[0].profile_id
         );
         assert_eq!(
             store
@@ -7996,7 +8175,7 @@ mod tests {
         )
         .await
         .expect("initial discovery");
-        assert_eq!(initial.len(), 1);
+        assert_eq!(initial.0.len(), 1);
         let printer = node_inventory
             .present_printers()
             .expect("node printers")
@@ -8091,7 +8270,8 @@ mod tests {
                 1,
             )
             .await
-            .expect("initial discovery")[0]
+            .expect("initial discovery")
+            .0[0]
                 .id
         };
 

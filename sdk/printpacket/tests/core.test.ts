@@ -67,4 +67,19 @@ describe("PrintPacket developer contract", () => {
     for (let index = 0; index < 34; index += 1) children = [{ type: "section", children }];
     expect(() => preflightPacket({ format: "printpacket/v1", media: { kind: "paged", size: "a4" }, body: children as never })).toThrow("nesting");
   });
+
+  it("accepts 100 resources and rejects 101 before an API or SDK call", () => {
+    const resource = { type: "image" as const, digest: `sha256:${"a".repeat(64)}` as const, media_type: "image/jpeg" as const, byte_length: 1 };
+    const packet = definePacket({
+      format: "printpacket/v1",
+      media: { kind: "paged", size: "a4" },
+      body: [],
+      resources: Object.fromEntries(Array.from({ length: 100 }, (_, index) => [`image_${index}`, resource]))
+    });
+    expect(() => preflightPacket(packet)).not.toThrow();
+    expect(() => preflightPacket({
+      ...packet,
+      resources: { ...packet.resources, image_100: resource }
+    })).toThrow("100 resources");
+  });
 });

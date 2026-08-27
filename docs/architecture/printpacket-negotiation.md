@@ -34,8 +34,12 @@ store the exact fallback reason on the job.
 
 `raw` is a transport shape, not a printer language. Native jobs must name both
 an output profile and a language profile which the authenticated node has bound
-to the exact printer ID. The media types must match. Capability disappearance
-between registration and lease causes the server to withhold the offer.
+to the exact printer ID. The server persists the resolved language, language
+version, replay-tested support-pack profile version, media type, driver
+fingerprint, support-pack digest, and printer ID. The complete tuple must match
+the current authenticated report before reoffer and the node's latest local
+support-pack/driver evidence before content materialization. Capability drift
+or ID reuse therefore causes the server or node to withhold the offer.
 
 Every API surface requires this binding for printer-native bytes. A generic RAW
 fallback is never substituted for a missing pinned profile.

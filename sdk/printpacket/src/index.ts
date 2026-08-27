@@ -90,6 +90,7 @@ export function normalizeFormat(format: string): typeof PRINTPACKET_V1 {
 export function preflightPacket(packet: PrintPacketV1): void {
   normalizeFormat(packet.format);
   if (!Array.isArray(packet.body)) throw new Error("PrintPacket body must be an array");
+  if (Object.keys(packet.resources ?? {}).length > 100) throw new Error("PrintPacket exceeds 100 resources");
   const encoded = new TextEncoder().encode(JSON.stringify(packet));
   if (encoded.byteLength > 1024 * 1024) throw new Error("PrintPacket template exceeds 1 MiB");
   let count = 0;
