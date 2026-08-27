@@ -205,6 +205,10 @@ public protocol PiqaeEmbeddedNodeRuntime: PiqaeHostLifecycleReporter, Sendable {
     ) async throws -> [PiqaeRuntimePrinterSnapshot]
     func printerInventory() async throws -> [PiqaeRuntimePrinterSnapshot]
     func enqueue(_ request: PiqaeRuntimeJobRequest) async throws -> PiqaeRuntimeJobAccepted
+    func validatePrintPacket(_ packet: PiqaePrintPacket) async throws
+        -> PiqaePrintPacketValidation
+    func enqueuePrintPacket(_ request: PiqaePrintPacketSubmissionRequest) async throws
+        -> PiqaePrintPacketSubmission
     func nextOperation(adapterID: String) async throws -> PiqaeRuntimeAdapterOperation?
     /// Returns accepted native handoffs that require bounded status polling.
     /// This is deliberately separate from runnable queue work so an accepted
@@ -269,6 +273,20 @@ public extension PiqaeEmbeddedNodeRuntime {
     func printerInventory() async throws -> [PiqaeRuntimePrinterSnapshot] { [] }
     func enqueue(_ request: PiqaeRuntimeJobRequest) async throws -> PiqaeRuntimeJobAccepted {
         throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose its queue.")
+    }
+    func validatePrintPacket(_ packet: PiqaePrintPacket) async throws
+        -> PiqaePrintPacketValidation
+    {
+        throw PiqaeNodeError.unsupportedOperation(
+            "This runtime does not expose direct PrintPacket rendering."
+        )
+    }
+    func enqueuePrintPacket(_ request: PiqaePrintPacketSubmissionRequest) async throws
+        -> PiqaePrintPacketSubmission
+    {
+        throw PiqaeNodeError.unsupportedOperation(
+            "This runtime does not expose direct PrintPacket rendering."
+        )
     }
     func nextOperation(adapterID: String) async throws -> PiqaeRuntimeAdapterOperation? { nil }
     func nativeObservations(adapterID: String) async throws -> [PiqaeRuntimeAdapterOperation] { [] }

@@ -113,6 +113,34 @@ let status = try await node.jobs.status(receipt.jobID)
 let history = try await node.jobs.history(offset: 0, limit: 50)
 ```
 
+Applications can also validate and submit a vendor-neutral PrintPacket without
+inventing a renderer or bypassing the durable queue:
+
+```swift
+let packet = try PiqaePrintPacket(
+    templateJSON: templateJSON,
+    dataJSON: orderJSON,
+    resources: ["logo.png": logoData] // optional embedded resources
+)
+let validation = try await node.printPackets.validate(packet) // local PDF by default
+let submission = try await node.printPackets.submit(.init(
+    adapterID: printer.adapterID,
+    printerID: printer.id,
+    idempotencyKey: "order-1042-label-1",
+    title: "Order 1042",
+    packet: packet
+))
+```
+
+Validation is offline and does not mutate the queue. Submission renders through
+the same bounded native PrintPacket implementation, then stores the resulting
+document and idempotency key in the existing durable node queue before any
+adapter handoff. The portable PDF profile is the default. A native printer
+language target fails closed until that exact renderer/profile is shipped and
+certified. Direct PrintPacket calls currently require the embedded runtime;
+attached installed-node clients have no equivalent authenticated broker command
+yet and never start a parallel renderer as a fallback.
+
 For an embedded host, NodeKit calls `adapter.submit` only after the shared
 runtime has persisted the document, operation ID, route fence, deadline, and
 idempotency key and then durably recorded that native handoff is beginning. A

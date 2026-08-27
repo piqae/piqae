@@ -357,6 +357,68 @@ public sealed class PiqaeNode : IDisposable
         expires_unix_ms = expiresUnixMs
     });
 
+    /// <summary>
+    /// Validates and renders a PrintPacket locally using the runtime's exact
+    /// bounded reference renderer. No cloud connection or queue mutation is
+    /// required.
+    /// </summary>
+    public PrintPacketValidation ValidatePrintPacket(PrintPacket packet)
+    {
+        ArgumentNullException.ThrowIfNull(packet);
+        var result = Command(new
+        {
+            type = "validate_print_packet",
+            specification = packet.Template,
+            data = packet.Data,
+            output_target = packet.OutputTarget.ToWireValue(),
+            resources_base64 = packet.Resources.ToDictionary(
+                pair => pair.Key,
+                pair => Convert.ToBase64String(pair.Value),
+                StringComparer.Ordinal)
+        });
+        return JsonSerializer.Deserialize<PrintPacketValidation>(result.GetRawText(), JsonOptions)
+            ?? throw InvalidNativeResponse();
+    }
+
+    /// <summary>
+    /// Renders and durably submits a PrintPacket through the existing local
+    /// adapter queue. Repeating the same idempotency key and content returns
+    /// the same job instead of producing a duplicate print.
+    /// </summary>
+    public PrintPacketSubmission EnqueuePrintPacket(
+        string adapterId,
+        string idempotencyKey,
+        string printerId,
+        string title,
+        PrintPacket packet,
+        string optionsJson = "{}",
+        long? expiresUnixMs = null)
+    {
+        ArgumentNullException.ThrowIfNull(packet);
+        using var options = JsonDocument.Parse(optionsJson);
+        if (options.RootElement.ValueKind != JsonValueKind.Object)
+            throw new ArgumentException("Print options must be a JSON object.", nameof(optionsJson));
+        var result = Command(new
+        {
+            type = "enqueue_print_packet",
+            adapter_id = adapterId,
+            idempotency_key = idempotencyKey,
+            printer_id = printerId,
+            title,
+            specification = packet.Template,
+            data = packet.Data,
+            output_target = packet.OutputTarget.ToWireValue(),
+            resources_base64 = packet.Resources.ToDictionary(
+                pair => pair.Key,
+                pair => Convert.ToBase64String(pair.Value),
+                StringComparer.Ordinal),
+            options_json = optionsJson,
+            expires_unix_ms = expiresUnixMs
+        });
+        return JsonSerializer.Deserialize<PrintPacketSubmission>(result.GetRawText(), JsonOptions)
+            ?? throw InvalidNativeResponse();
+    }
+
     public JsonElement NextAdapterOperation(string adapterId) => Command(new
     {
         type = "next_adapter_operation",
