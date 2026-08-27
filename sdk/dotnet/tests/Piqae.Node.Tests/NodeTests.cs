@@ -9,6 +9,36 @@ namespace Piqae.Node.Tests;
 public sealed class NodeTests
 {
     [Fact]
+    public void ApplicationIdentifiersMatchSharedContractFixture()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !Directory.Exists(Path.Combine(directory.FullName, "contracts")))
+            directory = directory.Parent;
+        Assert.NotNull(directory);
+        var fixture = JsonSerializer.Deserialize<ApplicationIdFixture>(File.ReadAllText(Path.Combine(
+            directory!.FullName,
+            "contracts",
+            "fixtures",
+            "node-host-application-ids.json")));
+        Assert.NotNull(fixture);
+
+        foreach (var applicationId in fixture.Valid)
+            _ = new HostConfiguration(
+                NodeHostProduct.Standalone,
+                applicationId,
+                new NodeIdentityConfiguration("Fixture node"),
+                InstalledHostPolicy.IsolatedApplication,
+                new ConnectionPolicy(ConnectionManagement.UserManaged));
+        foreach (var applicationId in fixture.Invalid)
+            Assert.Throws<ArgumentException>(() => new HostConfiguration(
+                NodeHostProduct.Standalone,
+                applicationId,
+                new NodeIdentityConfiguration("Fixture node"),
+                InstalledHostPolicy.IsolatedApplication,
+                new ConnectionPolicy(ConnectionManagement.UserManaged)));
+    }
+
+    [Fact]
     public void HostConfigurationMatchesPortableContractAndAllowsManyConnections()
     {
         var configuration = new HostConfiguration(
@@ -53,6 +83,29 @@ public sealed class NodeTests
         Assert.Throws<ArgumentException>(() => new ConnectionPolicy(
             ConnectionManagement.UserManaged,
             allowsMultiple: false));
+        Assert.Throws<ArgumentException>(() => new NodeIdentityConfiguration("Node\0hidden"));
+        Assert.Throws<ArgumentException>(() => new ConnectionPolicy(
+            ConnectionManagement.HostManaged,
+            allowedAuthorityOrigins:
+            [
+                new Uri("https://api.piqae.com"),
+                new Uri("https://api.piqae.com/"),
+            ]));
+        foreach (var invalid in new[] { ".com.example", "-com.example", "éxample.com" })
+            Assert.Throws<ArgumentException>(() => new HostConfiguration(
+                NodeHostProduct.Embedded,
+                invalid,
+                new NodeIdentityConfiguration("Node"),
+                InstalledHostPolicy.PreferInstalled,
+                new ConnectionPolicy(ConnectionManagement.UserManaged)));
+        Assert.Throws<ArgumentException>(() => new HostConfiguration(
+            NodeHostProduct.Standalone,
+            "com.example.standalone",
+            new NodeIdentityConfiguration("Node"),
+            InstalledHostPolicy.IsolatedApplication,
+            new ConnectionPolicy(
+                ConnectionManagement.HostManaged,
+                allowedAuthorityOrigins: [new Uri("https://api.piqae.com")])));
     }
 
     [Fact]
@@ -306,3 +359,7 @@ public sealed class NodeTests
         public void Delete(string handle) => throw new InvalidOperationException(secret);
     }
 }
+
+file sealed record ApplicationIdFixture(
+    [property: System.Text.Json.Serialization.JsonPropertyName("valid")] string[] Valid,
+    [property: System.Text.Json.Serialization.JsonPropertyName("invalid")] string[] Invalid);

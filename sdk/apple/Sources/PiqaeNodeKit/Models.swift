@@ -180,17 +180,23 @@ public struct PiqaeConnection: Identifiable, Codable, Equatable, Sendable {
     public let authorityURL: URL?
     public let workspaceName: String?
     public let state: PiqaeConnectionState
+    public let nodeIdentityRevision: UInt64?
+    public let nodeIdentityConflictRevision: UInt64?
 
     public init(
         id: PiqaeConnectionID,
         authorityURL: URL?,
         workspaceName: String?,
-        state: PiqaeConnectionState
+        state: PiqaeConnectionState,
+        nodeIdentityRevision: UInt64? = nil,
+        nodeIdentityConflictRevision: UInt64? = nil
     ) {
         self.id = id
         self.authorityURL = authorityURL
         self.workspaceName = workspaceName
         self.state = state
+        self.nodeIdentityRevision = nodeIdentityRevision
+        self.nodeIdentityConflictRevision = nodeIdentityConflictRevision
     }
 
     public static let localOnly = PiqaeConnection(

@@ -27,6 +27,11 @@ if [ ! -d "$APP_PATH" ]; then
   echo "unsigned app was not produced at the expected path" >&2
   exit 1
 fi
+if [ ! -f "$APP_PATH/PrivacyInfo.xcprivacy" ]; then
+  echo "privacy manifest was not embedded in the unsigned app" >&2
+  exit 1
+fi
+plutil -lint "$APP_PATH/PrivacyInfo.xcprivacy"
 ditto -c -k --keepParent "$APP_PATH" "$ARTIFACT_DIR/PiqaeNode-iOS-unsigned-preview.zip"
 shasum -a 256 "$ARTIFACT_DIR/PiqaeNode-iOS-unsigned-preview.zip" \
   > "$ARTIFACT_DIR/PiqaeNode-iOS-unsigned-preview.zip.sha256"

@@ -390,19 +390,30 @@ public struct PiqaeRuntimeConnectorSnapshot: Codable, Equatable, Sendable {
     public let displayName: String?
     public let workspaceName: String?
     public let enabled: Bool
+    /// Independent server revision for this connector's tenant-visible node
+    /// metadata. It never revisions local queue or credential identity.
+    public let nodeIdentityRevision: UInt64?
+    /// Present when the authority changed this connector's metadata before a
+    /// pending local edit. An operator must review and save again; the runtime
+    /// does not silently overwrite either side.
+    public let nodeIdentityConflictRevision: UInt64?
 
     public init(
         connectorID: String,
         controlPlaneURL: URL,
         displayName: String? = nil,
         workspaceName: String? = nil,
-        enabled: Bool
+        enabled: Bool,
+        nodeIdentityRevision: UInt64? = nil,
+        nodeIdentityConflictRevision: UInt64? = nil
     ) {
         self.connectorID = connectorID
         self.controlPlaneURL = controlPlaneURL
         self.displayName = displayName
         self.workspaceName = workspaceName
         self.enabled = enabled
+        self.nodeIdentityRevision = nodeIdentityRevision
+        self.nodeIdentityConflictRevision = nodeIdentityConflictRevision
     }
 
     enum CodingKeys: String, CodingKey {
@@ -410,6 +421,28 @@ public struct PiqaeRuntimeConnectorSnapshot: Codable, Equatable, Sendable {
         case controlPlaneURL = "control_plane_url"
         case displayName = "display_name"
         case workspaceName = "workspace_name"
+        case nodeIdentityRevision = "node_identity_revision"
+        case nodeIdentityConflictRevision = "node_identity_conflict_revision"
         case enabled
+    }
+}
+
+public struct PiqaeNodeIdentityUpdateRequest: Equatable, Sendable {
+    public let expectedRevision: UInt64
+    public let identity: PiqaeNodeIdentityConfiguration
+
+    public init(expectedRevision: UInt64, identity: PiqaeNodeIdentityConfiguration) {
+        self.expectedRevision = expectedRevision
+        self.identity = identity
+    }
+}
+
+public struct PiqaeNodeIdentitySnapshot: Codable, Equatable, Sendable {
+    public let revision: UInt64
+    public let identity: PiqaeNodeIdentityConfiguration
+
+    public init(revision: UInt64, identity: PiqaeNodeIdentityConfiguration) {
+        self.revision = revision
+        self.identity = identity
     }
 }

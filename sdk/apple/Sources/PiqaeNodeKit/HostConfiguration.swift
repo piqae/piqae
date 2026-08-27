@@ -62,7 +62,11 @@ public struct PiqaeNodeIdentityConfiguration: Codable, Equatable, Sendable {
 
     private static func required(_ value: String, field: String, maximum: Int) throws -> String {
         let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty, value.utf8.count <= maximum else {
+        guard
+            !value.isEmpty,
+            value.utf8.count <= maximum,
+            value.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) })
+        else {
             throw PiqaeNodeError.invalidConfiguration(
                 "\(field) must contain 1 to \(maximum) UTF-8 bytes."
             )
@@ -74,7 +78,10 @@ public struct PiqaeNodeIdentityConfiguration: Codable, Equatable, Sendable {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return nil }
-        guard trimmed.utf8.count <= maximum else {
+        guard
+            trimmed.utf8.count <= maximum,
+            trimmed.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) })
+        else {
             throw PiqaeNodeError.invalidConfiguration(
                 "\(field) must contain at most \(maximum) UTF-8 bytes."
             )
@@ -126,7 +133,12 @@ public struct PiqaeConnectionPolicy: Codable, Equatable, Sendable {
         }
         for origin in allowedAuthorityOrigins {
             let origin = try Self.exactHTTPSOrigin(origin)
-            if seen.insert(origin.absoluteString).inserted { normalized.append(origin) }
+            guard seen.insert(origin.absoluteString).inserted else {
+                throw PiqaeNodeError.invalidConfiguration(
+                    "Connection authority origins must be unique."
+                )
+            }
+            normalized.append(origin)
         }
         if management == .hostManaged, normalized.isEmpty {
             throw PiqaeNodeError.invalidConfiguration(
@@ -234,14 +246,34 @@ public struct PiqaeHostConfiguration: Codable, Equatable, Sendable {
         installedHostPolicy: PiqaeInstalledHostPolicy,
         connectionPolicy: PiqaeConnectionPolicy
     ) throws {
-        let applicationID = applicationID.trimmingCharacters(in: .whitespacesAndNewlines)
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-"))
+        let bytes = Array(applicationID.utf8)
+        let isASCIIAlphanumeric: (UInt8) -> Bool = { byte in
+            (0x30 ... 0x39).contains(byte)
+                || (0x41 ... 0x5a).contains(byte)
+                || (0x61 ... 0x7a).contains(byte)
+        }
+        let segments = applicationID.split(separator: ".", omittingEmptySubsequences: false)
+        let validSegments = !segments.isEmpty && segments.allSatisfy { segment in
+            guard
+                segment.utf8.count <= 63,
+                let first = segment.utf8.first,
+                let last = segment.utf8.last,
+                isASCIIAlphanumeric(first),
+                isASCIIAlphanumeric(last)
+            else { return false }
+            return segment.utf8.allSatisfy { isASCIIAlphanumeric($0) || $0 == 0x2d }
+        }
         guard
             applicationID.utf8.count >= 3, applicationID.utf8.count <= 255,
-            applicationID.unicodeScalars.allSatisfy({ allowed.contains($0) })
+            !bytes.isEmpty, validSegments
         else {
             throw PiqaeNodeError.invalidConfiguration(
                 "Application IDs must be bounded reverse-DNS identifiers."
+            )
+        }
+        guard product != .standalone || connectionPolicy.management == .userManaged else {
+            throw PiqaeNodeError.invalidConfiguration(
+                "Standalone nodes require user-managed connections."
             )
         }
         contract = 1

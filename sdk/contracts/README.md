@@ -28,3 +28,8 @@ metadata.
 The schema contains no invitation, API key, device key, APNs token, printer
 endpoint, or document data. Those values use the existing bounded runtime
 contracts and secure stores.
+
+`fixtures/node-host-application-ids.json` is the cross-SDK application-ID
+fixture. Swift, .NET, and Rust validate the same ASCII-first grammar represented
+there; a host must not accept a Unicode or punctuation-prefixed ID that another
+runtime rejects.

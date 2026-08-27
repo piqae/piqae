@@ -10,6 +10,7 @@ public enum PiqaeNativeRuntimeError: Error, LocalizedError, Equatable, Sendable 
     case invalidResponse
     case rejected(code: String, message: String)
     case keyUnavailable
+    case nodeIdentityRevisionConflict(currentRevision: UInt64)
 
     public var errorDescription: String? {
         switch self {
@@ -18,6 +19,8 @@ public enum PiqaeNativeRuntimeError: Error, LocalizedError, Equatable, Sendable 
         case .invalidResponse: "The Piqae native runtime returned an invalid response."
         case let .rejected(_, message): message
         case .keyUnavailable: "The Piqae installation key is unavailable."
+        case .nodeIdentityRevisionConflict:
+            "The node details changed elsewhere. Review them before saving again."
         }
     }
 }
@@ -444,6 +447,15 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
         )
     }
 
+    public func updateNodeIdentity(_ request: PiqaeNodeIdentityUpdateRequest) async throws
+        -> PiqaeNodeIdentitySnapshot
+    {
+        try commandResponse(
+            UpdateNodeIdentityCommand(request: request),
+            as: NodeIdentityUpdatedData.self
+        ).snapshot
+    }
+
     public func profiles(printerID: PiqaePrinterID) async throws
         -> [PiqaeRuntimeProfileSnapshot]
     {
@@ -564,6 +576,13 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
         catch { throw PiqaeNativeRuntimeError.invalidResponse }
         if envelope.ok, let value = envelope.data { return value }
         if let error = envelope.error {
+            if error.code == "node_identity_revision_conflict",
+                let currentRevision = error.details?.currentRevision
+            {
+                throw PiqaeNativeRuntimeError.nodeIdentityRevisionConflict(
+                    currentRevision: currentRevision
+                )
+            }
             throw PiqaeNativeRuntimeError.rejected(code: error.code, message: error.message)
         }
         throw PiqaeNativeRuntimeError.invalidResponse
@@ -878,6 +897,29 @@ private struct ConnectorIDCommand: Encodable {
     let connectorID: String
     enum CodingKeys: String, CodingKey { case type; case connectorID = "connector_id" }
 }
+private struct UpdateNodeIdentityCommand: Encodable {
+    let type = "update_node_identity"
+    let expectedRevision: UInt64
+    let displayName: String
+    let site: String?
+    let location: String?
+    let labels: [String]
+
+    init(request: PiqaeNodeIdentityUpdateRequest) {
+        expectedRevision = request.expectedRevision
+        displayName = request.identity.displayName
+        site = request.identity.site
+        location = request.identity.location
+        labels = request.identity.labels
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case expectedRevision = "expected_revision"
+        case displayName = "display_name"
+        case site, location, labels
+    }
+}
 private struct PrepareConnectorKeyCommand: Encodable {
     let type: String
     let applicationScope: String
@@ -924,6 +966,12 @@ private struct NativeEnvelope<Value: Decodable>: Decodable {
 private struct NativeErrorData: Decodable {
     let code: String
     let message: String
+    let details: NativeErrorDetails?
+}
+
+private struct NativeErrorDetails: Decodable {
+    let currentRevision: UInt64?
+    enum CodingKeys: String, CodingKey { case currentRevision = "current_revision" }
 }
 
 private struct HandleData: Decodable { let handle: UInt64 }
@@ -1019,6 +1067,13 @@ private struct ConnectedConnectorData: Decodable { let connector: PiqaeRuntimeCo
 private struct CancelledConnectorKeyData: Decodable { let cancelled: Bool }
 private struct DeletedData: Decodable { let deleted: Bool }
 private struct RevokedData: Decodable { let revoked: Bool }
+private struct NodeIdentityUpdatedData: Decodable {
+    let revision: UInt64
+    let identity: PiqaeNodeIdentityConfiguration
+    var snapshot: PiqaeNodeIdentitySnapshot {
+        PiqaeNodeIdentitySnapshot(revision: revision, identity: identity)
+    }
+}
 
 private final class PiqaeNativeLibrary: @unchecked Sendable {
     private typealias AbiDescriptor = @convention(c) () -> PiqaeNodeAbiDescriptor
