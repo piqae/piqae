@@ -845,7 +845,7 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
             .expect("uncertainty cleared")
     );
 
-    sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at,destination_id,route_id,created_at) VALUES ('job_stale_owner',$1,$2,'ptr_backup','agt_first_backup','{}'::jsonb,'waiting_for_agent',1,now()-interval '1 second','destination_source','route_first_backup',now()-interval '2 minutes'),('job_after_stale',$1,$2,'ptr_backup','agt_first_backup','{}'::jsonb,'waiting_for_agent',2,now()+interval '1 hour','destination_source','route_first_backup',now()-interval '1 minute')")
+    sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at,destination_id,route_id,created_at) VALUES ('job_stale_owner',$1,$2,'ptr_backup','agt_first_backup','{}'::jsonb,'waiting_for_agent',1,now()+interval '1 hour','destination_source','route_first_backup',now()-interval '2 minutes'),('job_after_stale',$1,$2,'ptr_backup','agt_first_backup','{}'::jsonb,'waiting_for_agent',2,now()+interval '1 hour','destination_source','route_first_backup',now()-interval '1 minute')")
         .bind(first.workspace_id.to_string()).bind(first.environment_id.to_string()).execute(store.pool()).await.expect("stale destination handoff jobs");
     store
         .begin_delivery_attempt(

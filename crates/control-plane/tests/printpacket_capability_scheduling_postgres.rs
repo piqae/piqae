@@ -890,6 +890,53 @@ async fn expiry_is_bounded_restart_safe_and_preserves_local_responsibility() {
         .expect("first bounded expiry");
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].transition.job.id, safe.id);
+    assert!(matches!(
+        store
+            .begin_delivery_attempt(
+                TenantScope {
+                    workspace_id: workspace,
+                    environment_id: environment,
+                },
+                NewDeliveryAttempt {
+                    attempt_id: "attempt_stale_after_expiry",
+                    reservation_id: "reservation_stale_after_expiry",
+                    job_id: &safe.id.to_string(),
+                    destination_id: "pdst_capability",
+                    route_id: "rte_capability",
+                    lease_until: Utc::now() + chrono::Duration::minutes(1),
+                },
+            )
+            .await,
+        Err(piqae_storage_postgres::StorageError::ConcurrentStateChange)
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM delivery_attempts
+             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3",
+        )
+        .bind(workspace.to_string())
+        .bind(environment.to_string())
+        .bind(safe.id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("stale scheduler attempt count"),
+        1,
+        "expiry's superseded attempt must not be followed by a stale route lease"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM route_reservations
+             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3
+               AND state='active'",
+        )
+        .bind(workspace.to_string())
+        .bind(environment.to_string())
+        .bind(safe.id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("stale scheduler reservation count"),
+        0
+    );
     seed_active_attempt(
         &pool,
         workspace,
