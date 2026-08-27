@@ -22,8 +22,15 @@ use piqae_node_runtime::{
 };
 use piqae_protocol::agent::PrinterGrant;
 use piqae_support_packs::SupportPackRegistry;
+use printpacket::{
+    CompatibilityStatus, OutputTarget, PacketLimits, RenderLimits, RenderRequirement,
+    RendererCapabilities, ResolvedResources, TemplateManifest, analyze_document,
+    canonical_data_bytes, negotiate as negotiate_printpacket, render_cache_key,
+    render_with_metrics,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::Digest as _;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Component, Path},
@@ -358,6 +365,29 @@ pub enum NativeCommand {
         title: String,
         content_kind: String,
         content_base64: String,
+        #[serde(default = "empty_json_object")]
+        options_json: String,
+        expires_unix_ms: Option<i64>,
+    },
+    ValidatePrintPacket {
+        specification: Value,
+        data: Value,
+        #[serde(default = "OutputTarget::pdf_v1")]
+        output_target: OutputTarget,
+        #[serde(default)]
+        resources_base64: BTreeMap<String, String>,
+    },
+    EnqueuePrintPacket {
+        adapter_id: String,
+        idempotency_key: String,
+        printer_id: String,
+        title: String,
+        specification: Value,
+        data: Value,
+        #[serde(default = "OutputTarget::pdf_v1")]
+        output_target: OutputTarget,
+        #[serde(default)]
+        resources_base64: BTreeMap<String, String>,
         #[serde(default = "empty_json_object")]
         options_json: String,
         expires_unix_ms: Option<i64>,
@@ -1132,6 +1162,55 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
                     .map_err(|_| FfiError::AdapterOperation)?;
                 return Ok(json!({ "handle": handle, "job": accepted }));
             }
+            NativeCommand::ValidatePrintPacket {
+                specification,
+                data,
+                output_target,
+                resources_base64,
+            } => {
+                let rendered =
+                    render_printpacket(&specification, &data, &output_target, &resources_base64)?;
+                return Ok(json!({
+                    "handle": handle,
+                    "manifest": rendered.manifest,
+                    "cache_key": rendered.cache_key,
+                    "output": rendered.output,
+                }));
+            }
+            NativeCommand::EnqueuePrintPacket {
+                adapter_id,
+                idempotency_key,
+                printer_id,
+                title,
+                specification,
+                data,
+                output_target,
+                resources_base64,
+                options_json,
+                expires_unix_ms,
+            } => {
+                let rendered =
+                    render_printpacket(&specification, &data, &output_target, &resources_base64)?;
+                let accepted = lock_embedded(&embedded_queue)?
+                    .enqueue(EmbeddedJobRequest {
+                        adapter_id,
+                        idempotency_key,
+                        printer_id,
+                        title,
+                        content_kind: "pdf".into(),
+                        content: rendered.content,
+                        options_json,
+                        expires_unix_ms,
+                    })
+                    .map_err(|_| FfiError::AdapterOperation)?;
+                return Ok(json!({
+                    "handle": handle,
+                    "job": accepted,
+                    "manifest": rendered.manifest,
+                    "cache_key": rendered.cache_key,
+                    "output": rendered.output,
+                }));
+            }
             NativeCommand::NextAdapterOperation { adapter_id } => {
                 let operation = {
                     let mut queue = lock_embedded(&embedded_queue)?;
@@ -1452,6 +1531,7 @@ enum FfiError {
     SecureConnectorProviderRequired,
     RuntimeTransition,
     BrokerTransport,
+    PrintPacket,
     Contract(String),
     Internal,
 }
@@ -1484,6 +1564,7 @@ impl FfiError {
             Self::SecureConnectorProviderRequired => "secure_connector_provider_required",
             Self::RuntimeTransition => "runtime_transition_in_progress",
             Self::BrokerTransport => "broker_transport_failed",
+            Self::PrintPacket => "printpacket_invalid_or_unsupported",
             Self::Contract(_) => "invalid_configuration",
             Self::Internal => "internal_error",
         }
@@ -1516,9 +1597,128 @@ impl FfiError {
             }
             Self::RuntimeTransition => "the runtime is stopping or changing ownership",
             Self::BrokerTransport => "the installed local node broker request failed",
+            Self::PrintPacket => {
+                "the PrintPacket template, data, resources, target, or renderer limits are unsupported"
+            }
             Self::Internal => "the runtime operation failed",
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+struct PrintPacketOutput {
+    media_type: String,
+    profile: String,
+    sha256: String,
+    bytes: u64,
+    pages: u32,
+}
+
+#[derive(Debug)]
+struct RenderedPrintPacket {
+    content: Vec<u8>,
+    manifest: TemplateManifest,
+    cache_key: String,
+    output: PrintPacketOutput,
+}
+
+fn render_printpacket(
+    specification: &Value,
+    data: &Value,
+    output_target: &OutputTarget,
+    resources_base64: &BTreeMap<String, String>,
+) -> Result<RenderedPrintPacket, FfiError> {
+    let limits = RenderLimits::default();
+    let (document, manifest) =
+        analyze_document(specification, limits).map_err(|_| FfiError::PrintPacket)?;
+    let packet_limits = PacketLimits::default();
+    if manifest.canonical_bytes > packet_limits.max_template_bytes
+        || manifest.resource_count > packet_limits.max_resources
+        || manifest.resource_bytes > packet_limits.max_total_resource_bytes
+        || resources_base64.len() != document.resources.len()
+    {
+        return Err(FfiError::PrintPacket);
+    }
+    let canonical_data = canonical_data_bytes(data).map_err(|_| FfiError::PrintPacket)?;
+    let data_bytes = u64::try_from(canonical_data.len()).map_err(|_| FfiError::PrintPacket)?;
+    if data_bytes > packet_limits.max_data_bytes {
+        return Err(FfiError::PrintPacket);
+    }
+    let maximum_resource_bytes = document
+        .resources
+        .values()
+        .map(|resource| {
+            let printpacket::Resource::Image { byte_length, .. } = resource;
+            *byte_length
+        })
+        .max()
+        .unwrap_or(0);
+    let requirement = RenderRequirement {
+        specification_version: manifest.specification_version.clone(),
+        conformance_suite: printpacket::CONFORMANCE_CORE_V1.into(),
+        required_features: manifest.required_features.clone(),
+        output_target: output_target.clone(),
+        template_bytes: manifest.canonical_bytes,
+        data_bytes,
+        maximum_output_bytes: packet_limits.max_output_bytes,
+        maximum_pages: packet_limits.max_pages,
+        resource_count: manifest.resource_count,
+        maximum_resource_bytes,
+        resource_bytes: manifest.resource_bytes,
+    };
+    if negotiate_printpacket(&RendererCapabilities::reference_pdf(), &requirement).status
+        != CompatibilityStatus::Compatible
+    {
+        return Err(FfiError::PrintPacket);
+    }
+    let mut resolved = ResolvedResources::default();
+    let mut resolved_bytes = 0_u64;
+    for (resource_id, declaration) in &document.resources {
+        let printpacket::Resource::Image {
+            byte_length,
+            media_type,
+            ..
+        } = declaration;
+        if media_type != "image/jpeg" || *byte_length > packet_limits.max_resource_bytes {
+            return Err(FfiError::PrintPacket);
+        }
+        let encoded = resources_base64
+            .get(resource_id)
+            .ok_or(FfiError::PrintPacket)?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|_| FfiError::PrintPacket)?;
+        if u64::try_from(bytes.len()).ok() != Some(*byte_length) {
+            return Err(FfiError::PrintPacket);
+        }
+        resolved_bytes = resolved_bytes
+            .checked_add(*byte_length)
+            .filter(|total| *total <= packet_limits.max_total_resource_bytes)
+            .ok_or(FfiError::PrintPacket)?;
+        resolved.images.insert(resource_id.clone(), bytes);
+    }
+    let output = render_with_metrics(&document, data, &resolved, limits)
+        .map_err(|_| FfiError::PrintPacket)?;
+    let output_bytes = u64::try_from(output.pdf.len()).map_err(|_| FfiError::PrintPacket)?;
+    let sha256 = format!("{:x}", sha2::Sha256::digest(&output.pdf));
+    let cache_key =
+        render_cache_key(&manifest, data, output_target).map_err(|_| FfiError::PrintPacket)?;
+    let profile = match output_target {
+        OutputTarget::Pdf { profile } => profile.clone(),
+        OutputTarget::PrinterNative { .. } => return Err(FfiError::PrintPacket),
+    };
+    Ok(RenderedPrintPacket {
+        content: output.pdf,
+        manifest,
+        cache_key,
+        output: PrintPacketOutput {
+            media_type: "application/pdf".into(),
+            profile,
+            sha256,
+            bytes: output_bytes,
+            pages: output.page_count,
+        },
+    })
 }
 
 fn lock_embedded(
@@ -2168,6 +2368,121 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one ABI fixture proves validation, durable idempotency, PDF output, and raw fail-closed behavior"
+    )]
+    fn direct_printpacket_validates_renders_and_durably_enqueues_once() {
+        let fixture = unique_fixture();
+        let created = read_and_free(piqae_node_create(fixture.as_ptr(), fixture.len()));
+        let handle = created["data"]["handle"].as_u64().unwrap();
+        assert_eq!(read_and_free(piqae_node_start(handle))["ok"], true);
+        assert_eq!(
+            command(
+                handle,
+                json!({
+                    "type": "register_adapter",
+                    "registration": {
+                        "fingerprint": {
+                            "platform": "ios_air_print",
+                            "adapter_id": "com.example.pos.airprint",
+                            "adapter_version": "1.0.0",
+                            "device_family": "ipad",
+                            "firmware_version": null
+                        },
+                        "capability_contract": {"document_kinds": ["pdf"]}
+                    }
+                }),
+            )["ok"],
+            true
+        );
+        let inventory = command(
+            handle,
+            json!({
+                "type": "observe_printer_inventory",
+                "adapter_id": "com.example.pos.airprint",
+                "printers": [{
+                    "native_id": "ipps://printer/ipp/print",
+                    "name": "Kitchen",
+                    "state": "available",
+                    "is_default": true,
+                    "native_options": {}
+                }]
+            }),
+        );
+        let printer_id = inventory["data"]["printers"][0]["printer_id"]
+            .as_str()
+            .unwrap();
+        let packet: Value = serde_json::from_str(include_str!(
+            "../../../standards/printpacket/conformance/receipt-80mm.json"
+        ))
+        .unwrap();
+        let validated = command(
+            handle,
+            json!({
+                "type":"validate_print_packet",
+                "specification":packet["template"],
+                "data":packet["data"]
+            }),
+        );
+        assert_eq!(validated["ok"], true);
+        assert_eq!(
+            validated["data"]["manifest"]["specification_version"],
+            "printpacket/v1"
+        );
+        assert_eq!(validated["data"]["output"]["media_type"], "application/pdf");
+
+        let request = json!({
+            "type":"enqueue_print_packet",
+            "adapter_id":"com.example.pos.airprint",
+            "idempotency_key":"receipt-1042",
+            "printer_id":printer_id,
+            "title":"Receipt 1042",
+            "specification":packet["template"],
+            "data":packet["data"],
+            "options_json":"{}",
+            "expires_unix_ms":null
+        });
+        let first = command(handle, request.clone());
+        let second = command(handle, request);
+        assert_eq!(first["ok"], true);
+        assert_eq!(
+            first["data"]["job"]["job_id"],
+            second["data"]["job"]["job_id"]
+        );
+        assert_eq!(
+            first["data"]["output"]["sha256"].as_str().unwrap().len(),
+            64
+        );
+        let next = command(
+            handle,
+            json!({"type":"next_adapter_operation","adapter_id":"com.example.pos.airprint"}),
+        );
+        assert_eq!(next["data"]["operation"]["content_kind"], "pdf");
+        let content =
+            std::fs::read(next["data"]["operation"]["content_path"].as_str().unwrap()).unwrap();
+        assert!(content.starts_with(b"%PDF-"));
+
+        let raw = command(
+            handle,
+            json!({
+                "type":"validate_print_packet",
+                "specification":packet["template"],
+                "data":packet["data"],
+                "output_target":{
+                    "kind":"printer_native",
+                    "language":"zpl",
+                    "profile":"zpl-raster/v1",
+                    "dpi":203,
+                    "printable_width_dots":812
+                }
+            }),
+        );
+        assert_eq!(raw["error"]["code"], "printpacket_invalid_or_unsupported");
+        let _ = read_and_free(piqae_node_destroy(handle));
+    }
+
+    #[test]
     fn native_command_fixtures_pin_the_v1_schema() {
         for fixture in [
             include_bytes!("../../../contracts/node-sdk/v1/adapter-register.json").as_slice(),
@@ -2178,6 +2493,8 @@ mod tests {
             include_bytes!("../../../contracts/node-sdk/v1/reconcile-cloud-request.json")
                 .as_slice(),
             include_bytes!("../../../contracts/node-sdk/v1/reconcile-cloud-poll.json").as_slice(),
+            include_bytes!("../../../contracts/node-sdk/v1/printpacket-validate.json").as_slice(),
+            include_bytes!("../../../contracts/node-sdk/v1/printpacket-enqueue.json").as_slice(),
         ] {
             serde_json::from_slice::<NativeCommand>(fixture).unwrap();
         }

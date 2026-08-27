@@ -18,8 +18,10 @@ piqae-node-client = { path = "../node-client", version = "0.1.22" }
 piqae-local-ipc = { path = "../local-ipc", version = "0.1.22" }
 piqae-protocol.workspace = true
 piqae-support-packs = { path = "../support-packs", version = "0.1.22" }
+printpacket.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 url.workspace = true
