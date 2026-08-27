@@ -17,6 +17,7 @@ final class StandaloneNodeStore {
         static let location = "standalone.location"
         static let labels = "standalone.labels"
         static let identityRevision = "standalone.identity.revision"
+        static let identityUpdatePending = "standalone.identity.update-pending"
         static let printers = "standalone.airprint.urls"
     }
 
@@ -30,6 +31,9 @@ final class StandaloneNodeStore {
     var identityRevision: UInt64 {
         let value = defaults.object(forKey: Key.identityRevision) as? NSNumber
         return max(1, value?.uint64Value ?? 1)
+    }
+    var isIdentityUpdatePending: Bool {
+        defaults.bool(forKey: Key.identityUpdatePending)
     }
 
     func load() -> StandaloneNodeSettings {
@@ -63,6 +67,10 @@ final class StandaloneNodeStore {
         defaults.set(identity.labels, forKey: Key.labels)
         defaults.set(max(1, revision), forKey: Key.identityRevision)
         defaults.set(true, forKey: Key.configured)
+    }
+
+    func markIdentityUpdatePending(_ pending: Bool) {
+        defaults.set(pending, forKey: Key.identityUpdatePending)
     }
 
     func saveIdentityRevision(_ revision: UInt64) {
