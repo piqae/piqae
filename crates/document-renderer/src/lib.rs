@@ -5,8 +5,7 @@
 //! Renderer ABI v1 uses deterministic PDF Base-14 Helvetica with Windows-1252
 //! encoding. Characters outside that exact profile fail explicitly rather than
 //! being substituted. A later embedded-font ABI can extend scripts without
-//! changing the packet semantics. The legacy Piqae business-document identifier
-//! remains a lossless compatibility alias.
+//! changing the packet semantics.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
@@ -24,14 +23,10 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
-/// Legacy compatibility identifier retained for stored Piqae revisions.
-pub const BUSINESS_DOCUMENT_FORMAT: &str = "piqae.business-document/v1";
 /// Canonical vendor-neutral `PrintPacket` identifier for new documents.
 pub const PRINT_PACKET_DOCUMENT_FORMAT: &str = "printpacket/v1";
-pub const RENDERER_VERSION: &str = concat!(
-    "piqae-business-document-renderer/",
-    env!("CARGO_PKG_VERSION")
-);
+pub const RENDERER_VERSION: &str =
+    concat!("printpacket-reference-renderer/", env!("CARGO_PKG_VERSION"));
 const PAGE_NUMBER_MARKER: &str = "\u{e000}\u{e000}\u{e000}\u{e000}";
 const PAGE_COUNT_MARKER: &str = "\u{e001}\u{e001}\u{e001}\u{e001}";
 
@@ -50,6 +45,7 @@ pub struct RenderLimits {
     pub max_pages: usize,
     pub max_text_bytes: usize,
     pub max_output_bytes: usize,
+    pub max_total_resource_bytes: usize,
     pub max_continuous_height_mm: f32,
 }
 impl Default for RenderLimits {
@@ -59,7 +55,7 @@ impl Default for RenderLimits {
             max_depth: 32,
             max_expression_nodes: 50_000,
             max_expression_depth: 64,
-            max_expression_values: 1_024,
+            max_expression_values: 100,
             max_path_segments: 64,
             max_path_segment_bytes: 120,
             max_literal_bytes: 1024 * 1024,
@@ -71,6 +67,7 @@ impl Default for RenderLimits {
             max_pages: 1_000,
             max_text_bytes: 1_000_000,
             max_output_bytes: 50 * 1024 * 1024,
+            max_total_resource_bytes: 12 * 1024 * 1024,
             max_continuous_height_mm: 2_000.0,
         }
     }
@@ -78,7 +75,7 @@ impl Default for RenderLimits {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RenderError {
-    #[error("unsupported business-document format: {0}")]
+    #[error("unsupported PrintPacket format: {0}")]
     UnsupportedVersion(String),
     #[error("invalid document: {0}")]
     Invalid(&'static str),
@@ -98,10 +95,10 @@ pub enum RenderError {
     InvalidBarcode(&'static str),
 }
 
-/// Canonical public business-document model.
+/// Canonical public `PrintPacket` model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BusinessDocumentV1 {
+pub struct PrintPacketV1 {
     pub format: String,
     pub media: Media,
     #[serde(default)]
@@ -634,7 +631,7 @@ enum Draw {
         height: f32,
         pixel_width: u16,
         pixel_height: u16,
-        bytes: Vec<u8>,
+        resource_id: String,
     },
 }
 #[derive(Debug, Clone, Copy)]
@@ -649,9 +646,10 @@ struct PageDraw {
     width: f32,
     height: f32,
     draws: Vec<Draw>,
+    header_draws: usize,
 }
 struct State<'a> {
-    doc: &'a BusinessDocumentV1,
+    doc: &'a PrintPacketV1,
     limits: RenderLimits,
     root: &'a Value,
     current: Value,
@@ -670,6 +668,7 @@ struct State<'a> {
     continuous: bool,
     in_region: bool,
     pending_page_break: bool,
+    estimated_pdf_bytes: usize,
 }
 
 /// Render a validated document and its data into deterministic PDF bytes.
@@ -677,7 +676,7 @@ struct State<'a> {
 /// # Errors
 /// Returns a stable validation, capability, expression, or resource-limit error.
 pub fn render(
-    spec: &BusinessDocumentV1,
+    spec: &PrintPacketV1,
     input: &Value,
     limits: RenderLimits,
 ) -> Result<Vec<u8>, RenderError> {
@@ -690,7 +689,7 @@ pub fn render(
 /// Returns an error if an asset is absent, has a digest mismatch, is malformed,
 /// uses an unsupported media type, or if ordinary rendering fails.
 pub fn render_with_resources(
-    spec: &BusinessDocumentV1,
+    spec: &PrintPacketV1,
     input: &Value,
     resolved: &ResolvedResources,
     limits: RenderLimits,
@@ -710,7 +709,7 @@ pub struct RenderOutput {
 /// Returns the same bounded validation, expression, resource, and output errors
 /// as [`render_with_resources`].
 pub fn render_with_metrics(
-    spec: &BusinessDocumentV1,
+    spec: &PrintPacketV1,
     input: &Value,
     resolved: &ResolvedResources,
     limits: RenderLimits,
@@ -728,6 +727,7 @@ pub fn render_with_metrics(
             width,
             height,
             draws: vec![],
+            header_draws: 0,
         }],
         width,
         nominal_height: height,
@@ -742,10 +742,28 @@ pub fn render_with_metrics(
         continuous,
         in_region: false,
         pending_page_break: false,
+        estimated_pdf_bytes: 4_096_usize
+            .checked_add(
+                spec.resources
+                    .values()
+                    .try_fold(0_usize, |total, resource| {
+                        let Resource::Image { byte_length, .. } = resource;
+                        let length = usize::try_from(*byte_length)
+                            .map_err(|_| RenderError::Limit("resource bytes"))?;
+                        total
+                            .checked_add(length)
+                            .ok_or(RenderError::Limit("resource bytes"))
+                    })?,
+            )
+            .ok_or(RenderError::Limit("output bytes"))?,
     };
+    if state.estimated_pdf_bytes > limits.max_output_bytes {
+        return Err(RenderError::Limit("output bytes"));
+    }
     reserve_regions(&mut state)?;
     render_region(&mut state, RegionKind::Header, false)?;
     layout_nodes(&spec.body, &mut state, 0)?;
+    replace_final_header(&mut state)?;
     render_region(&mut state, RegionKind::Footer, true)?;
     if continuous {
         let used = (state.nominal_height - state.y + mm(state.margins.bottom_mm)).max(mm(10.0));
@@ -759,10 +777,7 @@ pub fn render_with_metrics(
             translate_y(draw, -delta);
         }
     }
-    let pdf = write_pdf(&state.pages);
-    if pdf.len() > limits.max_output_bytes {
-        return Err(RenderError::Limit("output bytes"));
-    }
+    let pdf = write_pdf(&state.pages, resolved, limits.max_output_bytes)?;
     Ok(RenderOutput {
         page_count: u32::try_from(state.pages.len()).map_err(|_| RenderError::Limit("pages"))?,
         pdf,
@@ -778,7 +793,7 @@ pub fn render_with_metrics(
 /// # Errors
 /// Returns an error for missing, undeclared, malformed, or mismatched resources.
 pub fn validate_resolved_resources(
-    spec: &BusinessDocumentV1,
+    spec: &PrintPacketV1,
     resolved: &ResolvedResources,
 ) -> Result<(), RenderError> {
     if resolved.images.len() != spec.resources.len()
@@ -816,12 +831,12 @@ pub fn validate_resolved_resources(
     Ok(())
 }
 
-/// Validate a business document without performing rendering or external I/O.
+/// Validate a `PrintPacket` without performing rendering or external I/O.
 ///
 /// # Errors
 /// Returns the first deterministic schema, capability, or configured-limit error.
-pub fn validate(spec: &BusinessDocumentV1, limits: RenderLimits) -> Result<(), RenderError> {
-    if spec.format != BUSINESS_DOCUMENT_FORMAT && spec.format != PRINT_PACKET_DOCUMENT_FORMAT {
+pub fn validate(spec: &PrintPacketV1, limits: RenderLimits) -> Result<(), RenderError> {
+    if spec.format != PRINT_PACKET_DOCUMENT_FORMAT {
         return Err(RenderError::UnsupportedVersion(spec.format.clone()));
     }
     if !(4.0..=72.0).contains(&spec.theme.font_size_pt)
@@ -832,7 +847,11 @@ pub fn validate(spec: &BusinessDocumentV1, limits: RenderLimits) -> Result<(), R
     if spec.resources.len() > 100 {
         return Err(RenderError::Limit("resources"));
     }
-    for resource in spec.resources.values() {
+    let mut total_resource_bytes = 0_usize;
+    for (resource_id, resource) in &spec.resources {
+        if resource_id.is_empty() || resource_id.len() > 120 {
+            return Err(RenderError::Invalid("resource id"));
+        }
         let Resource::Image {
             digest,
             media_type,
@@ -845,25 +864,67 @@ pub fn validate(spec: &BusinessDocumentV1, limits: RenderLimits) -> Result<(), R
         if media_type != "image/jpeg" || *byte_length == 0 || *byte_length > 4 * 1024 * 1024 {
             return Err(RenderError::Invalid("resource metadata"));
         }
+        total_resource_bytes = total_resource_bytes
+            .checked_add(
+                usize::try_from(*byte_length).map_err(|_| RenderError::Limit("resource bytes"))?,
+            )
+            .ok_or(RenderError::Limit("resource bytes"))?;
+        if total_resource_bytes > limits.max_total_resource_bytes {
+            return Err(RenderError::Limit("resource bytes"));
+        }
     }
     let mut count = 0;
     let mut expression_count = 0;
     validate_nodes(&spec.body, 0, &mut count, &mut expression_count, limits)?;
     if let Some(r) = &spec.header {
-        if !r.last.is_empty() {
-            return Err(RenderError::Unsupported("header.last"));
-        }
         validate_nodes(&r.first, 1, &mut count, &mut expression_count, limits)?;
-        validate_nodes(&r.default, 1, &mut count, &mut expression_count, limits)?;
-    }
-    if let Some(r) = &spec.footer {
-        if !r.first.is_empty() {
-            return Err(RenderError::Unsupported("footer.first"));
-        }
         validate_nodes(&r.default, 1, &mut count, &mut expression_count, limits)?;
         validate_nodes(&r.last, 1, &mut count, &mut expression_count, limits)?;
     }
+    if let Some(r) = &spec.footer {
+        validate_nodes(&r.first, 1, &mut count, &mut expression_count, limits)?;
+        validate_nodes(&r.default, 1, &mut count, &mut expression_count, limits)?;
+        validate_nodes(&r.last, 1, &mut count, &mut expression_count, limits)?;
+    }
+    let region_has_page_break = spec.header.as_ref().is_some_and(|region| {
+        contains_page_break(&region.first)
+            || contains_page_break(&region.default)
+            || contains_page_break(&region.last)
+    }) || spec.footer.as_ref().is_some_and(|region| {
+        contains_page_break(&region.first)
+            || contains_page_break(&region.default)
+            || contains_page_break(&region.last)
+    });
+    if matches!(spec.media, Media::Continuous { .. })
+        && (contains_page_break(&spec.body) || region_has_page_break)
+    {
+        return Err(RenderError::Unsupported("page breaks on continuous media"));
+    }
     Ok(())
+}
+
+fn contains_page_break(nodes: &[Node]) -> bool {
+    nodes.iter().any(|node| match node {
+        Node::PageBreak => true,
+        Node::Section { children, .. }
+        | Node::Box { children, .. }
+        | Node::Stack { children, .. }
+        | Node::Row { children, .. }
+        | Node::Grid { children, .. }
+        | Node::Repeat { children, .. }
+        | Node::KeepTogether { children } => contains_page_break(children),
+        Node::DataList {
+            header,
+            item,
+            empty,
+            ..
+        } => contains_page_break(header) || contains_page_break(item) || contains_page_break(empty),
+        Node::Conditional {
+            then, otherwise, ..
+        } => contains_page_break(then) || contains_page_break(otherwise),
+        Node::Table { empty, .. } => contains_page_break(empty),
+        _ => false,
+    })
 }
 fn validate_nodes(
     nodes: &[Node],
@@ -881,15 +942,26 @@ fn validate_nodes(
             return Err(RenderError::Limit("nodes"));
         }
         match n {
-            Node::Section { children, .. }
-            | Node::Stack { children, .. }
-            | Node::Row { children, .. }
-            | Node::KeepTogether { children } => {
+            Node::Section { children, gap_mm } | Node::Stack { children, gap_mm } => {
+                checked_mm(*gap_mm, "gap")?;
+                validate_nodes(children, depth + 1, count, expression_count, limits)?
+            }
+            Node::Row { children, gap_mm } => {
+                checked_mm(*gap_mm, "column gap")?;
+                if children.len() > limits.max_table_columns {
+                    return Err(RenderError::Limit("row columns"));
+                }
+                validate_nodes(children, depth + 1, count, expression_count, limits)?
+            }
+            Node::KeepTogether { children } => {
                 validate_nodes(children, depth + 1, count, expression_count, limits)?
             }
             Node::Repeat {
-                items, children, ..
+                items,
+                children,
+                gap_mm,
             } => {
+                checked_mm(*gap_mm, "gap")?;
                 validate_expr(items, 0, expression_count, limits)?;
                 validate_nodes(children, depth + 1, count, expression_count, limits)?
             }
@@ -904,9 +976,17 @@ fn validate_nodes(
                 validate_nodes(children, depth + 1, count, expression_count, limits)?
             }
             Node::Grid {
-                columns, children, ..
+                columns,
+                children,
+                gap_mm,
             } => {
-                if columns.is_empty() || columns.iter().any(|v| !v.is_finite() || *v <= 0.0) {
+                checked_mm(*gap_mm, "column gap")?;
+                if columns.is_empty()
+                    || columns.len() != children.len()
+                    || columns.len() > limits.max_table_columns
+                    || columns.iter().any(|v| !v.is_finite() || *v <= 0.0)
+                    || !columns.iter().sum::<f32>().is_finite()
+                {
                     return Err(RenderError::Invalid("grid columns"));
                 }
                 validate_nodes(children, depth + 1, count, expression_count, limits)?
@@ -965,17 +1045,72 @@ fn validate_nodes(
                 }
                 validate_nodes(empty, depth + 1, count, expression_count, limits)?;
             }
-            Node::Paragraph { content, .. } | Node::Heading { content, .. } => {
+            Node::Paragraph { content, style } => {
+                validate_text_style(style)?;
                 validate_inlines(content, expression_count, limits)?;
             }
-            Node::ImageValue { resource, .. }
-            | Node::Qr {
-                value: resource, ..
+            Node::Heading {
+                content,
+                level,
+                style,
+            } => {
+                if !(1..=6).contains(level) {
+                    return Err(RenderError::Invalid("heading level"));
+                }
+                validate_text_style(style)?;
+                validate_inlines(content, expression_count, limits)?;
             }
-            | Node::Barcode {
-                value: resource, ..
-            } => validate_expr(resource, 0, expression_count, limits)?,
-            Node::Image { .. } | Node::Spacer { .. } | Node::Divider { .. } | Node::PageBreak => {}
+            Node::Image {
+                resource,
+                width_mm,
+                height_mm,
+                fit,
+            } => {
+                if resource.is_empty() || resource.len() > 120 {
+                    return Err(RenderError::Invalid("resource id"));
+                }
+                validate_image_dimensions(*width_mm, *height_mm, *fit)?;
+            }
+            Node::ImageValue {
+                resource,
+                width_mm,
+                height_mm,
+                fit,
+            } => {
+                validate_image_dimensions(*width_mm, *height_mm, *fit)?;
+                validate_expr(resource, 0, expression_count, limits)?;
+            }
+            Node::Qr { value, size_mm, .. } => {
+                let size = checked_mm(*size_mm, "QR size")?;
+                if size < mm(8.0) {
+                    return Err(RenderError::Invalid("QR size"));
+                }
+                validate_expr(value, 0, expression_count, limits)?;
+            }
+            Node::Barcode {
+                value,
+                width_mm,
+                height_mm,
+                ..
+            } => {
+                let width = checked_mm(*width_mm, "barcode width")?;
+                let height = checked_mm(*height_mm, "barcode height")?;
+                if width < mm(20.0) || height < mm(8.0) {
+                    return Err(RenderError::InvalidBarcode(
+                        "dimensions are below the supported minimum",
+                    ));
+                }
+                validate_expr(value, 0, expression_count, limits)?;
+            }
+            Node::Spacer { height_mm } => {
+                checked_mm(*height_mm, "spacer")?;
+            }
+            Node::Divider { width_pt } => {
+                if !width_pt.is_finite() || !(0.1..=10.0).contains(width_pt) {
+                    return Err(RenderError::Invalid("divider width"));
+                }
+            }
+            Node::PageBreak => {}
         }
     }
     Ok(())
@@ -993,11 +1128,39 @@ fn validate_inlines(
                     return Err(RenderError::Limit("inline text bytes"));
                 }
             }
-            Inline::Value { value, .. } => {
+            Inline::Value { value, style } => {
+                validate_text_style(style)?;
                 validate_expr(value, 0, expression_count, limits)?;
             }
             Inline::LineBreak => {}
         }
+    }
+    Ok(())
+}
+
+fn validate_text_style(style: &TextStyle) -> Result<(), RenderError> {
+    if style
+        .font_size_pt
+        .is_some_and(|size| !size.is_finite() || !(4.0..=72.0).contains(&size))
+    {
+        return Err(RenderError::Invalid("text style"));
+    }
+    Ok(())
+}
+
+fn validate_image_dimensions(
+    width_mm: f32,
+    height_mm: f32,
+    fit: ImageFit,
+) -> Result<(), RenderError> {
+    if matches!(fit, ImageFit::Cover) {
+        return Err(RenderError::Unsupported(
+            "image cover cropping is not available in renderer ABI v1",
+        ));
+    }
+    if checked_mm(width_mm, "image width")? == 0.0 || checked_mm(height_mm, "image height")? == 0.0
+    {
+        return Err(RenderError::Invalid("image dimensions"));
     }
     Ok(())
 }
@@ -1036,7 +1199,8 @@ fn validate_expr(
             }
         }
         Expr::Coalesce { values } | Expr::Concat { values } | Expr::Boolean { values, .. } => {
-            if values.len() > limits.max_expression_values {
+            let maximum = limits.max_expression_values.min(100);
+            if values.is_empty() || values.len() > maximum {
                 return Err(RenderError::Limit("expression operands"));
             }
             for value in values {
@@ -1121,12 +1285,12 @@ enum RegionKind {
     Footer,
 }
 fn reserve_regions(state: &mut State) -> Result<(), RenderError> {
-    if state.continuous {
-        return Ok(());
-    }
     let header = estimate_region(state.doc.header.as_ref(), state)?;
     let footer = estimate_region(state.doc.footer.as_ref(), state)?;
     state.y -= header;
+    if state.continuous {
+        return Ok(());
+    }
     state.bottom += footer;
     if state.y <= state.bottom {
         return Err(RenderError::Invalid("header and footer leave no body area"));
@@ -1135,19 +1299,31 @@ fn reserve_regions(state: &mut State) -> Result<(), RenderError> {
 }
 fn estimate_region(region: Option<&Region>, state: &State) -> Result<f32, RenderError> {
     let Some(r) = region else { return Ok(0.0) };
-    Ok(estimate_nodes(
-        &r.default,
-        state.content_width,
-        state.doc.theme.font_size_pt,
-        state.doc.theme.line_height,
-    )?
-    .min(mm(60.0)))
+    let height = [&r.first, &r.default, &r.last]
+        .into_iter()
+        .map(|nodes| {
+            estimate_nodes(
+                nodes,
+                state.content_width,
+                state.doc.theme.font_size_pt,
+                state.doc.theme.line_height,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .fold(0.0_f32, f32::max);
+    if height > mm(60.0) {
+        return Err(RenderError::Limit("header/footer height"));
+    }
+    Ok(height)
 }
 fn render_region(state: &mut State, kind: RegionKind, last: bool) -> Result<(), RenderError> {
     let nodes = match kind {
         RegionKind::Header => state.doc.header.as_ref().map(|r| {
             if state.pages.len() == 1 && !r.first.is_empty() {
                 &r.first
+            } else if last && !r.last.is_empty() {
+                &r.last
             } else {
                 &r.default
             }
@@ -1155,6 +1331,8 @@ fn render_region(state: &mut State, kind: RegionKind, last: bool) -> Result<(), 
         RegionKind::Footer => state.doc.footer.as_ref().map(|r| {
             if last && !r.last.is_empty() {
                 &r.last
+            } else if state.pages.len() == 1 && !r.first.is_empty() {
+                &r.first
             } else {
                 &r.default
             }
@@ -1169,21 +1347,60 @@ fn render_region(state: &mut State, kind: RegionKind, last: bool) -> Result<(), 
     state.y = match kind {
         RegionKind::Header => state.nominal_height - mm(state.margins.top_mm),
         RegionKind::Footer => {
-            state.bottom
-                + estimate_nodes(
-                    &nodes,
-                    state.content_width,
-                    state.doc.theme.font_size_pt,
-                    state.doc.theme.line_height,
-                )?
+            if state.continuous {
+                old.1
+            } else {
+                mm(state.margins.bottom_mm)
+                    + estimate_nodes(
+                        &nodes,
+                        state.content_width,
+                        state.doc.theme.font_size_pt,
+                        state.doc.theme.line_height,
+                    )?
+            }
         }
     };
+    if matches!(kind, RegionKind::Footer) {
+        state.bottom = mm(state.margins.bottom_mm);
+    }
+    let draws_before = state.pages.last().map_or(0, |page| page.draws.len());
     layout_nodes(&nodes, state, 1)?;
+    if matches!(kind, RegionKind::Header) {
+        let page = state
+            .pages
+            .last_mut()
+            .ok_or(RenderError::Invalid("no page"))?;
+        page.header_draws = page.draws.len().saturating_sub(draws_before);
+    }
+    let continuous_footer_y = state.y;
     state.x = old.0;
-    state.y = old.1;
+    state.y = if state.continuous && matches!(kind, RegionKind::Footer) {
+        continuous_footer_y
+    } else {
+        old.1
+    };
     state.bottom = old.2;
     state.in_region = old.3;
     Ok(())
+}
+
+fn replace_final_header(state: &mut State) -> Result<(), RenderError> {
+    let should_replace = state.pages.len() > 1
+        && state
+            .doc
+            .header
+            .as_ref()
+            .is_some_and(|region| !region.last.is_empty());
+    if !should_replace {
+        return Ok(());
+    }
+    let page = state
+        .pages
+        .last_mut()
+        .ok_or(RenderError::Invalid("no page"))?;
+    page.draws.drain(..page.header_draws);
+    page.header_draws = 0;
+    render_region(state, RegionKind::Header, true)
 }
 
 fn layout_nodes(nodes: &[Node], state: &mut State, depth: usize) -> Result<(), RenderError> {
@@ -1994,6 +2211,9 @@ fn image(
     fit: ImageFit,
     state: &mut State,
 ) -> Result<(), RenderError> {
+    if resource_id.is_empty() || resource_id.len() > 120 {
+        return Err(RenderError::Invalid("resource id"));
+    }
     let declared = state
         .doc
         .resources
@@ -2027,6 +2247,11 @@ fn image(
         (box_width, box_height)
     } else {
         let scale = (box_width / f32::from(pixel_width)).min(box_height / f32::from(pixel_height));
+        let scale = if matches!(fit, ImageFit::ScaleDown) {
+            scale.min(1.0)
+        } else {
+            scale
+        };
         (
             f32::from(pixel_width) * scale,
             f32::from(pixel_height) * scale,
@@ -2042,7 +2267,7 @@ fn image(
             height,
             pixel_width,
             pixel_height,
-            bytes: bytes.clone(),
+            resource_id: resource_id.to_owned(),
         },
     )?;
     state.y -= box_height;
@@ -2132,7 +2357,7 @@ fn eval(expr: &Expr, root: &Value, current: &Value) -> Result<Value, RenderError
             Ok(Value::Bool(compare(&l, &r, *operator)?))
         }
         Expr::Boolean { operator, values } => {
-            if values.len() > 64 {
+            if values.is_empty() || values.len() > 100 {
                 return Err(RenderError::Limit("boolean operands"));
             }
             let vals = values
@@ -2346,6 +2571,7 @@ fn new_page(state: &mut State) -> Result<(), RenderError> {
         width: state.width,
         height: state.nominal_height,
         draws: vec![],
+        header_draws: 0,
     });
     state.x = mm(state.margins.left_mm);
     state.y = state.nominal_height - mm(state.margins.top_mm);
@@ -2353,6 +2579,29 @@ fn new_page(state: &mut State) -> Result<(), RenderError> {
     render_region(state, RegionKind::Header, false)
 }
 fn push(state: &mut State, draw: Draw) -> Result<(), RenderError> {
+    let estimate = match &draw {
+        Draw::Text { text, .. } => text.len().saturating_mul(4).saturating_add(256),
+        Draw::Line { .. } | Draw::Rect { .. } | Draw::Jpeg { .. } => 256,
+        Draw::Qr { modules, .. } => modules
+            .iter()
+            .map(|row| row.iter().filter(|module| **module).count())
+            .sum::<usize>()
+            .saturating_mul(64)
+            .saturating_add(256),
+        Draw::Bars { bits, .. } => bits
+            .iter()
+            .filter(|module| **module)
+            .count()
+            .saturating_mul(64)
+            .saturating_add(256),
+    };
+    state.estimated_pdf_bytes = state
+        .estimated_pdf_bytes
+        .checked_add(estimate)
+        .ok_or(RenderError::Limit("output bytes"))?;
+    if state.estimated_pdf_bytes > state.limits.max_output_bytes {
+        return Err(RenderError::Limit("output bytes"));
+    }
     state
         .pages
         .last_mut()
@@ -2524,7 +2773,9 @@ fn code128_bits(s: &str) -> Vec<bool> {
         % 103;
     codes.push(sum);
     codes.push(106);
-    let mut bits = Vec::new();
+    // ISO/IEC 15417 requires quiet areas on both sides. Ten modules is the
+    // minimum for Code 128 and is part of the encoded width, never caller data.
+    let mut bits = vec![false; 10];
     for code in codes {
         let mut bar = true;
         for d in CODE128[code].bytes() {
@@ -2534,6 +2785,7 @@ fn code128_bits(s: &str) -> Vec<bool> {
             bar = !bar
         }
     }
+    bits.extend(std::iter::repeat_n(false, 10));
     bits
 }
 
@@ -2599,29 +2851,33 @@ fn encode_win_ansi(character: char) -> Option<u8> {
     }
 }
 
-fn write_pdf(pages: &[PageDraw]) -> Vec<u8> {
+fn write_pdf(
+    pages: &[PageDraw],
+    resolved: &ResolvedResources,
+    max_output_bytes: usize,
+) -> Result<Vec<u8>, RenderError> {
     let page_count = pages.len();
     let font_id = 3 + page_count * 2;
     let first_image_id = font_id + 4;
-    let image_positions = pages
-        .iter()
+    let mut used_images = BTreeMap::<String, (u16, u16)>::new();
+    for page in pages {
+        for draw in &page.draws {
+            if let Draw::Jpeg {
+                resource_id,
+                pixel_width,
+                pixel_height,
+                ..
+            } = draw
+            {
+                used_images.insert(resource_id.clone(), (*pixel_width, *pixel_height));
+            }
+        }
+    }
+    let image_ids = used_images
+        .keys()
         .enumerate()
-        .flat_map(|(page, value)| {
-            value
-                .draws
-                .iter()
-                .enumerate()
-                .filter_map(move |(draw, value)| {
-                    matches!(value, Draw::Jpeg { .. }).then_some((page, draw))
-                })
-        })
-        .collect::<Vec<_>>();
-    let image_id = |page, draw| {
-        image_positions
-            .iter()
-            .position(|value| *value == (page, draw))
-            .map(|index| first_image_id + index)
-    };
+        .map(|(index, resource_id)| (resource_id.clone(), first_image_id + index))
+        .collect::<BTreeMap<_, _>>();
     let mut objects = vec![b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()];
     let kids = (0..page_count)
         .map(|index| format!("{} 0 R", 3 + index * 2))
@@ -2636,12 +2892,12 @@ fn write_pdf(pages: &[PageDraw]) -> Vec<u8> {
             .iter()
             .enumerate()
             .filter_map(|(draw_index, draw)| {
-                matches!(draw, Draw::Jpeg { .. })
-                    .then(|| {
-                        image_id(page_index, draw_index)
-                            .map(|id| format!("/Im{draw_index} {id} 0 R"))
-                    })
-                    .flatten()
+                let Draw::Jpeg { resource_id, .. } = draw else {
+                    return None;
+                };
+                image_ids
+                    .get(resource_id)
+                    .map(|id| format!("/Im{draw_index} {id} 0 R"))
             })
             .collect::<Vec<_>>()
             .join(" ");
@@ -2796,44 +3052,71 @@ fn write_pdf(pages: &[PageDraw]) -> Vec<u8> {
             .into_bytes(),
         );
     }
-    for (page, draw) in &image_positions {
-        let Draw::Jpeg {
-            pixel_width,
-            pixel_height,
-            bytes,
-            ..
-        } = &pages[*page].draws[*draw]
-        else {
-            continue;
-        };
+    for (resource_id, (pixel_width, pixel_height)) in &used_images {
+        let bytes = resolved
+            .images
+            .get(resource_id)
+            .ok_or(RenderError::Invalid("resolved resource set mismatch"))?;
         let mut object=format!("<< /Type /XObject /Subtype /Image /Width {pixel_width} /Height {pixel_height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n",bytes.len()).into_bytes();
         object.extend_from_slice(bytes);
         object.extend_from_slice(b"\nendstream");
         objects.push(object);
     }
-    let mut pdf = b"%PDF-1.4\n% Piqae Business Document\n".to_vec();
+    let object_bytes = objects.iter().try_fold(0_usize, |total, object| {
+        total
+            .checked_add(object.len())
+            .ok_or(RenderError::Limit("output bytes"))
+    })?;
+    if object_bytes > max_output_bytes {
+        return Err(RenderError::Limit("output bytes"));
+    }
+    let mut pdf = b"%PDF-1.4\n% PrintPacket\n".to_vec();
     let mut offsets = vec![0usize];
     for (index, object) in objects.iter().enumerate() {
         offsets.push(pdf.len());
-        pdf.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
-        pdf.extend_from_slice(object);
-        pdf.extend_from_slice(b"\nendobj\n");
+        append_pdf(
+            &mut pdf,
+            format!("{} 0 obj\n", index + 1).as_bytes(),
+            max_output_bytes,
+        )?;
+        append_pdf(&mut pdf, object, max_output_bytes)?;
+        append_pdf(&mut pdf, b"\nendobj\n", max_output_bytes)?;
     }
     let xref = pdf.len();
-    pdf.extend_from_slice(
+    append_pdf(
+        &mut pdf,
         format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
-    );
+        max_output_bytes,
+    )?;
     for offset in offsets.iter().skip(1) {
-        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        append_pdf(
+            &mut pdf,
+            format!("{offset:010} 00000 n \n").as_bytes(),
+            max_output_bytes,
+        )?;
     }
-    pdf.extend_from_slice(
+    append_pdf(
+        &mut pdf,
         format!(
             "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
             objects.len() + 1
         )
         .as_bytes(),
-    );
-    pdf
+        max_output_bytes,
+    )?;
+    Ok(pdf)
+}
+
+fn append_pdf(output: &mut Vec<u8>, bytes: &[u8], limit: usize) -> Result<(), RenderError> {
+    if output
+        .len()
+        .checked_add(bytes.len())
+        .is_none_or(|length| length > limit)
+    {
+        return Err(RenderError::Limit("output bytes"));
+    }
+    output.extend_from_slice(bytes);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2850,9 +3133,9 @@ mod tests {
             style: TextStyle::default(),
         }
     }
-    fn document(body: Vec<Node>) -> BusinessDocumentV1 {
-        BusinessDocumentV1 {
-            format: BUSINESS_DOCUMENT_FORMAT.into(),
+    fn document(body: Vec<Node>) -> PrintPacketV1 {
+        PrintPacketV1 {
+            format: PRINT_PACKET_DOCUMENT_FORMAT.into(),
             media: Media::Paged {
                 size: PageSize::A4,
                 orientation: Orientation::Portrait,
@@ -2870,10 +3153,70 @@ mod tests {
             path: vec![name.into()],
         }
     }
+
+    fn decode_code128_b(bits: &[bool]) -> Result<(Vec<usize>, String), &'static str> {
+        if bits.len() < 20
+            || bits[..10].iter().any(|module| *module)
+            || bits[bits.len() - 10..].iter().any(|module| *module)
+        {
+            return Err("missing quiet zone");
+        }
+        let payload = &bits[10..bits.len() - 10];
+        let mut position = 0;
+        let mut codes = Vec::new();
+        while position < payload.len() {
+            let width = if payload.len() - position == 13 {
+                13
+            } else {
+                11
+            };
+            let chunk = payload
+                .get(position..position + width)
+                .ok_or("truncated symbol")?;
+            let code = CODE128
+                .iter()
+                .enumerate()
+                .find_map(|(code, pattern)| {
+                    let mut expected = Vec::new();
+                    let mut bar = true;
+                    for digit in pattern.bytes() {
+                        expected.extend(std::iter::repeat_n(bar, usize::from(digit - b'0')));
+                        bar = !bar;
+                    }
+                    (expected == chunk).then_some(code)
+                })
+                .ok_or("unknown codeword")?;
+            codes.push(code);
+            position += width;
+        }
+        if codes.first() != Some(&104) || codes.last() != Some(&106) || codes.len() < 3 {
+            return Err("invalid start/stop");
+        }
+        let checksum = codes[..codes.len() - 2]
+            .iter()
+            .enumerate()
+            .skip(1)
+            .fold(104_usize, |sum, (index, code)| sum + index * code)
+            % 103;
+        if codes[codes.len() - 2] != checksum {
+            return Err("checksum mismatch");
+        }
+        let text = codes[1..codes.len() - 2]
+            .iter()
+            .map(|code| {
+                u8::try_from(code + 32)
+                    .ok()
+                    .map(char::from)
+                    .ok_or("non-Code-128-B codeword")
+            })
+            .collect::<Result<String, _>>()?;
+        Ok((codes, text))
+    }
+
     #[test]
     fn rejects_old_format() {
         let mut d = document(vec![]);
-        d.format = "piqae.document/v1".into();
+        d.format = "piqae.business-document/v1".into();
         assert!(matches!(
             render(&d, &json!({}), RenderLimits::default()),
             Err(RenderError::UnsupportedVersion(_))
@@ -2965,6 +3308,48 @@ mod tests {
         .unwrap();
         assert!(String::from_utf8_lossy(&pdf).contains("/MediaBox [0 0 226.77"));
     }
+
+    #[test]
+    fn continuous_regions_flow_without_overlapping_body_or_crop() {
+        fn media_height(pdf: &[u8]) -> f32 {
+            let text = String::from_utf8_lossy(pdf);
+            let marker = "/MediaBox [0 0 ";
+            let rest = text.split_once(marker).unwrap().1;
+            rest.split_once(']')
+                .unwrap()
+                .0
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .parse()
+                .unwrap()
+        }
+
+        let mut plain = document(vec![text("RECEIPT_BODY")]);
+        plain.media = Media::Continuous {
+            width_mm: 80.0,
+            margins: default_margins(),
+        };
+        let plain_pdf = render(&plain, &json!({}), RenderLimits::default()).unwrap();
+
+        let mut regions = plain;
+        regions.header = Some(Region {
+            first: vec![text("RECEIPT_HEADER"), Node::Spacer { height_mm: 5.0 }],
+            default: vec![],
+            last: vec![],
+        });
+        regions.footer = Some(Region {
+            first: vec![],
+            default: vec![],
+            last: vec![Node::Spacer { height_mm: 5.0 }, text("RECEIPT_FOOTER")],
+        });
+        let regions_pdf = render(&regions, &json!({}), RenderLimits::default()).unwrap();
+        let content = String::from_utf8_lossy(&regions_pdf);
+        assert!(content.contains("(RECEIPT_HEADER)"));
+        assert!(content.contains("(RECEIPT_BODY)"));
+        assert!(content.contains("(RECEIPT_FOOTER)"));
+        assert!(media_height(&regions_pdf) > media_height(&plain_pdf) + mm(9.0));
+    }
     #[test]
     fn qr_and_code128_render() {
         let d = document(vec![
@@ -2991,6 +3376,28 @@ mod tests {
                 .len()
                 > 1_000
         )
+    }
+
+    #[test]
+    fn code128_has_mandatory_quiet_zones_and_decodes_with_checksum() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../standards/printpacket/conformance/code128-decode.json"
+        ))
+        .unwrap();
+        let value = fixture["value"].as_str().unwrap();
+        let quiet = fixture["quiet_zone_modules"].as_u64().unwrap() as usize;
+        let expected_codes = fixture["expected_codewords"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|code| code.as_u64().unwrap() as usize)
+            .collect::<Vec<_>>();
+        let bits = code128_bits(value);
+        let (codes, decoded) = decode_code128_b(&bits).unwrap();
+        assert_eq!(decoded, value);
+        assert_eq!(codes, expected_codes);
+        assert_eq!(&bits[..quiet], vec![false; quiet]);
+        assert_eq!(&bits[bits.len() - quiet..], vec![false; quiet]);
     }
     #[test]
     fn bounded_and_explicit_unsupported() {
@@ -3233,6 +3640,81 @@ mod tests {
     }
 
     #[test]
+    fn repeated_jpeg_occurrences_share_one_bounded_pdf_object() {
+        let jpeg = vec![
+            0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x01, 0x00, 0x01, 0x03, 0x01, 0x11,
+            0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0xff, 0xd9,
+        ];
+        let mut document = document(
+            (0..100)
+                .map(|_| Node::Image {
+                    resource: "logo".into(),
+                    width_mm: 20.0,
+                    height_mm: 2.0,
+                    fit: ImageFit::Contain,
+                })
+                .collect(),
+        );
+        document.resources.insert(
+            "logo".into(),
+            Resource::Image {
+                digest: format!("sha256:{:x}", Sha256::digest(&jpeg)),
+                media_type: "image/jpeg".into(),
+                byte_length: jpeg.len() as u64,
+            },
+        );
+        let pdf = render_with_resources(
+            &document,
+            &json!({}),
+            &ResolvedResources {
+                images: BTreeMap::from([("logo".into(), jpeg)]),
+            },
+            RenderLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            pdf.windows(10)
+                .filter(|window| *window == b"/DCTDecode")
+                .count(),
+            1
+        );
+        assert_eq!(
+            pdf.windows(3).filter(|window| *window == b" Do").count(),
+            100
+        );
+    }
+
+    #[test]
+    fn aggregate_resources_and_incremental_output_are_bounded_before_pdf_growth() {
+        let mut resource_document = document(vec![]);
+        for index in 0..4 {
+            resource_document.resources.insert(
+                format!("image-{index}"),
+                Resource::Image {
+                    digest:
+                        "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                            .into(),
+                    media_type: "image/jpeg".into(),
+                    byte_length: 4 * 1024 * 1024,
+                },
+            );
+        }
+        assert_eq!(
+            validate(&resource_document, RenderLimits::default()),
+            Err(RenderError::Limit("resource bytes"))
+        );
+
+        let tiny = RenderLimits {
+            max_output_bytes: 512,
+            ..RenderLimits::default()
+        };
+        assert_eq!(
+            render(&document(vec![text("bounded")]), &json!({}), tiny),
+            Err(RenderError::Limit("output bytes"))
+        );
+    }
+
+    #[test]
     fn every_declared_resource_is_verified_even_when_not_laid_out() {
         let jpeg = vec![
             0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x01, 0x00, 0x01, 0x03, 0x01, 0x11,
@@ -3358,6 +3840,94 @@ mod tests {
         assert_eq!(
             validate(&d, RenderLimits::default()),
             Err(RenderError::Invalid("box style"))
+        );
+    }
+
+    #[test]
+    fn validation_rejects_render_time_only_layout_failures() {
+        let invalid_grid = document(vec![Node::Grid {
+            columns: vec![1.0],
+            children: vec![text("one"), text("two")],
+            gap_mm: 1.0,
+        }]);
+        assert_eq!(
+            validate(&invalid_grid, RenderLimits::default()),
+            Err(RenderError::Invalid("grid columns"))
+        );
+
+        let unsupported_fit = document(vec![Node::Image {
+            resource: "photo".into(),
+            width_mm: 20.0,
+            height_mm: 20.0,
+            fit: ImageFit::Cover,
+        }]);
+        assert_eq!(
+            validate(&unsupported_fit, RenderLimits::default()),
+            Err(RenderError::Unsupported(
+                "image cover cropping is not available in renderer ABI v1"
+            ))
+        );
+
+        let invalid_operands = document(vec![Node::Conditional {
+            condition: Expr::Boolean {
+                operator: BooleanOperator::And,
+                values: (0..101)
+                    .map(|_| Expr::Literal { value: json!(true) })
+                    .collect(),
+            },
+            then: vec![],
+            otherwise: vec![],
+        }]);
+        assert_eq!(
+            validate(&invalid_operands, RenderLimits::default()),
+            Err(RenderError::Limit("expression operands"))
+        );
+
+        let mut nested_break = document(vec![Node::KeepTogether {
+            children: vec![Node::Conditional {
+                condition: Expr::Literal { value: json!(true) },
+                then: vec![Node::PageBreak],
+                otherwise: vec![],
+            }],
+        }]);
+        nested_break.media = Media::Continuous {
+            width_mm: 80.0,
+            margins: default_margins(),
+        };
+        assert_eq!(
+            validate(&nested_break, RenderLimits::default()),
+            Err(RenderError::Unsupported("page breaks on continuous media"))
+        );
+    }
+
+    #[test]
+    fn tallest_region_variant_reserves_body_space() {
+        let mut packet = document(vec![Node::Spacer { height_mm: 15.0 }]);
+        packet.media = Media::Label {
+            width_mm: 50.0,
+            height_mm: 30.0,
+            margins: Edges {
+                top_mm: 2.0,
+                right_mm: 2.0,
+                bottom_mm: 2.0,
+                left_mm: 2.0,
+            },
+        };
+        packet.header = Some(Region {
+            first: vec![Node::Spacer { height_mm: 15.0 }],
+            default: vec![Node::Spacer { height_mm: 1.0 }],
+            last: vec![],
+        });
+        assert_eq!(
+            render(
+                &packet,
+                &json!({}),
+                RenderLimits {
+                    max_pages: 1,
+                    ..RenderLimits::default()
+                }
+            ),
+            Err(RenderError::Limit("pages"))
         );
     }
 
@@ -3588,27 +4158,46 @@ mod tests {
     }
 
     #[test]
-    fn region_fields_that_v1_cannot_render_are_rejected() {
-        let mut invalid_header = document(vec![]);
-        invalid_header.header = Some(Region {
-            first: vec![],
-            default: vec![],
-            last: vec![text("silently ignored before this fix")],
+    fn every_region_variant_is_reserved_and_rendered_exactly_once_when_selected() {
+        let mut packet = document((0..180).map(|_| text("flowing body line")).collect());
+        packet.header = Some(Region {
+            first: vec![text("HEADER_FIRST")],
+            default: vec![text("HEADER_DEFAULT")],
+            last: vec![
+                text("HEADER_LAST"),
+                text("last header is deliberately taller"),
+                text("and body space reserves its maximum height"),
+            ],
         });
+        packet.footer = Some(Region {
+            first: vec![text("FOOTER_FIRST"), text("first footer is taller")],
+            default: vec![text("FOOTER_DEFAULT")],
+            last: vec![
+                text("FOOTER_LAST"),
+                text("last footer is deliberately taller"),
+                text("and never overlaps the final body"),
+            ],
+        });
+        let output = render_with_metrics(
+            &packet,
+            &json!({}),
+            &ResolvedResources::default(),
+            RenderLimits::default(),
+        )
+        .unwrap();
+        assert!(output.page_count > 2);
+        let pdf = String::from_utf8(output.pdf).unwrap();
+        assert_eq!(pdf.matches("(HEADER_FIRST)").count(), 1);
+        assert_eq!(pdf.matches("(HEADER_LAST)").count(), 1);
         assert_eq!(
-            validate(&invalid_header, RenderLimits::default()),
-            Err(RenderError::Unsupported("header.last"))
+            pdf.matches("(HEADER_DEFAULT)").count(),
+            output.page_count as usize - 2
         );
-
-        let mut invalid_footer = document(vec![]);
-        invalid_footer.footer = Some(Region {
-            first: vec![text("silently ignored before this fix")],
-            default: vec![],
-            last: vec![],
-        });
+        assert_eq!(pdf.matches("(FOOTER_FIRST)").count(), 1);
+        assert_eq!(pdf.matches("(FOOTER_LAST)").count(), 1);
         assert_eq!(
-            validate(&invalid_footer, RenderLimits::default()),
-            Err(RenderError::Unsupported("footer.first"))
+            pdf.matches("(FOOTER_DEFAULT)").count(),
+            output.page_count as usize - 2
         );
     }
 }

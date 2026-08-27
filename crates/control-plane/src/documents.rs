@@ -15,12 +15,10 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::BytesMut;
 use futures::StreamExt as _;
 use piqae_auth::Scope;
-use piqae_document_renderer::{
-    BUSINESS_DOCUMENT_FORMAT, BusinessDocumentV1, PRINT_PACKET_DOCUMENT_FORMAT,
-};
 use piqae_domain::{ContentKind, ContentSource, JobOptions};
 use piqae_protocol::agent::{BusinessDocumentNodeRender, BusinessDocumentResourceDescriptor};
 use piqae_storage_postgres::{CreateDocumentResult, StoredDocumentPreview, StoredDocumentRender};
+use printpacket_renderer::{PRINT_PACKET_DOCUMENT_FORMAT, PrintPacketV1};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -574,13 +572,13 @@ async fn register_render(
             &revision.spec_ciphertext,
         )
         .map_err(|_| AppError::service_unavailable("document_decryption_failed"))?;
-    let specification: BusinessDocumentV1 = serde_json::from_slice(&specification)
+    let specification: PrintPacketV1 = serde_json::from_slice(&specification)
         .map_err(|_| AppError::service_unavailable("invalid_stored_document"))?;
     let resource_digests = specification
         .resources
         .values()
         .map(|resource| match resource {
-            piqae_document_renderer::Resource::Image { digest, .. } => {
+            printpacket_renderer::Resource::Image { digest, .. } => {
                 normalized_resource_digest(digest)
                     .ok_or_else(|| AppError::service_unavailable("invalid_stored_document"))
             }
@@ -1339,13 +1337,13 @@ pub(crate) async fn node_render_payload(
             &render.input_ciphertext,
         )
         .map_err(|_| AppError::service_unavailable("document_decryption_failed"))?;
-    let specification: BusinessDocumentV1 = serde_json::from_slice(&spec_bytes)
+    let specification: PrintPacketV1 = serde_json::from_slice(&spec_bytes)
         .map_err(|_| AppError::service_unavailable("invalid_stored_document"))?;
     let resources = specification
         .resources
         .values()
         .map(|resource| match resource {
-            piqae_document_renderer::Resource::Image {
+            printpacket_renderer::Resource::Image {
                 digest,
                 media_type,
                 byte_length,
@@ -1389,17 +1387,14 @@ fn document_aad_for(domain: &str, workspace: &str, environment: &str, resource: 
         .into_bytes()
 }
 fn validate_document_spec(value: &Value) -> Result<Vec<u8>, AppError> {
-    if !matches!(
-        value.get("format").and_then(Value::as_str),
-        Some(PRINT_PACKET_DOCUMENT_FORMAT | BUSINESS_DOCUMENT_FORMAT)
-    ) {
+    if value.get("format").and_then(Value::as_str) != Some(PRINT_PACKET_DOCUMENT_FORMAT) {
         return Err(AppError::invalid(
             "invalid_document_spec",
-            "format must be printpacket/v1 (or the frozen piqae.business-document/v1 alias).",
+            "format must be printpacket/v1.",
         ));
     }
     let encoded = validate_json(value, true)?;
-    serde_json::from_slice::<BusinessDocumentV1>(&encoded).map_err(|_| {
+    serde_json::from_slice::<PrintPacketV1>(&encoded).map_err(|_| {
         AppError::invalid("invalid_document_spec", "Document structure is invalid.")
     })?;
     Ok(encoded)
@@ -1484,15 +1479,13 @@ mod tests {
 
     #[test]
     fn document_specs_are_bounded_and_reject_runtime_urls() {
-        for format in [PRINT_PACKET_DOCUMENT_FORMAT, BUSINESS_DOCUMENT_FORMAT] {
-            assert!(
-                validate_document_spec(&serde_json::json!({
-                    "format": format, "media": {"kind": "paged", "size": "a4"},
-                    "body": [{"type": "paragraph", "content": [{"type": "text", "value": "Receipt"}]}]
-                }))
-                .is_ok()
-            );
-        }
+        assert!(
+            validate_document_spec(&serde_json::json!({
+                "format": PRINT_PACKET_DOCUMENT_FORMAT, "media": {"kind": "paged", "size": "a4"},
+                "body": [{"type": "paragraph", "content": [{"type": "text", "value": "Receipt"}]}]
+            }))
+            .is_ok()
+        );
         assert!(
             validate_document_spec(&serde_json::json!({
                 "format": "piqae.business-document/v1", "media": {"kind": "paged", "size": "a4"},

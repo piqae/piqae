@@ -5887,7 +5887,7 @@ async fn materialize_descriptor(
             let rendered = if render.renderer_abi == RENDERER_ABI
                 && render.resource_abi == RESOURCE_ABI
             {
-                let specification: piqae_document_renderer::BusinessDocumentV1 =
+                let specification: printpacket_renderer::PrintPacketV1 =
                     serde_json::from_value(render.specification.clone())
                         .context("decode business document specification")?;
                 let resources = resolve_node_render_resources(
@@ -5914,7 +5914,7 @@ async fn materialize_descriptor(
                             &NodeRenderRequirement {
                                 negotiation_version: 1,
                                 renderer_abi: render.renderer_abi.clone(),
-                                renderer_build: piqae_document_renderer::RENDERER_VERSION.into(),
+                                renderer_build: printpacket_renderer::RENDERER_VERSION.into(),
                                 spec_version: specification.format.clone(),
                                 input_bytes,
                                 maximum_pdf_bytes: render.expected_pdf_bytes,
@@ -5964,9 +5964,9 @@ async fn resolve_node_render_resources(
     job_id: JobId,
     lease_id: uuid::Uuid,
     lease_token: &str,
-    specification: &piqae_document_renderer::BusinessDocumentV1,
+    specification: &printpacket_renderer::PrintPacketV1,
     offered: &[piqae_protocol::agent::BusinessDocumentResourceDescriptor],
-) -> Result<piqae_document_renderer::ResolvedResources> {
+) -> Result<printpacket_renderer::ResolvedResources> {
     let cache = DOCUMENT_RESOURCE_CACHE
         .get()
         .context("document resource cache is unavailable")?;
@@ -5982,9 +5982,9 @@ async fn resolve_node_render_resources(
             )
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    let mut resolved = piqae_document_renderer::ResolvedResources::default();
+    let mut resolved = printpacket_renderer::ResolvedResources::default();
     for (resource_id, resource) in &specification.resources {
-        let piqae_document_renderer::Resource::Image {
+        let printpacket_renderer::Resource::Image {
             digest,
             media_type,
             byte_length,

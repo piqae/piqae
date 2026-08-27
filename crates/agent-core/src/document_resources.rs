@@ -6,7 +6,9 @@
 //! digest are collapsed into one acquisition.
 
 use piqae_agent_storage::{AgentStore, StorageError, StoredDocumentResource};
-use piqae_document_renderer::{BusinessDocumentV1, ResolvedResources, Resource};
+use printpacket_renderer::{
+    PrintPacketV1, RenderLimits, ResolvedResources, Resource, validate as validate_packet,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
@@ -18,7 +20,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const RESOURCE_ABI: &str = "piqae.document-resources/v1";
+pub const RESOURCE_ABI: &str = "printpacket.resources/v1";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -237,13 +239,15 @@ impl DocumentResourceCache {
     /// Returns an error for unsupported, missing, corrupt, or oversized assets.
     pub fn resolve_document_images<F>(
         &self,
-        document: &BusinessDocumentV1,
+        document: &PrintPacketV1,
         mut acquire: F,
         now_unix_ms: i64,
     ) -> Result<ResolvedResources, ResourceCacheError>
     where
         F: FnMut(&NodeResourceDescriptor) -> Result<Vec<u8>, String>,
     {
+        validate_packet(document, RenderLimits::default())
+            .map_err(|_| ResourceCacheError::InvalidDescriptor)?;
         let mut resolved = ResolvedResources::default();
         for (resource_id, resource) in &document.resources {
             let Resource::Image {
@@ -500,6 +504,8 @@ fn verify_file(
 )]
 mod tests {
     use super::*;
+    use printpacket_renderer::{Edges, Media, Orientation, PageSize, Theme};
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use tempfile::TempDir;
@@ -666,5 +672,54 @@ mod tests {
             "stale crash pin must not leak capacity"
         );
         assert_eq!(cache.verified_digests(1).unwrap(), vec![second.digest]);
+    }
+
+    #[test]
+    fn aggregate_packet_limit_fails_before_any_resource_acquisition() {
+        let temp = TempDir::new().unwrap();
+        let cache = cache(&temp, 64 * 1024 * 1024);
+        let resources = (0..4)
+            .map(|index| {
+                (
+                    format!("image-{index}"),
+                    Resource::Image {
+                        digest: format!("sha256:{:064x}", index + 1),
+                        media_type: "image/jpeg".into(),
+                        byte_length: 4 * 1024 * 1024,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let packet = PrintPacketV1 {
+            format: "printpacket/v1".into(),
+            media: Media::Paged {
+                size: PageSize::A4,
+                orientation: Orientation::Portrait,
+                margins: Edges {
+                    top_mm: 10.0,
+                    right_mm: 10.0,
+                    bottom_mm: 10.0,
+                    left_mm: 10.0,
+                },
+            },
+            theme: Theme::default(),
+            resources,
+            header: None,
+            body: vec![],
+            footer: None,
+        };
+        let calls = AtomicUsize::new(0);
+        assert!(matches!(
+            cache.resolve_document_images(
+                &packet,
+                |_| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(vec![])
+                },
+                1
+            ),
+            Err(ResourceCacheError::InvalidDescriptor)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

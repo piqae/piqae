@@ -7,17 +7,17 @@ use crate::{
 };
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt as _;
-use piqae_document_renderer::{
-    BusinessDocumentV1, RenderLimits, ResolvedResources, Resource, render_with_metrics, validate,
+use piqae_storage_postgres::DocumentRenderWork;
+use printpacket_renderer::{
+    PrintPacketV1, RenderLimits, ResolvedResources, Resource, render_with_metrics, validate,
     validate_resolved_resources,
 };
-use piqae_storage_postgres::DocumentRenderWork;
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 
 const MAX_CLOUD_RENDER_RESOURCE_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_CLOUD_RENDER_RESOURCE_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_CLOUD_RENDER_RESOURCE_TOTAL_BYTES: u64 = 12 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct DocumentRenderWorker {
@@ -233,7 +233,7 @@ impl DocumentRenderWorker {
             .document_secrets
             .decrypt(&input_aad, &work.render.input_ciphertext)
             .map_err(|_| ("document_decryption_failed", false))?;
-        let spec: BusinessDocumentV1 =
+        let spec: PrintPacketV1 =
             serde_json::from_slice(&spec_bytes).map_err(|_| ("invalid_document_spec", false))?;
         let input: Value =
             serde_json::from_slice(&input_bytes).map_err(|_| ("invalid_document_input", false))?;
@@ -298,10 +298,14 @@ impl DocumentRenderWorker {
     async fn resolve_resources(
         &self,
         work: &DocumentRenderWork,
-        specification: &BusinessDocumentV1,
+        specification: &PrintPacketV1,
     ) -> Result<ResolvedResources, (&'static str, bool)> {
-        validate(specification, RenderLimits::default())
-            .map_err(|_| ("invalid_document_spec", false))?;
+        if specification.resources.values().any(|resource| {
+            let Resource::Image { byte_length, .. } = resource;
+            *byte_length > MAX_CLOUD_RENDER_RESOURCE_BYTES
+        }) {
+            return Err(("document_resource_too_large", false));
+        }
         let total_bytes = specification
             .resources
             .values()
@@ -311,6 +315,8 @@ impl DocumentRenderWorker {
             })
             .filter(|total| *total <= MAX_CLOUD_RENDER_RESOURCE_TOTAL_BYTES)
             .ok_or(("document_resource_aggregate_too_large", false))?;
+        validate(specification, RenderLimits::default())
+            .map_err(|_| ("invalid_document_spec", false))?;
         let mut resolved = ResolvedResources::default();
         let mut loaded_bytes = 0_u64;
         for (resource_id, resource) in &specification.resources {
@@ -319,9 +325,6 @@ impl DocumentRenderWorker {
                 byte_length,
                 ..
             } = resource;
-            if *byte_length > MAX_CLOUD_RENDER_RESOURCE_BYTES {
-                return Err(("document_resource_too_large", false));
-            }
             let digest = digest
                 .strip_prefix("sha256:")
                 .ok_or(("invalid_document_spec", false))?
@@ -392,7 +395,7 @@ mod tests {
         Box<dyn std::error::Error>,
     > {
         queued_with_spec(
-            br#"{"format":"piqae.business-document/v1","media":{"kind":"paged","size":"a4"},"body":[{"type":"paragraph","content":[{"type":"text","value":"Hello"}]}]}"#,
+            br#"{"format":"printpacket/v1","media":{"kind":"paged","size":"a4"},"body":[{"type":"paragraph","content":[{"type":"text","value":"Hello"}]}]}"#,
             Arc::new(MemoryObjectStore::default()),
         )
         .await
@@ -478,7 +481,7 @@ mod tests {
             }])
         };
         serde_json::to_vec(&serde_json::json!({
-            "format": "piqae.business-document/v1",
+            "format": "printpacket/v1",
             "media": {"kind": "paged", "size": "a4"},
             "resources": {
                 "logo": {
@@ -650,7 +653,7 @@ mod tests {
             })
             .collect::<serde_json::Map<_, _>>();
         let specification = serde_json::to_vec(&serde_json::json!({
-            "format": "piqae.business-document/v1",
+            "format": "printpacket/v1",
             "media": {"kind": "paged", "size": "a4"},
             "resources": resources,
             "body": [{"type": "paragraph", "content": [{"type": "text", "value": "bounded"}]}]
