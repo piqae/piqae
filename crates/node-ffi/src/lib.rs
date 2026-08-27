@@ -1346,8 +1346,6 @@ pub extern "C" fn piqae_node_broker_request(
     request_length: usize,
 ) -> PiqaeBuffer {
     ffi_entry(|| {
-        use piqae_node_client::BrokerTransport as _;
-
         let endpoint = std::str::from_utf8(input_bytes(endpoint, endpoint_length)?)
             .map_err(|_| FfiError::InvalidInput)?;
         if endpoint.is_empty()
@@ -1372,6 +1370,8 @@ pub extern "C" fn piqae_node_broker_request(
         }
         #[cfg(unix)]
         {
+            use piqae_node_client::BrokerTransport as _;
+
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()

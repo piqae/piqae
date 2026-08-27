@@ -45,19 +45,20 @@ impl PowerLifecycleRegistration {
             Callback: Some(power_callback),
             Context: (&raw mut *context).cast(),
         };
-        let mut handle: HPOWERNOTIFY = std::ptr::null_mut();
+        let mut registration_handle = std::ptr::null_mut::<core::ffi::c_void>();
         // SAFETY: callback context remains boxed until after successful
         // unregistration; the API copies the subscription parameters.
         let status = unsafe {
             PowerRegisterSuspendResumeNotification(
                 DEVICE_NOTIFY_CALLBACK,
                 (&raw mut parameters).cast::<core::ffi::c_void>() as HANDLE,
-                &raw mut handle,
+                &raw mut registration_handle,
             )
         };
-        if status != 0 || handle.is_null() {
+        if status != 0 || registration_handle.is_null() {
             bail!("register Windows power lifecycle notification: Windows error {status}");
         }
+        let handle = registration_handle as HPOWERNOTIFY;
         Ok(Self {
             handle,
             context: Some(context),
