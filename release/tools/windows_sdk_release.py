@@ -18,6 +18,16 @@ DEPENDENCY_ID = "BouncyCastle.Cryptography"
 DEPENDENCY_VERSION = "2.6.2"
 MANAGED_ENTRY = "lib/net8.0/Piqae.Node.dll"
 NATIVE_ENTRY = "runtimes/win-x64/native/piqae_node_ffi.dll"
+LICENSE_ENTRIES = {"LICENSE", "NOTICE"}
+NATIVE_ARCHIVE_ENTRIES = {
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "piqae_node.h",
+    "piqae_node_ffi.dll",
+    "piqae_node_ffi.dll.lib",
+}
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 class ReleaseError(RuntimeError):
@@ -60,10 +70,14 @@ def nuspec(archive: zipfile.ZipFile) -> ElementTree.Element:
 def safe_entries(archive: zipfile.ZipFile) -> set[str]:
     names: set[str] = set()
     for raw_name in archive.namelist():
-        name = raw_name.replace("\\", "/")
+        if "\\" in raw_name:
+            raise ReleaseError("release archive contains a non-portable path separator")
+        name = raw_name
         path = PurePosixPath(name)
         if path.is_absolute() or ".." in path.parts:
-            raise ReleaseError("NuGet package contains an unsafe archive path")
+            raise ReleaseError("release archive contains an unsafe archive path")
+        if name in names:
+            raise ReleaseError("release archive contains a duplicate path")
         names.add(name)
     return names
 
@@ -83,9 +97,13 @@ def validate_package(package: Path, dependency_package: Path, version: str) -> d
             raise ReleaseError("staged NuGet package ID is not Piqae.Node")
         if child_text(metadata, "version") != version:
             raise ReleaseError("staged NuGet package version does not match the release")
-        required = {MANAGED_ENTRY, NATIVE_ENTRY}
+        required = {MANAGED_ENTRY, NATIVE_ENTRY} | LICENSE_ENTRIES
         if not required.issubset(entries):
             raise ReleaseError("staged NuGet is missing the managed facade or win-x64 runtime")
+        if archive.read("LICENSE") != (REPOSITORY_ROOT / "LICENSE").read_bytes() or archive.read(
+            "NOTICE"
+        ) != (REPOSITORY_ROOT / "NOTICE").read_bytes():
+            raise ReleaseError("staged NuGet LICENSE or NOTICE does not match the repository")
         runtime_entries = sorted(name for name in entries if name.startswith("runtimes/"))
         if runtime_entries != [NATIVE_ENTRY]:
             raise ReleaseError("staged NuGet contains an unexpected or incomplete RID runtime set")
@@ -127,6 +145,212 @@ def validate_package(package: Path, dependency_package: Path, version: str) -> d
         "native_sha256": digest(native, "sha256"),
         "archive_files": archive_files,
     }
+
+
+def validate_native_archive(archive_path: Path, version: str) -> list[dict[str, str]]:
+    expected_name = f"PiqaeNode-native-windows-x64-{version}.zip"
+    if archive_path.name != expected_name:
+        raise ReleaseError("Windows native SDK archive filename does not match the release version")
+    with zipfile.ZipFile(archive_path) as archive:
+        entries = safe_entries(archive)
+        files = {name for name in entries if not name.endswith("/")}
+        if files != NATIVE_ARCHIVE_ENTRIES:
+            raise ReleaseError("Windows native SDK archive contents are incomplete or unexpected")
+        if archive.read("LICENSE") != (REPOSITORY_ROOT / "LICENSE").read_bytes() or archive.read(
+            "NOTICE"
+        ) != (REPOSITORY_ROOT / "NOTICE").read_bytes():
+            raise ReleaseError("Windows native SDK archive LICENSE or NOTICE does not match the repository")
+        return [
+            {
+                "name": name,
+                "sha1": digest(archive.read(name), "sha1"),
+                "sha256": digest(archive.read(name), "sha256"),
+            }
+            for name in sorted(files)
+        ]
+
+
+def generate_native_sbom(archive: Path, version: str, output: Path) -> None:
+    files = validate_native_archive(archive, version)
+    spdx_files = []
+    relationships = []
+    for index, entry in enumerate(files):
+        spdx_id = f"SPDXRef-File-Native-{index}-{entry['sha256'][:16]}"
+        spdx_files.append(
+            {
+                "fileName": f"./{entry['name']}",
+                "SPDXID": spdx_id,
+                "checksums": [
+                    {"algorithm": "SHA1", "checksumValue": entry["sha1"]},
+                    {"algorithm": "SHA256", "checksumValue": entry["sha256"]},
+                ],
+                "licenseConcluded": "Apache-2.0",
+                "licenseInfoInFiles": ["NOASSERTION"],
+                "copyrightText": "NOASSERTION",
+            }
+        )
+        relationships.append(
+            {
+                "spdxElementId": "SPDXRef-Package-PiqaeNodeNativeBundle",
+                "relationshipType": "CONTAINS",
+                "relatedSpdxElement": spdx_id,
+            }
+        )
+    verification = digest(
+        "".join(sorted(entry["sha1"] for entry in files)).encode("ascii"), "sha1"
+    )
+    document = {
+        "spdxVersion": "SPDX-2.3",
+        "dataLicense": "CC0-1.0",
+        "SPDXID": "SPDXRef-DOCUMENT",
+        "name": f"PiqaeNode-native-windows-x64-{version}",
+        "documentNamespace": f"https://spdx.org/spdxdocs/piqae-node-native-{version}-{file_digest(archive)[:20]}",
+        "creationInfo": {
+            "created": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "creators": ["Tool: piqae-windows-sdk-release"],
+        },
+        "packages": [
+            {
+                "name": "piqae-node-ffi-native-bundle",
+                "SPDXID": "SPDXRef-Package-PiqaeNodeNativeBundle",
+                "versionInfo": version,
+                "downloadLocation": "NOASSERTION",
+                "filesAnalyzed": True,
+                "packageVerificationCode": {"packageVerificationCodeValue": verification},
+                "checksums": [{"algorithm": "SHA256", "checksumValue": file_digest(archive)}],
+                "licenseConcluded": "Apache-2.0",
+                "licenseDeclared": "Apache-2.0",
+                "copyrightText": "NOASSERTION",
+            }
+        ],
+        "files": spdx_files,
+        "relationships": [
+            {
+                "spdxElementId": "SPDXRef-DOCUMENT",
+                "relationshipType": "DESCRIBES",
+                "relatedSpdxElement": "SPDXRef-Package-PiqaeNodeNativeBundle",
+            }
+        ]
+        + relationships,
+    }
+    output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def validate_native_sbom(archive: Path, sbom: Path, version: str) -> None:
+    evidence = validate_native_archive(archive, version)
+    document = json.loads(sbom.read_text(encoding="utf-8"))
+    if document.get("spdxVersion") != "SPDX-2.3":
+        raise ReleaseError("Windows native SDK SBOM must be SPDX 2.3 JSON")
+    spdx_files = {
+        entry.get("fileName", "").removeprefix("./"): entry
+        for entry in document.get("files", [])
+    }
+    if set(spdx_files) != {entry["name"] for entry in evidence}:
+        raise ReleaseError("Windows native SDK SBOM does not cover every archive file")
+    contained = {
+        relationship.get("relatedSpdxElement")
+        for relationship in document.get("relationships", [])
+        if relationship.get("spdxElementId") == "SPDXRef-Package-PiqaeNodeNativeBundle"
+        and relationship.get("relationshipType") == "CONTAINS"
+    }
+    file_ids = {entry.get("SPDXID") for entry in spdx_files.values()}
+    if len(file_ids) != len(evidence) or None in file_ids or contained != file_ids:
+        raise ReleaseError("Windows native SDK SBOM package containment is incomplete")
+    sha1_values = []
+    for entry in evidence:
+        checksums = {
+            value.get("algorithm"): value.get("checksumValue")
+            for value in spdx_files[entry["name"]].get("checksums", [])
+        }
+        if checksums.get("SHA256") != entry["sha256"]:
+            raise ReleaseError("Windows native SDK SBOM file checksum is inconsistent")
+        if checksums.get("SHA1") != entry["sha1"]:
+            raise ReleaseError("Windows native SDK SBOM file checksum is inconsistent")
+        sha1_values.append(entry["sha1"])
+    packages = document.get("packages", [])
+    if len(packages) != 1 or packages[0].get("checksums") != [
+        {"algorithm": "SHA256", "checksumValue": file_digest(archive)}
+    ]:
+        raise ReleaseError("Windows native SDK SBOM package checksum is inconsistent")
+    verification = digest("".join(sorted(sha1_values)).encode("ascii"), "sha1")
+    if packages[0].get("packageVerificationCode", {}).get(
+        "packageVerificationCodeValue"
+    ) != verification:
+        raise ReleaseError("Windows native SDK SBOM package verification code is inconsistent")
+
+
+def generate_sdk_manifest(
+    package: Path,
+    native_archive: Path,
+    nuget_sbom: Path,
+    native_sbom: Path,
+    version: str,
+    output: Path,
+) -> None:
+    document = {
+        "schema": 1,
+        "version": version,
+        "native_abi": 1,
+        "native_contract": {"current": 2, "supported": [2]},
+        "capability_command": "print_packet_capabilities",
+        "capability_contract": "printpacket/v1",
+        "artifacts": {
+            package.name: {"sha256": file_digest(package), "sbom": nuget_sbom.name},
+            native_archive.name: {
+                "sha256": file_digest(native_archive),
+                "sbom": native_sbom.name,
+            },
+        },
+    }
+    output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    validate_sdk_manifest(package, native_archive, nuget_sbom, native_sbom, version, output)
+
+
+def validate_sdk_manifest(
+    package: Path,
+    native_archive: Path,
+    nuget_sbom: Path,
+    native_sbom: Path,
+    version: str,
+    manifest: Path,
+) -> None:
+    if package.name != f"Piqae.Node.{version}.nupkg":
+        raise ReleaseError("Windows SDK manifest package filename does not match the release")
+    validate_sbom(nuget_sbom, package, version)
+    validate_native_sbom(native_archive, native_sbom, version)
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    expected = {
+        "schema": 1,
+        "version": version,
+        "native_abi": 1,
+        "native_contract": {"current": 2, "supported": [2]},
+        "capability_command": "print_packet_capabilities",
+        "capability_contract": "printpacket/v1",
+        "artifacts": {
+            package.name: {"sha256": file_digest(package), "sbom": nuget_sbom.name},
+            native_archive.name: {
+                "sha256": file_digest(native_archive),
+                "sbom": native_sbom.name,
+            },
+        },
+    }
+    if document != expected:
+        raise ReleaseError("Windows SDK manifest does not match ABI 1, contract 2, and staged artifacts")
+    nuget_document = json.loads(nuget_sbom.read_text(encoding="utf-8"))
+    piqae_package = next(
+        (
+            value
+            for value in nuget_document.get("packages", [])
+            if value.get("SPDXID") == "SPDXRef-Package-PiqaeNode"
+        ),
+        None,
+    )
+    package_checksums = {
+        value.get("algorithm"): value.get("checksumValue")
+        for value in (piqae_package or {}).get("checksums", [])
+    }
+    if package_checksums.get("SHA256") != file_digest(package):
+        raise ReleaseError("Windows NuGet SBOM is not bound to the staged package")
 
 
 def verification_code(file_sha1: str) -> str:
@@ -262,7 +486,7 @@ def generate_sbom(package: Path, dependency_package: Path, version: str, output:
     output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def validate_sbom(path: Path, version: str) -> None:
+def validate_sbom(path: Path, package: Path, version: str) -> None:
     document = json.loads(path.read_text(encoding="utf-8"))
     if document.get("spdxVersion") != "SPDX-2.3":
         raise ReleaseError("Windows SDK SBOM must be SPDX 2.3 JSON")
@@ -276,12 +500,30 @@ def validate_sbom(path: Path, version: str) -> None:
     }
     if not required_packages.issubset(packages):
         raise ReleaseError("Windows SDK SBOM omits the facade, dependency, or native runtime")
-    files = {entry.get("fileName") for entry in document.get("files", [])}
+    with zipfile.ZipFile(package) as archive:
+        archive_names = {
+            name for name in safe_entries(archive) if not name.endswith("/")
+        }
+        archive_checksums = {
+            name: {
+                "SHA1": digest(archive.read(name), "sha1"),
+                "SHA256": digest(archive.read(name), "sha256"),
+            }
+            for name in archive_names
+        }
+    document_files = document.get("files", [])
+    if not isinstance(document_files, list):
+        raise ReleaseError("Windows SDK SBOM files must be an array")
+    files = {entry.get("fileName") for entry in document_files}
+    if len(document_files) != len(archive_names) or files != {
+        f"./{name}" for name in archive_names
+    }:
+        raise ReleaseError("Windows SDK SBOM does not cover every file in the NuGet package")
     if f"./{MANAGED_ENTRY}" not in files or f"./{NATIVE_ENTRY}" not in files:
         raise ReleaseError("Windows SDK SBOM omits managed or native packaged files")
-    file_entries = {
-        entry.get("SPDXID"): entry for entry in document.get("files", []) if entry.get("SPDXID")
-    }
+    file_entries = {entry.get("SPDXID"): entry for entry in document_files if entry.get("SPDXID")}
+    if len(file_entries) != len(document_files):
+        raise ReleaseError("Windows SDK SBOM file identifiers must be present and unique")
     contained = {
         relationship.get("relatedSpdxElement")
         for relationship in document.get("relationships", [])
@@ -292,12 +534,13 @@ def validate_sbom(path: Path, version: str) -> None:
         raise ReleaseError("Windows SDK SBOM does not analyze every file in the NuGet package")
     sha1_values = []
     for spdx_id in contained:
+        file_name = str(file_entries[spdx_id].get("fileName", "")).removeprefix("./")
         checksums = {
             checksum.get("algorithm"): checksum.get("checksumValue")
             for checksum in file_entries[spdx_id].get("checksums", [])
         }
-        if not checksums.get("SHA1"):
-            raise ReleaseError("Windows SDK SBOM NuGet file is missing its SHA1")
+        if checksums != archive_checksums.get(file_name):
+            raise ReleaseError("Windows SDK SBOM NuGet file checksum is inconsistent")
         sha1_values.append(checksums["SHA1"])
     expected_verification = digest("".join(sorted(sha1_values)).encode("ascii"), "sha1")
     piqae_package = next(
@@ -306,7 +549,15 @@ def validate_sbom(path: Path, version: str) -> None:
     actual_verification = piqae_package.get("packageVerificationCode", {}).get(
         "packageVerificationCodeValue"
     )
-    if not piqae_package.get("filesAnalyzed") or actual_verification != expected_verification:
+    package_checksums = {
+        checksum.get("algorithm"): checksum.get("checksumValue")
+        for checksum in piqae_package.get("checksums", [])
+    }
+    if (
+        not piqae_package.get("filesAnalyzed")
+        or actual_verification != expected_verification
+        or package_checksums.get("SHA256") != file_digest(package)
+    ):
         raise ReleaseError("Windows SDK SBOM NuGet package verification code is inconsistent")
 
 
@@ -322,16 +573,60 @@ def main() -> int:
             command.add_argument("--output", type=Path, required=True)
     validate = subparsers.add_parser("validate-sbom")
     validate.add_argument("--input", type=Path, required=True)
+    validate.add_argument("--package", type=Path, required=True)
     validate.add_argument("--version", required=True)
+    native_generate = subparsers.add_parser("generate-native-sbom")
+    native_generate.add_argument("--archive", type=Path, required=True)
+    native_generate.add_argument("--version", required=True)
+    native_generate.add_argument("--output", type=Path, required=True)
+    native_validate = subparsers.add_parser("validate-native-sbom")
+    native_validate.add_argument("--archive", type=Path, required=True)
+    native_validate.add_argument("--input", type=Path, required=True)
+    native_validate.add_argument("--version", required=True)
+    for name in ("generate-sdk-manifest", "validate-sdk-manifest"):
+        manifest_command = subparsers.add_parser(name)
+        manifest_command.add_argument("--package", type=Path, required=True)
+        manifest_command.add_argument("--native-archive", type=Path, required=True)
+        manifest_command.add_argument("--nuget-sbom", type=Path, required=True)
+        manifest_command.add_argument("--native-sbom", type=Path, required=True)
+        manifest_command.add_argument("--version", required=True)
+        manifest_command.add_argument(
+            "--output" if name == "generate-sdk-manifest" else "--input",
+            type=Path,
+            required=True,
+        )
     args = parser.parse_args()
     try:
         if args.command == "validate-package":
             validate_package(args.package, args.dependency_package, args.version)
         elif args.command == "generate-sbom":
             generate_sbom(args.package, args.dependency_package, args.version, args.output)
-            validate_sbom(args.output, args.version)
+            validate_sbom(args.output, args.package, args.version)
+        elif args.command == "validate-sbom":
+            validate_sbom(args.input, args.package, args.version)
+        elif args.command == "generate-native-sbom":
+            generate_native_sbom(args.archive, args.version, args.output)
+            validate_native_sbom(args.archive, args.output, args.version)
+        elif args.command == "validate-native-sbom":
+            validate_native_sbom(args.archive, args.input, args.version)
+        elif args.command == "generate-sdk-manifest":
+            generate_sdk_manifest(
+                args.package,
+                args.native_archive,
+                args.nuget_sbom,
+                args.native_sbom,
+                args.version,
+                args.output,
+            )
         else:
-            validate_sbom(args.input, args.version)
+            validate_sdk_manifest(
+                args.package,
+                args.native_archive,
+                args.nuget_sbom,
+                args.native_sbom,
+                args.version,
+                args.input,
+            )
     except (OSError, ValueError, KeyError, zipfile.BadZipFile, ReleaseError) as error:
         parser.error(str(error))
     return 0

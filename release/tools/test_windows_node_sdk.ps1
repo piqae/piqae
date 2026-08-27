@@ -23,6 +23,8 @@ try {
 
     $native = (Resolve-Path "target\x86_64-pc-windows-msvc\release\piqae_node_ffi.dll").Path
     $env:PATH = "$(Split-Path $native);$env:PATH"
+    $env:LOCALAPPDATA = Join-Path $temporaryRoot "local-app-data"
+    New-Item -ItemType Directory -Force $env:LOCALAPPDATA | Out-Null
     & "target\piqae-node-abi-smoke.exe"
     if ($LASTEXITCODE -ne 0) { throw "C ABI smoke consumer failed at runtime" }
 
@@ -103,6 +105,11 @@ if (!node.Start().GetProperty("started").GetBoolean())
     throw new InvalidOperationException("The packaged native runtime did not start.");
 if (node.Snapshot().GetProperty("host_mode").GetString() != "embedded_application")
     throw new InvalidOperationException("The packaged native ABI returned an invalid snapshot.");
+if (PiqaeNode.NativeAbiVersion != 1 || PiqaeNode.NativeContractVersion != 2)
+    throw new InvalidOperationException("The packaged facade does not require ABI 1 and contract 2.");
+var capabilities = node.GetPrintPacketCapabilities();
+if (capabilities.Contract != "printpacket/v1" || !capabilities.DirectOfflineRendering)
+    throw new InvalidOperationException("The packaged native runtime did not return PrintPacket capabilities.");
 if (node.Stop().GetProperty("started").GetBoolean())
     throw new InvalidOperationException("The packaged native runtime did not stop.");
 Console.WriteLine("Piqae.Node staged NuGet loaded its managed facade, dependency, and win-x64 ABI.");
@@ -124,18 +131,16 @@ Console.WriteLine("Piqae.Node staged NuGet loaded its managed facade, dependency
             throw "The clean consumer output is missing $required"
         }
     }
-    $env:LOCALAPPDATA = Join-Path $temporaryRoot "local-app-data"
-    New-Item -ItemType Directory -Force $env:LOCALAPPDATA | Out-Null
     dotnet (Join-Path $published "Piqae.Node.PackageSmoke.dll")
     if ($LASTEXITCODE -ne 0) { throw "The clean NuGet consumer failed the packaged native ABI smoke" }
 
     $sbomInput = Join-Path $OutputDirectory "sbom-input"
     New-Item -ItemType Directory -Force $sbomInput | Out-Null
     Copy-Item $dependencyPackage (Join-Path $sbomInput (Split-Path $dependencyPackage -Leaf))
-    $sbom = Join-Path $OutputDirectory "PiqaeNode-native-windows-x64.spdx.json"
+    $sbom = Join-Path $OutputDirectory "Piqae.Node.$PackageVersion.spdx.json"
     & $python.Source release/tools/windows_sdk_release.py generate-sbom --package $expectedPackage --dependency-package $dependencyPackage --version $PackageVersion --output $sbom
     if ($LASTEXITCODE -ne 0) { throw "Windows SDK SPDX SBOM generation failed" }
-    & $python.Source release/tools/windows_sdk_release.py validate-sbom --input $sbom --version $PackageVersion
+    & $python.Source release/tools/windows_sdk_release.py validate-sbom --input $sbom --package $expectedPackage --version $PackageVersion
     if ($LASTEXITCODE -ne 0) { throw "Windows SDK SPDX SBOM is incomplete" }
 }
 finally {

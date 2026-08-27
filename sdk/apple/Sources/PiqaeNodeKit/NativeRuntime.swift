@@ -102,6 +102,13 @@ public struct PiqaeNativeRuntimeConfiguration: Sendable {
 /// native handle and Keychain callback context until `stop()` destroys it.
 public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityProvider {
     public static var linkedLibraryAvailable: Bool { piqae_node_link_anchor() != 0 }
+    public static let nativeABIVersion: UInt16 = 1
+    public static let nativeContractVersion: UInt16 = 2
+    static func supportsNativeContract(abi: UInt16, minimum: UInt16, maximum: UInt16) -> Bool {
+        abi == nativeABIVersion
+            && minimum == nativeContractVersion
+            && maximum == nativeContractVersion
+    }
     private let configuration: PiqaeNativeRuntimeConfiguration
     private let keyStore: any PiqaeHostKeyStore
     private let connectorKeyStore: any PiqaeConnectorKeyStore
@@ -145,8 +152,11 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
         guard handle == nil else { return }
         let library = try PiqaeNativeLibrary(url: configuration.libraryURL)
         let descriptor = library.abiDescriptor()
-        guard descriptor.abi_version == 1, descriptor.contract_min <= 2,
-            descriptor.contract_max >= 2
+        guard Self.supportsNativeContract(
+            abi: descriptor.abi_version,
+            minimum: descriptor.contract_min,
+            maximum: descriptor.contract_max
+        )
         else { throw PiqaeNativeRuntimeError.incompatibleABI }
 
         let request = NativeConfiguration(

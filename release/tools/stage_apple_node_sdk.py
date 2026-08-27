@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
@@ -110,6 +110,152 @@ def deterministic_zip(source: Path, output: Path) -> None:
             archive.writestr(info, path.read_bytes())
 
 
+def archive_files(path: Path) -> list[dict[str, str]]:
+    files: list[dict[str, str]] = []
+    names: set[str] = set()
+    with zipfile.ZipFile(path) as archive:
+        for raw_name in sorted(archive.namelist()):
+            if raw_name.endswith("/"):
+                continue
+            if "\\" in raw_name:
+                raise ReleaseError("Apple release archive contains a non-portable path")
+            name = raw_name
+            pure = PurePosixPath(name)
+            if pure.is_absolute() or ".." in pure.parts:
+                raise ReleaseError("Apple release archive contains an unsafe path")
+            if name in names:
+                raise ReleaseError("Apple release archive contains a duplicate path")
+            names.add(name)
+            contents = archive.read(raw_name)
+            files.append(
+                {
+                    "name": name,
+                    "sha1": hashlib.sha1(contents, usedforsecurity=False).hexdigest(),
+                    "sha256": hashlib.sha256(contents).hexdigest(),
+                }
+            )
+    if not files:
+        raise ReleaseError("Apple release archive is empty")
+    return files
+
+
+def generate_archive_sbom(archive: Path, package_name: str, version: str, output: Path) -> None:
+    files = archive_files(archive)
+    spdx_files = []
+    relationships = []
+    for index, entry in enumerate(files):
+        spdx_id = f"SPDXRef-File-{index}-{entry['sha256'][:16]}"
+        spdx_files.append(
+            {
+                "fileName": f"./{entry['name']}",
+                "SPDXID": spdx_id,
+                "checksums": [
+                    {"algorithm": "SHA1", "checksumValue": entry["sha1"]},
+                    {"algorithm": "SHA256", "checksumValue": entry["sha256"]},
+                ],
+                "licenseConcluded": "Apache-2.0",
+                "licenseInfoInFiles": ["NOASSERTION"],
+                "copyrightText": "NOASSERTION",
+            }
+        )
+        relationships.append(
+            {
+                "spdxElementId": "SPDXRef-Package",
+                "relationshipType": "CONTAINS",
+                "relatedSpdxElement": spdx_id,
+            }
+        )
+    verification = hashlib.sha1(
+        "".join(sorted(entry["sha1"] for entry in files)).encode("ascii"),
+        usedforsecurity=False,
+    ).hexdigest()
+    document = {
+        "spdxVersion": "SPDX-2.3",
+        "dataLicense": "CC0-1.0",
+        "SPDXID": "SPDXRef-DOCUMENT",
+        "name": f"{package_name}-{version}",
+        "documentNamespace": f"https://spdx.org/spdxdocs/{package_name.lower()}-{version}-{sha256(archive)[:20]}",
+        "creationInfo": {
+            "created": "1980-01-01T00:00:00Z",
+            "creators": ["Tool: piqae-apple-node-sdk-release"],
+        },
+        "packages": [
+            {
+                "name": package_name,
+                "SPDXID": "SPDXRef-Package",
+                "versionInfo": version,
+                "downloadLocation": "NOASSERTION",
+                "filesAnalyzed": True,
+                "packageVerificationCode": {"packageVerificationCodeValue": verification},
+                "checksums": [{"algorithm": "SHA256", "checksumValue": sha256(archive)}],
+                "licenseConcluded": "Apache-2.0",
+                "licenseDeclared": "Apache-2.0",
+                "copyrightText": "NOASSERTION",
+            }
+        ],
+        "files": spdx_files,
+        "relationships": [
+            {
+                "spdxElementId": "SPDXRef-DOCUMENT",
+                "relationshipType": "DESCRIBES",
+                "relatedSpdxElement": "SPDXRef-Package",
+            }
+        ]
+        + relationships,
+    }
+    output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def validate_archive_sbom(
+    archive: Path, sbom: Path, required_license_paths: set[str]
+) -> None:
+    files = archive_files(archive)
+    names = {entry["name"] for entry in files}
+    if not required_license_paths.issubset(names):
+        raise ReleaseError("Apple release archive is missing LICENSE or NOTICE")
+    document = json.loads(sbom.read_text(encoding="utf-8"))
+    if document.get("spdxVersion") != "SPDX-2.3":
+        raise ReleaseError("Apple archive SBOM must be SPDX 2.3 JSON")
+    spdx_files = {
+        entry.get("fileName", "").removeprefix("./"): entry
+        for entry in document.get("files", [])
+    }
+    if set(spdx_files) != names:
+        raise ReleaseError("Apple archive SBOM does not cover every archive file")
+    contained = {
+        relationship.get("relatedSpdxElement")
+        for relationship in document.get("relationships", [])
+        if relationship.get("spdxElementId") == "SPDXRef-Package"
+        and relationship.get("relationshipType") == "CONTAINS"
+    }
+    file_ids = {entry.get("SPDXID") for entry in spdx_files.values()}
+    if len(file_ids) != len(files) or None in file_ids or contained != file_ids:
+        raise ReleaseError("Apple archive SBOM package containment is incomplete")
+    sha1_values = []
+    for entry in files:
+        checksums = {
+            value.get("algorithm"): value.get("checksumValue")
+            for value in spdx_files[entry["name"]].get("checksums", [])
+        }
+        if checksums.get("SHA256") != entry["sha256"]:
+            raise ReleaseError("Apple archive SBOM file checksum is inconsistent")
+        if checksums.get("SHA1") != entry["sha1"]:
+            raise ReleaseError("Apple archive SBOM file checksum is inconsistent")
+        sha1_values.append(entry["sha1"])
+    packages = document.get("packages", [])
+    if len(packages) != 1 or packages[0].get("checksums") != [
+        {"algorithm": "SHA256", "checksumValue": sha256(archive)}
+    ]:
+        raise ReleaseError("Apple archive SBOM package checksum is inconsistent")
+    verification = hashlib.sha1(
+        "".join(sorted(sha1_values)).encode("ascii"), usedforsecurity=False
+    ).hexdigest()
+    if packages[0].get("packageVerificationCode", {}).get(
+        "packageVerificationCodeValue"
+    ) != verification:
+        raise ReleaseError("Apple archive SBOM package verification code is inconsistent")
+
+
 def exact_git_revision(repository_root: Path) -> str:
     return subprocess.run(
         ["git", "-C", str(repository_root), "rev-parse", "HEAD"],
@@ -138,6 +284,15 @@ def stage(repository_root: Path, version: str, output: Path) -> None:
     archive_checksum = swiftpm_checksum(source_archive)
     if metadata.get("schema") != 1:
         raise ReleaseError("source Apple artifact manifest schema must be 1")
+    if metadata.get("native_abi") != 1 or metadata.get("native_contract") != {
+        "current": 2,
+        "supported": [2],
+    }:
+        raise ReleaseError("source Apple artifact must require native ABI 1 and contract 2")
+    if metadata.get("capability_command") != "print_packet_capabilities" or metadata.get(
+        "capability_contract"
+    ) != "printpacket/v1":
+        raise ReleaseError("source Apple artifact must expose PrintPacket capabilities")
     if metadata.get("artifact") != source_archive.name:
         raise ReleaseError("source Apple manifest does not name the built archive")
     if metadata.get("git_revision") != revision:
@@ -189,8 +344,16 @@ def stage(repository_root: Path, version: str, output: Path) -> None:
     (output / f"{package_archive_name}.sha256").write_text(
         f"{package_digest}  {package_archive_name}\n", encoding="ascii"
     )
+    native_sbom_name = f"PiqaeNode.xcframework-{version}.spdx.json"
+    source_sbom_name = f"PiqaeNodeKit-{version}.spdx.json"
+    generate_archive_sbom(staged_archive, "PiqaeNodeNative", version, output / native_sbom_name)
+    generate_archive_sbom(package_archive, "PiqaeNodeKit", version, output / source_sbom_name)
     release_manifest = {
         "schema": 2,
+        "native_abi": 1,
+        "native_contract": {"current": 2, "supported": [2]},
+        "capability_command": "print_packet_capabilities",
+        "capability_contract": "printpacket/v1",
         "version": version,
         "tag": f"v{version}",
         "git_revision": revision,
@@ -201,6 +364,10 @@ def stage(repository_root: Path, version: str, output: Path) -> None:
         "source_package": package_archive_name,
         "source_package_download_url": f"https://github.com/{REPOSITORY}/releases/download/v{version}/{package_archive_name}",
         "source_package_sha256": package_digest,
+        "sboms": {
+            versioned_archive: native_sbom_name,
+            package_archive_name: source_sbom_name,
+        },
         "slices": metadata.get("slices"),
     }
     (output / "PiqaeNode.artifact.json").write_text(
@@ -219,6 +386,10 @@ def validate_stage(repository_root: Path, version: str, output: Path) -> dict[st
     source_package = f"PiqaeNodeKit-{version}.zip"
     expected = {
         "schema": 2,
+        "native_abi": 1,
+        "native_contract": {"current": 2, "supported": [2]},
+        "capability_command": "print_packet_capabilities",
+        "capability_contract": "printpacket/v1",
         "version": version,
         "tag": f"v{version}",
         "git_revision": exact_git_revision(repository_root),
@@ -226,6 +397,10 @@ def validate_stage(repository_root: Path, version: str, output: Path) -> dict[st
         "download_url": f"https://github.com/{REPOSITORY}/releases/download/v{version}/{versioned_archive}",
         "source_package": source_package,
         "source_package_download_url": f"https://github.com/{REPOSITORY}/releases/download/v{version}/{source_package}",
+        "sboms": {
+            versioned_archive: f"PiqaeNode.xcframework-{version}.spdx.json",
+            source_package: f"PiqaeNodeKit-{version}.spdx.json",
+        },
     }
     for key, value in expected.items():
         if metadata.get(key) != value:
@@ -258,6 +433,8 @@ def validate_stage(repository_root: Path, version: str, output: Path) -> dict[st
         manifest_name = f"{root}/Package.swift"
         required = {
             manifest_name,
+            f"{root}/LICENSE",
+            f"{root}/NOTICE",
             f"{root}/Sources/CPiqaeNodeABI/include/piqae_node.h",
             f"{root}/Sources/CPiqaeNodeABI/include/shim.h",
             f"{root}/Sources/PiqaeNodeKit/PiqaeNode.swift",
@@ -272,6 +449,37 @@ def validate_stage(repository_root: Path, version: str, output: Path) -> dict[st
         shim = package_zip.read(f"{root}/Sources/CPiqaeNodeABI/include/shim.h").decode("utf-8")
         if '#include "piqae_node.h"' not in shim or "../../../../native" in shim:
             raise ReleaseError("release package C shim is not independent of the repository layout")
+    with zipfile.ZipFile(archive) as native_zip:
+        native_names = set(native_zip.namelist())
+        if not {
+            "PiqaeNode.xcframework/LICENSE",
+            "PiqaeNode.xcframework/NOTICE",
+        }.issubset(native_names):
+            raise ReleaseError("Apple native archive is missing LICENSE or NOTICE")
+        if native_zip.read("PiqaeNode.xcframework/LICENSE") != (
+            repository_root / "LICENSE"
+        ).read_bytes() or native_zip.read("PiqaeNode.xcframework/NOTICE") != (
+            repository_root / "NOTICE"
+        ).read_bytes():
+            raise ReleaseError("Apple native archive LICENSE or NOTICE does not match the repository")
+    with zipfile.ZipFile(package) as package_zip:
+        package_root = f"PiqaeNodeKit-{version}"
+        if package_zip.read(f"{package_root}/LICENSE") != (
+            repository_root / "LICENSE"
+        ).read_bytes() or package_zip.read(f"{package_root}/NOTICE") != (
+            repository_root / "NOTICE"
+        ).read_bytes():
+            raise ReleaseError("Apple source archive LICENSE or NOTICE does not match the repository")
+    validate_archive_sbom(
+        archive,
+        output / metadata["sboms"][versioned_archive],
+        {"PiqaeNode.xcframework/LICENSE", "PiqaeNode.xcframework/NOTICE"},
+    )
+    validate_archive_sbom(
+        package,
+        output / metadata["sboms"][source_package],
+        {f"PiqaeNodeKit-{version}/LICENSE", f"PiqaeNodeKit-{version}/NOTICE"},
+    )
     return metadata
 
 

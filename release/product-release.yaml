@@ -10,6 +10,9 @@ contracts:
   node:
     current: 1
     supported: [1]
+  native_sdk:
+    current: 2
+    supported: [2]
 
 components:
   control_plane:
@@ -45,6 +48,7 @@ components:
     release_version_locked: true
     consumes:
       node: 1
+      native_sdk: 2
     depends_on: [node]
   dotnet_node_sdk:
     version_file: sdk/dotnet/src/Piqae.Node/Piqae.Node.csproj
@@ -52,6 +56,7 @@ components:
     release_version_locked: true
     consumes:
       node: 1
+      native_sdk: 2
     depends_on: [node]
   shopify:
     version_file: apps/shopify/package.json

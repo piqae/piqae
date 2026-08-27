@@ -89,6 +89,8 @@ public sealed record PiqaeConnectorInvitation(
 
 public sealed class PiqaeNode : IDisposable
 {
+    public const ushort NativeAbiVersion = 1;
+    public const ushort NativeContractVersion = 2;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
@@ -813,7 +815,9 @@ public sealed class PiqaeNode : IDisposable
 
     internal static void EnsureCompatibleAbi(NativeAbiDescriptor descriptor)
     {
-        if (descriptor.AbiVersion != 1 || descriptor.ContractMin > 2 || descriptor.ContractMax < 2)
+        if (descriptor.AbiVersion != NativeAbiVersion
+            || descriptor.ContractMin != NativeContractVersion
+            || descriptor.ContractMax != NativeContractVersion)
             throw new PiqaeNodeException(
                 "unsupported_native_abi",
                 "The native Piqae runtime ABI is not compatible with this SDK.");
