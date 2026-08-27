@@ -367,6 +367,12 @@ jobs:
       - run: pnpm --filter @piqae/sdk generate:check
       - run: pnpm --filter @piqae/sdk check
       - run: pnpm --filter @piqae/sdk test
+      - name: Validate the neutral PrintPacket package
+        run: |
+          pnpm --filter @printpacket/core generate:check
+          pnpm --filter @printpacket/core check
+          pnpm --filter @printpacket/core test
+          pnpm --filter @printpacket/core build
       - name: Build and lint the SDK package
         run: |
           pnpm --filter @piqae/sdk build

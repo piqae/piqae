@@ -40,6 +40,7 @@ NATIVE_SHARED = (
     "crates/node-host-api/",
     "crates/node-runtime/",
     "crates/piqae-agent/",
+    "crates/printpacket/",
     "crates/protocol/",
     "crates/update-guardian/",
     "crates/update-metadata/",
@@ -71,7 +72,8 @@ def classify(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
         server = shared or path.startswith(("crates/", "migrations/", "bins/", "xtask/"))
         js_workspace = path in {"package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"}
         openapi = path.startswith("contracts/openapi/")
-        sdk = path.startswith("sdk/")
+        printpacket_standard = path.startswith("standards/printpacket/")
+        sdk = path.startswith("sdk/") or printpacket_standard
 
         selected["rust_shared"] |= shared
         selected["rust_server"] |= server
@@ -93,7 +95,7 @@ def classify(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
         selected["macos_packaging"] |= path.startswith("packaging/macos/")
         selected["windows_shell"] |= path.startswith("crates/shell-windows/")
         selected["windows_installer"] |= path.startswith("packaging/windows/")
-        selected["web"] |= js_workspace or openapi or path.startswith(
+        selected["web"] |= js_workspace or openapi or printpacket_standard or path.startswith(
             ("apps/web/", "contracts/", "deploy/cloudflare/")
         )
         selected["sdk"] |= js_workspace or openapi or sdk

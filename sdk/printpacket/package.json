@@ -1,0 +1,28 @@
+{
+  "name": "@printpacket/core",
+  "version": "0.1.0-preview.1",
+  "description": "Vendor-neutral PrintPacket contracts, builders, feature analysis, and cache identities",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "engines": { "node": ">=20" },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./schema": "./schema/printpacket-v1.schema.json"
+  },
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "schema", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit",
+    "generate": "node scripts/sync-schema.mjs",
+    "generate:check": "node scripts/sync-schema.mjs --check",
+    "test": "vitest run",
+    "prepack": "pnpm generate:check && pnpm build"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

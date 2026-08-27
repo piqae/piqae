@@ -73,6 +73,15 @@ class CiChangedPathsTests(unittest.TestCase):
         self.assertTrue(selected["macos_rust"])
         self.assertTrue(selected["windows_rust"])
 
+    def test_printpacket_core_checks_native_and_sdk_consumers(self) -> None:
+        crate = classify(["crates/printpacket/src/lib.rs"])
+        self.assertTrue(crate["rust_shared"])
+        self.assertTrue(crate["macos_rust"] and crate["windows_rust"])
+
+        standard = classify(["standards/printpacket/schema/printpacket-v1.schema.json"])
+        self.assertTrue(standard["sdk"] and standard["web"])
+        self.assertTrue(standard["mcp"] and standard["shopify"])
+
     def test_server_migration_does_not_build_native_apps(self) -> None:
         selected = classify(["migrations/0024_example.sql"])
         self.assertTrue(selected["rust_server"])
