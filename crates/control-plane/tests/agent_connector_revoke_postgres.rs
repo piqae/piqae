@@ -263,6 +263,49 @@ async fn preaccept_cancel_repair_commits_one_durable_event_across_retries() {
     let pool = schema_pool(&database_url, &schema).await;
     let store = PostgresStore::from_pool(pool.clone());
     store.migrate().await.expect("apply migrations");
+
+    let direct = insert_fixture(&pool, &store).await;
+    let directly_cancelled = store
+        .request_job_cancellation(
+            direct.workspace_id,
+            direct.environment_id,
+            direct.job_id,
+            &serde_json::to_value(piqae_protocol::agent::AgentCommand::CancelJob {
+                job_id: direct.job_id,
+            })
+            .expect("cancel command JSON"),
+        )
+        .await
+        .expect("direct pre-accept cancellation");
+    assert_eq!(directly_cancelled.state, JobState::Cancelled);
+    let direct_key = preaccept_cancellation_webhook_idempotency_key(
+        direct.workspace_id,
+        direct.environment_id,
+        direct.job_id,
+    );
+    store
+        .enqueue_webhook_event_idempotently(
+            &direct_key,
+            direct.workspace_id,
+            direct.environment_id,
+            "job.updated",
+            &serde_json::to_value(&directly_cancelled).expect("cancelled job JSON"),
+        )
+        .await
+        .expect("HTTP publication replay");
+    let direct_event_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM webhook_events
+         WHERE workspace_id=$1 AND environment_id=$2 AND idempotency_key=$3
+           AND event_type='job.updated'",
+    )
+    .bind(direct.workspace_id.to_string())
+    .bind(direct.environment_id.to_string())
+    .bind(&direct_key)
+    .fetch_one(&pool)
+    .await
+    .expect("direct cancellation event count");
+    assert_eq!(direct_event_count, 1);
+
     let fixture = insert_fixture(&pool, &store).await;
     let sequence = store
         .list_job_events(fixture.workspace_id, fixture.environment_id, fixture.job_id)
@@ -334,12 +377,13 @@ async fn preaccept_cancel_repair_commits_one_durable_event_across_retries() {
     let command_acknowledged: bool = sqlx::query_scalar(
         "SELECT acknowledged_at IS NOT NULL FROM agent_commands
          WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3
-           AND command->'cancel_job'->>'job_id'=$4",
+           AND ((command->>'type'='cancel_job' AND command->>'job_id'=$4)
+                OR command->'cancel_job'->>'job_id'=$4)",
     )
     .bind(fixture.workspace_id.to_string())
     .bind(fixture.environment_id.to_string())
     .bind(fixture.agent_id.to_string())
-    .bind(fixture.job_id.to_string())
+    .bind(fixture.job_id.as_ulid().to_string())
     .fetch_one(&pool)
     .await
     .expect("command acknowledgement");

@@ -97,6 +97,32 @@ public struct LocalStatus: Codable, Equatable, Sendable {
     public let activeJobs: UInt32
     public let printerWarnings: UInt32
     public let paused: Bool
+    public let nodeIdentity: LocalNodeIdentity?
+    public let nodeIdentityRevision: UInt64?
+
+    public init(
+        agentID: String?,
+        workspaceName: String?,
+        version: String,
+        connection: String,
+        queuedJobs: UInt32,
+        activeJobs: UInt32,
+        printerWarnings: UInt32,
+        paused: Bool,
+        nodeIdentity: LocalNodeIdentity? = nil,
+        nodeIdentityRevision: UInt64? = nil
+    ) {
+        self.agentID = agentID
+        self.workspaceName = workspaceName
+        self.version = version
+        self.connection = connection
+        self.queuedJobs = queuedJobs
+        self.activeJobs = activeJobs
+        self.printerWarnings = printerWarnings
+        self.paused = paused
+        self.nodeIdentity = nodeIdentity
+        self.nodeIdentityRevision = nodeIdentityRevision
+    }
 
     enum CodingKeys: String, CodingKey {
         case agentID = "agent_id"
@@ -107,6 +133,22 @@ public struct LocalStatus: Codable, Equatable, Sendable {
         case activeJobs = "active_jobs"
         case printerWarnings = "printer_warnings"
         case paused
+        case nodeIdentity = "node_identity"
+        case nodeIdentityRevision = "node_identity_revision"
+    }
+}
+
+public struct LocalNodeIdentity: Codable, Equatable, Sendable {
+    public let displayName: String
+    public let site: String?
+    public let location: String?
+    public let labels: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case displayName = "display_name"
+        case site
+        case location
+        case labels
     }
 }
 
@@ -299,6 +341,27 @@ private struct ExposureUpdate: Encodable {
     let exposed: Bool
 }
 
+private struct NodeIdentityUpdate: Encodable {
+    let expectedRevision: UInt64
+    let displayName: String
+    let site: String?
+    let location: String?
+    let labels: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case expectedRevision = "expected_revision"
+        case displayName = "display_name"
+        case site
+        case location
+        case labels
+    }
+}
+
+public struct LocalNodeIdentityUpdated: Decodable, Equatable, Sendable {
+    public let revision: UInt64
+    public let identity: LocalNodeIdentity
+}
+
 private struct TestPageRequest: Encodable {
     let profileID: String
     let confirmed: Bool
@@ -381,7 +444,7 @@ public final class LocalAPIClient: @unchecked Sendable {
     }
 
     public func createDashboardSession(view: String) async throws -> URL {
-        guard ["history", "connections"].contains(view) else {
+        guard ["history", "connections", "node"].contains(view) else {
             throw LocalAPIError.invalidResponse
         }
         let response: DashboardSessionResponse = try await request(
@@ -412,6 +475,40 @@ public final class LocalAPIClient: @unchecked Sendable {
             method: "PUT",
             path: "/v1/local/printers/\(try pathComponent(printerID))/exposure",
             body: try encoder.encode(ExposureUpdate(exposed: exposed))
+        )
+    }
+
+    public func updateNodeIdentity(
+        expectedRevision: UInt64,
+        displayName: String,
+        site: String?,
+        location: String?,
+        labels: [String] = []
+    ) async throws -> LocalNodeIdentityUpdated {
+        let cleanName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanSite = site?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanLocation = location?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanLabels = labels.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard !cleanName.isEmpty, cleanName.utf8.count <= 120,
+              cleanName.rangeOfCharacter(from: .controlCharacters) == nil,
+              cleanSite.map({ !$0.isEmpty && $0.utf8.count <= 120 && $0.rangeOfCharacter(from: .controlCharacters) == nil }) ?? true,
+              cleanLocation.map({ !$0.isEmpty && $0.utf8.count <= 120 && $0.rangeOfCharacter(from: .controlCharacters) == nil }) ?? true,
+              cleanLabels.count <= 16,
+              Set(cleanLabels).count == cleanLabels.count,
+              cleanLabels.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 64 && $0.rangeOfCharacter(from: .controlCharacters) == nil })
+        else { throw LocalAPIError.invalidConfiguration("Node identity is outside supported limits.") }
+        return try await request(
+            method: "PUT",
+            path: "/v1/local/node/identity",
+            body: try encoder.encode(
+                NodeIdentityUpdate(
+                    expectedRevision: expectedRevision,
+                    displayName: cleanName,
+                    site: cleanSite,
+                    location: cleanLocation,
+                    labels: cleanLabels
+                )
+            )
         )
     }
 

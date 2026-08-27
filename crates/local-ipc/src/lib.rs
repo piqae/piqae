@@ -463,6 +463,20 @@ pub struct LocalStatus {
     pub active_jobs: u32,
     pub printer_warnings: u32,
     pub paused: bool,
+    /// Operator-visible metadata only. Older nodes omit it during N/N-1.
+    #[serde(default)]
+    pub node_identity: Option<LocalNodeIdentity>,
+    #[serde(default)]
+    pub node_identity_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalNodeIdentity {
+    pub display_name: String,
+    pub site: Option<String>,
+    pub location: Option<String>,
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

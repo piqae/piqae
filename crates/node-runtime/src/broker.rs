@@ -501,11 +501,13 @@ impl BrokerConsentHandle {
             .ok_or_else(|| CommandFailure {
                 code: "broker_authorization_not_found".into(),
                 message: "the authorization request was not found or expired".into(),
+                current_revision: None,
             })?;
         if pending.decision.is_some() {
             return Err(CommandFailure {
                 code: "broker_authorization_already_decided".into(),
                 message: "the authorization request has already been decided".into(),
+                current_revision: None,
             });
         }
         if !decision.approved {
@@ -513,6 +515,7 @@ impl BrokerConsentHandle {
                 return Err(CommandFailure {
                     code: "broker_authorization_invalid_decision".into(),
                     message: "a denied request cannot grant capabilities".into(),
+                    current_revision: None,
                 });
             }
             pending.decision = Some(Err(()));
@@ -522,6 +525,7 @@ impl BrokerConsentHandle {
             CommandFailure {
                 code: "broker_authorization_invalid_capabilities".into(),
                 message: "approved capabilities must be a non-empty subset of the request".into(),
+                current_revision: None,
             }
         })?;
         let requested = pending
@@ -537,6 +541,7 @@ impl BrokerConsentHandle {
             return Err(CommandFailure {
                 code: "broker_authorization_invalid_capabilities".into(),
                 message: "approved capabilities must be a non-empty subset of the request".into(),
+                current_revision: None,
             });
         }
         pending.decision = Some(Ok(granted));
@@ -1380,7 +1385,7 @@ fn unavailable() -> LocalFailure {
     )
 }
 
-fn command_failure(CommandFailure { code, message }: CommandFailure) -> LocalFailure {
+fn command_failure(CommandFailure { code, message, .. }: CommandFailure) -> LocalFailure {
     local_failure(&code, &message, false)
 }
 
@@ -1711,6 +1716,8 @@ mod tests {
                     active_jobs: 0,
                     printer_warnings: 0,
                     paused: false,
+                    node_identity: None,
+                    node_identity_revision: None,
                 });
             }
         });

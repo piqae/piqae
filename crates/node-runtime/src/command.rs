@@ -63,6 +63,10 @@ pub enum RuntimeCommand {
     Status {
         respond_to: oneshot::Sender<LocalStatus>,
     },
+    UpdateNodeIdentity {
+        request: NodeIdentityUpdate,
+        respond_to: oneshot::Sender<Result<NodeIdentityUpdated, CommandFailure>>,
+    },
     Printers {
         respond_to: oneshot::Sender<Vec<LocalPrinter>>,
     },
@@ -166,6 +170,23 @@ pub struct HostLifecycleRequest {
     pub event: crate::LifecycleEvent,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NodeIdentityUpdate {
+    pub expected_revision: u64,
+    pub display_name: String,
+    pub site: Option<String>,
+    pub location: Option<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeIdentityUpdated {
+    pub revision: u64,
+    pub identity: piqae_local_ipc::LocalNodeIdentity,
+}
+
 /// Compatibility name for the one-release loopback HTTP adapter. New code
 /// should use `RuntimeCommand` through `piqae-node-client`.
 #[deprecated(note = "use RuntimeCommand through piqae-node-client; remove after N/N-1 window")]
@@ -175,6 +196,8 @@ pub type ControlRequest = RuntimeCommand;
 pub struct CommandFailure {
     pub code: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_revision: Option<u64>,
 }
 
 #[deprecated(note = "use CommandFailure; remove with the loopback control adapter")]
@@ -248,6 +271,9 @@ pub struct LocalConnectorDetail {
     pub eligible_printer_count: usize,
     pub inventory_revision: u64,
     pub inventory_refresh_pending: bool,
+    pub identity_sync_status: String,
+    pub identity_server_revision: Option<u64>,
+    pub identity_conflict_revision: Option<u64>,
     pub cross_authority_route_warning: bool,
     pub manage_url: Option<String>,
 }

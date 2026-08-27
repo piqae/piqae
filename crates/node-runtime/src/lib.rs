@@ -16,6 +16,7 @@ pub mod connector_registry;
 mod durable_file;
 pub mod embedded;
 pub mod embedded_cloud;
+pub mod host_configuration;
 pub mod installation;
 pub mod route_coordinator;
 pub mod runtime;
@@ -32,15 +33,18 @@ pub use command_recovery::*;
 pub use connector_enrollment::*;
 pub use embedded::*;
 pub use embedded_cloud::*;
+pub use host_configuration::HostConfigurationStore;
 pub use installation::{
-    AttachPolicy, BrokerEndpoint, InstallationGuard, InstallationLockError, RuntimeDisposition,
-    RuntimeSelectionError, select_runtime,
+    AttachPolicy, BrokerEndpoint, InstallationGuard, InstallationLockError, InstalledBroker,
+    RuntimeDisposition, RuntimeSelectionError, select_host_runtime, select_runtime,
 };
 pub use piqae_node_host_api::{
-    AvailabilityClass, ConnectorKeyError, GeneratedConnectorKey, HostCapabilities, HostKeyError,
-    HostKeyProvider, HostKind, HostLifecycle, LeaseAdmission, LifecycleEvent, LifecycleSnapshot,
-    NetworkAvailability, NodeRuntimeMode, PowerAvailability, PrinterTransport,
-    RuntimeConfiguration, SecureConnectorSigner, SecureKeyHandle,
+    AvailabilityClass, ConnectionManagement, ConnectionPolicy, ConnectorKeyError,
+    GeneratedConnectorKey, HostCapabilities, HostConfiguration, HostConfigurationError,
+    HostKeyError, HostKeyProvider, HostKind, HostLifecycle, HostProduct, InstalledHostPolicy,
+    LeaseAdmission, LifecycleEvent, LifecycleSnapshot, NetworkAvailability, NodeIdentity,
+    NodeRuntimeMode, PowerAvailability, PrinterTransport, RuntimeConfiguration,
+    SecureConnectorSigner, SecureKeyHandle, default_device_display_name,
 };
 pub use runtime::NodeRuntime;
 pub use secure_connector::{

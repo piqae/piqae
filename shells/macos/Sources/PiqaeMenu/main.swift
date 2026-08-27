@@ -547,6 +547,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
+        addNodeIdentityItem()
         addPrinterSection()
         addRecentJobsSection()
 
@@ -585,6 +586,30 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             keyEquivalent: "q"
         )
         quit.target = self
+    }
+
+    private func addNodeIdentityItem() {
+        let root = NSMenuItem(
+            title: status?.nodeIdentity?.displayName ?? MenuPresentation.nodeTitle,
+            action: nil,
+            keyEquivalent: ""
+        )
+        root.image = symbol("desktopcomputer", description: "This Piqae node")
+        let node = NSMenu()
+        node.addItem(informational(MenuPresentation.nodeSummary(identity: status?.nodeIdentity)))
+        node.addItem(
+            informational("Standalone node · user-managed connections")
+        )
+        node.addItem(.separator())
+        let edit = node.addItem(
+            withTitle: "Rename & Set Location…",
+            action: #selector(editNodeIdentity),
+            keyEquivalent: ""
+        )
+        edit.target = self
+        edit.isEnabled = client != nil && status?.nodeIdentityRevision != nil
+        root.submenu = node
+        menu.addItem(root)
     }
 
     private func addApplicationAuthorizationItems() {
@@ -939,6 +964,50 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func refreshNow() {
         refresh()
+    }
+
+    @objc private func editNodeIdentity() {
+        guard let status, let revision = status.nodeIdentityRevision else { return }
+        let current = status.nodeIdentity
+        let name = NSTextField(string: current?.displayName ?? "")
+        name.placeholderString = "Node name"
+        let site = NSTextField(string: current?.site ?? "")
+        site.placeholderString = "Site (optional)"
+        let location = NSTextField(string: current?.location ?? "")
+        location.placeholderString = "Location (optional)"
+        let grid = NSGridView(views: [
+            [NSTextField(labelWithString: "Name"), name],
+            [NSTextField(labelWithString: "Site"), site],
+            [NSTextField(labelWithString: "Location"), location],
+        ])
+        grid.rowSpacing = 8
+        grid.columnSpacing = 10
+        grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 1).width = 280
+        let alert = NSAlert()
+        alert.messageText = "Name this Piqae node"
+        alert.informativeText = "Use a device or workplace name. Piqae does not upload your macOS account name or address."
+        alert.accessoryView = grid
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let displayName = name.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !displayName.isEmpty else {
+            showAlert(title: "Node name required", message: "Enter a name for this computer.")
+            return
+        }
+        let cleanSite = site.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanLocation = location.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        performAction(successMessage: "Node details updated.") { client in
+            _ = try await client.updateNodeIdentity(
+                expectedRevision: revision,
+                displayName: displayName,
+                site: cleanSite.isEmpty ? nil : cleanSite,
+                location: cleanLocation.isEmpty ? nil : cleanLocation,
+                labels: current?.labels ?? []
+            )
+        }
     }
 
     @objc private func pauseAgent() {

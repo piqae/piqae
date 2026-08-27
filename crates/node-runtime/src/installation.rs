@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::{fs::OpenOptions, path::PathBuf};
 use thiserror::Error;
 
+use crate::{HostConfiguration, HostProduct, InstalledHostPolicy};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttachPolicy {
@@ -27,6 +29,8 @@ pub struct BrokerEndpoint {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeDisposition {
+    /// The installed standalone product owns its durable machine/user runtime.
+    Standalone,
     Attached(BrokerEndpoint),
     Embedded,
 }
@@ -39,6 +43,69 @@ pub enum RuntimeSelectionError {
     EmbeddedDataDirectoryRequired,
     #[error("local broker protocol range {minimum}..={maximum} is incompatible")]
     IncompatibleBrokerProtocol { minimum: u16, maximum: u16 },
+    #[error("the installed Piqae node has not approved this application")]
+    BrokerAuthorizationRequired,
+    #[error("the node host configuration is invalid")]
+    InvalidHostConfiguration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledBroker {
+    pub endpoint: BrokerEndpoint,
+    /// True only after the OS-verified application principal has an active,
+    /// capability-scoped broker authorization.
+    pub authorized: bool,
+}
+
+/// Selects one runtime from the portable host contract.
+///
+/// A standalone product always owns its durable runtime. An embedded product
+/// attaches only to an approved compatible broker; broker presence alone never
+/// grants access.
+///
+/// # Errors
+///
+/// Returns a typed error for invalid configuration, a required but absent
+/// authorization, incompatible protocol, or missing isolated state root.
+pub fn select_host_runtime(
+    configuration: &HostConfiguration,
+    broker: Option<InstalledBroker>,
+    application_data_directory: Option<&std::path::Path>,
+) -> Result<RuntimeDisposition, RuntimeSelectionError> {
+    configuration
+        .validate()
+        .map_err(|_| RuntimeSelectionError::InvalidHostConfiguration)?;
+    if configuration.product == HostProduct::Standalone {
+        return Ok(RuntimeDisposition::Standalone);
+    }
+    match (configuration.installed_host_policy, broker) {
+        (InstalledHostPolicy::IsolatedApplication, _) => application_data_directory
+            .map(|_| RuntimeDisposition::Embedded)
+            .ok_or(RuntimeSelectionError::EmbeddedDataDirectoryRequired),
+        (InstalledHostPolicy::PreferInstalled, Some(broker))
+            if broker.authorized && broker_is_compatible(&broker.endpoint) =>
+        {
+            Ok(RuntimeDisposition::Attached(broker.endpoint))
+        }
+        (InstalledHostPolicy::PreferInstalled, _) => application_data_directory
+            .map(|_| RuntimeDisposition::Embedded)
+            .ok_or(RuntimeSelectionError::EmbeddedDataDirectoryRequired),
+        (InstalledHostPolicy::RequireInstalled, None) => Err(RuntimeSelectionError::BrokerRequired),
+        (InstalledHostPolicy::RequireInstalled, Some(broker)) if !broker.authorized => {
+            Err(RuntimeSelectionError::BrokerAuthorizationRequired)
+        }
+        (InstalledHostPolicy::RequireInstalled, Some(broker))
+            if !broker_is_compatible(&broker.endpoint) =>
+        {
+            Err(RuntimeSelectionError::IncompatibleBrokerProtocol {
+                minimum: broker.endpoint.protocol_min,
+                maximum: broker.endpoint.protocol_max,
+            })
+        }
+        (InstalledHostPolicy::RequireInstalled, Some(broker)) => {
+            Ok(RuntimeDisposition::Attached(broker.endpoint))
+        }
+    }
 }
 
 /// Makes mode selection explicit before any database or private key is opened.
@@ -171,6 +238,83 @@ impl Drop for InstallationGuard {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::{
+        ConnectionManagement, ConnectionPolicy, HostProduct, InstalledHostPolicy, NodeIdentity,
+    };
+
+    fn embedded(policy: InstalledHostPolicy) -> HostConfiguration {
+        HostConfiguration {
+            contract: piqae_node_host_api::HOST_CONFIGURATION_CONTRACT,
+            product: HostProduct::Embedded,
+            application_id: "com.example.pos".into(),
+            identity: NodeIdentity::new("Example POS", None, None, Vec::new()).unwrap(),
+            installed_host_policy: policy,
+            connection_policy: ConnectionPolicy {
+                management: ConnectionManagement::HostManaged,
+                allows_multiple: true,
+                allowed_authority_origins: vec!["https://api.example.test".into()],
+            },
+        }
+    }
+
+    fn broker(authorized: bool) -> InstalledBroker {
+        InstalledBroker {
+            endpoint: BrokerEndpoint {
+                address: "/tmp/piqae.sock".into(),
+                protocol_min: BROKER_PROTOCOL_MIN_VERSION,
+                protocol_max: BROKER_PROTOCOL_VERSION,
+            },
+            authorized,
+        }
+    }
+
+    #[test]
+    fn embedded_attach_first_uses_only_an_approved_broker() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(
+            select_host_runtime(
+                &embedded(InstalledHostPolicy::PreferInstalled),
+                Some(broker(true)),
+                Some(root.path())
+            )
+            .unwrap(),
+            RuntimeDisposition::Attached(broker(true).endpoint)
+        );
+        assert_eq!(
+            select_host_runtime(
+                &embedded(InstalledHostPolicy::PreferInstalled),
+                Some(broker(false)),
+                Some(root.path())
+            )
+            .unwrap(),
+            RuntimeDisposition::Embedded
+        );
+    }
+
+    #[test]
+    fn require_installed_does_not_fall_back_before_consent() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            select_host_runtime(
+                &embedded(InstalledHostPolicy::RequireInstalled),
+                Some(broker(false)),
+                Some(root.path())
+            ),
+            Err(RuntimeSelectionError::BrokerAuthorizationRequired)
+        ));
+    }
+
+    #[test]
+    fn standalone_always_owns_its_runtime_even_when_broker_is_present() {
+        let root = tempfile::tempdir().unwrap();
+        let configuration = HostConfiguration::standalone(
+            NodeIdentity::new("Warehouse PC", None, None, Vec::new()).unwrap(),
+        );
+        assert_eq!(
+            select_host_runtime(&configuration, Some(broker(true)), Some(root.path())).unwrap(),
+            RuntimeDisposition::Standalone
+        );
+    }
 
     #[test]
     fn automatic_prefers_a_compatible_broker() {

@@ -28,6 +28,12 @@ their own UI. The browser keeps the capability in a fragment and hands it to
 the registered app scheme; the end user needs no Piqae account. Each accepted
 service receives separate credentials, storage and explicit printer grants.
 
+**This Node → Rename & Set Location…** updates bounded display metadata through
+the authenticated local API. The first-run name comes from the macOS Computer
+Name, not the login account. Site and location are explicit operator fields;
+neither is inferred. The edit uses an optimistic revision so two shells or a
+local browser cannot silently overwrite one another.
+
 Configuration:
 
 - `PIQAE_LOCAL_API_URL` defaults to `http://127.0.0.1:39100` and must remain an

@@ -10,6 +10,12 @@ each discovered Windows queue and immutable profile, opens the dashboard, and
 starts create/edit/clone native profile capture. It contains no queue, cloud or
 printing code.
 
+The **This node** submenu displays the standalone node's privacy-safe name and
+optional site/location. **Rename & set location…** creates a short-lived local
+browser handoff; the loopback bearer token is never placed in the URL. Saving
+uses a revision-checked local command, so the tray remains a disposable client
+and never edits the agent database or identity files itself.
+
 `PIQAE_LOCAL_API_URL` defaults to `http://127.0.0.1:39100` and rejects
 non-loopback origins. `PIQAE_LOCAL_TOKEN_FILE` can point at the agent's
 `local.token`; otherwise the shell uses `PIQAE_DATA_DIR/local.token`, then

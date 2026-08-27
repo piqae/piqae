@@ -496,6 +496,10 @@ pub fn router(state: AppState) -> Router {
             axum::routing::put(api::register_agent_content_encryption_key),
         )
         .route(
+            "/v1/agent/identity",
+            axum::routing::put(api::update_agent_identity),
+        )
+        .route(
             "/v1/agent/content-encryption-key/{key_id}",
             axum::routing::delete(api::revoke_agent_content_encryption_key),
         )
@@ -991,6 +995,181 @@ mod tests {
             )
             .body(Body::from(body))
             .expect("valid signed request")
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one route test proves validation, CAS, idempotency, tenant isolation, and event repair"
+    )]
+    async fn connector_identity_update_is_revision_fenced_idempotent_and_operator_safe() {
+        let application = application().await;
+        let oversized = serde_json::to_vec(&serde_json::json!({
+            "expected_revision": 1,
+            "display_name": "Dispatch Mac",
+            "site": "é".repeat(61),
+            "location": null,
+            "labels": []
+        }))
+        .expect("oversized identity body");
+        let rejected = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                &application,
+                "PUT",
+                "/v1/agent/identity",
+                oversized,
+            ))
+            .await
+            .expect("invalid identity response");
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        let rejected: serde_json::Value = serde_json::from_slice(
+            &rejected
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("invalid identity JSON");
+        assert_eq!(rejected["error"]["code"], "invalid_node_identity");
+
+        let first = serde_json::json!({
+            "expected_revision": 1,
+            "display_name": "Dispatch Mac",
+            "site": "Warehouse",
+            "location": "Desk 2",
+            "labels": ["shipping"]
+        });
+        let first_body = serde_json::to_vec(&first).expect("identity body");
+        let response = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                &application,
+                "PUT",
+                "/v1/agent/identity",
+                first_body.clone(),
+            ))
+            .await
+            .expect("identity response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("identity JSON");
+        assert_eq!(body["revision"], 2);
+
+        let replay = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                &application,
+                "PUT",
+                "/v1/agent/identity",
+                first_body,
+            ))
+            .await
+            .expect("identity replay response");
+        assert_eq!(replay.status(), StatusCode::OK);
+        let persisted = application
+            .repository
+            .get_agent(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+            )
+            .await
+            .expect("agent");
+        assert_eq!(persisted.identity_revision, 2);
+        let events = application
+            .repository
+            .list_tenant_events(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                None,
+                100,
+            )
+            .await
+            .expect("tenant events");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    event.event_type == "node.updated"
+                        && event.payload["identity_revision"] == serde_json::json!(2)
+                })
+                .count(),
+            1,
+            "an exact connector replay repairs a missing publish without duplicating the event"
+        );
+
+        let operator = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "PATCH",
+                &format!("/v1/nodes/{}", application.agent_id),
+                "piq_test_integration",
+                Some(
+                    &serde_json::json!({
+                        "name": "Operator override",
+                        "site": "Warehouse",
+                        "location": "Desk 3",
+                        "labels": ["shipping"],
+                        "expected_revision": 2
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .expect("operator response");
+        let operator_status = operator.status();
+        let operator_body = operator.into_body().collect().await.expect("operator body");
+        assert_eq!(
+            operator_status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&operator_body.to_bytes())
+        );
+
+        let stale = serde_json::to_vec(&serde_json::json!({
+            "expected_revision": 2,
+            "display_name": "Stale local name",
+            "site": null,
+            "location": null,
+            "labels": []
+        }))
+        .expect("stale body");
+        let conflict = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                &application,
+                "PUT",
+                "/v1/agent/identity",
+                stale,
+            ))
+            .await
+            .expect("conflict response");
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let conflict: serde_json::Value = serde_json::from_slice(
+            &conflict
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("conflict JSON");
+        assert_eq!(conflict["error"]["code"], "node_identity_revision_conflict");
+        assert_eq!(conflict["error"]["details"]["current_revision"], 3);
     }
 
     #[tokio::test]
@@ -3781,6 +3960,19 @@ mod tests {
                 .await,
             Err(crate::repository::RepositoryError::NotFound)
         ));
+        let direct_job_updated_before = application
+            .repository
+            .list_tenant_events(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                None,
+                500,
+            )
+            .await
+            .expect("tenant events before direct cancellation")
+            .into_iter()
+            .filter(|event| event.event_type == "job.updated")
+            .count();
         let cancelled = application
             .router
             .clone()
@@ -3795,6 +3987,20 @@ mod tests {
             .await
             .expect("cancel response");
         assert_eq!(cancelled.status(), StatusCode::ACCEPTED);
+        let direct_job_updated_after = application
+            .repository
+            .list_tenant_events(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                None,
+                500,
+            )
+            .await
+            .expect("tenant events after direct cancellation")
+            .into_iter()
+            .filter(|event| event.event_type == "job.updated")
+            .count();
+        assert_eq!(direct_job_updated_after, direct_job_updated_before + 1);
 
         let first = sync_test_agent(&application, None).await;
         assert!(first.commands.is_empty());
