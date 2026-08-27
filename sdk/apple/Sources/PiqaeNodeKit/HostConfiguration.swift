@@ -320,6 +320,7 @@ public struct PiqaeHostConfiguration: Codable, Equatable, Sendable {
             localOnly: localOnly,
             nodeName: identity.displayName,
             hostname: Self.platformHostname,
+            hostConfiguration: self,
             libraryURL: libraryURL
         )
     }

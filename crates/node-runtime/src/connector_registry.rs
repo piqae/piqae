@@ -112,6 +112,19 @@ pub struct ConnectorRecord {
     /// Explicit local printer grants. Empty is valid only for all-printer access.
     #[serde(default)]
     pub allowed_printer_ids: Vec<String>,
+    /// Independent authority revision for display-only node metadata.
+    #[serde(default)]
+    pub node_identity_revision: Option<u64>,
+    /// Local host-configuration revision acknowledged by this authority.
+    #[serde(default)]
+    pub node_identity_applied_local_revision: Option<u64>,
+    /// Newer authority revision observed during optimistic reconciliation.
+    #[serde(default)]
+    pub node_identity_conflict_revision: Option<u64>,
+    /// Local revision which produced the conflict. The exact edit is not
+    /// retried until the operator explicitly saves a newer local revision.
+    #[serde(default)]
+    pub node_identity_conflict_local_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -237,6 +250,30 @@ impl ConnectorRegistry {
 
     pub fn records(&self) -> impl Iterator<Item = &ConnectorRecord> {
         self.records.values()
+    }
+
+    /// Atomically updates only connector-scoped node identity reconciliation
+    /// metadata. Credentials, installation identity, grants, routes and queue
+    /// paths are retained byte-for-byte.
+    pub fn update_identity_reconciliation(
+        &mut self,
+        connector_id: &str,
+        server_revision: Option<u64>,
+        applied_local_revision: Option<u64>,
+        conflict_revision: Option<u64>,
+        conflict_local_revision: Option<u64>,
+    ) -> Result<()> {
+        let mut candidate = self.records.clone();
+        let record = candidate
+            .get_mut(connector_id)
+            .context("connector was not found")?;
+        record.node_identity_revision = server_revision;
+        record.node_identity_applied_local_revision = applied_local_revision;
+        record.node_identity_conflict_revision = conflict_revision;
+        record.node_identity_conflict_local_revision = conflict_local_revision;
+        self.persist_records(&candidate)?;
+        self.records = candidate;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -732,6 +769,20 @@ fn validate_record(record: &ConnectorRecord) -> Result<()> {
     {
         bail!("invalid connector printer grants");
     }
+    if [
+        record.node_identity_revision,
+        record.node_identity_applied_local_revision,
+        record.node_identity_conflict_revision,
+        record.node_identity_conflict_local_revision,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|revision| revision == 0)
+        || record.node_identity_conflict_revision.is_some()
+            != record.node_identity_conflict_local_revision.is_some()
+    {
+        bail!("invalid connector node identity reconciliation state");
+    }
     Ok(())
 }
 
@@ -759,6 +810,10 @@ mod tests {
             enabled: true,
             printer_grant: PrinterGrant::SelectedPrinters,
             allowed_printer_ids: vec!["prn_allowed".into()],
+            node_identity_revision: None,
+            node_identity_applied_local_revision: None,
+            node_identity_conflict_revision: None,
+            node_identity_conflict_local_revision: None,
         }
     }
 
@@ -799,6 +854,37 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn identity_reconciliation_is_connector_scoped_and_preserves_authority_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = ConnectorRegistry::load(dir.path()).unwrap();
+        let first = record("ncon_a");
+        let second = record("ncon_b");
+        registry.add(first.clone()).unwrap();
+        registry.add(second.clone()).unwrap();
+        registry
+            .update_identity_reconciliation("ncon_a", Some(8), Some(3), None, None)
+            .unwrap();
+
+        let restarted = ConnectorRegistry::load(dir.path()).unwrap();
+        let updated = restarted
+            .records()
+            .find(|record| record.connector_id == "ncon_a")
+            .unwrap();
+        assert_eq!(updated.node_identity_revision, Some(8));
+        assert_eq!(updated.node_identity_applied_local_revision, Some(3));
+        assert_eq!(updated.agent_id, first.agent_id);
+        assert_eq!(updated.device_key_file, first.device_key_file);
+        assert_eq!(updated.printer_grant, first.printer_grant);
+        assert_eq!(updated.allowed_printer_ids, first.allowed_printer_ids);
+
+        let untouched = restarted
+            .records()
+            .find(|record| record.connector_id == "ncon_b")
+            .unwrap();
+        assert_eq!(untouched, &second);
     }
 
     #[test]

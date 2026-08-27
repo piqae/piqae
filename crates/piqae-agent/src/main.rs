@@ -1329,6 +1329,10 @@ async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) ->
         enabled: true,
         printer_grant,
         allowed_printer_ids,
+        node_identity_revision: None,
+        node_identity_applied_local_revision: None,
+        node_identity_conflict_revision: None,
+        node_identity_conflict_local_revision: None,
     };
     if registry.contains(&connector_id) {
         registry.replace(record)?;
@@ -1464,6 +1468,10 @@ async fn connect_installed_invitation(
         enabled: true,
         printer_grant,
         allowed_printer_ids,
+        node_identity_revision: None,
+        node_identity_applied_local_revision: None,
+        node_identity_conflict_revision: None,
+        node_identity_conflict_local_revision: None,
     };
     let result = ConnectorInvitationResult {
         connector_id,
@@ -6814,6 +6822,10 @@ mod tests {
             enabled: true,
             printer_grant: PrinterGrant::SelectedPrinters,
             allowed_printer_ids: vec!["prn_test".to_owned()],
+            node_identity_revision: None,
+            node_identity_applied_local_revision: None,
+            node_identity_conflict_revision: None,
+            node_identity_conflict_local_revision: None,
         }
     }
 

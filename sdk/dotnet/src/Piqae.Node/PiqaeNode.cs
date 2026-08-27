@@ -30,7 +30,10 @@ public sealed record PiqaeNodeOptions(
     AvailabilityClass Availability,
     bool LocalOnly,
     string ApplicationId,
-    string DataDirectory);
+    string DataDirectory,
+    HostConfiguration? HostConfiguration = null);
+
+public sealed record NodeIdentitySnapshot(ulong Revision, NodeIdentityConfiguration Identity);
 
 public sealed record AdapterFingerprint(
     string Platform,
@@ -108,6 +111,14 @@ public sealed class PiqaeNode : IDisposable
         ArgumentNullException.ThrowIfNull(options);
         if (string.IsNullOrWhiteSpace(options.ApplicationId))
             throw new ArgumentException("An application ID is required.", nameof(options));
+        if (options.HostConfiguration is not null
+            && !string.Equals(
+                options.HostConfiguration.ApplicationId,
+                options.ApplicationId,
+                StringComparison.Ordinal))
+            throw new ArgumentException(
+                "The native application ID must match the host configuration.",
+                nameof(options));
         _applicationId = options.ApplicationId;
         var descriptor = NativeMethods.piqae_node_abi_descriptor();
         EnsureCompatibleAbi(descriptor);
@@ -118,7 +129,8 @@ public sealed class PiqaeNode : IDisposable
             availability = options.Availability,
             local_only = options.LocalOnly,
             application_id = options.ApplicationId,
-            data_directory = options.DataDirectory
+            data_directory = options.DataDirectory,
+            host_configuration = options.HostConfiguration
         }, JsonOptions);
         using var response = NativeResponse.Call(payload, NativeMethods.piqae_node_create);
         _handle = response.Data.GetProperty("handle").GetUInt64();
@@ -149,6 +161,33 @@ public sealed class PiqaeNode : IDisposable
         }, JsonOptions);
         using var response = NativeResponse.Call(_handle, payload, NativeMethods.piqae_node_command);
         return response.Data.Clone();
+    }
+
+    /// <summary>
+    /// Durably updates only operator-visible Node name / Site / Location /
+    /// Labels. Connector credentials, installation identity, routes and queue
+    /// state are never rotated by this command.
+    /// </summary>
+    public NodeIdentitySnapshot UpdateNodeIdentity(
+        ulong expectedRevision,
+        NodeIdentityConfiguration identity)
+    {
+        ArgumentNullException.ThrowIfNull(identity);
+        var result = Command(new
+        {
+            type = "update_node_identity",
+            expected_revision = expectedRevision,
+            display_name = identity.DisplayName,
+            site = identity.Site,
+            location = identity.Location,
+            labels = identity.Labels
+        });
+        var returnedIdentity = JsonSerializer.Deserialize<NodeIdentityConfiguration>(
+            result.GetProperty("identity").GetRawText(),
+            JsonOptions) ?? throw InvalidNativeResponse();
+        return new NodeIdentitySnapshot(
+            RequiredUInt64(result, "revision"),
+            returnedIdentity);
     }
 
     /// <summary>
@@ -887,9 +926,13 @@ internal struct NativeConnectorKeyProvider
     internal IntPtr Delete;
 }
 
-public sealed class PiqaeNodeException(string code, string message) : Exception(message)
+public sealed class PiqaeNodeException(
+    string code,
+    string message,
+    ulong? currentRevision = null) : Exception(message)
 {
     public string Code { get; } = code;
+    public ulong? CurrentRevision { get; } = currentRevision;
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -956,9 +999,16 @@ internal sealed class NativeResponse : IDisposable
             if (throwOnError && (!root.TryGetProperty("ok", out var ok) || !ok.GetBoolean()))
             {
                 var error = root.GetProperty("error");
+                ulong? currentRevision = null;
+                if (error.TryGetProperty("details", out var details)
+                    && details.ValueKind == JsonValueKind.Object
+                    && details.TryGetProperty("current_revision", out var revision)
+                    && revision.TryGetUInt64(out var parsedRevision))
+                    currentRevision = parsedRevision;
                 throw new PiqaeNodeException(
                     error.GetProperty("code").GetString() ?? "native_error",
-                    error.GetProperty("message").GetString() ?? "The native runtime operation failed.");
+                    error.GetProperty("message").GetString() ?? "The native runtime operation failed.",
+                    currentRevision);
             }
         }
         catch

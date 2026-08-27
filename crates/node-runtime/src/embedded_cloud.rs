@@ -8,9 +8,9 @@ use crate::connector_registry::{ConnectorRecord, ConnectorRegistry};
 use crate::{
     AgentClientAuthority, CloudCommandApplication, CloudCommandApplier, CloudConnectorWorker,
     CloudWorkerError, ConnectorKeyError, ContentMaterializer, DurableOfferAcceptor, EmbeddedQueue,
-    EventAcknowledger, GeneratedConnectorKey, HostBackedDeviceIdentity, InventorySnapshotProvider,
-    NodeRuntime, PendingCloudAcceptance, PendingCloudRelease, SecureConnectorSigner,
-    SecureKeyHandle, WakeReconciler,
+    EventAcknowledger, GeneratedConnectorKey, HostBackedDeviceIdentity, HostConfigurationStore,
+    InventorySnapshotProvider, NodeRuntime, PendingCloudAcceptance, PendingCloudRelease,
+    SecureConnectorSigner, SecureKeyHandle, WakeReconciler,
 };
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -19,8 +19,8 @@ use futures::StreamExt as _;
 use piqae_agent_client::{AgentClient, ClientError, DeviceRequestSigner};
 use piqae_domain::{AgentId, EventId, JobId};
 use piqae_protocol::agent::{
-    AgentAcceptJobRequest, AgentCommand, AgentSyncRequest, ContentDescriptor,
-    InventoryProjectionAcknowledgement, JobOffer, PrinterGrant,
+    AgentAcceptJobRequest, AgentCommand, AgentIdentityUpdateRequest, AgentSyncRequest,
+    ContentDescriptor, InventoryProjectionAcknowledgement, JobOffer, PrinterGrant,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -224,6 +224,7 @@ impl EmbeddedCloudSupervisor {
         registry: Arc<Mutex<ConnectorRegistry>>,
         provider: Arc<dyn SecureConnectorSigner>,
         runtime: Arc<NodeRuntime>,
+        host_configuration: Option<Arc<Mutex<HostConfigurationStore>>>,
         work_notifier: Option<Arc<dyn WorkAvailableNotifier>>,
     ) -> Result<Self, std::io::Error> {
         let stop = Arc::new(AtomicBool::new(false));
@@ -246,6 +247,7 @@ impl EmbeddedCloudSupervisor {
                     registry,
                     provider,
                     runtime,
+                    host_configuration,
                     thread_stop,
                     thread_stop_notify,
                     thread_reconcile,
@@ -355,6 +357,7 @@ async fn run_supervisor(
     registry: Arc<Mutex<ConnectorRegistry>>,
     provider: Arc<dyn SecureConnectorSigner>,
     runtime: Arc<NodeRuntime>,
+    host_configuration: Option<Arc<Mutex<HostConfigurationStore>>>,
     stop: Arc<AtomicBool>,
     stop_notify: Arc<tokio::sync::Notify>,
     reconcile: Arc<ReconcileControl>,
@@ -426,6 +429,7 @@ async fn run_supervisor(
                     Arc::clone(&registry),
                     Arc::clone(&provider),
                     Arc::clone(&runtime),
+                    host_configuration.clone(),
                     &record,
                     started_at,
                     work_notifier.clone(),
@@ -676,9 +680,15 @@ mod reconcile_control_tests {
         let registry = Arc::new(std::sync::Mutex::new(
             ConnectorRegistry::load(directory.path().join("embedded")).unwrap(),
         ));
-        let mut supervisor =
-            EmbeddedCloudSupervisor::start(queue, registry, Arc::new(UnusedSigner), runtime, None)
-                .unwrap();
+        let mut supervisor = EmbeddedCloudSupervisor::start(
+            queue,
+            registry,
+            Arc::new(UnusedSigner),
+            runtime,
+            None,
+            None,
+        )
+        .unwrap();
 
         let request = supervisor.request_reconcile();
         let generation = request.generation();
@@ -827,6 +837,7 @@ async fn reconcile_connector(
     registry: Arc<Mutex<ConnectorRegistry>>,
     provider: Arc<dyn SecureConnectorSigner>,
     runtime: Arc<NodeRuntime>,
+    host_configuration: Option<Arc<Mutex<HostConfigurationStore>>>,
     record: &ConnectorRecord,
     started_at: chrono::DateTime<Utc>,
     work_notifier: Option<Arc<dyn WorkAvailableNotifier>>,
@@ -859,7 +870,7 @@ async fn reconcile_connector(
         started_at,
         allowed: connector_allowed(record),
         runtime: Arc::clone(&runtime),
-        registry,
+        registry: Arc::clone(&registry),
         work_notifier,
     };
     let authority = AgentClientAuthority::new(client.clone(), Arc::clone(&signer));
@@ -868,15 +879,89 @@ async fn reconcile_connector(
         EmbeddedInventory(common.clone()),
         EmbeddedEvents(common.clone()),
         EmbeddedCommands(common.clone()),
-        EmbeddedMaterializer { client, signer },
+        EmbeddedMaterializer {
+            client: client.clone(),
+            signer: Arc::clone(&signer),
+        },
         EmbeddedAcceptor(common),
         EmbeddedWake,
         runtime,
     );
-    worker
-        .reconcile_once()
-        .await
-        .map(|value| value.next_poll_after)
+    let next_poll_after = worker.reconcile_once().await?.next_poll_after;
+    if let Some(host_configuration) = host_configuration {
+        // Identity metadata is intentionally reconciled after jobs, events and
+        // inventory. Failure or an N-1 authority therefore cannot block the
+        // connector's printing path.
+        reconcile_embedded_connector_identity(
+            &client,
+            signer.as_ref(),
+            &registry,
+            record,
+            &host_configuration,
+        )
+        .await;
+    }
+    Ok(next_poll_after)
+}
+
+async fn reconcile_embedded_connector_identity(
+    client: &AgentClient,
+    signer: &dyn DeviceRequestSigner,
+    registry: &Arc<Mutex<ConnectorRegistry>>,
+    record: &ConnectorRecord,
+    host_configuration: &Arc<Mutex<HostConfigurationStore>>,
+) {
+    let (local_revision, identity) = match host_configuration.lock() {
+        Ok(store) => {
+            let (revision, configuration) = store.snapshot();
+            (revision, configuration.identity)
+        }
+        Err(_) => return,
+    };
+    if record.node_identity_applied_local_revision == Some(local_revision)
+        || record.node_identity_conflict_local_revision == Some(local_revision)
+    {
+        return;
+    }
+    let expected_revision = record
+        .node_identity_conflict_revision
+        .or(record.node_identity_revision)
+        .unwrap_or(1);
+    let request = AgentIdentityUpdateRequest {
+        expected_revision,
+        display_name: identity.display_name,
+        site: identity.site,
+        location: identity.location,
+        labels: identity.labels,
+    };
+    match client.update_node_identity(signer, &request).await {
+        Ok(updated) => {
+            if let Ok(mut registry) = registry.lock() {
+                let _ = registry.update_identity_reconciliation(
+                    &record.connector_id,
+                    Some(updated.revision),
+                    Some(local_revision),
+                    None,
+                    None,
+                );
+            }
+        }
+        Err(ClientError::NodeIdentityRevisionConflict { current_revision }) => {
+            if let Ok(mut registry) = registry.lock() {
+                let _ = registry.update_identity_reconciliation(
+                    &record.connector_id,
+                    record.node_identity_revision,
+                    record.node_identity_applied_local_revision,
+                    Some(current_revision),
+                    Some(local_revision),
+                );
+            }
+        }
+        // Transport and N-1 unsupported-route failures remain pending. A
+        // later normal connector pass retries them without affecting queue or
+        // inventory reconciliation.
+        Err(_) => {}
+    }
 }
 
 #[derive(Clone)]
@@ -1289,16 +1374,17 @@ impl WakeReconciler for EmbeddedWake {
 mod disconnect_compatibility_tests {
     use super::{
         ConnectorRetrySchedule, connector_disconnect_requires_authority_upgrade,
-        finish_remote_connector_revocation,
+        finish_remote_connector_revocation, reconcile_embedded_connector_identity,
     };
     use crate::connector_registry::{ConnectorRecord, ConnectorRegistry};
     use crate::{
-        ConnectorKeyError, EmbeddedQueue, GeneratedConnectorKey, SecureConnectorSigner,
-        SecureKeyHandle,
+        ConnectionPolicy, ConnectorKeyError, EmbeddedQueue, GeneratedConnectorKey,
+        HostBackedDeviceIdentity, HostConfiguration, HostConfigurationStore, HostProduct,
+        InstalledHostPolicy, NodeIdentity, SecureConnectorSigner, SecureKeyHandle,
     };
     use chrono::Utc;
     use ed25519_dalek::{Signer as _, SigningKey};
-    use piqae_agent_client::ClientError;
+    use piqae_agent_client::{AgentClient, ClientError, DeviceRequestSigner};
     use piqae_agent_storage::{AcceptedJob, AgentStore, CloudRouteProof};
     use piqae_domain::{AgentId, JobId};
     use piqae_protocol::agent::PrinterGrant;
@@ -1355,6 +1441,149 @@ mod disconnect_compatibility_tests {
             }
         });
         (Url::parse(&format!("http://{address}/")).unwrap(), task)
+    }
+
+    async fn identity_authority() -> (
+        Url,
+        tokio::sync::mpsc::Receiver<String>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        let task = tokio::spawn(async move {
+            for response_index in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = vec![0_u8; 16 * 1024];
+                let length = stream.read(&mut request).await.unwrap();
+                request.truncate(length);
+                sender
+                    .send(String::from_utf8_lossy(&request).into_owned())
+                    .await
+                    .unwrap();
+                let (status, body) = if response_index == 0 {
+                    (
+                        "409 Conflict",
+                        r#"{"error":{"code":"node_identity_revision_conflict","message":"conflict","request_id":"req_test","retryable":false,"details":{"current_revision":5}}}"#,
+                    )
+                } else {
+                    (
+                        "200 OK",
+                        r#"{"revision":6,"identity":{"display_name":"Dispatch iPad","site":null,"location":null,"labels":[]}}"#,
+                    )
+                };
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        (
+            Url::parse(&format!("http://{address}/")).unwrap(),
+            receiver,
+            task,
+        )
+    }
+
+    #[tokio::test]
+    async fn connector_identity_conflict_waits_for_explicit_new_local_revision() {
+        let directory = tempfile::tempdir().unwrap();
+        let (origin, mut requests, server) = identity_authority().await;
+        let agent_id = AgentId::new();
+        let handle = SecureKeyHandle::new("connector/test/identity".into()).unwrap();
+        let mut record = ConnectorRecord {
+            connector_id: "ncon_identity".into(),
+            agent_id: agent_id.to_string(),
+            control_plane_url: origin.clone(),
+            display_name: None,
+            workspace_name: None,
+            authorization_type: None,
+            workspace_id: None,
+            environment_id: None,
+            requesting_service_account_id: None,
+            manage_url: None,
+            device_key_file: None,
+            secure_key_handle: Some(handle.clone()),
+            enabled: true,
+            printer_grant: PrinterGrant::AllLocalPrinters,
+            allowed_printer_ids: Vec::new(),
+            node_identity_revision: Some(1),
+            node_identity_applied_local_revision: None,
+            node_identity_conflict_revision: None,
+            node_identity_conflict_local_revision: None,
+        };
+        let mut registry = ConnectorRegistry::load(directory.path().join("embedded")).unwrap();
+        registry
+            .register_prepared_key(
+                handle.clone(),
+                [4; 32],
+                Utc::now().timestamp_millis() + 60_000,
+            )
+            .unwrap();
+        registry.complete_prepared(record.clone()).unwrap();
+        let registry = Arc::new(Mutex::new(registry));
+        let configuration = HostConfiguration {
+            contract: 1,
+            product: HostProduct::Embedded,
+            application_id: "com.example.pos".into(),
+            identity: NodeIdentity::new("Kitchen iPad", None, None, Vec::new()).unwrap(),
+            installed_host_policy: InstalledHostPolicy::IsolatedApplication,
+            connection_policy: ConnectionPolicy::user_managed(),
+        };
+        let store = Arc::new(Mutex::new(
+            HostConfigurationStore::open_or_create(directory.path(), configuration).unwrap(),
+        ));
+        let signer: Arc<dyn DeviceRequestSigner> = Arc::new(HostBackedDeviceIdentity::new(
+            agent_id,
+            handle,
+            Arc::new(TestSigner(SigningKey::from_bytes(&[3; 32]))),
+        ));
+        let client = AgentClient::new(origin).unwrap();
+
+        reconcile_embedded_connector_identity(&client, signer.as_ref(), &registry, &record, &store)
+            .await;
+        record = registry.lock().unwrap().records().next().unwrap().clone();
+        assert_eq!(record.node_identity_conflict_revision, Some(5));
+        assert_eq!(record.node_identity_conflict_local_revision, Some(1));
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .configuration()
+                .identity
+                .display_name,
+            "Kitchen iPad"
+        );
+
+        // The exact conflicting edit is suppressed and produces no request.
+        reconcile_embedded_connector_identity(&client, signer.as_ref(), &registry, &record, &store)
+            .await;
+        assert!(requests.try_recv().is_ok());
+        assert!(requests.try_recv().is_err());
+
+        store
+            .lock()
+            .unwrap()
+            .update_identity(
+                1,
+                NodeIdentity::new("Dispatch iPad", None, None, Vec::new()).unwrap(),
+            )
+            .unwrap();
+        reconcile_embedded_connector_identity(&client, signer.as_ref(), &registry, &record, &store)
+            .await;
+        let second = requests.recv().await.unwrap();
+        assert!(second.contains(r#""expected_revision":5"#));
+        let updated = registry.lock().unwrap().records().next().unwrap().clone();
+        assert_eq!(updated.node_identity_revision, Some(6));
+        assert_eq!(updated.node_identity_applied_local_revision, Some(2));
+        assert_eq!(updated.node_identity_conflict_revision, None);
+        server.await.unwrap();
     }
 
     #[test]
@@ -1449,6 +1678,10 @@ mod disconnect_compatibility_tests {
             enabled: true,
             printer_grant: PrinterGrant::AllLocalPrinters,
             allowed_printer_ids: Vec::new(),
+            node_identity_revision: None,
+            node_identity_applied_local_revision: None,
+            node_identity_conflict_revision: None,
+            node_identity_conflict_local_revision: None,
         };
         let mut registry = ConnectorRegistry::load(directory.path()).unwrap();
         registry

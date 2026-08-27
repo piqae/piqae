@@ -80,6 +80,10 @@ mod tests {
             enabled: true,
             printer_grant: PrinterGrant::AllLocalPrinters,
             allowed_printer_ids: Vec::new(),
+            node_identity_revision: None,
+            node_identity_applied_local_revision: None,
+            node_identity_conflict_revision: None,
+            node_identity_conflict_local_revision: None,
         }
     }
 

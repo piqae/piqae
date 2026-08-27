@@ -36,6 +36,10 @@ public struct PiqaeNativeRuntimeConfiguration: Sendable {
     /// Bounded platform hint. iOS defaults to a generic value rather than the
     /// user-assigned device name or a login-derived hostname.
     public let hostname: String
+    /// Portable host ownership, connection, and operator-visible identity
+    /// contract. Older callers may omit it; identity editing is then
+    /// unavailable rather than synthesized from connector credentials.
+    public let hostConfiguration: PiqaeHostConfiguration?
     public let libraryURL: URL?
 
     public init(
@@ -46,6 +50,7 @@ public struct PiqaeNativeRuntimeConfiguration: Sendable {
         localOnly: Bool,
         nodeName: String? = nil,
         hostname: String? = nil,
+        hostConfiguration: PiqaeHostConfiguration? = nil,
         libraryURL: URL? = nil
     ) {
         self.applicationID = applicationID
@@ -70,6 +75,7 @@ public struct PiqaeNativeRuntimeConfiguration: Sendable {
             maximumBytes: 120
         )
         #endif
+        self.hostConfiguration = hostConfiguration
         self.libraryURL = libraryURL
     }
 
@@ -143,7 +149,8 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
             availability: configuration.availability,
             localOnly: configuration.localOnly,
             applicationID: configuration.applicationID,
-            dataDirectory: configuration.dataDirectory
+            dataDirectory: configuration.dataDirectory,
+            hostConfiguration: configuration.hostConfiguration
         )
         let created = library.create(try JSONEncoder().encode(request))
         let createdData: HandleData = try Self.unwrap(created)
@@ -695,6 +702,7 @@ private struct NativeConfiguration: Encodable {
     let localOnly: Bool
     let applicationID: String
     let dataDirectory: String
+    let hostConfiguration: PiqaeHostConfiguration?
 
     enum CodingKeys: String, CodingKey {
         case contract
@@ -703,6 +711,7 @@ private struct NativeConfiguration: Encodable {
         case localOnly = "local_only"
         case applicationID = "application_id"
         case dataDirectory = "data_directory"
+        case hostConfiguration = "host_configuration"
     }
 }
 

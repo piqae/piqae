@@ -212,6 +212,10 @@ pub async fn exchange_connector_invitation(
         enabled: true,
         printer_grant: request.printer_grant,
         allowed_printer_ids: request.allowed_printer_ids,
+        node_identity_revision: None,
+        node_identity_applied_local_revision: None,
+        node_identity_conflict_revision: None,
+        node_identity_conflict_local_revision: None,
     };
     registry.complete_prepared(record.clone())?;
     Ok(record)
