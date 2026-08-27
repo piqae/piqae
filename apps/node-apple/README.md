@@ -56,7 +56,10 @@ Before uploading a build, all of the following remain external release work:
    support/privacy URLs, screenshots, review notes, and age/category metadata.
 4. APNs entitlement/provisioning plus a production backend which stores tokens
    tenant-safely and sends metadata-free, collapseable wake hints. Provider keys
-   never belong in the app or NodeKit.
+   never belong in the app or NodeKit. This Preview target does not register an
+   APNs token and reports remote wake as not configured; it still retries while
+   foregrounded, after network/foreground recovery, and during best-effort
+   scheduled maintenance granted by iOS.
 5. TestFlight internal/external testing and App Review. A buildable archive does
    not imply review approval.
 6. Named-device AirPrint, Bluetooth, MFi/vendor, supervised-kiosk, sleep/wake,
@@ -66,7 +69,11 @@ Before uploading a build, all of the following remain external release work:
 Apple controls background scheduling. Background notifications may be delayed,
 throttled, coalesced, or dropped, and a force-quit app is unavailable. Piqae
 uses them only as hints; the durable runtime must reconcile and publish a fresh
-eligible route before cloud work can be offered. See Apple's
+eligible route before cloud work can be offered. The app delegate holds at most
+32 opaque in-memory hint IDs during cold launch,
+coalesces duplicates, and completes every fetch handler within a 20-second
+deadline; it never persists a hint, job identifier, or document metadata.
+See Apple's
 [background strategy](https://developer.apple.com/documentation/backgroundtasks/choosing-background-strategies-for-your-app),
 [background notification](https://developer.apple.com/documentation/usernotifications/pushing-background-updates-to-your-app),
 [device-name entitlement](https://developer.apple.com/documentation/BundleResources/Entitlements/com.apple.developer.device-information.user-assigned-device-name),

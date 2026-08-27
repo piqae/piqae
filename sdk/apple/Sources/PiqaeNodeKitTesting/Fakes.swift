@@ -503,12 +503,19 @@ public actor PiqaeFakeRemoteNotificationProvider:
     PiqaeRemoteNotificationRegistrationProvider
 {
     public private(set) var registrations: [PiqaeRemoteNotificationRegistration] = []
-    public var error: (any Error & Sendable)?
+    private var remainingFailures = 0
 
     public init() {}
 
+    public func failNextRegistrations(_ count: Int) {
+        remainingFailures = max(0, count)
+    }
+
     public func register(_ request: PiqaeRemoteNotificationRegistration) async throws {
-        if let error { throw error }
+        if remainingFailures > 0 {
+            remainingFailures -= 1
+            throw PiqaeNodeError.unsupportedOperation("The fake registration provider failed.")
+        }
         registrations.append(request)
     }
 }

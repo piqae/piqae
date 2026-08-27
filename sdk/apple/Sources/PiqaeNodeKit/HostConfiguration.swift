@@ -112,6 +112,11 @@ public struct PiqaeConnectionPolicy: Codable, Equatable, Sendable {
         allowsMultiple: Bool = true,
         allowedAuthorityOrigins: [URL] = []
     ) throws {
+        guard allowsMultiple else {
+            throw PiqaeNodeError.invalidConfiguration(
+                "Piqae hosts must not impose an artificial single-connection limit."
+            )
+        }
         var normalized: [URL] = []
         var seen = Set<String>()
         guard allowedAuthorityOrigins.count <= 32 else {
@@ -129,7 +134,7 @@ public struct PiqaeConnectionPolicy: Codable, Equatable, Sendable {
             )
         }
         self.management = management
-        self.allowsMultiple = allowsMultiple
+        self.allowsMultiple = true
         self.allowedAuthorityOrigins = normalized
     }
 

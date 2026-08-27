@@ -108,6 +108,10 @@ public sealed record ConnectionPolicy
         bool allowsMultiple = true,
         IReadOnlyList<Uri>? allowedAuthorityOrigins = null)
     {
+        if (!allowsMultiple)
+            throw new ArgumentException(
+                "Piqae hosts must not impose an artificial single-connection limit.",
+                nameof(allowsMultiple));
         var normalized = (allowedAuthorityOrigins ?? Array.Empty<Uri>())
             .Select(ExactHttpsOrigin)
             .Distinct()
@@ -121,7 +125,7 @@ public sealed record ConnectionPolicy
                 "Host-managed connections require a pinned HTTPS authority origin.",
                 nameof(allowedAuthorityOrigins));
         Management = management;
-        AllowsMultiple = allowsMultiple;
+        AllowsMultiple = true;
         AllowedAuthorityOrigins = normalized;
     }
 
