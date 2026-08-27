@@ -205,6 +205,7 @@ public protocol PiqaeEmbeddedNodeRuntime: PiqaeHostLifecycleReporter, Sendable {
     ) async throws -> [PiqaeRuntimePrinterSnapshot]
     func printerInventory() async throws -> [PiqaeRuntimePrinterSnapshot]
     func enqueue(_ request: PiqaeRuntimeJobRequest) async throws -> PiqaeRuntimeJobAccepted
+    func printPacketCapabilities() async throws -> PiqaePrintPacketCapabilities
     func validatePrintPacket(_ packet: PiqaePrintPacket) async throws
         -> PiqaePrintPacketValidation
     func enqueuePrintPacket(_ request: PiqaePrintPacketSubmissionRequest) async throws
@@ -273,6 +274,11 @@ public extension PiqaeEmbeddedNodeRuntime {
     func printerInventory() async throws -> [PiqaeRuntimePrinterSnapshot] { [] }
     func enqueue(_ request: PiqaeRuntimeJobRequest) async throws -> PiqaeRuntimeJobAccepted {
         throw PiqaeNodeError.unsupportedOperation("The embedded runtime does not expose its queue.")
+    }
+    func printPacketCapabilities() async throws -> PiqaePrintPacketCapabilities {
+        throw PiqaeNodeError.unsupportedOperation(
+            "This runtime does not expose the required PrintPacket capability contract."
+        )
     }
     func validatePrintPacket(_ packet: PiqaePrintPacket) async throws
         -> PiqaePrintPacketValidation

@@ -145,12 +145,12 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
         guard handle == nil else { return }
         let library = try PiqaeNativeLibrary(url: configuration.libraryURL)
         let descriptor = library.abiDescriptor()
-        guard descriptor.abi_version == 1, descriptor.contract_min <= 1,
-            descriptor.contract_max >= 1
+        guard descriptor.abi_version == 1, descriptor.contract_min <= 2,
+            descriptor.contract_max >= 2
         else { throw PiqaeNativeRuntimeError.incompatibleABI }
 
         let request = NativeConfiguration(
-            contract: 1,
+            contract: 2,
             hostMode: configuration.hostMode,
             availability: configuration.availability,
             localOnly: configuration.localOnly,
@@ -377,9 +377,17 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
         return response.job
     }
 
+    public func printPacketCapabilities() async throws -> PiqaePrintPacketCapabilities {
+        try commandResponse(
+            TypeOnlyCommand(type: "print_packet_capabilities"),
+            as: PrintPacketCapabilitiesData.self
+        ).capabilities
+    }
+
     public func validatePrintPacket(_ packet: PiqaePrintPacket) async throws
         -> PiqaePrintPacketValidation
     {
+        try await ensurePrintPacketSupport(for: packet)
         var payload = try Self.printPacketPayload(packet)
         payload["type"] = "validate_print_packet"
         let data = try JSONSerialization.data(withJSONObject: payload)
@@ -389,6 +397,7 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
     public func enqueuePrintPacket(_ request: PiqaePrintPacketSubmissionRequest) async throws
         -> PiqaePrintPacketSubmission
     {
+        try await ensurePrintPacketSupport(for: request.packet)
         var payload = try Self.printPacketPayload(request.packet)
         payload["type"] = "enqueue_print_packet"
         payload["adapter_id"] = request.adapterID
@@ -401,6 +410,26 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
         } ?? NSNull()
         let data = try JSONSerialization.data(withJSONObject: payload)
         return try commandResponse(data, as: PiqaePrintPacketSubmission.self)
+    }
+
+    private func ensurePrintPacketSupport(for packet: PiqaePrintPacket) async throws {
+        let capabilities = try await printPacketCapabilities()
+        guard capabilities.contract == "printpacket/v1",
+            capabilities.rendererABI == "printpacket.pdf-renderer/v1",
+            capabilities.resourceABI == "printpacket.resources/v1",
+            capabilities.conformanceProfile == "printpacket.conformance/core-v1",
+            capabilities.cacheProfile == "printpacket.render-cache/v1",
+            capabilities.directOfflineRendering
+        else {
+            throw PiqaeNativeRuntimeError.nativeCoreUpdateRequired
+        }
+        guard capabilities.supportedOutputTargets.contains(where: packet.outputTarget.isAdvertised)
+        else {
+            throw PiqaeNativeRuntimeError.rejected(
+                code: "printpacket_unsupported_target",
+                message: "The exact PrintPacket output target is not supported by this runtime."
+            )
+        }
     }
 
     public func nextOperation(adapterID: String) async throws -> PiqaeRuntimeAdapterOperation? {
@@ -659,7 +688,9 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
         message: String,
         currentRevision: UInt64? = nil
     ) -> PiqaeNativeRuntimeError {
-        if code == "invalid_command" { return .nativeCoreUpdateRequired }
+        if code == "printpacket_core_update_required" {
+            return .nativeCoreUpdateRequired
+        }
         if code == "node_identity_revision_conflict", let currentRevision {
             return .nodeIdentityRevisionConflict(currentRevision: currentRevision)
         }
@@ -1103,6 +1134,9 @@ private struct OpaqueEvidenceData: Decodable {
 private struct RegisteredData: Decodable { let registered: Bool }
 private struct PrinterInventoryData: Decodable { let printers: [PiqaeRuntimePrinterSnapshot] }
 private struct JobAcceptedData: Decodable { let job: PiqaeRuntimeJobAccepted }
+private struct PrintPacketCapabilitiesData: Decodable {
+    let capabilities: PiqaePrintPacketCapabilities
+}
 private struct AdapterOperationData: Decodable { let operation: PiqaeRuntimeAdapterOperation? }
 private struct AdapterObservationsData: Decodable {
     let operations: [PiqaeRuntimeAdapterOperation]

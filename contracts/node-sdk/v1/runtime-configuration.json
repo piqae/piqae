@@ -1,5 +1,5 @@
 {
-  "contract": 1,
+  "contract": 2,
   "host_mode": "embedded_application",
   "availability": "foreground_only",
   "local_only": true,

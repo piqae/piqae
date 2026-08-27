@@ -24,8 +24,8 @@ use piqae_node_runtime::{
 use piqae_protocol::agent::PrinterGrant;
 use piqae_support_packs::SupportPackRegistry;
 use printpacket::{
-    CompatibilityStatus, OutputTarget, PacketLimits, RenderLimits, RenderRequirement,
-    RendererCapabilities, ResolvedResources, TemplateManifest, analyze_document,
+    CompatibilityStatus, OutputTarget, PacketError, PacketLimits, RenderError, RenderLimits,
+    RenderRequirement, RendererCapabilities, ResolvedResources, TemplateManifest, analyze_document,
     canonical_data_bytes, negotiate as negotiate_printpacket, render_cache_key,
     render_with_metrics,
 };
@@ -43,7 +43,11 @@ use std::{
 use thiserror::Error;
 
 pub const NODE_ABI_VERSION: u16 = 1;
-pub const NODE_CONTRACT_VERSION: u16 = 1;
+pub const NODE_CONTRACT_VERSION: u16 = 2;
+const PRINTPACKET_CONTRACT: &str = "printpacket/v1";
+const PRINTPACKET_RENDERER_ABI: &str = "printpacket.pdf-renderer/v1";
+const PRINTPACKET_RESOURCE_ABI: &str = "printpacket.resources/v1";
+const PRINTPACKET_CACHE_PROFILE: &str = "printpacket.render-cache/v1";
 const MAX_ABI_INPUT_BYTES: usize = 24 * 1024 * 1024;
 const MAX_APPLICATION_ID_BYTES: usize = 255;
 const MAX_DATA_DIRECTORY_BYTES: usize = 512;
@@ -374,6 +378,7 @@ pub enum NativeCommand {
         options_json: String,
         expires_unix_ms: Option<i64>,
     },
+    PrintPacketCapabilities,
     ValidatePrintPacket {
         specification: Value,
         data: Value,
@@ -1211,6 +1216,12 @@ pub extern "C" fn piqae_node_command(handle: u64, data: *const u8, length: usize
                     .map_err(|_| FfiError::AdapterOperation)?;
                 return Ok(json!({ "handle": handle, "job": accepted }));
             }
+            NativeCommand::PrintPacketCapabilities => {
+                return Ok(json!({
+                    "handle": handle,
+                    "capabilities": printpacket_native_capabilities(),
+                }));
+            }
             NativeCommand::ValidatePrintPacket {
                 specification,
                 data,
@@ -1638,7 +1649,14 @@ enum FfiError {
     SecureConnectorProviderRequired,
     RuntimeTransition,
     BrokerTransport,
-    PrintPacket,
+    PrintPacketInvalidPacket,
+    PrintPacketInvalidData,
+    PrintPacketInvalidResource,
+    PrintPacketCoreUpdateRequired,
+    PrintPacketUnsupportedFeature,
+    PrintPacketTargetUnsupported,
+    PrintPacketLimitExceeded,
+    PrintPacketRenderFailed,
     Contract(String),
     HostConfigurationUnavailable,
     InvalidNodeIdentity,
@@ -1675,7 +1693,14 @@ impl FfiError {
             Self::SecureConnectorProviderRequired => "secure_connector_provider_required",
             Self::RuntimeTransition => "runtime_transition_in_progress",
             Self::BrokerTransport => "broker_transport_failed",
-            Self::PrintPacket => "printpacket_invalid_or_unsupported",
+            Self::PrintPacketInvalidPacket => "printpacket_invalid_packet",
+            Self::PrintPacketInvalidData => "printpacket_invalid_data",
+            Self::PrintPacketInvalidResource => "printpacket_invalid_resource",
+            Self::PrintPacketCoreUpdateRequired => "printpacket_core_update_required",
+            Self::PrintPacketUnsupportedFeature => "printpacket_unsupported_feature",
+            Self::PrintPacketTargetUnsupported => "printpacket_unsupported_target",
+            Self::PrintPacketLimitExceeded => "printpacket_limit_exceeded",
+            Self::PrintPacketRenderFailed => "printpacket_render_failed",
             Self::Contract(_) => "invalid_configuration",
             Self::HostConfigurationUnavailable => "host_configuration_unavailable",
             Self::InvalidNodeIdentity => "invalid_node_identity",
@@ -1720,8 +1745,21 @@ impl FfiError {
             }
             Self::RuntimeTransition => "the runtime is stopping or changing ownership",
             Self::BrokerTransport => "the installed local node broker request failed",
-            Self::PrintPacket => {
-                "the PrintPacket template, data, resources, target, or renderer limits are unsupported"
+            Self::PrintPacketInvalidPacket => "the PrintPacket template is invalid",
+            Self::PrintPacketInvalidData => "the PrintPacket data is invalid",
+            Self::PrintPacketInvalidResource => "a PrintPacket resource is invalid",
+            Self::PrintPacketCoreUpdateRequired => {
+                "the native runtime must be updated for this PrintPacket version or feature"
+            }
+            Self::PrintPacketUnsupportedFeature => {
+                "a PrintPacket feature is not supported by this native runtime"
+            }
+            Self::PrintPacketTargetUnsupported => {
+                "the exact PrintPacket output target is not supported by this native runtime"
+            }
+            Self::PrintPacketLimitExceeded => "the PrintPacket exceeds a native runtime limit",
+            Self::PrintPacketRenderFailed => {
+                "the PrintPacket could not be rendered by the native runtime"
             }
             Self::Internal => "the runtime operation failed",
         }
@@ -1737,6 +1775,40 @@ struct PrintPacketOutput {
     pages: u32,
 }
 
+#[derive(Debug, Serialize)]
+struct PrintPacketNativeCapabilities {
+    contract: &'static str,
+    renderer_abi: &'static str,
+    resource_abi: &'static str,
+    renderer_build: String,
+    conformance_profile: String,
+    cache_profile: &'static str,
+    supported_features: BTreeSet<printpacket::Feature>,
+    supported_output_targets: Vec<OutputTarget>,
+    resource_media_types: BTreeSet<String>,
+    hard_limits: PacketLimits,
+    persistent_resource_cache: bool,
+    direct_offline_rendering: bool,
+}
+
+fn printpacket_native_capabilities() -> PrintPacketNativeCapabilities {
+    let capabilities = RendererCapabilities::reference_pdf();
+    PrintPacketNativeCapabilities {
+        contract: PRINTPACKET_CONTRACT,
+        renderer_abi: PRINTPACKET_RENDERER_ABI,
+        resource_abi: PRINTPACKET_RESOURCE_ABI,
+        renderer_build: capabilities.implementation_version,
+        conformance_profile: printpacket::CONFORMANCE_CORE_V1.into(),
+        cache_profile: PRINTPACKET_CACHE_PROFILE,
+        supported_features: capabilities.features,
+        supported_output_targets: capabilities.output_targets,
+        resource_media_types: capabilities.resource_media_types,
+        hard_limits: capabilities.limits,
+        persistent_resource_cache: capabilities.persistent_resource_cache,
+        direct_offline_rendering: capabilities.direct_offline_rendering,
+    }
+}
+
 #[derive(Debug)]
 struct RenderedPrintPacket {
     content: Vec<u8>,
@@ -1745,6 +1817,10 @@ struct RenderedPrintPacket {
     output: PrintPacketOutput,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fail-closed boundary validates, negotiates, resolves, renders, and hashes a sensitive packet without intermediate persistence"
+)]
 fn render_printpacket(
     specification: &Value,
     data: &Value,
@@ -1752,20 +1828,22 @@ fn render_printpacket(
     resources_base64: &BTreeMap<String, String>,
 ) -> Result<RenderedPrintPacket, FfiError> {
     let limits = RenderLimits::default();
-    let (document, manifest) =
-        analyze_document(specification, limits).map_err(|_| FfiError::PrintPacket)?;
+    let (document, manifest) = analyze_document(specification, limits).map_err(map_packet_error)?;
     let packet_limits = PacketLimits::default();
     if manifest.canonical_bytes > packet_limits.max_template_bytes
         || manifest.resource_count > packet_limits.max_resources
         || manifest.resource_bytes > packet_limits.max_total_resource_bytes
-        || resources_base64.len() != document.resources.len()
     {
-        return Err(FfiError::PrintPacket);
+        return Err(FfiError::PrintPacketLimitExceeded);
     }
-    let canonical_data = canonical_data_bytes(data).map_err(|_| FfiError::PrintPacket)?;
-    let data_bytes = u64::try_from(canonical_data.len()).map_err(|_| FfiError::PrintPacket)?;
+    if resources_base64.len() != document.resources.len() {
+        return Err(FfiError::PrintPacketInvalidResource);
+    }
+    let canonical_data = canonical_data_bytes(data).map_err(map_packet_error)?;
+    let data_bytes =
+        u64::try_from(canonical_data.len()).map_err(|_| FfiError::PrintPacketLimitExceeded)?;
     if data_bytes > packet_limits.max_data_bytes {
-        return Err(FfiError::PrintPacket);
+        return Err(FfiError::PrintPacketLimitExceeded);
     }
     let maximum_resource_bytes = document
         .resources
@@ -1789,46 +1867,60 @@ fn render_printpacket(
         maximum_resource_bytes,
         resource_bytes: manifest.resource_bytes,
     };
-    if negotiate_printpacket(&RendererCapabilities::reference_pdf(), &requirement).status
-        != CompatibilityStatus::Compatible
-    {
-        return Err(FfiError::PrintPacket);
+    match negotiate_printpacket(&RendererCapabilities::reference_pdf(), &requirement).status {
+        CompatibilityStatus::Compatible => {}
+        CompatibilityStatus::NodeUpdateRequired => {
+            return Err(FfiError::PrintPacketCoreUpdateRequired);
+        }
+        CompatibilityStatus::UnsupportedTarget => {
+            return Err(FfiError::PrintPacketTargetUnsupported);
+        }
+        CompatibilityStatus::LimitExceeded => {
+            return Err(FfiError::PrintPacketLimitExceeded);
+        }
     }
     let mut resolved = ResolvedResources::default();
     let mut resolved_bytes = 0_u64;
     for (resource_id, declaration) in &document.resources {
         let printpacket::Resource::Image {
             byte_length,
+            digest,
             media_type,
             ..
         } = declaration;
         if media_type != "image/jpeg" || *byte_length > packet_limits.max_resource_bytes {
-            return Err(FfiError::PrintPacket);
+            return Err(FfiError::PrintPacketInvalidResource);
         }
         let encoded = resources_base64
             .get(resource_id)
-            .ok_or(FfiError::PrintPacket)?;
+            .ok_or(FfiError::PrintPacketInvalidResource)?;
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(encoded)
-            .map_err(|_| FfiError::PrintPacket)?;
+            .map_err(|_| FfiError::PrintPacketInvalidResource)?;
         if u64::try_from(bytes.len()).ok() != Some(*byte_length) {
-            return Err(FfiError::PrintPacket);
+            return Err(FfiError::PrintPacketInvalidResource);
+        }
+        let actual_digest = format!("sha256:{:x}", sha2::Sha256::digest(&bytes));
+        if !actual_digest.eq_ignore_ascii_case(digest) {
+            return Err(FfiError::PrintPacketInvalidResource);
         }
         resolved_bytes = resolved_bytes
             .checked_add(*byte_length)
             .filter(|total| *total <= packet_limits.max_total_resource_bytes)
-            .ok_or(FfiError::PrintPacket)?;
+            .ok_or(FfiError::PrintPacketLimitExceeded)?;
         resolved.images.insert(resource_id.clone(), bytes);
     }
-    let output = render_with_metrics(&document, data, &resolved, limits)
-        .map_err(|_| FfiError::PrintPacket)?;
-    let output_bytes = u64::try_from(output.pdf.len()).map_err(|_| FfiError::PrintPacket)?;
+    let output =
+        render_with_metrics(&document, data, &resolved, limits).map_err(map_render_error)?;
+    let output_bytes =
+        u64::try_from(output.pdf.len()).map_err(|_| FfiError::PrintPacketLimitExceeded)?;
     let sha256 = format!("{:x}", sha2::Sha256::digest(&output.pdf));
-    let cache_key =
-        render_cache_key(&manifest, data, output_target).map_err(|_| FfiError::PrintPacket)?;
+    let cache_key = render_cache_key(&manifest, data, output_target).map_err(map_packet_error)?;
     let profile = match output_target {
         OutputTarget::Pdf { profile } => profile.clone(),
-        OutputTarget::PrinterNative { .. } => return Err(FfiError::PrintPacket),
+        OutputTarget::PrinterNative { .. } => {
+            return Err(FfiError::PrintPacketTargetUnsupported);
+        }
     };
     Ok(RenderedPrintPacket {
         content: output.pdf,
@@ -1842,6 +1934,39 @@ fn render_printpacket(
             pages: output.page_count,
         },
     })
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "used directly as a Result::map_err adapter and never retains error details"
+)]
+fn map_packet_error(error: PacketError) -> FfiError {
+    match error {
+        PacketError::UnsupportedVersion(_) => FfiError::PrintPacketCoreUpdateRequired,
+        PacketError::InvalidDocument(_) => FfiError::PrintPacketInvalidPacket,
+        PacketError::InvalidData(_) => FfiError::PrintPacketInvalidData,
+    }
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "used directly as a Result::map_err adapter and never retains error details"
+)]
+fn map_render_error(error: RenderError) -> FfiError {
+    match error {
+        RenderError::UnsupportedVersion(_) => FfiError::PrintPacketCoreUpdateRequired,
+        RenderError::Unsupported(_) => FfiError::PrintPacketUnsupportedFeature,
+        RenderError::Limit(_) => FfiError::PrintPacketLimitExceeded,
+        RenderError::Invalid(_) | RenderError::InvalidBarcode(_) => {
+            FfiError::PrintPacketInvalidPacket
+        }
+        RenderError::MissingPath(_) | RenderError::Expression(_) => {
+            FfiError::PrintPacketInvalidData
+        }
+        RenderError::UnsupportedCharacter { .. } | RenderError::QrTooLarge => {
+            FfiError::PrintPacketRenderFailed
+        }
+    }
 }
 
 fn lock_embedded(
@@ -1969,7 +2094,10 @@ mod tests {
     #[test]
     fn abi_descriptor_is_fixed_width_and_versioned() {
         assert_eq!(std::mem::size_of::<PiqaeNodeAbiDescriptor>(), 6);
-        assert_eq!(piqae_node_abi_descriptor().abi_version, 1);
+        let descriptor = piqae_node_abi_descriptor();
+        assert_eq!(descriptor.abi_version, 1);
+        assert_eq!(descriptor.contract_min, 2);
+        assert_eq!(descriptor.contract_max, 2);
     }
 
     #[test]
@@ -2003,7 +2131,7 @@ mod tests {
     fn config_rejects_absolute_parent_traversal_control_and_invalid_app_ids() {
         for directory in ["/tmp/app", "../app", "app/../other", "app\nstate"] {
             let bytes = format!(
-                r#"{{"contract":1,"host_mode":"embedded_application","availability":"foreground_only","local_only":true,"application_id":"com.example.pos","data_directory":{}}}"#,
+                r#"{{"contract":2,"host_mode":"embedded_application","availability":"foreground_only","local_only":true,"application_id":"com.example.pos","data_directory":{}}}"#,
                 serde_json::to_string(directory).unwrap()
             );
             assert!(
@@ -2011,8 +2139,13 @@ mod tests {
                 "{directory}"
             );
         }
-        let bytes = br#"{"contract":1,"host_mode":"embedded_application","availability":"foreground_only","local_only":true,"application_id":"not valid","data_directory":"app-state"}"#;
+        let bytes = br#"{"contract":2,"host_mode":"embedded_application","availability":"foreground_only","local_only":true,"application_id":"not valid","data_directory":"app-state"}"#;
         assert!(decode_configuration(bytes).is_err());
+        let old_contract = br#"{"contract":1,"host_mode":"embedded_application","availability":"foreground_only","local_only":true,"application_id":"com.example.pos","data_directory":"app-state"}"#;
+        assert!(matches!(
+            decode_configuration(old_contract),
+            Err(ContractError::UnsupportedVersion(1))
+        ));
     }
 
     #[test]
@@ -2052,6 +2185,28 @@ mod tests {
         let created = read_and_free(piqae_node_create(fixture.as_ptr(), fixture.len()));
         let handle = created["data"]["handle"].as_u64().unwrap();
         assert_eq!(read_and_free(piqae_node_start(handle))["ok"], true);
+        let capabilities = command(handle, json!({"type":"print_packet_capabilities"}));
+        assert_eq!(capabilities["ok"], true);
+        assert_eq!(
+            capabilities["data"]["capabilities"]["contract"],
+            "printpacket/v1"
+        );
+        assert_eq!(
+            capabilities["data"]["capabilities"]["renderer_abi"],
+            "printpacket.pdf-renderer/v1"
+        );
+        assert_eq!(
+            capabilities["data"]["capabilities"]["resource_abi"],
+            "printpacket.resources/v1"
+        );
+        assert_eq!(
+            capabilities["data"]["capabilities"]["cache_profile"],
+            "printpacket.render-cache/v1"
+        );
+        assert_eq!(
+            capabilities["data"]["capabilities"]["direct_offline_rendering"],
+            true
+        );
         let updated = command(
             handle,
             json!({
@@ -2700,7 +2855,24 @@ mod tests {
                 }
             }),
         );
-        assert_eq!(raw["error"]["code"], "printpacket_invalid_or_unsupported");
+        assert_eq!(raw["error"]["code"], "printpacket_unsupported_target");
+
+        let update_required = command(
+            handle,
+            json!({
+                "type":"validate_print_packet",
+                "specification":{
+                    "format":"printpacket/v2",
+                    "media":{"kind":"continuous","width_mm":80},
+                    "body":[]
+                },
+                "data":{}
+            }),
+        );
+        assert_eq!(
+            update_required["error"]["code"],
+            "printpacket_core_update_required"
+        );
         let _ = read_and_free(piqae_node_destroy(handle));
     }
 
@@ -2715,6 +2887,8 @@ mod tests {
             include_bytes!("../../../contracts/node-sdk/v1/reconcile-cloud-request.json")
                 .as_slice(),
             include_bytes!("../../../contracts/node-sdk/v1/reconcile-cloud-poll.json").as_slice(),
+            include_bytes!("../../../contracts/node-sdk/v1/printpacket-capabilities.json")
+                .as_slice(),
             include_bytes!("../../../contracts/node-sdk/v1/printpacket-validate.json").as_slice(),
             include_bytes!("../../../contracts/node-sdk/v1/printpacket-enqueue.json").as_slice(),
         ] {
