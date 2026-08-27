@@ -70,10 +70,11 @@ fn applied_history_is_current_prefix(
         return false;
     }
     rows.iter().zip(migrator.iter()).all(|(applied, current)| {
+        let checksum_matches = applied.checksum.as_slice() == current.checksum.as_ref();
         applied.success
             && applied.version == current.version
             && applied.description == current.description
-            && applied.checksum.as_slice() == current.checksum.as_ref()
+            && checksum_matches
     })
 }
 
@@ -186,6 +187,25 @@ pub struct JobLease {
     pub lease_id: Uuid,
     pub lease_token: String,
     pub lease_until: DateTime<Utc>,
+}
+
+/// A job transition committed atomically with its durable outbox row.
+///
+/// The caller reuses this key to broadcast the same event to live subscribers
+/// without creating a second durable webhook event.
+#[derive(Clone, Debug)]
+pub struct DurableJobTransition {
+    pub job: Job,
+    pub webhook_idempotency_key: String,
+}
+
+/// Result of a server-side pre-handoff transition. Local responsibility is a
+/// non-error scheduling outcome: the job remains fenced and later candidates
+/// in the same bounded claim batch may still progress.
+#[derive(Clone, Debug)]
+pub enum PreHandoffTransitionOutcome {
+    Transitioned(Box<DurableJobTransition>),
+    UnsafeLocalResponsibility,
 }
 
 /// A claimed, content-free wake notification waiting to be projected into the
@@ -3802,7 +3822,7 @@ impl PostgresStore {
             "SELECT id, name, identity_site, identity_location, identity_labels,
                     identity_revision, os, state, version, COALESCE(last_seen_at, created_at) AS last_seen_at,
                     health_started_at, health_observed_at, sqlite_integrity_ok,
-                    executor_crashes, last_error_code, document_render_capabilities
+                    executor_crashes, last_error_code, printpacket_render_capabilities
              FROM agents
              WHERE workspace_id = $1 AND environment_id = $2 AND revoked_at IS NULL
              ORDER BY created_at DESC, id DESC",
@@ -3824,7 +3844,7 @@ impl PostgresStore {
             "SELECT id, name, identity_site, identity_location, identity_labels,
                     identity_revision, os, state, version, COALESCE(last_seen_at, created_at) AS last_seen_at,
                     health_started_at, health_observed_at, sqlite_integrity_ok,
-                    executor_crashes, last_error_code, document_render_capabilities
+                    executor_crashes, last_error_code, printpacket_render_capabilities
              FROM agents
              WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
                AND revoked_at IS NULL",
@@ -3858,7 +3878,7 @@ impl PostgresStore {
                        identity_revision, os, state, version,
                        COALESCE(last_seen_at, created_at) AS last_seen_at,
                        health_started_at, health_observed_at, sqlite_integrity_ok,
-                       executor_crashes, last_error_code, document_render_capabilities",
+                       executor_crashes, last_error_code, printpacket_render_capabilities",
         )
         .bind(agent_id.to_string())
         .bind(workspace_id.to_string())
@@ -8316,7 +8336,7 @@ impl PostgresStore {
         job_id: JobId,
         lease_id: Uuid,
         lease_token: &str,
-    ) -> Result<Job, StorageError> {
+    ) -> Result<PreHandoffTransitionOutcome, StorageError> {
         let token_hash = Sha256::digest(lease_token.as_bytes()).to_vec();
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(
@@ -8337,6 +8357,17 @@ impl PostgresStore {
         .ok_or(StorageError::ConcurrentStateChange)?;
         let current_state: String = row.try_get("state")?;
         let mut job = job_from_row(row.try_get("payload")?, &current_state)?;
+        if !supersede_pre_handoff_delivery_attempts(
+            &mut transaction,
+            workspace_id,
+            environment_id,
+            job_id,
+        )
+        .await?
+        {
+            transaction.commit().await?;
+            return Ok(PreHandoffTransitionOutcome::UnsafeLocalResponsibility);
+        }
         let sequence = row.try_get::<i64, _>("state_sequence")? + 1;
         let sequence_u64 = u64::try_from(sequence)
             .map_err(|error| StorageError::InvalidData(format!("event sequence: {error}")))?;
@@ -8385,38 +8416,30 @@ impl PostgresStore {
         if updated.rows_affected() != 1 {
             return Err(StorageError::ConcurrentStateChange);
         }
-        // A current server never reserves before compatibility is proven. The
-        // cleanup is intentionally defensive for a lease first offered by an
-        // older process before a capability report changed.
         sqlx::query(
-            "UPDATE delivery_attempts SET state='rejected_before_handoff',final_at=$4,updated_at=$4
-             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3
-               AND state='route_leased' AND final_at IS NULL",
+            "INSERT INTO node_capability_recovery_checks (
+                 workspace_id,environment_id,agent_id,job_id,next_check_at,checked_at,updated_at
+             ) VALUES ($1,$2,$3,$4,$5,NULL,$5)
+             ON CONFLICT (workspace_id,environment_id,agent_id,job_id)
+             DO UPDATE SET next_check_at=EXCLUDED.next_check_at,
+                           checked_at=NULL,updated_at=EXCLUDED.updated_at",
         )
         .bind(workspace_id.to_string())
         .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
         .bind(job_id.to_string())
         .bind(now)
         .execute(&mut *transaction)
         .await?;
-        sqlx::query(
-            "UPDATE route_reservations SET state='released',released_at=$4,updated_at=$4
-             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND state='active'",
-        )
-        .bind(workspace_id.to_string())
-        .bind(environment_id.to_string())
-        .bind(job_id.to_string())
-        .bind(now)
-        .execute(&mut *transaction)
-        .await?;
+        let webhook_idempotency_key = node_update_required_webhook_idempotency_key(
+            workspace_id,
+            environment_id,
+            job_id,
+            sequence_u64,
+        );
         enqueue_webhook_event_in_transaction(
             &mut transaction,
-            Some(&node_update_required_webhook_idempotency_key(
-                workspace_id,
-                environment_id,
-                job_id,
-                sequence_u64,
-            )),
+            Some(&webhook_idempotency_key),
             workspace_id,
             environment_id,
             "job.updated",
@@ -8424,7 +8447,12 @@ impl PostgresStore {
         )
         .await?;
         transaction.commit().await?;
-        Ok(job)
+        Ok(PreHandoffTransitionOutcome::Transitioned(Box::new(
+            DurableJobTransition {
+                job,
+                webhook_idempotency_key,
+            },
+        )))
     }
 
     /// Atomically terminalizes malformed durable content before any native
@@ -8441,7 +8469,7 @@ impl PostgresStore {
         lease_token: &str,
         reason: JobFailureReason,
         message: &str,
-    ) -> Result<Job, StorageError> {
+    ) -> Result<PreHandoffTransitionOutcome, StorageError> {
         let token_hash = Sha256::digest(lease_token.as_bytes()).to_vec();
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(
@@ -8462,6 +8490,17 @@ impl PostgresStore {
         .ok_or(StorageError::ConcurrentStateChange)?;
         let current_state: String = row.try_get("state")?;
         let mut job = job_from_row(row.try_get("payload")?, &current_state)?;
+        if !supersede_pre_handoff_delivery_attempts(
+            &mut transaction,
+            workspace_id,
+            environment_id,
+            job_id,
+        )
+        .await?
+        {
+            transaction.commit().await?;
+            return Ok(PreHandoffTransitionOutcome::UnsafeLocalResponsibility);
+        }
         let sequence = row.try_get::<i64, _>("state_sequence")? + 1;
         let sequence_u64 = u64::try_from(sequence)
             .map_err(|error| StorageError::InvalidData(format!("event sequence: {error}")))?;
@@ -8477,7 +8516,9 @@ impl PostgresStore {
                 state: JobState::FailedTerminal,
                 reason: Some(reason),
                 message: Some(message.to_owned()),
-                agent_id: Some(agent_id),
+                // Stored-content validation is performed by the server. The
+                // assigned node did not report this failure.
+                agent_id: None,
                 native_job_id: None,
                 occurred_at: now,
             },
@@ -8505,34 +8546,24 @@ impl PostgresStore {
             return Err(StorageError::ConcurrentStateChange);
         }
         sqlx::query(
-            "UPDATE delivery_attempts SET state='rejected_before_handoff',final_at=$4,updated_at=$4
-             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3
-               AND state='route_leased' AND final_at IS NULL",
+            "DELETE FROM node_capability_recovery_checks
+             WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 AND job_id=$4",
         )
         .bind(workspace_id.to_string())
         .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
         .bind(job_id.to_string())
-        .bind(now)
         .execute(&mut *transaction)
         .await?;
-        sqlx::query(
-            "UPDATE route_reservations SET state='released',released_at=$4,updated_at=$4
-             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND state='active'",
-        )
-        .bind(workspace_id.to_string())
-        .bind(environment_id.to_string())
-        .bind(job_id.to_string())
-        .bind(now)
-        .execute(&mut *transaction)
-        .await?;
+        let webhook_idempotency_key = prehandoff_failure_webhook_idempotency_key(
+            workspace_id,
+            environment_id,
+            job_id,
+            sequence_u64,
+        );
         enqueue_webhook_event_in_transaction(
             &mut transaction,
-            Some(&prehandoff_failure_webhook_idempotency_key(
-                workspace_id,
-                environment_id,
-                job_id,
-                sequence_u64,
-            )),
+            Some(&webhook_idempotency_key),
             workspace_id,
             environment_id,
             "job.updated",
@@ -8540,7 +8571,12 @@ impl PostgresStore {
         )
         .await?;
         transaction.commit().await?;
-        Ok(job)
+        Ok(PreHandoffTransitionOutcome::Transitioned(Box::new(
+            DurableJobTransition {
+                job,
+                webhook_idempotency_key,
+            },
+        )))
     }
 
     /// Lists only jobs blocked by the server for a missing node capability.
@@ -8552,10 +8588,17 @@ impl PostgresStore {
         agent_id: AgentId,
         limit: i64,
     ) -> Result<Vec<Job>, StorageError> {
+        let mut transaction = self.pool.begin().await?;
         let rows = sqlx::query(
-            "SELECT job.payload,job.state FROM jobs AS job
+            "SELECT job.payload,job.state,job.id FROM jobs AS job
+             JOIN node_capability_recovery_checks AS recovery
+               ON recovery.workspace_id=job.workspace_id
+              AND recovery.environment_id=job.environment_id
+              AND recovery.agent_id=job.agent_id
+              AND recovery.job_id=job.id
              WHERE job.workspace_id=$1 AND job.environment_id=$2 AND job.agent_id=$3
                AND job.state='blocked' AND job.expires_at>now()
+               AND recovery.next_check_at<=now()
                AND (
                  SELECT event.payload->>'reason'='node_update_required'
                         AND event.payload->>'agent_id' IS NULL
@@ -8565,22 +8608,44 @@ impl PostgresStore {
                    AND event.job_id=job.id
                  ORDER BY event.sequence DESC LIMIT 1
                )=TRUE
-             ORDER BY job.created_at,job.id LIMIT $4",
+             ORDER BY recovery.next_check_at,job.created_at,job.id
+             LIMIT $4 FOR UPDATE OF recovery SKIP LOCKED",
         )
         .bind(workspace_id.to_string())
         .bind(environment_id.to_string())
         .bind(agent_id.to_string())
         .bind(limit.clamp(1, 100))
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *transaction)
         .await?;
-        rows.into_iter()
+        let job_ids = rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("id"))
+            .collect::<Result<Vec<_>, _>>()?;
+        if !job_ids.is_empty() {
+            sqlx::query(
+                "UPDATE node_capability_recovery_checks
+                 SET checked_at=now(),next_check_at=now()+interval '30 seconds',updated_at=now()
+                 WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3
+                   AND job_id=ANY($4)",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(agent_id.to_string())
+            .bind(&job_ids)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        let jobs = rows
+            .into_iter()
             .map(|row| {
                 job_from_row(
                     row.try_get("payload")?,
                     row.try_get::<String, _>("state")?.as_str(),
                 )
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        transaction.commit().await?;
+        Ok(jobs)
     }
 
     /// Returns a capability-blocked job to the queue exactly once after the
@@ -8591,7 +8656,7 @@ impl PostgresStore {
         environment_id: EnvironmentId,
         agent_id: AgentId,
         job_id: JobId,
-    ) -> Result<Option<Job>, StorageError> {
+    ) -> Result<Option<DurableJobTransition>, StorageError> {
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(
             "SELECT job.payload,job.state,job.state_sequence FROM jobs AS job
@@ -8661,14 +8726,25 @@ impl PostgresStore {
         if updated.rows_affected() != 1 {
             return Err(StorageError::ConcurrentStateChange);
         }
+        sqlx::query(
+            "DELETE FROM node_capability_recovery_checks
+             WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 AND job_id=$4",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(job_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        let webhook_idempotency_key = node_capability_recovered_webhook_idempotency_key(
+            workspace_id,
+            environment_id,
+            job_id,
+            sequence_u64,
+        );
         enqueue_webhook_event_in_transaction(
             &mut transaction,
-            Some(&node_capability_recovered_webhook_idempotency_key(
-                workspace_id,
-                environment_id,
-                job_id,
-                sequence_u64,
-            )),
+            Some(&webhook_idempotency_key),
             workspace_id,
             environment_id,
             "job.updated",
@@ -8676,7 +8752,10 @@ impl PostgresStore {
         )
         .await?;
         transaction.commit().await?;
-        Ok(Some(job))
+        Ok(Some(DurableJobTransition {
+            job,
+            webhook_idempotency_key,
+        }))
     }
 
     pub async fn validate_agent_lease(
@@ -11672,6 +11751,62 @@ async fn ensure_waiting_job_wake_hints_in_transaction(
     Ok(candidate_agents.len())
 }
 
+/// Finalizes only a server-side route lease that provably precedes durable
+/// node admission. `accepted_by_node`, `queued_local`, `handing_to_spooler`,
+/// and every later state remain fenced because local work may still run and a
+/// replay could otherwise duplicate a physical print.
+async fn supersede_pre_handoff_delivery_attempts(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+) -> Result<bool, StorageError> {
+    let attempts: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id,state FROM delivery_attempts
+         WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND final_at IS NULL
+         FOR UPDATE",
+    )
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(job_id.to_string())
+    .fetch_all(&mut **transaction)
+    .await?;
+    if attempts.iter().any(|(_, state)| state != "route_leased") {
+        return Ok(false);
+    }
+    let attempt_ids = attempts.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+    if attempt_ids.is_empty() {
+        return Ok(true);
+    }
+    let now = Utc::now();
+    sqlx::query(
+        "UPDATE delivery_attempts
+         SET state='superseded',final_at=$4,updated_at=$4
+         WHERE workspace_id=$1 AND environment_id=$2 AND id=ANY($3)
+           AND state='route_leased'
+           AND final_at IS NULL",
+    )
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(&attempt_ids)
+    .bind(now)
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE route_reservations
+         SET state='superseded',released_at=$4,updated_at=$4
+         WHERE workspace_id=$1 AND environment_id=$2 AND attempt_id=ANY($3)
+           AND state='active'",
+    )
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(&attempt_ids)
+    .bind(now)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(true)
+}
+
 async fn insert_event(
     transaction: &mut Transaction<'_, Postgres>,
     job: &Job,
@@ -12055,7 +12190,7 @@ fn agent_from_row(row: &PgRow) -> Result<StoredAgent, StorageError> {
         executor_crashes: u64::try_from(row.try_get::<i64, _>("executor_crashes")?)
             .map_err(|error| StorageError::InvalidData(format!("executor crash count: {error}")))?,
         last_error_code: row.try_get("last_error_code")?,
-        document_render: serde_json::from_value(row.try_get("document_render_capabilities")?)?,
+        document_render: serde_json::from_value(row.try_get("printpacket_render_capabilities")?)?,
     })
 }
 

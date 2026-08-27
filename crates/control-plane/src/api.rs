@@ -46,10 +46,10 @@ use piqae_protocol::agent::{
     NodeDisplayIdentity,
 };
 use piqae_storage_postgres::{
-    JobLease, StoredAgent, StoredApiKey, StoredNodeConnector, StoredPrinter, StoredTargetBinding,
-    StoredUpload, StoredWebhook, StoredWebhookDelivery, SyncedPrinter,
-    acceptance_revocation_webhook_idempotency_key, agent_acceptance_webhook_idempotency_key,
-    preaccept_cancellation_webhook_idempotency_key,
+    JobLease, PreHandoffTransitionOutcome, StoredAgent, StoredApiKey, StoredNodeConnector,
+    StoredPrinter, StoredTargetBinding, StoredUpload, StoredWebhook, StoredWebhookDelivery,
+    SyncedPrinter, acceptance_revocation_webhook_idempotency_key,
+    agent_acceptance_webhook_idempotency_key, preaccept_cancellation_webhook_idempotency_key,
 };
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
@@ -3089,7 +3089,7 @@ pub async fn agent_sync(
             )
             .await
             {
-                let _ = state
+                if let Some(transition) = state
                     .repository
                     .recover_node_update_required_job(
                         tenant.workspace_id,
@@ -3097,7 +3097,17 @@ pub async fn agent_sync(
                         request.agent_id,
                         blocked.id,
                     )
-                    .await?;
+                    .await?
+                {
+                    state
+                        .publish_idempotently(
+                            &transition.webhook_idempotency_key,
+                            tenant,
+                            "job.updated",
+                            &transition.job,
+                        )
+                        .await?;
+                }
             }
         }
     }
@@ -3172,9 +3182,53 @@ pub async fn agent_sync(
                         &lease.lease_token,
                     )
                     .await;
-                if let Err(error) = transition {
-                    let mut pending = vec![lease];
-                    pending.extend(leases);
+                let transition = match transition {
+                    Ok(PreHandoffTransitionOutcome::Transitioned(transition)) => transition,
+                    Ok(PreHandoffTransitionOutcome::UnsafeLocalResponsibility) => {
+                        let release = state
+                            .repository
+                            .release_agent_lease(
+                                tenant.workspace_id,
+                                tenant.environment_id,
+                                request.agent_id,
+                                lease.job.id,
+                                lease.lease_id,
+                                &lease.lease_token,
+                            )
+                            .await;
+                        if let Err(error) = release {
+                            let mut pending = vec![lease];
+                            pending.extend(leases);
+                            let _ = release_agent_lease_batch(
+                                &state,
+                                tenant,
+                                request.agent_id,
+                                pending,
+                            )
+                            .await;
+                            return Err(error.into());
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        let mut pending = vec![lease];
+                        pending.extend(leases);
+                        let _ =
+                            release_agent_lease_batch(&state, tenant, request.agent_id, pending)
+                                .await;
+                        return Err(error.into());
+                    }
+                };
+                if let Err(error) = state
+                    .publish_idempotently(
+                        &transition.webhook_idempotency_key,
+                        tenant,
+                        "job.updated",
+                        &transition.job,
+                    )
+                    .await
+                {
+                    let pending = leases.collect();
                     let _ =
                         release_agent_lease_batch(&state, tenant, request.agent_id, pending).await;
                     return Err(error.into());
@@ -3214,9 +3268,53 @@ pub async fn agent_sync(
                         message,
                     )
                     .await;
-                if let Err(error) = transition {
-                    let mut pending = vec![lease];
-                    pending.extend(leases);
+                let transition = match transition {
+                    Ok(PreHandoffTransitionOutcome::Transitioned(transition)) => transition,
+                    Ok(PreHandoffTransitionOutcome::UnsafeLocalResponsibility) => {
+                        let release = state
+                            .repository
+                            .release_agent_lease(
+                                tenant.workspace_id,
+                                tenant.environment_id,
+                                request.agent_id,
+                                lease.job.id,
+                                lease.lease_id,
+                                &lease.lease_token,
+                            )
+                            .await;
+                        if let Err(error) = release {
+                            let mut pending = vec![lease];
+                            pending.extend(leases);
+                            let _ = release_agent_lease_batch(
+                                &state,
+                                tenant,
+                                request.agent_id,
+                                pending,
+                            )
+                            .await;
+                            return Err(error.into());
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        let mut pending = vec![lease];
+                        pending.extend(leases);
+                        let _ =
+                            release_agent_lease_batch(&state, tenant, request.agent_id, pending)
+                                .await;
+                        return Err(error.into());
+                    }
+                };
+                if let Err(error) = state
+                    .publish_idempotently(
+                        &transition.webhook_idempotency_key,
+                        tenant,
+                        "job.updated",
+                        &transition.job,
+                    )
+                    .await
+                {
+                    let pending = leases.collect();
                     let _ =
                         release_agent_lease_batch(&state, tenant, request.agent_id, pending).await;
                     return Err(error.into());

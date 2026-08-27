@@ -16,20 +16,20 @@ use piqae_storage_postgres::destination_topology::{
 };
 use piqae_storage_postgres::{
     AgentAuthenticationRecord, CreateDocumentResult, CreateJobResult as PgCreateJobResult,
-    DeliveryAttemptProof, DestinationRouteReassignment, DocumentRenderWork, EnrolledAgent,
-    ExpiredDocumentArtifactWork, JobLease, NewDeviceAuthorization, NodeUpdatePolicy,
-    NodeUpdateState, PendingWakeHintDispatch, PostgresStore, StorageError, StoredAgent,
-    StoredAgentCommandBatch, StoredApiKey, StoredBillingSummary, StoredConnectSessionPreview,
-    StoredContentEncryptionKey, StoredDeviceAuthorization, StoredDocumentPreview,
-    StoredDocumentRender, StoredDocumentTemplate, StoredDocumentTemplateRevision,
-    StoredLoadedMedia, StoredNodeConnector, StoredNodeDiagnostic, StoredNodeUpdate,
-    StoredPlatformAccount, StoredPlatformCredential, StoredPrintWorkflow, StoredPrinter,
-    StoredResolvedPrintTicket, StoredStock, StoredTarget, StoredTargetBinding, StoredTenantEvent,
-    StoredUpload, StoredUsageSummary, StoredWebhook, StoredWebhookDelivery, StoredWorkspace,
-    StoredWorkspaceMember, StripeBillingEvent, StripeProjectionResult, SyncedPrinter,
-    UpsertedPlatformAccount, WebhookDeliveryWork, WorkOsIdentityEvent, WorkOsProjectionResult,
-    acceptance_revocation_webhook_idempotency_key, agent_acceptance_webhook_idempotency_key,
-    node_capability_recovered_webhook_idempotency_key,
+    DeliveryAttemptProof, DestinationRouteReassignment, DocumentRenderWork, DurableJobTransition,
+    EnrolledAgent, ExpiredDocumentArtifactWork, JobLease, NewDeviceAuthorization, NodeUpdatePolicy,
+    NodeUpdateState, PendingWakeHintDispatch, PostgresStore, PreHandoffTransitionOutcome,
+    StorageError, StoredAgent, StoredAgentCommandBatch, StoredApiKey, StoredBillingSummary,
+    StoredConnectSessionPreview, StoredContentEncryptionKey, StoredDeviceAuthorization,
+    StoredDocumentPreview, StoredDocumentRender, StoredDocumentTemplate,
+    StoredDocumentTemplateRevision, StoredLoadedMedia, StoredNodeConnector, StoredNodeDiagnostic,
+    StoredNodeUpdate, StoredPlatformAccount, StoredPlatformCredential, StoredPrintWorkflow,
+    StoredPrinter, StoredResolvedPrintTicket, StoredStock, StoredTarget, StoredTargetBinding,
+    StoredTenantEvent, StoredUpload, StoredUsageSummary, StoredWebhook, StoredWebhookDelivery,
+    StoredWorkspace, StoredWorkspaceMember, StripeBillingEvent, StripeProjectionResult,
+    SyncedPrinter, UpsertedPlatformAccount, WebhookDeliveryWork, WorkOsIdentityEvent,
+    WorkOsProjectionResult, acceptance_revocation_webhook_idempotency_key,
+    agent_acceptance_webhook_idempotency_key, node_capability_recovered_webhook_idempotency_key,
     node_update_required_webhook_idempotency_key, preaccept_cancellation_webhook_idempotency_key,
     prehandoff_failure_webhook_idempotency_key,
 };
@@ -1121,7 +1121,7 @@ pub trait Repository: Send + Sync + 'static {
         job_id: JobId,
         lease_id: Uuid,
         lease_token: &str,
-    ) -> Result<Job, RepositoryError>;
+    ) -> Result<PreHandoffTransitionOutcome, RepositoryError>;
     async fn fail_agent_lease_before_handoff(
         &self,
         workspace_id: WorkspaceId,
@@ -1132,7 +1132,7 @@ pub trait Repository: Send + Sync + 'static {
         lease_token: &str,
         reason: JobFailureReason,
         message: &str,
-    ) -> Result<Job, RepositoryError>;
+    ) -> Result<PreHandoffTransitionOutcome, RepositoryError>;
     async fn list_node_update_required_jobs(
         &self,
         workspace_id: WorkspaceId,
@@ -1146,7 +1146,7 @@ pub trait Repository: Send + Sync + 'static {
         environment_id: EnvironmentId,
         agent_id: AgentId,
         job_id: JobId,
-    ) -> Result<Option<Job>, RepositoryError>;
+    ) -> Result<Option<DurableJobTransition>, RepositoryError>;
     async fn validate_agent_lease(
         &self,
         workspace_id: WorkspaceId,
@@ -3281,7 +3281,7 @@ impl Repository for PostgresStore {
         job_id: JobId,
         lease_id: Uuid,
         lease_token: &str,
-    ) -> Result<Job, RepositoryError> {
+    ) -> Result<PreHandoffTransitionOutcome, RepositoryError> {
         Self::block_agent_lease_for_node_update(
             self,
             workspace_id,
@@ -3305,7 +3305,7 @@ impl Repository for PostgresStore {
         lease_token: &str,
         reason: JobFailureReason,
         message: &str,
-    ) -> Result<Job, RepositoryError> {
+    ) -> Result<PreHandoffTransitionOutcome, RepositoryError> {
         Self::fail_agent_lease_before_handoff(
             self,
             workspace_id,
@@ -3339,7 +3339,7 @@ impl Repository for PostgresStore {
         environment_id: EnvironmentId,
         agent_id: AgentId,
         job_id: JobId,
-    ) -> Result<Option<Job>, RepositoryError> {
+    ) -> Result<Option<DurableJobTransition>, RepositoryError> {
         Self::recover_node_update_required_job(self, workspace_id, environment_id, agent_id, job_id)
             .await
             .map_err(Into::into)
@@ -3660,6 +3660,7 @@ struct MemoryState {
     idempotency: HashMap<(WorkspaceId, EnvironmentId, String), (Vec<u8>, JobId)>,
     wake_hint_outbox: HashMap<String, MemoryWakeHintOutbox>,
     wake_reconciliations: HashMap<(WorkspaceId, EnvironmentId, JobId, u64), usize>,
+    capability_recovery_next_checks: HashMap<JobId, DateTime<Utc>>,
     consumed_envelopes: HashMap<(WorkspaceId, EnvironmentId, String), (String, JobId)>,
     compatibility: HashMap<(WorkspaceId, EnvironmentId, String, String), i64>,
     reverse_compatibility: HashMap<(WorkspaceId, EnvironmentId, String, i64), String>,
@@ -3764,6 +3765,28 @@ impl MemoryRepository {
         if let Some((_, _, _, _, render)) = self.state.write().await.document_renders.get_mut(id) {
             render.lease_expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
         }
+    }
+
+    #[cfg(test)]
+    pub async fn mark_local_responsibility_for_test(&self, job_id: JobId, agent_id: AgentId) {
+        let mut state = self.state.write().await;
+        if let Some(record) = state.jobs.get_mut(&job_id) {
+            record.job.state = JobState::FailedRetryable;
+        }
+        state.job_acceptances.insert(
+            job_id,
+            MemoryJobAcceptance {
+                agent_id,
+                lease_id: Uuid::new_v4(),
+                lease_token: None,
+                content_sha256: None,
+                local_sequence: 1,
+                route_reservation_id: None,
+                route_generation: None,
+                route_fencing_token_hash: None,
+                connector_generation: 1,
+            },
+        );
     }
     pub async fn add_printer(
         &self,
@@ -7683,7 +7706,7 @@ impl Repository for MemoryRepository {
         job_id: JobId,
         lease_id: Uuid,
         lease_token: &str,
-    ) -> Result<Job, RepositoryError> {
+    ) -> Result<PreHandoffTransitionOutcome, RepositoryError> {
         let mut state = self.state.write().await;
         let valid_lease = state.leases.get(&job_id).is_some_and(
             |(stored_agent, stored_id, stored_token, expiry)| {
@@ -7695,6 +7718,9 @@ impl Repository for MemoryRepository {
         );
         if !valid_lease {
             return Err(RepositoryError::ConcurrentStateChange);
+        }
+        if state.job_acceptances.contains_key(&job_id) {
+            return Ok(PreHandoffTransitionOutcome::UnsafeLocalResponsibility);
         }
         let (job, sequence) = {
             let record = state
@@ -7731,22 +7757,31 @@ impl Repository for MemoryRepository {
             (record.job.clone(), record.sequence)
         };
         state.leases.remove(&job_id);
+        state
+            .capability_recovery_next_checks
+            .insert(job_id, Utc::now());
         let payload = serde_json::to_value(&job)
             .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+        let webhook_idempotency_key = node_update_required_webhook_idempotency_key(
+            workspace_id,
+            environment_id,
+            job_id,
+            sequence,
+        );
         enqueue_memory_webhook_event(
             &mut state,
-            Some(&node_update_required_webhook_idempotency_key(
-                workspace_id,
-                environment_id,
-                job_id,
-                sequence,
-            )),
+            Some(&webhook_idempotency_key),
             workspace_id,
             environment_id,
             "job.updated",
             &payload,
         );
-        Ok(job)
+        Ok(PreHandoffTransitionOutcome::Transitioned(Box::new(
+            DurableJobTransition {
+                job,
+                webhook_idempotency_key,
+            },
+        )))
     }
 
     async fn fail_agent_lease_before_handoff(
@@ -7759,7 +7794,7 @@ impl Repository for MemoryRepository {
         lease_token: &str,
         reason: JobFailureReason,
         message: &str,
-    ) -> Result<Job, RepositoryError> {
+    ) -> Result<PreHandoffTransitionOutcome, RepositoryError> {
         let mut state = self.state.write().await;
         let valid_lease = state.leases.get(&job_id).is_some_and(
             |(stored_agent, stored_id, stored_token, expiry)| {
@@ -7771,6 +7806,9 @@ impl Repository for MemoryRepository {
         );
         if !valid_lease {
             return Err(RepositoryError::ConcurrentStateChange);
+        }
+        if state.job_acceptances.contains_key(&job_id) {
+            return Ok(PreHandoffTransitionOutcome::UnsafeLocalResponsibility);
         }
         let (job, sequence) = {
             let record = state
@@ -7795,29 +7833,36 @@ impl Repository for MemoryRepository {
                 state: JobState::FailedTerminal,
                 reason: Some(reason),
                 message: Some(message.to_owned()),
-                agent_id: Some(agent_id),
+                agent_id: None,
                 native_job_id: None,
                 occurred_at: Utc::now(),
             });
             (record.job.clone(), record.sequence)
         };
         state.leases.remove(&job_id);
+        state.capability_recovery_next_checks.remove(&job_id);
         let payload = serde_json::to_value(&job)
             .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+        let webhook_idempotency_key = prehandoff_failure_webhook_idempotency_key(
+            workspace_id,
+            environment_id,
+            job_id,
+            sequence,
+        );
         enqueue_memory_webhook_event(
             &mut state,
-            Some(&prehandoff_failure_webhook_idempotency_key(
-                workspace_id,
-                environment_id,
-                job_id,
-                sequence,
-            )),
+            Some(&webhook_idempotency_key),
             workspace_id,
             environment_id,
             "job.updated",
             &payload,
         );
-        Ok(job)
+        Ok(PreHandoffTransitionOutcome::Transitioned(Box::new(
+            DurableJobTransition {
+                job,
+                webhook_idempotency_key,
+            },
+        )))
     }
 
     async fn list_node_update_required_jobs(
@@ -7827,7 +7872,8 @@ impl Repository for MemoryRepository {
         agent_id: AgentId,
         limit: i64,
     ) -> Result<Vec<Job>, RepositoryError> {
-        let state = self.state.read().await;
+        let mut state = self.state.write().await;
+        let now = Utc::now();
         let mut jobs = state
             .jobs
             .values()
@@ -7837,6 +7883,10 @@ impl Repository for MemoryRepository {
                     && record.agent_id == agent_id
                     && record.job.state == JobState::Blocked
                     && record.job.expires_at > Utc::now()
+                    && state
+                        .capability_recovery_next_checks
+                        .get(&record.job.id)
+                        .is_none_or(|next_check_at| *next_check_at <= now)
                     && record.events.last().is_some_and(|event| {
                         event.reason == Some(JobFailureReason::NodeUpdateRequired)
                             && event.agent_id.is_none()
@@ -7845,11 +7895,20 @@ impl Repository for MemoryRepository {
             .map(|record| record.job.clone())
             .collect::<Vec<_>>();
         jobs.sort_by(|left, right| {
-            left.created_at
-                .cmp(&right.created_at)
+            state
+                .capability_recovery_next_checks
+                .get(&left.id)
+                .cmp(&state.capability_recovery_next_checks.get(&right.id))
+                .then_with(|| left.created_at.cmp(&right.created_at))
                 .then_with(|| left.id.to_string().cmp(&right.id.to_string()))
         });
         jobs.truncate(usize::try_from(limit.clamp(1, 100)).unwrap_or(100));
+        let next_check_at = now + chrono::Duration::seconds(30);
+        for job in &jobs {
+            state
+                .capability_recovery_next_checks
+                .insert(job.id, next_check_at);
+        }
         Ok(jobs)
     }
 
@@ -7859,7 +7918,7 @@ impl Repository for MemoryRepository {
         environment_id: EnvironmentId,
         agent_id: AgentId,
         job_id: JobId,
-    ) -> Result<Option<Job>, RepositoryError> {
+    ) -> Result<Option<DurableJobTransition>, RepositoryError> {
         let mut state = self.state.write().await;
         let (job, sequence) = {
             let Some(record) = state.jobs.get_mut(&job_id).filter(|record| {
@@ -7893,22 +7952,27 @@ impl Repository for MemoryRepository {
             });
             (record.job.clone(), record.sequence)
         };
+        state.capability_recovery_next_checks.remove(&job_id);
         let payload = serde_json::to_value(&job)
             .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+        let webhook_idempotency_key = node_capability_recovered_webhook_idempotency_key(
+            workspace_id,
+            environment_id,
+            job_id,
+            sequence,
+        );
         enqueue_memory_webhook_event(
             &mut state,
-            Some(&node_capability_recovered_webhook_idempotency_key(
-                workspace_id,
-                environment_id,
-                job_id,
-                sequence,
-            )),
+            Some(&webhook_idempotency_key),
             workspace_id,
             environment_id,
             "job.updated",
             &payload,
         );
-        Ok(Some(job))
+        Ok(Some(DurableJobTransition {
+            job,
+            webhook_idempotency_key,
+        }))
     }
 
     async fn validate_agent_lease(
@@ -9909,7 +9973,10 @@ mod routing_repository_tests {
             )
             .await
             .expect("block incompatible lease");
-        assert_eq!(blocked.state, JobState::Blocked);
+        let PreHandoffTransitionOutcome::Transitioned(blocked) = blocked else {
+            panic!("unaccepted fixture must be safe to block")
+        };
+        assert_eq!(blocked.job.state, JobState::Blocked);
         assert!(matches!(
             repository
                 .block_agent_lease_for_node_update(

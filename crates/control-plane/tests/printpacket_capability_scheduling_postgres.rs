@@ -11,7 +11,10 @@ use piqae_domain::{
     AgentId, ContentKind, ContentSource, EnvironmentId, Job, JobFailureReason, JobId, JobOptions,
     JobState, PrinterId, WorkspaceId,
 };
-use piqae_storage_postgres::PostgresStore;
+use piqae_storage_postgres::{
+    PostgresStore, PreHandoffTransitionOutcome,
+    destination_topology::{DestinationTopologyRepository, NewDeliveryAttempt, TenantScope},
+};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
 async fn schema_pool(database_url: &str, schema: &str) -> PgPool {
@@ -76,6 +79,124 @@ async fn seed_tenant(pool: &PgPool) -> (WorkspaceId, EnvironmentId, AgentId, Pri
     .await
     .expect("printer");
     (workspace, environment, agent, printer)
+}
+
+async fn seed_topology(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    environment: EnvironmentId,
+    agent: AgentId,
+    printer: PrinterId,
+) {
+    sqlx::query(
+        "INSERT INTO physical_destinations (
+             workspace_id,environment_id,id,name,state
+         ) VALUES ($1,$2,'pdst_capability','Virtual destination','available')",
+    )
+    .bind(workspace.to_string())
+    .bind(environment.to_string())
+    .execute(pool)
+    .await
+    .expect("physical destination");
+    sqlx::query(
+        "INSERT INTO printer_routes (
+             workspace_id,environment_id,id,destination_id,printer_id,agent_id,
+             native_queue_id,state,role
+         ) VALUES ($1,$2,'rte_capability','pdst_capability',$3,$4,
+                   'virtual-capability','available','primary')",
+    )
+    .bind(workspace.to_string())
+    .bind(environment.to_string())
+    .bind(printer.to_string())
+    .bind(agent.to_string())
+    .execute(pool)
+    .await
+    .expect("printer route");
+}
+
+async fn seed_active_attempt(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    environment: EnvironmentId,
+    job_id: JobId,
+    suffix: &str,
+    state: &str,
+) {
+    sqlx::query(
+        "UPDATE jobs SET state='failed_retryable',destination_id='pdst_capability',
+                         route_id='rte_capability',updated_at=now()
+         WHERE workspace_id=$1 AND environment_id=$2 AND id=$3",
+    )
+    .bind(workspace.to_string())
+    .bind(environment.to_string())
+    .bind(job_id.to_string())
+    .execute(pool)
+    .await
+    .expect("failed-retryable fixture state");
+    let attempt_id = format!("attempt_{suffix}");
+    let reservation_id = format!("reservation_{suffix}");
+    let fence = "f".repeat(64);
+    sqlx::query(
+        "INSERT INTO delivery_attempts (
+             workspace_id,environment_id,id,job_id,destination_id,route_id,
+             generation,fencing_token_hash,state,lease_until
+         ) VALUES ($1,$2,$3,$4,'pdst_capability','rte_capability',1,$5,$6,
+                   now()+interval '1 hour')",
+    )
+    .bind(workspace.to_string())
+    .bind(environment.to_string())
+    .bind(&attempt_id)
+    .bind(job_id.to_string())
+    .bind(&fence)
+    .bind(state)
+    .execute(pool)
+    .await
+    .expect("active attempt fixture");
+    sqlx::query(
+        "INSERT INTO route_reservations (
+             workspace_id,environment_id,id,route_id,destination_id,job_id,
+             attempt_id,generation,fencing_token_hash,state,lease_until
+         ) VALUES ($1,$2,$3,'rte_capability','pdst_capability',$4,$5,1,$6,
+                   'active',now()+interval '1 hour')",
+    )
+    .bind(workspace.to_string())
+    .bind(environment.to_string())
+    .bind(reservation_id)
+    .bind(job_id.to_string())
+    .bind(attempt_id)
+    .bind(fence)
+    .execute(pool)
+    .await
+    .expect("active reservation fixture");
+}
+
+async fn cleanup_active_attempt(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    environment: EnvironmentId,
+    job_id: JobId,
+) {
+    sqlx::query(
+        "UPDATE delivery_attempts SET state='superseded',final_at=now(),updated_at=now()
+         WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND final_at IS NULL",
+    )
+    .bind(workspace.to_string())
+    .bind(environment.to_string())
+    .bind(job_id.to_string())
+    .execute(pool)
+    .await
+    .expect("finalize exact test attempt");
+    sqlx::query(
+        "UPDATE route_reservations
+         SET state='superseded',released_at=now(),updated_at=now()
+         WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND state='active'",
+    )
+    .bind(workspace.to_string())
+    .bind(environment.to_string())
+    .bind(job_id.to_string())
+    .execute(pool)
+    .await
+    .expect("release exact test reservation");
 }
 
 fn job(
@@ -293,6 +414,370 @@ async fn capability_block_and_recovery_are_atomic_fair_and_tenant_scoped() {
         .await
         .expect("later lease remains dispatchable");
 
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop schema");
+}
+
+#[tokio::test]
+async fn capability_recovery_progress_survives_restart_past_sixteen_jobs() {
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL for capability scheduling evidence");
+        return;
+    };
+    let schema = format!("piqae_capability_page_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect PostgreSQL");
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create schema");
+    let pool = schema_pool(&database_url, &schema).await;
+    let store = PostgresStore::from_pool(pool.clone());
+    store.migrate().await.expect("migrations");
+    let (workspace, environment, agent, printer) = seed_tenant(&pool).await;
+    let base = Utc::now() - chrono::Duration::minutes(1);
+    let mut jobs = Vec::new();
+    for index in 0..17 {
+        let job = job(
+            workspace,
+            environment,
+            printer,
+            &format!("paged {index}"),
+            base + chrono::Duration::milliseconds(i64::from(index)),
+        );
+        store
+            .create_job(&job, agent, None, job.title.as_bytes())
+            .await
+            .expect("paged job");
+        jobs.push(job);
+    }
+    let leases = store
+        .claim_jobs(workspace, environment, agent, "virtual-page", 100)
+        .await
+        .expect("claim paged jobs");
+    assert_eq!(leases.len(), 17);
+    for lease in leases {
+        assert!(matches!(
+            store
+                .block_agent_lease_for_node_update(
+                    workspace,
+                    environment,
+                    agent,
+                    lease.job.id,
+                    lease.lease_id,
+                    &lease.lease_token,
+                )
+                .await
+                .expect("block paged job"),
+            PreHandoffTransitionOutcome::Transitioned(_)
+        ));
+    }
+    let first_page = store
+        .list_node_update_required_jobs(workspace, environment, agent, 16)
+        .await
+        .expect("first recovery page");
+    assert_eq!(first_page.len(), 16);
+    assert_eq!(first_page[0].id, jobs[0].id);
+    drop(store);
+    pool.close().await;
+
+    let restarted_pool = schema_pool(&database_url, &schema).await;
+    let restarted = PostgresStore::from_pool(restarted_pool.clone());
+    let second_page = restarted
+        .list_node_update_required_jobs(workspace, environment, agent, 16)
+        .await
+        .expect("recovery page after restart");
+    assert_eq!(
+        second_page.iter().map(|job| job.id).collect::<Vec<_>>(),
+        vec![jobs[16].id]
+    );
+
+    restarted_pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop schema");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn prehandoff_transitions_finalize_only_unaccepted_route_leases() {
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL for capability scheduling evidence");
+        return;
+    };
+    let schema = format!("piqae_capability_attempt_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect PostgreSQL");
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create schema");
+    let pool = schema_pool(&database_url, &schema).await;
+    let store = PostgresStore::from_pool(pool.clone());
+    store.migrate().await.expect("migrations");
+    let (workspace, environment, agent, printer) = seed_tenant(&pool).await;
+    seed_topology(&pool, workspace, environment, agent, printer).await;
+    let scope = TenantScope {
+        workspace_id: workspace,
+        environment_id: environment,
+    };
+
+    let blocked_job = job(
+        workspace,
+        environment,
+        printer,
+        "block route lease",
+        Utc::now() - chrono::Duration::seconds(3),
+    );
+    store
+        .create_job(&blocked_job, agent, None, b"block route lease")
+        .await
+        .expect("block job");
+    seed_active_attempt(
+        &pool,
+        workspace,
+        environment,
+        blocked_job.id,
+        "block",
+        "route_leased",
+    )
+    .await;
+    let lease = store
+        .claim_jobs(workspace, environment, agent, "block-attempt", 1)
+        .await
+        .expect("claim block job")
+        .pop()
+        .expect("block lease");
+    assert!(matches!(
+        store
+            .block_agent_lease_for_node_update(
+                workspace,
+                environment,
+                agent,
+                blocked_job.id,
+                lease.lease_id,
+                &lease.lease_token,
+            )
+            .await
+            .expect("block route-leased job"),
+        PreHandoffTransitionOutcome::Transitioned(_)
+    ));
+    let projection: (String, bool, String, bool) = sqlx::query_as(
+        "SELECT attempt.state,attempt.final_at IS NOT NULL,
+                reservation.state,reservation.released_at IS NOT NULL
+         FROM delivery_attempts AS attempt
+         JOIN route_reservations AS reservation
+           ON reservation.workspace_id=attempt.workspace_id
+          AND reservation.environment_id=attempt.environment_id
+          AND reservation.attempt_id=attempt.id
+         WHERE attempt.job_id=$1",
+    )
+    .bind(blocked_job.id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("blocked delivery projection");
+    assert_eq!(
+        projection,
+        ("superseded".into(), true, "superseded".into(), true)
+    );
+    let _ = store
+        .list_node_update_required_jobs(workspace, environment, agent, 1)
+        .await
+        .expect("schedule recovery check");
+    assert!(
+        store
+            .recover_node_update_required_job(workspace, environment, agent, blocked_job.id)
+            .await
+            .expect("recover blocked route lease")
+            .is_some()
+    );
+    let blocked_job_id = blocked_job.id.to_string();
+    store
+        .begin_delivery_attempt(
+            scope,
+            NewDeliveryAttempt {
+                attempt_id: "attempt_block_recovered",
+                reservation_id: "reservation_block_recovered",
+                job_id: &blocked_job_id,
+                destination_id: "pdst_capability",
+                route_id: "rte_capability",
+                lease_until: Utc::now() + chrono::Duration::minutes(1),
+            },
+        )
+        .await
+        .expect("recovered job can acquire a fresh route fence");
+    cleanup_active_attempt(&pool, workspace, environment, blocked_job.id).await;
+    sqlx::query(
+        "UPDATE jobs SET state='failed_terminal',final_at=now(),updated_at=now()
+         WHERE workspace_id=$1 AND environment_id=$2 AND id=$3",
+    )
+    .bind(workspace.to_string())
+    .bind(environment.to_string())
+    .bind(blocked_job.id.to_string())
+    .execute(&pool)
+    .await
+    .expect("retire recovered fixture before later scheduling assertions");
+
+    let failed_job = job(
+        workspace,
+        environment,
+        printer,
+        "fail route lease",
+        Utc::now() - chrono::Duration::seconds(2),
+    );
+    store
+        .create_job(&failed_job, agent, None, b"fail route lease")
+        .await
+        .expect("failure job");
+    seed_active_attempt(
+        &pool,
+        workspace,
+        environment,
+        failed_job.id,
+        "failure",
+        "route_leased",
+    )
+    .await;
+    let lease = store
+        .claim_jobs(workspace, environment, agent, "fail-attempt", 1)
+        .await
+        .expect("claim failure job")
+        .pop()
+        .expect("failure lease");
+    let outcome = store
+        .fail_agent_lease_before_handoff(
+            workspace,
+            environment,
+            agent,
+            failed_job.id,
+            lease.lease_id,
+            &lease.lease_token,
+            JobFailureReason::ContentChecksumMismatch,
+            "invalid stored fixture",
+        )
+        .await
+        .expect("terminalize route-leased failure");
+    assert!(matches!(
+        outcome,
+        PreHandoffTransitionOutcome::Transitioned(_)
+    ));
+    let projection: (String, bool, String, bool) = sqlx::query_as(
+        "SELECT attempt.state,attempt.final_at IS NOT NULL,
+                reservation.state,reservation.released_at IS NOT NULL
+         FROM delivery_attempts AS attempt
+         JOIN route_reservations AS reservation
+           ON reservation.attempt_id=attempt.id
+          AND reservation.workspace_id=attempt.workspace_id
+          AND reservation.environment_id=attempt.environment_id
+         WHERE attempt.job_id=$1",
+    )
+    .bind(failed_job.id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("failed delivery projection");
+    assert_eq!(
+        projection,
+        ("superseded".into(), true, "superseded".into(), true)
+    );
+    let failure_events = store
+        .list_job_events(workspace, environment, failed_job.id)
+        .await
+        .expect("failure events");
+    assert_eq!(failure_events.last().and_then(|event| event.agent_id), None);
+
+    for (index, attempt_state) in ["accepted_by_node", "queued_local", "handing_to_spooler"]
+        .into_iter()
+        .enumerate()
+    {
+        let unsafe_job = job(
+            workspace,
+            environment,
+            printer,
+            &format!("unsafe {attempt_state}"),
+            Utc::now() + chrono::Duration::milliseconds(i64::try_from(index).unwrap_or(0)),
+        );
+        store
+            .create_job(&unsafe_job, agent, None, unsafe_job.title.as_bytes())
+            .await
+            .expect("unsafe job");
+        seed_active_attempt(
+            &pool,
+            workspace,
+            environment,
+            unsafe_job.id,
+            &format!("unsafe_{index}"),
+            attempt_state,
+        )
+        .await;
+        let lease = store
+            .claim_jobs(workspace, environment, agent, "unsafe-attempt", 1)
+            .await
+            .expect("claim unsafe job")
+            .pop()
+            .expect("unsafe lease");
+        assert!(matches!(
+            store
+                .block_agent_lease_for_node_update(
+                    workspace,
+                    environment,
+                    agent,
+                    unsafe_job.id,
+                    lease.lease_id,
+                    &lease.lease_token,
+                )
+                .await
+                .expect("classify local responsibility"),
+            PreHandoffTransitionOutcome::UnsafeLocalResponsibility
+        ));
+        assert_eq!(
+            store
+                .get_job(workspace, environment, unsafe_job.id)
+                .await
+                .expect("unsafe job unchanged")
+                .state,
+            JobState::FailedRetryable
+        );
+        let attempt: (String, bool) =
+            sqlx::query_as("SELECT state,final_at IS NULL FROM delivery_attempts WHERE job_id=$1")
+                .bind(unsafe_job.id.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("unsafe attempt unchanged");
+        assert_eq!(attempt, (attempt_state.into(), true));
+        store
+            .release_agent_lease(
+                workspace,
+                environment,
+                agent,
+                unsafe_job.id,
+                lease.lease_id,
+                &lease.lease_token,
+            )
+            .await
+            .expect("release unsafe lease");
+        cleanup_active_attempt(&pool, workspace, environment, unsafe_job.id).await;
+        sqlx::query(
+            "UPDATE jobs SET state='failed_terminal',final_at=now(),updated_at=now()
+             WHERE workspace_id=$1 AND environment_id=$2 AND id=$3",
+        )
+        .bind(workspace.to_string())
+        .bind(environment.to_string())
+        .bind(unsafe_job.id.to_string())
+        .execute(&pool)
+        .await
+        .expect("retire exact unsafe fixture");
+    }
+
+    pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
         .await
