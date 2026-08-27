@@ -90,7 +90,7 @@ async fn node_identity_upgrades_43_and_fences_tenants_revisions_and_invalid_rows
         .expect("version 43 agent fixture");
 
     let store = PostgresStore::from_pool(pool.clone());
-    store.migrate().await.expect("upgrade 43 to 44");
+    store.migrate().await.expect("upgrade 43 to latest");
     let upgraded = store
         .get_agent(workspace, environment, agent)
         .await
@@ -186,7 +186,7 @@ async fn node_identity_upgrades_43_and_fences_tenants_revisions_and_invalid_rows
         .fetch_one(&pool)
         .await
         .expect("schema version");
-    assert_eq!(latest, 44);
+    assert_eq!(latest, 45);
 
     pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
@@ -201,13 +201,15 @@ async fn node_identity_upgrades_43_and_fences_tenants_revisions_and_invalid_rows
         .await
         .expect("create fresh schema");
     let fresh = schema_pool(&database_url, &fresh_schema).await;
-    all.run(&fresh).await.expect("migrate empty database to 44");
+    all.run(&fresh)
+        .await
+        .expect("migrate empty database to latest");
     let fresh_latest: i64 =
         sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
             .fetch_one(&fresh)
             .await
             .expect("fresh schema version");
-    assert_eq!(fresh_latest, 44);
+    assert_eq!(fresh_latest, 45);
     fresh.close().await;
     sqlx::query(&format!("DROP SCHEMA {fresh_schema} CASCADE"))
         .execute(&admin)

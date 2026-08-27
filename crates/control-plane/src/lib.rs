@@ -4079,6 +4079,162 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn capability_recovery_pages_past_sixteen_incompatible_jobs() {
+        let application = application().await;
+        assert!(
+            sync_virtual_document_node(
+                &application,
+                piqae_protocol::agent::DocumentRenderCapabilities::default(),
+                false,
+            )
+            .await
+            .candidate_jobs
+            .is_empty()
+        );
+        let mut live_events = application.state.events.subscribe();
+        let mut job_ids = Vec::new();
+        let base_time = Utc::now() - chrono::Duration::minutes(1);
+        for index in 0..17 {
+            let profile = if index < 16 {
+                "zpl.generic/v1"
+            } else {
+                "escpos.generic/v1"
+            };
+            let language = if index < 16 { "zpl" } else { "escpos" };
+            let media_type = if index < 16 {
+                "application/vnd.zebra-zpl"
+            } else {
+                "application/vnd.escpos"
+            };
+            let job = piqae_domain::Job {
+                id: JobId::new(),
+                workspace_id: application.tenant.workspace_id,
+                environment_id: application.tenant.environment_id,
+                printer_id: application.printer_id,
+                title: format!("Paged native job {index}"),
+                source: None,
+                content_kind: piqae_domain::ContentKind::Raw,
+                content: piqae_domain::ContentSource::Base64 {
+                    data: "G0BmaXh0dXJl".into(),
+                },
+                options: piqae_domain::JobOptions::default(),
+                metadata: std::collections::BTreeMap::from([
+                    ("piqae.printer_native.output_profile".into(), profile.into()),
+                    (
+                        "piqae.printer_native.language_profile".into(),
+                        profile.into(),
+                    ),
+                    ("piqae.printer_native.language".into(), language.into()),
+                    ("piqae.printer_native.language_version".into(), "1".into()),
+                    (
+                        "piqae.printer_native.profile_version".into(),
+                        "1.0.0".into(),
+                    ),
+                    ("piqae.printer_native.media_type".into(), media_type.into()),
+                    (
+                        "piqae.printer_native.driver_fingerprint_sha256".into(),
+                        "b".repeat(64),
+                    ),
+                    (
+                        "piqae.printer_native.support_pack_digest_sha256".into(),
+                        "c".repeat(64),
+                    ),
+                    (
+                        "piqae.printer_native.printer_id".into(),
+                        application.printer_id.to_string(),
+                    ),
+                ]),
+                deliveries: 1,
+                state: JobState::WaitingForAgent,
+                created_at: base_time + chrono::Duration::milliseconds(i64::from(index)),
+                expires_at: Utc::now() + chrono::Duration::hours(1),
+                delivery_uncertain_since: None,
+            };
+            job_ids.push(job.id);
+            application
+                .repository
+                .create_job(&job, application.agent_id, None, job.title.as_bytes())
+                .await
+                .expect("create paged capability job");
+        }
+
+        let first = sync_virtual_document_node(
+            &application,
+            piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            false,
+        )
+        .await;
+        assert!(first.candidate_jobs.is_empty());
+        let second = sync_virtual_document_node(
+            &application,
+            piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            false,
+        )
+        .await;
+        assert!(second.candidate_jobs.is_empty());
+        let mut block_broadcasts = 0;
+        while let Ok(event) = live_events.try_recv() {
+            if event.event_type == "job.updated" && event.data["state"] == "blocked" {
+                block_broadcasts += 1;
+            }
+        }
+        assert_eq!(block_broadcasts, 17);
+
+        let mut restored = virtual_print_packet_capabilities();
+        let packet = restored
+            .print_packet
+            .as_mut()
+            .expect("PrintPacket capability");
+        packet.output_profiles.push(
+            piqae_protocol::agent::PrintPacketOutputProfile::PrinterNative {
+                id: "escpos.generic/v1".into(),
+                media_type: "application/vnd.escpos".into(),
+                language_profile_id: "escpos.generic/v1".into(),
+            },
+        );
+        packet
+            .native_language_profiles
+            .push(piqae_protocol::agent::PrinterNativeLanguageProfile {
+                id: "escpos.generic/v1".into(),
+                language: "escpos".into(),
+                language_version: "1".into(),
+                profile_version: "1.0.0".into(),
+                media_type: "application/vnd.escpos".into(),
+                driver_fingerprint_sha256: "b".repeat(64),
+                support_pack_digest_sha256: "c".repeat(64),
+                printer_ids: vec![application.printer_id.to_string()],
+            });
+        let recovered = sync_virtual_document_node(&application, restored, true).await;
+        assert_eq!(recovered.candidate_jobs.len(), 1);
+        assert_eq!(recovered.candidate_jobs[0].job.id, job_ids[16]);
+        let recovery_broadcasts = std::iter::from_fn(|| live_events.try_recv().ok())
+            .filter(|event| {
+                event.event_type == "job.updated"
+                    && event.data["id"] == job_ids[16].as_ulid().to_string()
+                    && event.data["state"] == "waiting_for_agent"
+            })
+            .count();
+        assert_eq!(recovery_broadcasts, 1);
+        for job_id in &job_ids[..16] {
+            assert_eq!(
+                application
+                    .repository
+                    .get_job(
+                        application.tenant.workspace_id,
+                        application.tenant.environment_id,
+                        *job_id,
+                    )
+                    .await
+                    .expect("permanently incompatible job")
+                    .state,
+                JobState::Blocked
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn poisoned_oldest_job_fails_durably_without_holding_later_leases() {
         let application = application().await;
         assert!(
@@ -4091,6 +4247,7 @@ mod tests {
             .candidate_jobs
             .is_empty()
         );
+        let mut live_events = application.state.events.subscribe();
         let poisoned_job = piqae_domain::Job {
             id: JobId::new(),
             workspace_id: application.tenant.workspace_id,
@@ -4177,6 +4334,120 @@ mod tests {
         assert_eq!(
             poison_events.last().and_then(|event| event.reason.clone()),
             Some(piqae_domain::JobFailureReason::ContentChecksumMismatch)
+        );
+        assert_eq!(
+            poison_events.last().and_then(|event| event.agent_id),
+            None,
+            "server content validation must not blame the assigned node"
+        );
+        let failure_broadcasts = std::iter::from_fn(|| live_events.try_recv().ok())
+            .filter(|event| {
+                event.event_type == "job.updated"
+                    && event.data["id"] == poisoned_job.id.as_ulid().to_string()
+                    && event.data["state"] == "failed_terminal"
+            })
+            .count();
+        assert_eq!(failure_broadcasts, 1);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_local_responsibility_does_not_block_later_candidates() {
+        let application = application().await;
+        assert!(
+            sync_virtual_document_node(
+                &application,
+                piqae_protocol::agent::DocumentRenderCapabilities::default(),
+                false,
+            )
+            .await
+            .candidate_jobs
+            .is_empty()
+        );
+        let oldest = piqae_domain::Job {
+            id: JobId::new(),
+            workspace_id: application.tenant.workspace_id,
+            environment_id: application.tenant.environment_id,
+            printer_id: application.printer_id,
+            title: "Locally admitted retry".into(),
+            source: None,
+            content_kind: piqae_domain::ContentKind::Raw,
+            content: piqae_domain::ContentSource::Base64 {
+                data: "G0BmaXh0dXJl".into(),
+            },
+            options: piqae_domain::JobOptions::default(),
+            metadata: std::collections::BTreeMap::from([
+                (
+                    "piqae.printer_native.output_profile".into(),
+                    "escpos.generic/v1".into(),
+                ),
+                (
+                    "piqae.printer_native.language_profile".into(),
+                    "escpos.generic/v1".into(),
+                ),
+            ]),
+            deliveries: 1,
+            state: JobState::WaitingForAgent,
+            created_at: Utc::now() - chrono::Duration::seconds(2),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            delivery_uncertain_since: None,
+        };
+        let later = piqae_domain::Job {
+            id: JobId::new(),
+            title: "Later compatible PDF".into(),
+            content_kind: piqae_domain::ContentKind::Pdf,
+            content: piqae_domain::ContentSource::Base64 {
+                data: "JVBERi0=".into(),
+            },
+            created_at: Utc::now() - chrono::Duration::seconds(1),
+            ..oldest.clone()
+        };
+        for job in [&oldest, &later] {
+            application
+                .repository
+                .create_job(job, application.agent_id, None, job.title.as_bytes())
+                .await
+                .expect("create scheduling fixture");
+        }
+        application
+            .repository
+            .mark_local_responsibility_for_test(oldest.id, application.agent_id)
+            .await;
+
+        let response = sync_virtual_document_node(
+            &application,
+            piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            true,
+        )
+        .await;
+        assert_eq!(response.candidate_jobs.len(), 1);
+        assert_eq!(response.candidate_jobs[0].job.id, later.id);
+        assert_eq!(
+            application
+                .repository
+                .get_job(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    oldest.id,
+                )
+                .await
+                .expect("locally owned job")
+                .state,
+            JobState::FailedRetryable
+        );
+        assert!(
+            application
+                .repository
+                .list_job_events(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    oldest.id,
+                )
+                .await
+                .expect("locally owned events")
+                .iter()
+                .all(|event| {
+                    event.reason != Some(piqae_domain::JobFailureReason::NodeUpdateRequired)
+                })
         );
     }
 
