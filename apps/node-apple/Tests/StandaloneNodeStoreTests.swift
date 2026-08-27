@@ -79,6 +79,36 @@ final class StandaloneNodeStoreTests: XCTestCase {
         XCTAssertEqual(model.handledCollapseIDs, ["same-generation"])
     }
 
+    func testDuplicateWakeCompletionHandlersAreBounded() async {
+        let delegate = PiqaeNodeAppDelegate(
+            wakeDeadlineSeconds: 1,
+            maximumPendingHints: 4,
+            maximumCompletionsPerHint: 2
+        )
+        let model = FakeStandaloneWakeHandler()
+        let completed = expectation(description: "bounded duplicate completions")
+        completed.expectedFulfillmentCount = 3
+        var results: [UIBackgroundFetchResult] = []
+
+        for _ in 0 ..< 3 {
+            delegate.application(
+                UIApplication.shared,
+                didReceiveRemoteNotification: wakePayload("same-generation"),
+                fetchCompletionHandler: {
+                    results.append($0)
+                    completed.fulfill()
+                }
+            )
+        }
+        XCTAssertEqual(results, [.noData])
+        delegate.install(model: model)
+        delegate.modelDidStart()
+        await fulfillment(of: [completed], timeout: 1)
+
+        XCTAssertEqual(model.handledCollapseIDs, ["same-generation"])
+        XCTAssertEqual(results.filter { $0 == .newData }.count, 2)
+    }
+
     func testColdLaunchWakeDeadlineCompletesWithoutRetainingTheHint() async {
         let delegate = PiqaeNodeAppDelegate(
             wakeDeadlineSeconds: 0.01,
@@ -122,6 +152,10 @@ final class StandaloneNodeStoreTests: XCTestCase {
         XCTAssertNil(StandaloneWakeHintEnvelope.collapseID(from: [
             "aps": ["content-available": 1, "alert": "Print this"],
             "piqae_wake_hint": "inventory-changed",
+        ]))
+        XCTAssertNil(StandaloneWakeHintEnvelope.collapseID(from: [
+            "aps": ["content-available": 1],
+            "piqae_wake_hint": "inventory\u{0000}changed",
         ]))
     }
 

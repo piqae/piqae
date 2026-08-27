@@ -37,14 +37,24 @@ final class PiqaeNodeAppDelegate: NSObject, UIApplicationDelegate {
     private var pending: [String: PendingHint] = [:]
     private let wakeDeadlineSeconds: Double
     private let maximumPendingHints: Int
+    private let maximumCompletionsPerHint: Int
 
     override convenience init() {
-        self.init(wakeDeadlineSeconds: 20, maximumPendingHints: 32)
+        self.init(
+            wakeDeadlineSeconds: 20,
+            maximumPendingHints: 32,
+            maximumCompletionsPerHint: 8
+        )
     }
 
-    init(wakeDeadlineSeconds: Double, maximumPendingHints: Int) {
+    init(
+        wakeDeadlineSeconds: Double,
+        maximumPendingHints: Int,
+        maximumCompletionsPerHint: Int = 8
+    ) {
         self.wakeDeadlineSeconds = max(0.01, wakeDeadlineSeconds)
         self.maximumPendingHints = max(1, maximumPendingHints)
+        self.maximumCompletionsPerHint = max(1, maximumCompletionsPerHint)
         super.init()
     }
 
@@ -80,6 +90,10 @@ final class PiqaeNodeAppDelegate: NSObject, UIApplicationDelegate {
         completion: @escaping (UIBackgroundFetchResult) -> Void
     ) {
         if var current = pending[collapseID] {
+            guard current.completions.count < maximumCompletionsPerHint else {
+                completion(.noData)
+                return
+            }
             current.completions.append(completion)
             pending[collapseID] = current
             return
@@ -147,7 +161,11 @@ enum StandaloneWakeHintEnvelope {
             return nil
         }
         let collapseID = rawCollapseID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !collapseID.isEmpty, collapseID.utf8.count <= 128 else { return nil }
+        guard !collapseID.isEmpty, collapseID.utf8.count <= 128,
+            collapseID.unicodeScalars.allSatisfy({
+                !CharacterSet.controlCharacters.contains($0)
+            })
+        else { return nil }
         return collapseID
     }
 }
