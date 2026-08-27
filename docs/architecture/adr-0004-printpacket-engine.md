@@ -29,8 +29,8 @@ styled table-cell runs, and unsupported image fitting rather than producing
 degraded output. The checked-in renderer tests and support matrix, not the
 breadth of the schema, determine what can be claimed as supported.
 
-The pre-release legacy document format, unrestricted canvas, hosted conversion
-API, and editor-specific adapter package were removed in migration 0038. That
-migration deletes only pre-release document subsystem rows and detaches retained
-uploads/jobs; it does not delete accounts, nodes, printers, queues, or unrelated
-jobs.
+v0.1.22 is the first PostgreSQL baseline containing this model. Pre-release
+document experiments and adapter-specific persistence are not part of the
+current migration history, and no database cutover or compatibility layer is
+shipped. Evaluation installations on an earlier baseline follow the explicit
+fresh-database and re-enrolment runbook.

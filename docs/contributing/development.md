@@ -41,7 +41,8 @@ The local agent API binds to `127.0.0.1:39100`. Its token is generated under
 - `sdk/`: public SDKs
 - `shells/`: thin platform-native menu/tray shells
 - `contracts/`: externally visible API contracts
-- `migrations/`: append-only database evolution
+- `migrations/`: append-only database evolution after the documented v0.1.22
+  fresh-install baseline
 - `xtask/`: safe contributor automation
 
 Use installed OS printer drivers. Do not add a Chromium desktop runtime or move

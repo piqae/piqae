@@ -218,6 +218,7 @@ jobs:
             shells/macos/.build
             sdk/apple/.build
             .piqae-test-fixtures/apple-sdk-derived-data
+            .piqae-test-fixtures/apple-node-app-derived-data
           key: swiftpm-macos-${{ hashFiles('shells/macos/Package.resolved', 'shells/macos/Package.swift', 'sdk/apple/Package.resolved', 'sdk/apple/Package.swift') }}
       - name: Test macOS menu shell
         run: swift test --package-path shells/macos
@@ -225,6 +226,10 @@ jobs:
         run: release/tools/test_apple_node_sdk.sh
       - name: Validate the linked Apple node runtime
         run: release/tools/test_apple_node_sdk_linked.sh
+      - name: Install deterministic Apple project generator
+        run: brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+      - name: Validate generated project and linked standalone app in Simulator
+        run: release/tools/test_apple_node_app.sh
 
   rust-windows:
     name: Rust (windows-latest)

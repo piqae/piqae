@@ -109,6 +109,18 @@ class CiChangedPathsTests(unittest.TestCase):
             classify(["sdk/apple/Sources/PiqaeNodeKit/PiqaeNode.swift"])["sdk"]
         )
 
+    def test_standalone_apple_app_selects_linked_apple_validation(self) -> None:
+        for path in (
+            "apps/node-apple/project.yml",
+            "apps/node-apple/Sources/StandaloneNodeStore.swift",
+            "apps/node-apple/Tests/StandaloneNodeStoreTests.swift",
+            "release/tools/test_apple_node_app.sh",
+        ):
+            with self.subTest(path=path):
+                selected = classify([path])
+                self.assertTrue(selected["macos_shell"])
+                self.assertFalse(selected["windows_shell"] or selected["windows_installer"])
+
     def test_release_workflow_change_does_not_select_every_platform(self) -> None:
         selected = classify([".github/workflows/macos-promotion.yml"])
         self.assertTrue(selected["release_tooling"] and selected["macos_packaging"])
