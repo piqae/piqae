@@ -3410,11 +3410,15 @@ export interface components {
             media_type: string;
             language_profile_id: string;
         };
+        /** @description Exact, printer-scoped native-language binding derived from one trusted support pack and one installed driver fingerprint. Every field is persisted with a RAW job and must still match before an offer is made. */
         PrinterNativeLanguageProfile: {
             id: string;
             language: string;
-            version: string;
+            language_version: string;
+            profile_version: string;
             media_type: string;
+            driver_fingerprint_sha256: components["schemas"]["Sha256Hex"];
+            support_pack_digest_sha256: components["schemas"]["Sha256Hex"];
             printer_ids: string[];
         };
         AgentSyncResponse: {

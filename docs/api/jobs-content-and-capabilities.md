@@ -33,7 +33,8 @@ type CreateJob = {
 
   title: string;
   source?: string | null;
-  content_type: 'pdf' | 'raw';
+  content_type: 'pdf';
+  printer_native?: never;
   content: JobContent;
   options?: JobOptions;
   deliveries?: number;
@@ -44,7 +45,11 @@ type CreateJob = {
   printer_id?: never;
   title: string;
   source?: string | null;
-  content_type: 'pdf' | 'raw';
+  content_type: 'raw';
+  printer_native: {
+    output_profile_id: string;
+    language_profile_id: string;
+  };
   content: JobContent;
   options?: JobOptions;
   deliveries?: number;
@@ -62,6 +67,7 @@ Top-level validation:
 | `title` | Yes | Non-blank and at most 255 UTF-8 bytes. It is operator-facing; do not put secrets or document content in it. |
 | `source` | No | Nullable, at most 255 characters in the OpenAPI contract. Use a stable, non-secret application label when useful. |
 | `content_type` | Yes | Exactly `pdf` or `raw`. It must agree with the upload media type and encrypted binding. |
+| `printer_native` | RAW only | Required for RAW and forbidden for PDF. It selects an exact output/language profile currently advertised for the selected physical printer; it is not a generic MIME hint. |
 | `content` | Yes | Exactly one of the four discriminated structures described below. Unknown fields are rejected. |
 | `options` | No | Portable/native print choices. Omit or use `{}` for driver defaults. RAW jobs must use no options. |
 | `deliveries` | No | Integer from 1 through 100; defaults to 1. This is the requested delivery count, distinct from `options.copies`. Integrators should normally keep one quantity mechanism. |
@@ -172,9 +178,33 @@ silently enable it to make incompatible artwork appear printable.
 
 RAW sends vendor/printer-language bytes through the native raw path. The
 request must use `content_type: 'raw'`, an octet-stream upload or compatible
-content source, and no `options`. Piqae cannot safely reinterpret RAW bytes,
-apply portable driver options, inspect their page count, or confirm their
-device-language compatibility.
+content source, an exact `printer_native` descriptor, and no `options`. Piqae
+does not reinterpret RAW bytes or apply portable driver options. Instead it
+resolves the descriptor against the authenticated node's exact printer-scoped
+language report and persists the resolved language, language version, support
+pack profile version, media type, driver fingerprint, support-pack digest, and
+printer ID with the immutable job. The server intersects that complete binding
+again before every offer, and the node compares it with its latest locally
+derived trusted support-pack/driver binding before downloading job content.
+
+```ts
+await piqae.jobs.create({
+  printer_id: 'ptr_...',
+  title: 'Order 10428 shipping label',
+  content_type: 'raw',
+  printer_native: {
+    output_profile_id: 'zpl.acme-model/v1',
+    language_profile_id: 'zpl.acme-model/v1'
+  },
+  content: { type: 'upload', upload_id: 'upl_...' }
+}, 'order-10428-zpl-v1');
+```
+
+If a driver, firmware, replay-tested support pack, language version, or profile
+fingerprint changes after registration, the binding becomes update-required
+and the bytes are withheld. Reusing a profile ID never authorizes changed
+semantics. A support pack with only discovered or mapped evidence cannot
+activate RAW language output.
 
 Only enable RAW in a trusted server-side workflow that knows the exact printer
 family, command language, document provenance, and authorization policy. Never

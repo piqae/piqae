@@ -264,10 +264,12 @@
     };
   };
   const humanise = (value: string) => value.replaceAll('_', ' ');
+  const printPacketUpdateReasons = (node: (typeof data.agents)[number]) =>
+    node.printPacket?.reasons?.map(humanise).join(', ') || null;
   const printPacketSummary = (node: (typeof data.agents)[number]) =>
     node.printPacket?.status === 'ready'
       ? `Ready${node.printPacket.implementationVersion ? ` · ${node.printPacket.implementationVersion}` : ''}`
-      : 'Node update required';
+      : `Node update required${node.printPacket?.reasons?.[0] ? ` · ${humanise(node.printPacket.reasons[0])}` : ''}`;
   const admissionSummary = (runtime: (typeof data.runtimeObservations)[number] | null) => {
     if (!runtime) return 'No runtime evidence';
     if (runtime.freshness === 'stale') return 'Blocked · stale observation';
@@ -1141,6 +1143,7 @@
         { term: 'Node version', value: `v${detail.node.version}`, mono: true },
         { term: 'Protocol', value: detail.node.protocolVersion, mono: true },
         { term: 'PrintPacket', value: printPacketSummary(detail.node) },
+        { term: 'Update reasons', value: printPacketUpdateReasons(detail.node) },
         { term: 'Direct offline', value: detail.node.printPacket?.directOffline ? 'Supported' : 'Not reported' },
         { term: 'Reported queue', value: runtimeQueue ? `${runtimeQueue.total} jobs · ${runtimeQueue.active} active` : 'Not reported' },
         { term: 'Site', value: detail.node.site ?? null },

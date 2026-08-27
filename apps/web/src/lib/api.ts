@@ -277,19 +277,49 @@ export function createLiveApi(
     labels: agent.labels ?? [],
     printPacket: (() => {
       const capability = agent.document_render?.print_packet;
-      const ready = capability?.negotiation_version === 2
-        && agent.document_render?.renderer_abi === 'printpacket.pdf-renderer/v1'
-        && agent.document_render?.resource_abi === 'printpacket.resources/v1'
-        && capability.supported_packet_versions.includes('printpacket/v1')
-        && capability.conformance_profiles.includes('printpacket.conformance/core-v1')
-        && capability.deterministic
-        && capability.output_profiles.some(
-          (profile) => profile.kind === 'pdf'
-            && profile.id === 'printpacket.pdf-base14/v1'
-            && profile.media_type === 'application/pdf'
-        );
+      const requiredFeatures = [
+        'media_paged',
+        'media_continuous',
+        'media_label',
+        'layout_flow',
+        'layout_grid',
+        'layout_table',
+        'layout_regions',
+        'layout_keep_together',
+        'data_expressions',
+        'data_repeat',
+        'image_jpeg',
+        'barcode_qr',
+        'barcode_code128',
+        'typography_base14_windows1252'
+      ];
+      const reasons: string[] = [];
+      if (capability?.negotiation_version !== 2) reasons.push('negotiation_v2_missing');
+      if (agent.document_render?.renderer_abi !== 'printpacket.pdf-renderer/v1') reasons.push('renderer_update_required');
+      if (agent.document_render?.resource_abi !== 'printpacket.resources/v1') reasons.push('resource_runtime_update_required');
+      if (!capability?.supported_packet_versions.includes('printpacket/v1')) reasons.push('packet_version_missing');
+      if (!capability?.conformance_profiles.includes('printpacket.conformance/core-v1')) reasons.push('conformance_profile_missing');
+      if (!capability?.deterministic) reasons.push('deterministic_output_missing');
+      if (!capability?.output_profiles.some(
+        (profile) => profile.kind === 'pdf'
+          && profile.id === 'printpacket.pdf-base14/v1'
+          && profile.media_type === 'application/pdf'
+      )) reasons.push('pdf_output_profile_missing');
+      if (requiredFeatures.some((feature) => !capability?.feature_ids.includes(feature))) reasons.push('semantic_features_missing');
+      if (!capability?.resource_types.includes('image/jpeg')
+        || !agent.document_render?.image_media_types?.includes('image/jpeg')) reasons.push('jpeg_resources_missing');
+      const limits = capability?.limits;
+      if (!limits
+        || limits.max_template_bytes < 1_048_576
+        || limits.max_input_bytes < 4_194_304
+        || limits.max_output_bytes < 52_428_800
+        || limits.max_pages < 1_000
+        || limits.max_resource_count < 100
+        || limits.max_resource_bytes < 4_194_304
+        || limits.max_total_resource_bytes < 12_582_912) reasons.push('renderer_limits_insufficient');
       return {
-        status: ready ? 'ready' : 'node_update_required',
+        status: reasons.length === 0 ? 'ready' : 'node_update_required',
+        reasons,
         supportedPacketVersions: capability?.supported_packet_versions ?? [],
         implementationVersion: capability?.implementation_version ?? null,
         directOffline: capability?.direct_offline ?? false

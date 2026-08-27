@@ -26,7 +26,12 @@ describe('live dashboard overview', () => {
       print_packet: {
         negotiation_version: 2,
         supported_packet_versions: ['printpacket/v1'],
-        feature_ids: [],
+        feature_ids: [
+          'media_paged', 'media_continuous', 'media_label', 'layout_flow',
+          'layout_grid', 'layout_table', 'layout_regions', 'layout_keep_together',
+          'data_expressions', 'data_repeat', 'image_jpeg', 'barcode_qr',
+          'barcode_code128', 'typography_base14_windows1252'
+        ],
         conformance_profiles: ['printpacket.conformance/core-v1'],
         output_profiles: [{
           id: 'printpacket.pdf-base14/v1',
@@ -35,13 +40,13 @@ describe('live dashboard overview', () => {
         }],
         deterministic: true,
         limits: {
-          max_template_bytes: 1024,
-          max_input_bytes: 1024,
-          max_output_bytes: 4096,
-          max_pages: 2,
-          max_resource_count: 1,
-          max_resource_bytes: 1024,
-          max_total_resource_bytes: 1024
+          max_template_bytes: 1_048_576,
+          max_input_bytes: 4_194_304,
+          max_output_bytes: 52_428_800,
+          max_pages: 1_000,
+          max_resource_count: 100,
+          max_resource_bytes: 4_194_304,
+          max_total_resource_bytes: 12_582_912
         },
         resource_types: ['image/jpeg'],
         direct_offline: true,
@@ -59,6 +64,33 @@ describe('live dashboard overview', () => {
         id: 'agt_wrong_abi', name: 'Old renderer', platform: 'macos/arm64', state: 'connected',
         version: '0.1.0', last_seen_at: '2026-08-27T00:00:00Z', labels: [],
         document_render: { ...capability, renderer_abi: 'printpacket.pdf-renderer/v2' }
+      },
+      {
+        id: 'agt_missing_feature', name: 'Missing feature', platform: 'macos/arm64', state: 'connected',
+        version: '0.1.0', last_seen_at: '2026-08-27T00:00:00Z', labels: [],
+        document_render: {
+          ...capability,
+          print_packet: { ...capability.print_packet, feature_ids: capability.print_packet.feature_ids.slice(1) }
+        }
+      },
+      {
+        id: 'agt_low_limit', name: 'Low limit', platform: 'macos/arm64', state: 'connected',
+        version: '0.1.0', last_seen_at: '2026-08-27T00:00:00Z', labels: [],
+        document_render: {
+          ...capability,
+          print_packet: {
+            ...capability.print_packet,
+            limits: { ...capability.print_packet.limits, max_resource_count: 99 }
+          }
+        }
+      },
+      {
+        id: 'agt_no_jpeg', name: 'No JPEG', platform: 'macos/arm64', state: 'connected',
+        version: '0.1.0', last_seen_at: '2026-08-27T00:00:00Z', labels: [],
+        document_render: {
+          ...capability,
+          print_packet: { ...capability.print_packet, resource_types: [] }
+        }
       }
     ]));
 
@@ -66,8 +98,11 @@ describe('live dashboard overview', () => {
       createLiveApi(fetcher as typeof fetch, 'https://api.example.test').agents()
     ).resolves.toMatchObject({
       data: [
-        { id: 'agt_ready', printPacket: { status: 'ready', directOffline: true } },
-        { id: 'agt_wrong_abi', printPacket: { status: 'node_update_required' } }
+        { id: 'agt_ready', printPacket: { status: 'ready', reasons: [], directOffline: true } },
+        { id: 'agt_wrong_abi', printPacket: { status: 'node_update_required', reasons: ['renderer_update_required'] } },
+        { id: 'agt_missing_feature', printPacket: { status: 'node_update_required', reasons: ['semantic_features_missing'] } },
+        { id: 'agt_low_limit', printPacket: { status: 'node_update_required', reasons: ['renderer_limits_insufficient'] } },
+        { id: 'agt_no_jpeg', printPacket: { status: 'node_update_required', reasons: ['jpeg_resources_missing'] } }
       ]
     });
   });

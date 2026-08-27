@@ -38,6 +38,10 @@ pub struct Manifest {
     /// adapter binary itself.
     #[serde(default)]
     pub adapter_selectors: Vec<AdapterSelector>,
+    /// Explicit printer-language claims. They become usable only after this
+    /// pack also matches one exact installed driver/adapter fingerprint.
+    #[serde(default)]
+    pub native_language_profiles: Vec<NativeLanguageProfileDeclaration>,
     pub platforms: Vec<Platform>,
     pub facets: Vec<String>,
     pub evidence: EvidenceTier,
@@ -46,6 +50,28 @@ pub struct Manifest {
     #[serde(default)]
     pub fixtures: Vec<String>,
     pub license: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeLanguageProfileDeclaration {
+    pub id: String,
+    pub output_profile_id: String,
+    pub language: String,
+    pub language_version: String,
+    pub media_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundNativeLanguageProfile {
+    pub id: String,
+    pub output_profile_id: String,
+    pub language: String,
+    pub language_version: String,
+    pub profile_version: String,
+    pub media_type: String,
+    pub driver_fingerprint_sha256: String,
+    pub support_pack_digest_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -293,6 +319,52 @@ impl SupportPackRegistry {
             fingerprint.platform,
             native_options,
         ))
+    }
+
+    /// Resolves printer-native language claims only from one exact trusted
+    /// driver match. Missing/incomplete fingerprints return no claims and
+    /// ambiguous matches fail closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PackError::Ambiguous`] when multiple packs match.
+    pub fn native_language_profiles(
+        &self,
+        fingerprint: Option<&DriverFingerprint>,
+    ) -> Result<Vec<BoundNativeLanguageProfile>, PackError> {
+        let Some(driver) = fingerprint else {
+            return Ok(Vec::new());
+        };
+        let Some(converted) = to_printer_fingerprint(driver) else {
+            return Ok(Vec::new());
+        };
+        let pack = match select_pack(&self.packs, &converted) {
+            Ok(pack) => pack,
+            Err(PackError::NoMatch) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        if pack.manifest.evidence < EvidenceTier::ReplayTested {
+            return Ok(Vec::new());
+        }
+        let fingerprint_bytes = serde_json::to_vec(driver)
+            .map_err(|_| PackError::Invalid("driver fingerprint cannot be encoded".into()))?;
+        let driver_fingerprint_sha256 = hex::encode(Sha256::digest(fingerprint_bytes));
+        let support_pack_digest_sha256 = hex::encode(pack.digest);
+        Ok(pack
+            .manifest
+            .native_language_profiles
+            .iter()
+            .map(|profile| BoundNativeLanguageProfile {
+                id: profile.id.clone(),
+                output_profile_id: profile.output_profile_id.clone(),
+                language: profile.language.clone(),
+                language_version: profile.language_version.clone(),
+                profile_version: pack.manifest.pack_version.clone(),
+                media_type: profile.media_type.clone(),
+                driver_fingerprint_sha256: driver_fingerprint_sha256.clone(),
+                support_pack_digest_sha256: support_pack_digest_sha256.clone(),
+            })
+            .collect())
     }
 }
 
@@ -577,6 +649,29 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), PackError> {
     for maintainer in &manifest.maintainers {
         validate_id("maintainer", maintainer, 256)?;
     }
+    if manifest.native_language_profiles.len() > 32 {
+        return Err(PackError::Invalid(
+            "at most 32 native language profiles are allowed".into(),
+        ));
+    }
+    let mut native_profile_ids = BTreeSet::new();
+    let mut output_profile_ids = BTreeSet::new();
+    for profile in &manifest.native_language_profiles {
+        validate_protocol_id("native language profile id", &profile.id, 128)?;
+        validate_protocol_id("native output profile id", &profile.output_profile_id, 128)?;
+        validate_protocol_id("native language", &profile.language, 64)?;
+        validate_id("native language version", &profile.language_version, 64)?;
+        validate_id("native media type", &profile.media_type, 64)?;
+        if !profile.media_type.starts_with("application/vnd.")
+            || !native_profile_ids.insert(&profile.id)
+            || !output_profile_ids.insert(&profile.output_profile_id)
+        {
+            return Err(PackError::Invalid(
+                "native language profiles require unique IDs and application/vnd.* media types"
+                    .into(),
+            ));
+        }
+    }
     for facet in &manifest.facets {
         validate_facet(facet)?;
     }
@@ -683,6 +778,21 @@ fn validate_id(label: &str, value: &str, max: usize) -> Result<(), PackError> {
         || !value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._:/+ -".contains(&b))
+    {
+        return Err(PackError::Invalid(format!("invalid {label}")));
+    }
+    Ok(())
+}
+
+fn validate_protocol_id(label: &str, value: &str, max: usize) -> Result<(), PackError> {
+    if value.is_empty()
+        || value.len() > max
+        || !value.as_bytes()[0].is_ascii_lowercase()
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'.' | b'_' | b'/' | b'-')
+        })
     {
         return Err(PackError::Invalid(format!("invalid {label}")));
     }
@@ -949,7 +1059,8 @@ mod tests {
           "schema_version":1,"pack_id":"{pack_id}","pack_version":"1.0.0",
           "vendor":"Example","family":"Example 100","maintainers":["Example Maintainer"],
           "selectors":[{{"driver_package_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","driver_id":"example-driver","driver_version":"1.2.3","device_id":"USBPRINT/example","firmware_version":"4.5"}}],
-          "platforms":["windows"],"facets":["media.sensing"],"evidence":"mapped",
+          "native_language_profiles":[{{"id":"zpl.example/v1","output_profile_id":"zpl.example/v1","language":"zpl","language_version":"2","media_type":"application/vnd.zebra-zpl"}}],
+          "platforms":["windows"],"facets":["media.sensing"],"evidence":"replay_tested",
           "mappings":["mappings/options.json"],"conformance":["tests/conformance.json"],"fixtures":["fixtures/capabilities.redacted.json"],"license":"Apache-2.0"
         }}"#
         )
@@ -1083,6 +1194,13 @@ mod tests {
                 native_choice: "Native A".into(),
             }
         );
+        let native = registry.native_language_profiles(Some(&fingerprint))?;
+        assert_eq!(native.len(), 1);
+        assert_eq!(native[0].language, "zpl");
+        assert_eq!(native[0].language_version, "2");
+        assert_eq!(native[0].profile_version, "1.0.0");
+        assert_eq!(native[0].driver_fingerprint_sha256.len(), 64);
+        assert_eq!(native[0].support_pack_digest_sha256, hex::encode(digest));
         assert_eq!(
             projection
                 .support_pack
@@ -1108,6 +1226,42 @@ mod tests {
         assert_eq!(
             SupportPackRegistry::load(&config)?.normalize(Some(&incomplete), &options)?,
             SemanticPrinterCapabilities::default()
+        );
+        assert!(
+            SupportPackRegistry::load(&config)?
+                .native_language_profiles(Some(&incomplete))?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mapped_pack_does_not_activate_printer_native_language()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pack = TestPack::new()?;
+        let manifest =
+            fs::read_to_string(pack.0.join("manifest.json"))?.replace("replay_tested", "mapped");
+        fs::write(pack.0.join("manifest.json"), manifest)?;
+        let digest = pack_digest(&pack.0)?;
+        let registry = SupportPackRegistry::load(&RegistryConfig {
+            pack_directories: vec![pack.0.clone()],
+            pinned_digest_hex: vec![hex::encode(digest)],
+            ed25519_public_key_hex: Vec::new(),
+        })?;
+        let fingerprint = DriverFingerprint {
+            platform: "windows".into(),
+            driver_name: "example-driver".into(),
+            driver_version: Some("1.2.3".into()),
+            architecture: None,
+            native_queue_id: "queue".into(),
+            device_fingerprint: Some("USBPRINT/example".into()),
+            driver_package_fingerprint: Some("a".repeat(64)),
+            firmware_version: Some("4.5".into()),
+        };
+        assert!(
+            registry
+                .native_language_profiles(Some(&fingerprint))?
+                .is_empty()
         );
         Ok(())
     }

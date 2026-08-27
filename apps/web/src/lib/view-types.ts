@@ -48,6 +48,7 @@ export interface DashboardAgent {
   labels: string[];
   printPacket?: {
     status: 'ready' | 'node_update_required';
+    reasons: string[];
     supportedPacketVersions: string[];
     implementationVersion: string | null;
     directOffline: boolean;

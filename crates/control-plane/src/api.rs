@@ -3388,6 +3388,7 @@ fn supports_print_packet_offer(
         total.saturating_add(resource.byte_length)
     });
     render.negotiation_version == 2
+        && render.input.is_object()
         && render.packet_version == printpacket::DOCUMENT_V1
         && render.conformance_profile == printpacket::CONFORMANCE_CORE_V1
         && render.output_profile == printpacket::PDF_BASE14_V1
@@ -3446,6 +3447,19 @@ fn supports_printer_native_offer(
                 .printer_ids
                 .iter()
                 .any(|supported| supported == printer_id)
+            && metadata.get("piqae.printer_native.language") == Some(&profile.language)
+            && metadata.get("piqae.printer_native.language_version")
+                == Some(&profile.language_version)
+            && metadata.get("piqae.printer_native.profile_version")
+                == Some(&profile.profile_version)
+            && metadata.get("piqae.printer_native.media_type") == Some(&profile.media_type)
+            && metadata.get("piqae.printer_native.driver_fingerprint_sha256")
+                == Some(&profile.driver_fingerprint_sha256)
+            && metadata.get("piqae.printer_native.support_pack_digest_sha256")
+                == Some(&profile.support_pack_digest_sha256)
+            && metadata
+                .get("piqae.printer_native.printer_id")
+                .is_some_and(|stored| stored == printer_id)
     });
     packet.output_profiles.iter().any(|profile| {
         matches!(
@@ -3493,6 +3507,12 @@ fn validate_document_render_capabilities(
         })
     };
     let unique = |values: &[String]| values.iter().collect::<BTreeSet<_>>().len() == values.len();
+    let valid_sha256 = |digest: &str| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
     let valid_packet = value.print_packet.as_ref().is_none_or(|packet| {
         let output_ids = packet
             .output_profiles
@@ -3504,6 +3524,21 @@ fn validate_document_render_capabilities(
             .iter()
             .map(|profile| profile.id.as_str())
             .collect::<BTreeSet<_>>();
+        let language_bindings = packet
+            .native_language_profiles
+            .iter()
+            .flat_map(|profile| {
+                profile
+                    .printer_ids
+                    .iter()
+                    .map(move |printer_id| (profile.id.as_str(), printer_id.as_str()))
+            })
+            .collect::<BTreeSet<_>>();
+        let language_binding_count = packet
+            .native_language_profiles
+            .iter()
+            .map(|profile| profile.printer_ids.len())
+            .sum::<usize>();
         packet.negotiation_version == 2
             && (1..=16).contains(&packet.supported_packet_versions.len())
             && unique(&packet.supported_packet_versions)
@@ -3555,14 +3590,19 @@ fn validate_document_render_capabilities(
                 .iter()
                 .all(|media| media == "image/jpeg")
             && packet.native_language_profiles.len() <= 32
-            && language_ids.len() == packet.native_language_profiles.len()
+            && language_bindings.len() == language_binding_count
             && packet.native_language_profiles.iter().all(|profile| {
                 valid_id(&profile.id, true)
                     && valid_id(&profile.language, false)
-                    && !profile.version.is_empty()
-                    && profile.version.len() <= 64
-                    && profile.version.is_ascii()
+                    && !profile.language_version.is_empty()
+                    && profile.language_version.len() <= 64
+                    && profile.language_version.is_ascii()
+                    && !profile.profile_version.is_empty()
+                    && profile.profile_version.len() <= 64
+                    && profile.profile_version.is_ascii()
                     && valid_media_type(&profile.media_type)
+                    && valid_sha256(&profile.driver_fingerprint_sha256)
+                    && valid_sha256(&profile.support_pack_digest_sha256)
                     && (1..=256).contains(&profile.printer_ids.len())
                     && unique(&profile.printer_ids)
                     && profile.printer_ids.iter().all(|id| {
@@ -3702,8 +3742,11 @@ mod adaptive_poll_tests {
                 native_language_profiles: vec![PrinterNativeLanguageProfile {
                     id: "escpos.generic/v1".into(),
                     language: "escpos".into(),
-                    version: "1".into(),
+                    language_version: "1".into(),
+                    profile_version: "1.0.0".into(),
                     media_type: "application/vnd.escpos".into(),
+                    driver_fingerprint_sha256: "b".repeat(64),
+                    support_pack_digest_sha256: "c".repeat(64),
                     printer_ids: vec!["ptr_fixture".into()],
                 }],
                 implementation_version: "0.1.22".into(),
@@ -3747,6 +3790,28 @@ mod adaptive_poll_tests {
                 "piqae.printer_native.language_profile".into(),
                 "escpos.generic/v1".into(),
             ),
+            ("piqae.printer_native.language".into(), "escpos".into()),
+            ("piqae.printer_native.language_version".into(), "1".into()),
+            (
+                "piqae.printer_native.profile_version".into(),
+                "1.0.0".into(),
+            ),
+            (
+                "piqae.printer_native.media_type".into(),
+                "application/vnd.escpos".into(),
+            ),
+            (
+                "piqae.printer_native.driver_fingerprint_sha256".into(),
+                "b".repeat(64),
+            ),
+            (
+                "piqae.printer_native.support_pack_digest_sha256".into(),
+                "c".repeat(64),
+            ),
+            (
+                "piqae.printer_native.printer_id".into(),
+                "ptr_fixture".into(),
+            ),
         ]);
         assert!(supports_printer_native_offer(
             &supported,
@@ -3757,6 +3822,18 @@ mod adaptive_poll_tests {
             &supported,
             &metadata,
             "ptr_other"
+        ));
+        let mut stale = supported.clone();
+        stale
+            .print_packet
+            .as_mut()
+            .and_then(|packet| packet.native_language_profiles.first_mut())
+            .expect("native language profile")
+            .language_version = "2".into();
+        assert!(!supports_printer_native_offer(
+            &stale,
+            &metadata,
+            "ptr_fixture"
         ));
 
         let mut duplicate = supported.clone();
@@ -3815,6 +3892,10 @@ mod adaptive_poll_tests {
             expected_page_count: 1,
         };
         assert!(supports_print_packet_offer(&supported, &render));
+
+        render.input = serde_json::json!(["not", "an", "object"]);
+        assert!(!supports_print_packet_offer(&supported, &render));
+        render.input = serde_json::json!({});
 
         render.resources[1].byte_length = 600;
         assert!(!supports_print_packet_offer(&supported, &render));
@@ -4541,10 +4622,13 @@ async fn validate_printer_native_job(
                 .iter()
                 .any(|printer_id| printer_id == &destination.printer_id.to_string())
     });
-    if output.is_none()
-        || language.is_none()
-        || output != language.map(|profile| &profile.media_type)
-    {
+    let Some(language) = language else {
+        return Err(AppError::conflict(
+            "printer_native_profile_unsupported",
+            "The exact printer/output/language profile is not currently advertised by this destination.",
+        ));
+    };
+    if output != Some(&language.media_type) {
         return Err(AppError::conflict(
             "printer_native_profile_unsupported",
             "The exact printer/output/language profile is not currently advertised by this destination.",
@@ -4558,6 +4642,34 @@ async fn validate_printer_native_job(
         (
             "piqae.printer_native.language_profile".into(),
             descriptor.language_profile_id.clone(),
+        ),
+        (
+            "piqae.printer_native.language".into(),
+            language.language.clone(),
+        ),
+        (
+            "piqae.printer_native.language_version".into(),
+            language.language_version.clone(),
+        ),
+        (
+            "piqae.printer_native.profile_version".into(),
+            language.profile_version.clone(),
+        ),
+        (
+            "piqae.printer_native.media_type".into(),
+            language.media_type.clone(),
+        ),
+        (
+            "piqae.printer_native.driver_fingerprint_sha256".into(),
+            language.driver_fingerprint_sha256.clone(),
+        ),
+        (
+            "piqae.printer_native.support_pack_digest_sha256".into(),
+            language.support_pack_digest_sha256.clone(),
+        ),
+        (
+            "piqae.printer_native.printer_id".into(),
+            destination.printer_id.to_string(),
         ),
     ]))
 }

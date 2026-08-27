@@ -488,8 +488,14 @@ impl PrintPacketOutputProfile {
 pub struct PrinterNativeLanguageProfile {
     pub id: String,
     pub language: String,
-    pub version: String,
+    pub language_version: String,
+    pub profile_version: String,
     pub media_type: String,
+    /// Canonical SHA-256 of the exact installed driver fingerprint used when
+    /// the trusted support-pack declaration was selected.
+    pub driver_fingerprint_sha256: String,
+    /// Canonical digest of the complete trusted support pack.
+    pub support_pack_digest_sha256: String,
     /// Public Piqae printer IDs for which this exact language/profile pair was
     /// authenticated. A node-wide language claim is intentionally invalid.
     pub printer_ids: Vec<String>,

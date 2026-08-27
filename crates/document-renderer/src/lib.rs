@@ -714,6 +714,9 @@ pub fn render_with_metrics(
     resolved: &ResolvedResources,
     limits: RenderLimits,
 ) -> Result<RenderOutput, RenderError> {
+    if !input.is_object() {
+        return Err(RenderError::Invalid("render input must be a JSON object"));
+    }
     validate(spec, limits)?;
     validate_resolved_resources(spec, resolved)?;
     let (width, height, margins, continuous) = media_geometry(&spec.media, limits)?;
@@ -3221,6 +3224,44 @@ mod tests {
             render(&d, &json!({}), RenderLimits::default()),
             Err(RenderError::UnsupportedVersion(_))
         ))
+    }
+    #[test]
+    fn render_input_root_must_be_an_object() {
+        let d = document(vec![text("bounded")]);
+        for input in [json!(null), json!([{"value": 1}]), json!("value")] {
+            assert_eq!(
+                render(&d, &input, RenderLimits::default()),
+                Err(RenderError::Invalid("render input must be a JSON object"))
+            );
+        }
+    }
+    #[test]
+    fn resource_count_accepts_one_hundred_and_rejects_one_hundred_and_one() {
+        let mut d = document(Vec::new());
+        for index in 0..100 {
+            d.resources.insert(
+                format!("image_{index}"),
+                Resource::Image {
+                    digest: format!("sha256:{}", "a".repeat(64)),
+                    media_type: "image/jpeg".into(),
+                    byte_length: 1,
+                },
+            );
+        }
+        assert_eq!(validate(&d, RenderLimits::default()), Ok(()));
+
+        d.resources.insert(
+            "image_100".into(),
+            Resource::Image {
+                digest: format!("sha256:{}", "b".repeat(64)),
+                media_type: "image/jpeg".into(),
+                byte_length: 1,
+            },
+        );
+        assert_eq!(
+            validate(&d, RenderLimits::default()),
+            Err(RenderError::Limit("resources"))
+        );
     }
     #[test]
     fn wraps_and_paginates() {
