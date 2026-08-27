@@ -54,6 +54,29 @@ const PRO_PLAN: PlanDefaults = PlanDefaults {
 };
 const PRO_ANNUAL_INCLUDED_JOBS: i64 = 300_000;
 
+#[derive(Debug)]
+struct AppliedMigration {
+    version: i64,
+    description: String,
+    success: bool,
+    checksum: Vec<u8>,
+}
+
+fn applied_history_is_current_prefix(
+    rows: &[AppliedMigration],
+    migrator: &sqlx::migrate::Migrator,
+) -> bool {
+    if rows.len() > migrator.iter().count() {
+        return false;
+    }
+    rows.iter().zip(migrator.iter()).all(|(applied, current)| {
+        applied.success
+            && applied.version == current.version
+            && applied.description == current.description
+            && applied.checksum.as_slice() == current.checksum.as_ref()
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct PostgresStore {
     pool: PgPool,
@@ -959,6 +982,10 @@ pub enum StorageError {
     Database(#[from] sqlx::Error),
     #[error("database migration failed: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
+    #[error(
+        "database migration history is incompatible with the fresh-only v0.1.22 PostgreSQL baseline; follow docs/operations/upgrades.md#v0122-fresh-postgresql-baseline"
+    )]
+    UnsupportedDatabaseBaseline,
     #[error("serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
 }
@@ -983,9 +1010,52 @@ impl PostgresStore {
     }
 
     pub async fn migrate(&self) -> Result<(), StorageError> {
-        sqlx::migrate!("../../migrations/postgres")
-            .run(&self.pool)
+        let migrator = sqlx::migrate!("../../migrations/postgres");
+        self.refuse_incompatible_prerelease_baseline(&migrator)
             .await?;
+        migrator.run(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn refuse_incompatible_prerelease_baseline(
+        &self,
+        migrator: &sqlx::migrate::Migrator,
+    ) -> Result<(), StorageError> {
+        let migration_table_exists: bool = sqlx::query_scalar(
+            "SELECT to_regclass(current_schema() || '._sqlx_migrations') IS NOT NULL",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        if !migration_table_exists {
+            return Ok(());
+        }
+
+        let applied_limit = i64::try_from(migrator.iter().count())
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        // One extra row detects a history ahead of this binary while keeping a
+        // corrupted or attacker-controlled migration table bounded.
+        let rows = sqlx::query(
+            "SELECT version, description, success, checksum
+             FROM _sqlx_migrations
+             ORDER BY version
+             LIMIT $1",
+        )
+        .bind(applied_limit)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|row| AppliedMigration {
+            version: row.get("version"),
+            description: row.get("description"),
+            success: row.get("success"),
+            checksum: row.get("checksum"),
+        })
+        .collect::<Vec<_>>();
+
+        if !applied_history_is_current_prefix(&rows, migrator) {
+            return Err(StorageError::UnsupportedDatabaseBaseline);
+        }
         Ok(())
     }
 
@@ -12309,5 +12379,30 @@ mod tests {
         assert!(!valid_external_installation_id("short"));
         assert!(!valid_external_installation_id("install/../../other"));
         assert!(!valid_external_installation_id(&"x".repeat(129)));
+    }
+
+    #[test]
+    fn migration_preflight_accepts_only_an_exact_current_prefix() {
+        let migrator = sqlx::migrate!("../../migrations/postgres");
+        let rows = migrator
+            .iter()
+            .take(2)
+            .map(|migration| AppliedMigration {
+                version: migration.version,
+                description: migration.description.to_string(),
+                success: true,
+                checksum: migration.checksum.to_vec(),
+            })
+            .collect::<Vec<_>>();
+        assert!(applied_history_is_current_prefix(&[], &migrator));
+        assert!(applied_history_is_current_prefix(&rows, &migrator));
+
+        let second_checksum = rows[1].checksum.clone();
+        let mut changed = rows;
+        changed[1].checksum[0] ^= 1;
+        assert!(!applied_history_is_current_prefix(&changed, &migrator));
+        changed[1].checksum = second_checksum;
+        changed[1].success = false;
+        assert!(!applied_history_is_current_prefix(&changed, &migrator));
     }
 }

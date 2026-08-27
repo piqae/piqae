@@ -12,8 +12,9 @@ cargo xtask dev
 
 Before editing, read the root `AGENTS.md` and the nearest scoped instructions.
 Normal tests must never reach physical hardware. Update OpenAPI before changing
-a public route, use append-only PostgreSQL migrations with cross-tenant tests,
-and preserve the distinction between spooler acceptance and physical delivery.
+a public route, use append-only PostgreSQL migrations with cross-tenant tests
+after the documented v0.1.22 fresh baseline, and preserve the distinction
+between spooler acceptance and physical delivery.
 
 Run focused checks before a small DCO-signed commit:
 

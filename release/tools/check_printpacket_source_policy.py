@@ -25,19 +25,64 @@ FORBIDDEN_MIGRATION_NAMES = (
     "document_adapter_" + "conversions",
 )
 
-# These locations assert rejection. The removed value may not appear in any
-# producer, compatibility adapter, documentation, schema, or generated output.
-NEGATIVE_FIXTURES = frozenset(
-    {
-        "apps/mcp/tests/server.test.ts",
-        "apps/shopify/tests/template-model.test.ts",
-        "crates/control-plane/src/api.rs",
-        "crates/control-plane/src/documents.rs",
-        "crates/document-renderer/src/lib.rs",
-        "crates/printpacket/src/lib.rs",
-        "crates/storage-postgres/tests/migrations.rs",
-    }
-)
+# The removed identifier is evidence only inside these exact rejection-test
+# spans. A whole-file exception could accidentally admit a producer or adapter
+# added elsewhere in a large source file.
+NEGATIVE_FIXTURE_SPANS = {
+    "apps/mcp/tests/server.test.ts": (
+        'it("accepts only the canonical PrintPacket identifier"',
+        "expect(fetchMock).not.toHaveBeenCalled();",
+        1,
+    ),
+    "apps/shopify/tests/template-model.test.ts": (
+        'it("rejects noncanonical packets and excessive nesting"',
+        'toThrow("12 levels")',
+        1,
+    ),
+    "crates/control-plane/src/api.rs": (
+        "fn print_packet_capabilities_are_exact_bounded_and_printer_scoped()",
+        "validate_document_render_capabilities(&retired_identifier).is_err()",
+        1,
+    ),
+    "crates/control-plane/src/documents.rs": (
+        "fn document_specs_are_bounded_and_reject_runtime_urls()",
+        "experimental Piqae format identifier must not be normalized or migrated",
+        1,
+    ),
+    "crates/document-renderer/src/lib.rs": (
+        "fn rejects_old_format()",
+        "Err(RenderError::UnsupportedVersion(_))",
+        1,
+    ),
+    "crates/printpacket/src/lib.rs": (
+        "fn canonical_document_is_analyzed_and_old_identifiers_are_rejected()",
+        "Feature::MediaContinuous",
+        2,
+    ),
+    "crates/storage-postgres/tests/migrations.rs": (
+        "async fn documents_migrate_and_enforce_tenant_scoped_references()",
+        "the pre-release format identifier must fail the database constraint",
+        1,
+    ),
+}
+
+
+def removed_identifier_is_structural_rejection(path: str, content: str) -> bool:
+    fixture = NEGATIVE_FIXTURE_SPANS.get(path)
+    if fixture is None:
+        return False
+    start_marker, end_marker, expected_count = fixture
+    start = content.find(start_marker)
+    end = content.find(end_marker, start + len(start_marker))
+    if start < 0 or end < 0:
+        return False
+    end += len(end_marker)
+    offsets: list[int] = []
+    offset = content.find(REMOVED_WIRE_IDENTIFIER)
+    while offset >= 0:
+        offsets.append(offset)
+        offset = content.find(REMOVED_WIRE_IDENTIFIER, offset + 1)
+    return len(offsets) == expected_count and all(start <= value < end for value in offsets)
 
 
 def tracked_files(root: Path = ROOT) -> list[Path]:
@@ -52,6 +97,7 @@ def tracked_files(root: Path = ROOT) -> list[Path]:
 
 def violations_for(path: str, content: str) -> list[str]:
     violations: list[str] = []
+    structural_rejection = removed_identifier_is_structural_rejection(path, content)
     if path.startswith("migrations/postgres/") and any(
         value in Path(path).name for value in FORBIDDEN_MIGRATION_NAMES
     ):
@@ -60,9 +106,9 @@ def violations_for(path: str, content: str) -> list[str]:
     for line_number, original in enumerate(content.splitlines(), 1):
         line = original
         if REMOVED_WIRE_IDENTIFIER in line:
-            if path not in NEGATIVE_FIXTURES:
+            if not structural_rejection:
                 violations.append(
-                    f"{path}:{line_number}: removed wire identifier outside a negative fixture"
+                    f"{path}:{line_number}: removed wire identifier outside an exact rejection test"
                 )
             line = line.replace(REMOVED_WIRE_IDENTIFIER, "")
         for removed in FORBIDDEN_TEXT:

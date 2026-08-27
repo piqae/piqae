@@ -87,10 +87,11 @@ def classify(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
             )
         )
         selected["macos_shell"] |= path.startswith(
-            ("shells/macos/", "sdk/apple/")
+            ("shells/macos/", "sdk/apple/", "apps/node-apple/")
         ) or path in {
             "release/tools/test_apple_node_sdk.sh",
             "release/tools/test_apple_node_sdk_linked.sh",
+            "release/tools/test_apple_node_app.sh",
         }
         selected["macos_packaging"] |= path.startswith("packaging/macos/")
         selected["windows_shell"] |= path.startswith("crates/shell-windows/")

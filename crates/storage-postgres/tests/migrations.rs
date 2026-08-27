@@ -1,10 +1,10 @@
 #![allow(clippy::expect_used)]
 
 use piqae_domain::{AgentId, EventId, JobFailureReason, JobId, JobState};
-use piqae_storage_postgres::{DeliveryAttemptProof, PostgresStore};
+use piqae_storage_postgres::{DeliveryAttemptProof, PostgresStore, StorageError};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, migrate::Migrator, postgres::PgPoolOptions};
-use std::{borrow::Cow, env};
+use std::{borrow::Cow, env, path::Path, process::Command};
 use uuid::Uuid;
 
 #[derive(Clone, Copy)]
@@ -19,6 +19,84 @@ struct AcceptanceMigrationFixture {
     job_state: &'static str,
     attempt_state: &'static str,
     revoked: bool,
+}
+
+#[tokio::test]
+async fn released_v0_1_21_history_is_refused_before_sqlx_checksum_validation() {
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL to run PostgreSQL migration evidence");
+        return;
+    };
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let listing = Command::new("git")
+        .args([
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "v0.1.21",
+            "--",
+            "migrations/postgres",
+        ])
+        .current_dir(&repository)
+        .output()
+        .expect("read released v0.1.21 migration inventory");
+    assert!(listing.status.success(), "v0.1.21 release tag is required");
+
+    let fixture_root = repository
+        .join(".piqae-test-fixtures/postgres-migration")
+        .join(ulid::Ulid::new().to_string().to_ascii_lowercase());
+    let migration_root = fixture_root.join("migrations");
+    std::fs::create_dir_all(&migration_root).expect("create isolated migration fixture");
+    for source in String::from_utf8(listing.stdout)
+        .expect("migration inventory is UTF-8")
+        .lines()
+    {
+        let filename = Path::new(source)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .expect("released migration has a safe filename");
+        let contents = Command::new("git")
+            .args(["show", &format!("v0.1.21:{source}")])
+            .current_dir(&repository)
+            .output()
+            .expect("read released migration");
+        assert!(contents.status.success(), "released migration is readable");
+        std::fs::write(migration_root.join(filename), contents.stdout)
+            .expect("write isolated released migration fixture");
+    }
+    let released = Migrator::new(migration_root)
+        .await
+        .expect("load released migration fixture");
+
+    let schema = format!("piqae_v021_refusal_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect PostgreSQL test database");
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create exact disposable schema");
+    let pool = schema_pool(&database_url, &schema).await;
+    released
+        .run(&pool)
+        .await
+        .expect("apply exact released v0.1.21 history");
+
+    let error = PostgresStore::from_pool(pool.clone())
+        .migrate()
+        .await
+        .expect_err("v0.1.21 must be refused by the v0.1.22 preflight");
+    assert!(matches!(error, StorageError::UnsupportedDatabaseBaseline));
+
+    pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop exact disposable schema");
+    admin.close().await;
+    std::fs::remove_dir_all(&fixture_root).expect("remove exact migration fixture");
 }
 
 #[tokio::test]
