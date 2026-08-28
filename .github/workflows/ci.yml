@@ -212,7 +212,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.macos_shell == 'true'
     runs-on: ${{ vars.PIQAE_CI_MACOS_RUNNER || 'macos-latest' }}
-    timeout-minutes: 20
+    # A cold exact linked-runtime build takes about 12 minutes before SDK,
+    # Xcode project, and Simulator validation. Keep every gate in one job so
+    # they consume the same XCFramework, with bounded headroom for cold hosts.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4

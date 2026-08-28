@@ -15,6 +15,8 @@ class CiReleaseContractTest(unittest.TestCase):
     def test_apple_app_and_sdk_share_one_explicit_linked_artifact(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         apple = workflow.split("\n  macos-shell:", 1)[1].split("\n  rust-windows:", 1)[0]
+        job_configuration = apple.split("\n    steps:", 1)[0]
+        self.assertIn("timeout-minutes: 35", job_configuration)
         build = apple.index("sdk/apple/scripts/build-xcframework.sh --replace")
         linked = apple.index("test_apple_node_sdk_linked.sh use-existing")
         app = apple.index("test_apple_node_app.sh")

@@ -11,7 +11,7 @@ public enum PiqaeMacNetworkPathState: Equatable, Sendable {
 
 @MainActor
 public protocol PiqaeMacNetworkPathSource: AnyObject {
-    var onChange: (@Sendable (PiqaeMacNetworkPathState) -> Void)? { get set }
+    var onChange: (@MainActor @Sendable (PiqaeMacNetworkPathState) -> Void)? { get set }
     func start()
     func cancel()
 }
@@ -25,6 +25,8 @@ public final class PiqaeMacHostLifecycleMonitor {
     private let network: any PiqaeMacNetworkPathSource
     private var observers: [NSObjectProtocol] = []
     private var reportTail: Task<Void, Never>?
+    private var active = false
+    private var generation: UInt64 = 0
 
     public init(
         reporter: any PiqaeHostLifecycleReporter,
@@ -41,7 +43,9 @@ public final class PiqaeMacHostLifecycleMonitor {
     }
 
     public func start() {
-        guard observers.isEmpty else { return }
+        guard !active else { return }
+        generation &+= 1
+        active = true
         enqueue(.started)
         observers.append(
             workspaceCenter.addObserver(
@@ -65,27 +69,30 @@ public final class PiqaeMacHostLifecycleMonitor {
             }
         )
         network.onChange = { [weak self] state in
-            Task { @MainActor [weak self] in
-                switch state {
-                case .available: self?.enqueue(.networkAvailable)
-                case .constrained: self?.enqueue(.networkConstrained)
-                case .unavailable: self?.enqueue(.networkUnavailable)
-                }
+            switch state {
+            case .available: self?.enqueue(.networkAvailable)
+            case .constrained: self?.enqueue(.networkConstrained)
+            case .unavailable: self?.enqueue(.networkUnavailable)
             }
         }
         network.start()
     }
 
     public func stop() {
+        active = false
+        generation &+= 1
         for observer in observers { workspaceCenter.removeObserver(observer) }
         observers.removeAll()
         network.onChange = nil
         network.cancel()
         reportTail?.cancel()
-        reportTail = nil
+        // Retain the cancelled tail as the next generation's completion
+        // predecessor. A reporter call already in flight cannot be retracted,
+        // and restarted facts must not overtake its completion.
     }
 
-    /// Waits for reports already queued by synchronous Apple notifications.
+    /// Waits for reports already enqueued on the main actor. It does not admit
+    /// a background callback that has not reached the main actor yet.
     public func flushForTesting() async {
         await reportTail?.value
     }
@@ -93,9 +100,18 @@ public final class PiqaeMacHostLifecycleMonitor {
     private func enqueue(_ event: PiqaeHostLifecycleEvent) {
         let previous = reportTail
         let reporter = reporter
-        reportTail = Task { @MainActor in
+        let generation = generation
+        reportTail = Task { @MainActor [weak self] in
             await previous?.value
-            guard !Task.isCancelled else { return }
+            // A report already executing at stop may finish before the next
+            // generation begins. An event that was only queued by an older
+            // monitor generation must not begin reporting after stop.
+            guard
+                !Task.isCancelled,
+                let self,
+                self.active,
+                self.generation == generation
+            else { return }
             try? await reporter.report(event)
         }
     }
@@ -103,17 +119,20 @@ public final class PiqaeMacHostLifecycleMonitor {
 
 @MainActor
 public final class PiqaeNWPathSource: PiqaeMacNetworkPathSource {
-    public var onChange: (@Sendable (PiqaeMacNetworkPathState) -> Void)?
+    public var onChange: (@MainActor @Sendable (PiqaeMacNetworkPathState) -> Void)?
 
     private var monitor: NWPathMonitor?
     private let queue = DispatchQueue(label: "com.piqae.nodekit.network-path")
     private var started = false
+    private var generation: UInt64 = 0
 
     public init() {}
 
     public func start() {
         guard !started else { return }
         started = true
+        generation &+= 1
+        let generation = generation
         let monitor = NWPathMonitor()
         self.monitor = monitor
         monitor.pathUpdateHandler = { [weak self] path in
@@ -122,7 +141,14 @@ public final class PiqaeNWPathSource: PiqaeMacNetworkPathSource {
             if path.status != .satisfied { state = .unavailable }
             else if path.isConstrained { state = .constrained }
             else { state = .available }
-            Task { @MainActor [weak self] in self?.onChange?(state) }
+            Task { @MainActor [weak self] in
+                guard
+                    let self,
+                    self.started,
+                    self.generation == generation
+                else { return }
+                self.onChange?(state)
+            }
         }
         monitor.start(queue: queue)
     }
@@ -130,6 +156,7 @@ public final class PiqaeNWPathSource: PiqaeMacNetworkPathSource {
     public func cancel() {
         guard started else { return }
         started = false
+        generation &+= 1
         monitor?.cancel()
         monitor = nil
     }
