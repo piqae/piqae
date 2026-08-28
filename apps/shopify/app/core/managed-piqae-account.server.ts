@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { PiqaeClient, PiqaePlatform, type PiqaeAccount } from "@piqae/sdk";
+import { PiqaeClient, PiqaePlatform } from "@piqae/sdk";
 import type { ShopLink, ShopRepository } from "./model";
 import { normalizeShopDomain } from "./model";
 import { starterTemplates } from "./starter-templates";
@@ -7,8 +7,16 @@ import {
   parseTemplateEnvelope,
   serializeTemplateEnvelope,
 } from "./template-model";
-import { seedStarterTemplates } from "./template-index.server";
-import type { WorkflowRepository } from "./workflows.server";
+import {
+  findSystemTemplate,
+  seedStarterTemplates,
+  systemTemplateId,
+} from "./template-index.server";
+import type {
+  BillingState,
+  SaveMerchantTemplate,
+  WorkflowRepository,
+} from "./workflows.server";
 
 export class ManagedPiqaeAccountService {
   private readonly platform: PiqaePlatform;
@@ -19,7 +27,7 @@ export class ManagedPiqaeAccountService {
     private readonly workflows: WorkflowRepository,
     platformKey: string,
     baseUrl: string,
-    fetcher: typeof globalThis.fetch = globalThis.fetch,
+    private readonly fetcher: typeof globalThis.fetch = globalThis.fetch,
   ) {
     this.platformKey = platformKey;
     this.platform = new PiqaePlatform({ platformKey, baseUrl, fetch: fetcher });
@@ -27,14 +35,63 @@ export class ManagedPiqaeAccountService {
 
   async ensure(rawShop: string): Promise<ShopLink> {
     const shop = normalizeShopDomain(rawShop);
+    return this.shops.withShopLock(shop, () => this.ensureLocked(shop));
+  }
+
+  async activatePlan(
+    rawShop: string,
+    plan: Exclude<BillingState["plan"], "free">,
+    limit: number,
+  ): Promise<ShopLink> {
+    const shop = normalizeShopDomain(rawShop);
+    return this.shops.withShopLock(shop, async () => {
+      await this.ensureLocked(shop);
+      const current = await this.shops.get(shop);
+      if (!current || current.entitlementMode !== "shopify_child")
+        throw new Error("PIQAE_MANAGED_ACCOUNT_NOT_READY");
+      const updated = { ...current, planHandle: plan };
+      if (!(await this.shops.putIfCurrentMatches(updated, current)))
+        throw new Error("PIQAE_ACCOUNT_LINK_CHANGED");
+      const previous = await this.workflows.getBilling(shop);
+      await this.workflows.saveBilling(shop, {
+        mode: "shopify_child",
+        plan,
+        used: previous.used,
+        limit,
+        status: "active",
+      });
+      return updated;
+    });
+  }
+
+  private async ensureLocked(shop: string): Promise<ShopLink> {
     const existing = await this.shops.get(shop);
-    if (existing?.entitlementMode === "shopify_child") return existing;
+    if (existing?.entitlementMode === "shopify_child") {
+      if (await this.starterGenerationCurrent(shop, existing)) return existing;
+      if (!existing.piqaeLiveEnvironmentId)
+        throw new Error("PIQAE_MANAGED_ACCOUNT_NOT_READY");
+      const templateRevisionId = await this.publishStarters(
+        shop,
+        existing.piqaeAccountId,
+        existing.piqaeLiveEnvironmentId,
+        this.client(existing),
+      );
+      const repaired = { ...existing, templateRevisionId };
+      if (!(await this.shops.putIfCurrentMatches(repaired, existing)))
+        throw new Error("PIQAE_ACCOUNT_LINK_CHANGED");
+      return repaired;
+    }
 
     const account = await this.platform.accounts.getOrCreate(shop, {
       name: shop.replace(/\.myshopify\.com$/, ""),
       metadata: { source: "shopify", shop },
     });
-    const templateRevisionId = await this.publishStarters(shop, account.live);
+    const templateRevisionId = await this.publishStarters(
+      shop,
+      account.id,
+      account.environments.live.id,
+      account.live,
+    );
     const link: ShopLink = {
       shop,
       piqaeAccountId: account.id,
@@ -46,8 +103,44 @@ export class ManagedPiqaeAccountService {
       planHandle: existing?.planHandle ?? "development",
       createdAt: existing?.createdAt ?? new Date().toISOString(),
     };
-    await this.shops.put(link);
+    if (!(await this.shops.putIfCurrentMatches(link, existing)))
+      throw new Error("PIQAE_ACCOUNT_LINK_CHANGED");
     return link;
+  }
+
+  private async starterGenerationCurrent(
+    shop: string,
+    link: ShopLink,
+  ): Promise<boolean> {
+    const stored = await this.workflows.listTemplates(shop);
+    for (const starter of starterTemplates) {
+      const local =
+        stored.find(
+          (candidate) => candidate.id === systemTemplateId(starter.id),
+        ) ?? findSystemTemplate(stored, starter.id);
+      if (!local?.published) return false;
+      try {
+        const envelope = parseTemplateEnvelope(local.published.source);
+        const published = envelope.published;
+        if (
+          envelope.system?.key !== starter.id ||
+          envelope.system.immutable !== true ||
+          !published ||
+          published.piqaeAccountId !== link.piqaeAccountId ||
+          published.piqaeEnvironmentId !== link.piqaeLiveEnvironmentId ||
+          published.canonicalDigest !==
+            createHash("sha256")
+              .update(JSON.stringify(envelope.document))
+              .digest("hex") ||
+          (starter.id === "invoice" &&
+            published.piqaeRevisionId !== link.templateRevisionId)
+        )
+          return false;
+      } catch {
+        return false;
+      }
+    }
+    return true;
   }
 
   client(link: ShopLink): PiqaeClient {
@@ -63,19 +156,26 @@ export class ManagedPiqaeAccountService {
         environmentId: link.piqaeLiveEnvironmentId,
       },
       baseUrl: this.platform.baseUrl,
+      fetch: this.fetcher,
     });
   }
 
   private async publishStarters(
     shop: string,
-    client: PiqaeAccount["live"],
+    accountId: string,
+    environmentId: string,
+    client: Pick<PiqaeClient, "printPackets">,
   ): Promise<string> {
     await seedStarterTemplates(this.workflows, shop);
     const stored = await this.workflows.listTemplates(shop);
+    const updates: SaveMerchantTemplate[] = [];
     let defaultRevisionId: string | undefined;
     for (const starter of starterTemplates) {
+      const canonicalDigest = createHash("sha256")
+        .update(JSON.stringify(starter.specification))
+        .digest("hex");
       const digest = createHash("sha256")
-        .update(`${shop}\0${starter.id}`)
+        .update(`${shop}\0${starter.id}\0${canonicalDigest}`)
         .digest("hex");
       const template = await client.printPackets.templates.create(
         {
@@ -89,25 +189,22 @@ export class ManagedPiqaeAccountService {
         starter.specification,
         `shopify-managed-publish-${digest}`,
       );
-      const local = stored.find((candidate) => {
-        try {
-          return (
-            parseTemplateEnvelope(candidate.source).system?.key === starter.id
-          );
-        } catch {
-          return false;
-        }
-      });
+      const local =
+        stored.find(
+          (candidate) => candidate.id === systemTemplateId(starter.id),
+        ) ?? findSystemTemplate(stored, starter.id);
       if (!local) throw new Error("PIQAE_DEFAULT_TEMPLATE_MISSING");
-      const envelope = parseTemplateEnvelope(local.source);
+      // Provisioning/relinking publishes the current canonical starter. A
+      // routine seed must never move an already-published revision implicitly.
+      const envelope = parseTemplateEnvelope(starter.source);
       envelope.published = {
+        piqaeAccountId: accountId,
+        piqaeEnvironmentId: environmentId,
         piqaeTemplateId: template.id,
         piqaeRevisionId: revision.id,
-        canonicalDigest: createHash("sha256")
-          .update(JSON.stringify(starter.specification))
-          .digest("hex"),
+        canonicalDigest,
       };
-      await this.workflows.saveTemplate(shop, {
+      updates.push({
         ...local,
         source: serializeTemplateEnvelope(envelope),
         expectedDraftRevision: local.draftRevision,
@@ -115,6 +212,7 @@ export class ManagedPiqaeAccountService {
       if (starter.id === "invoice") defaultRevisionId = revision.id;
     }
     if (!defaultRevisionId) throw new Error("PIQAE_DEFAULT_TEMPLATE_MISSING");
+    await this.workflows.saveTemplatesAtomically(shop, updates);
     return defaultRevisionId;
   }
 }

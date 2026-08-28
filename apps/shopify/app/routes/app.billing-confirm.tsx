@@ -6,7 +6,6 @@ import {
   confirmManagedPlan,
   MANAGED_PLANS,
 } from "../core/shopify-app-pricing.server";
-import { workflows } from "../core/workflows.server";
 import { createProductionServices } from "../services.server";
 function required(name: string) {
   const value = process.env[name];
@@ -50,17 +49,12 @@ export async function action({ request }: ActionFunctionArgs) {
     shopId: await shopGid(admin),
     returnedHandle: planHandle,
   });
-  const previous = await workflows().getBilling(session.shop);
   const services = createProductionServices();
-  const link = await services.managedAccounts.ensure(session.shop);
-  await services.repository.put({ ...link, planHandle: plan });
-  await workflows().saveBilling(session.shop, {
-    mode: "shopify_child",
+  await services.managedAccounts.activatePlan(
+    session.shop,
     plan,
-    used: previous.used,
-    limit: MANAGED_PLANS[plan].limit,
-    status: "active",
-  });
+    MANAGED_PLANS[plan].limit,
+  );
   return redirect("/app/billing?confirmed=1");
 }
 export default function ConfirmPlan() {

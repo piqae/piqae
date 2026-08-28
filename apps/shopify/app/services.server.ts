@@ -42,13 +42,7 @@ function buildServices() {
   const repository =
     injected ??
     (storage === "postgres"
-      ? new PostgresShopRepository(
-          new pg.Pool({
-            connectionString: required("DATABASE_URL"),
-            max: 10,
-            statement_timeout: 10_000,
-          }),
-        )
+      ? postgresShopRepository()
       : new MemoryShopRepository());
   const vault = CredentialVault.fromBase64(
     required("PIQAE_SHOPIFY_CREDENTIAL_KEY"),
@@ -138,4 +132,24 @@ function buildServices() {
     clientForLink,
     automationDelivery,
   };
+}
+
+function postgresShopRepository() {
+  const connectionString = required("DATABASE_URL");
+  return new PostgresShopRepository(
+    new pg.Pool({
+      connectionString,
+      max: 10,
+      statement_timeout: 10_000,
+      connectionTimeoutMillis: 10_000,
+    }),
+    // Advisory locks span remote publication calls. Keep them on a small,
+    // bounded pool so they can never consume the clients needed by data work.
+    new pg.Pool({
+      connectionString,
+      max: 4,
+      statement_timeout: 10_000,
+      connectionTimeoutMillis: 10_000,
+    }),
+  );
 }

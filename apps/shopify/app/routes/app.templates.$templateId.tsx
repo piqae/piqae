@@ -252,6 +252,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
     let source = serializeTemplateEnvelope(envelope);
     const id = existing?.id ?? newWorkflowId();
     let staged = null;
+    let saved: MerchantTemplate | undefined;
     if (intent === "publish") {
       // Persist the editable draft through CAS before creating a remote Piqae
       // revision. An already-stale browser is rejected before that external
@@ -277,21 +278,36 @@ export async function action({ request, params }: ActionFunctionArgs) {
         vault: services.vault,
         baseUrl: services.baseUrl,
         managedClientFactory: (link) => services.managedAccounts.client(link),
+        activate: async (publishedSource) => {
+          saved = await workflows().saveTemplate(session.shop, {
+            id,
+            name: bounded(form, "name", 200, true),
+            kind: kind as MerchantTemplate["kind"],
+            pageSize,
+            state: "published",
+            source: publishedSource,
+            revision: existing?.revision ?? 1,
+            designTargetId: designTargetId || null,
+            designSpecificationRevision,
+            expectedDraftRevision: staged!.draftRevision,
+          });
+        },
+      });
+    } else {
+      saved = await workflows().saveTemplate(session.shop, {
+        id,
+        name: bounded(form, "name", 200, true),
+        kind: kind as MerchantTemplate["kind"],
+        pageSize,
+        state: "draft",
+        source,
+        revision: existing?.revision ?? 1,
+        designTargetId: designTargetId || null,
+        designSpecificationRevision,
+        expectedDraftRevision: existing ? expectedDraftRevision : null,
       });
     }
-    const saved = await workflows().saveTemplate(session.shop, {
-      id,
-      name: bounded(form, "name", 200, true),
-      kind: kind as MerchantTemplate["kind"],
-      pageSize,
-      state: intent === "publish" ? "published" : "draft",
-      source,
-      revision: existing?.revision ?? 1,
-      designTargetId: designTargetId || null,
-      designSpecificationRevision,
-      expectedDraftRevision:
-        staged?.draftRevision ?? (existing ? expectedDraftRevision : null),
-    });
+    if (!saved) throw new Error("Published document activation failed");
     await syncTemplateIndex(admin, workflows(), session.shop);
     if (savingFromStarter || !params.templateId || params.templateId === "new")
       return redirect(`/app/templates/${encodeURIComponent(saved.id)}`, 303);

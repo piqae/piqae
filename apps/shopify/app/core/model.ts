@@ -8,11 +8,18 @@ export interface ShopLink {
   entitlementMode?: "existing_piqae" | "shopify_child";
   planHandle?: string | null;
   createdAt: string;
+  /** Opaque repository version used only for compare-and-swap writes. */
+  repositoryRevision?: string;
 }
 
 export interface ShopRepository {
   get(shop: string): Promise<ShopLink | null>;
   put(link: ShopLink): Promise<void>;
+  withShopLock<T>(shop: string, action: () => Promise<T>): Promise<T>;
+  putIfCurrentMatches(
+    link: ShopLink,
+    expected: ShopLink | null,
+  ): Promise<boolean>;
   deleteShop(shop: string): Promise<void>;
   redactCustomer(shop: string, customerId: string): Promise<void>;
   claimWebhook(
@@ -41,19 +48,53 @@ export interface ShopRepository {
 
 export class MemoryShopRepository implements ShopRepository {
   private readonly links = new Map<string, ShopLink>();
+  private readonly shopLocks = new Map<string, Promise<void>>();
+  private nextLinkRevision = 1;
   private readonly webhooks = new Set<string>();
   private readonly renders = new Map<
     string,
     { shop: string; orderGid?: string; customerGid?: string }
   >();
   async get(shop: string) {
-    return this.links.get(shop) ?? null;
+    const link = this.links.get(shop);
+    return link ? structuredClone(link) : null;
   }
   async put(link: ShopLink) {
-    this.links.set(link.shop, structuredClone(link));
+    this.links.set(link.shop, this.withNextRevision(link));
+  }
+  async withShopLock<T>(shop: string, action: () => Promise<T>): Promise<T> {
+    const key = normalizeShopDomain(shop);
+    const previous = this.shopLocks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => current);
+    this.shopLocks.set(key, tail);
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release();
+      if (this.shopLocks.get(key) === tail) this.shopLocks.delete(key);
+    }
+  }
+  async putIfCurrentMatches(link: ShopLink, expected: ShopLink | null) {
+    const current = this.links.get(link.shop) ?? null;
+    if (JSON.stringify(current) !== JSON.stringify(expected)) return false;
+    this.links.set(link.shop, this.withNextRevision(link));
+    return true;
+  }
+  private withNextRevision(link: ShopLink): ShopLink {
+    return {
+      ...structuredClone(link),
+      repositoryRevision: String(this.nextLinkRevision++),
+    };
   }
   async deleteShop(shop: string) {
-    this.links.delete(shop);
+    await this.withShopLock(shop, async () => {
+      this.links.delete(normalizeShopDomain(shop));
+    });
   }
   async redactCustomer(shop: string, customerId: string) {
     const customerGid = customerId.startsWith("gid://shopify/Customer/")

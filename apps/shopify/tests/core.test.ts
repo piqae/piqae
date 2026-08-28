@@ -49,6 +49,8 @@ import {
   removeSystemOwnership,
   serializeTemplateEnvelope,
 } from "../app/core/template-model";
+import { templateDigest } from "../app/core/template-digest.server";
+import { seedStarterTemplates } from "../app/core/template-index.server";
 
 const shop = "fixture-shop.myshopify.com";
 const order = {
@@ -133,14 +135,17 @@ async function publishPinnedDocument(
     piqaeRevisionId: string;
     targetId: string;
     specificationRevision: string;
+    accountId?: string;
   },
 ) {
   const starter = starterTemplates[0]!;
   const envelope = parseTemplateEnvelope(starter.source);
   envelope.published = {
+    piqaeAccountId: input.accountId ?? "acct_1",
+    piqaeEnvironmentId: null,
     piqaeTemplateId: `piqae_${input.id}`,
     piqaeRevisionId: input.piqaeRevisionId,
-    canonicalDigest: "a".repeat(64),
+    canonicalDigest: templateDigest(JSON.stringify(envelope.document)),
   };
   return workflow.saveTemplate(shop, {
     ...starter,
@@ -502,7 +507,74 @@ describe("Shopify boundary", () => {
         templateId: starterTemplates[0]!.id,
         requestKey: "preview-unpinned",
       }),
-    ).rejects.toThrow("has no published Piqae revision");
+    ).rejects.toThrow("has no pinned Piqae revision");
+  });
+  it.each([
+    {
+      accountId: "acct_other",
+      environmentId: null,
+      digest: "current",
+      error: "different Piqae account",
+    },
+    {
+      accountId: "acct_1",
+      environmentId: null,
+      digest: "b".repeat(64),
+      error: "no longer matches its pinned Piqae revision",
+    },
+    {
+      accountId: "acct_1",
+      environmentId: "env_other",
+      digest: "current",
+      error: "different Piqae environment",
+    },
+  ])("fails closed on a mismatched publication context", async (fixture) => {
+    const repository = new MemoryShopRepository();
+    const workflow = new MemoryWorkflowRepository();
+    const vault = new CredentialVault(Buffer.alloc(32, 9));
+    await repository.put({
+      shop,
+      piqaeAccountId: "acct_1",
+      encryptedCredential: vault.seal("token", shop),
+      templateRevisionId: "fallback_revision",
+      createdAt: new Date().toISOString(),
+    });
+    const starter = starterTemplates[0]!;
+    const envelope = parseTemplateEnvelope(starter.source);
+    envelope.published = {
+      piqaeAccountId: fixture.accountId,
+      piqaeEnvironmentId: fixture.environmentId,
+      piqaeTemplateId: "template_context",
+      piqaeRevisionId: "revision_context",
+      canonicalDigest:
+        fixture.digest === "current"
+          ? templateDigest(JSON.stringify(envelope.document))
+          : fixture.digest,
+    };
+    const saved = await workflow.saveTemplate(shop, {
+      ...starter,
+      id: "00000000-0000-4000-8000-000000008888",
+      source: serializeTemplateEnvelope(envelope),
+      state: "published",
+      revision: 1,
+    });
+    const service = new ShopifyPrintingService(
+      repository,
+      vault,
+      () => ({ printPackets: {} }) as never,
+      "https://app.example",
+      undefined,
+      workflow,
+    );
+    await expect(
+      service.previewOrders({
+        admin,
+        shop,
+        orderIds: ["42"],
+        templateId: saved.id,
+        requestKey: "preview-context-mismatch",
+      }),
+    ).rejects.toThrow(fixture.error);
   });
   it("pins POS receipt rendering to the published canonical receipt revision", async () => {
     const repository = new MemoryShopRepository();
@@ -518,16 +590,35 @@ describe("Shopify boundary", () => {
     const receipt = starterTemplates.find(({ id }) => id === "receipt")!;
     const envelope = parseTemplateEnvelope(receipt.source);
     envelope.published = {
+      piqaeAccountId: "acct_1",
+      piqaeEnvironmentId: null,
       piqaeTemplateId: "receipt_template",
       piqaeRevisionId: "receipt_revision",
-      canonicalDigest: "a".repeat(64),
+      canonicalDigest: templateDigest(JSON.stringify(envelope.document)),
     };
     await workflow.saveTemplate(shop, {
       ...receipt,
+      id: "00000000-0000-4000-8000-000000000003",
       source: serializeTemplateEnvelope(envelope),
       state: "published",
       revision: 1,
     });
+    const cloneEnvelope = parseTemplateEnvelope(receipt.source);
+    cloneEnvelope.published = {
+      piqaeAccountId: "acct_1",
+      piqaeEnvironmentId: null,
+      piqaeTemplateId: "receipt_clone_template",
+      piqaeRevisionId: "receipt_clone_revision",
+      canonicalDigest: templateDigest(JSON.stringify(cloneEnvelope.document)),
+    };
+    await workflow.saveTemplate(shop, {
+      ...receipt,
+      id: "00000000-0000-4000-8000-000000009999",
+      source: serializeTemplateEnvelope(cloneEnvelope),
+      state: "published",
+      revision: 1,
+    });
+    await seedStarterTemplates(workflow, shop);
     const create = vi.fn(async () => ({
       id: "receipt_render",
       state: "completed",
@@ -575,6 +666,7 @@ describe("Shopify boundary", () => {
       piqaeRevisionId: "rev_preview",
       targetId: "tgt_orders",
       specificationRevision: "spec_orders_4",
+      accountId: "acct_preview",
     });
     const createRender = vi.fn(async () => ({
       id: "render_preview",
@@ -1051,7 +1143,9 @@ describe("Shopify document experience", () => {
       state: "draft",
       revision: 1,
     });
-    expect(parseTemplateEnvelope(draft.source).system).toBeUndefined();
+    const customized = parseTemplateEnvelope(draft.source);
+    expect(customized.system).toBeUndefined();
+    expect(customized.published).toBeUndefined();
     expect(() =>
       customizedSystemDraft(
         {
@@ -1081,7 +1175,16 @@ describe("Shopify document experience", () => {
       "{{ order.name }}",
     );
     const ownedEnvelope = parseTemplateEnvelope(starterTemplates[0]!.source);
+    ownedEnvelope.published = {
+      piqaeAccountId: "account_owned",
+      piqaeEnvironmentId: null,
+      piqaeTemplateId: "template_owned",
+      piqaeRevisionId: "revision_owned",
+      canonicalDigest: templateDigest(JSON.stringify(ownedEnvelope.document)),
+    };
     expect(ownedEnvelope.system).toBeDefined();
-    expect(removeSystemOwnership(ownedEnvelope).system).toBeUndefined();
+    const portable = removeSystemOwnership(ownedEnvelope);
+    expect(portable.system).toBeUndefined();
+    expect(portable.published).toBeUndefined();
   });
 });
