@@ -7,7 +7,7 @@ bundle contains all of the following in one directory:
 - `release-manifest.json`, conforming to
   `release/release-manifest.schema.json`;
 - `SHA256SUMS`, covering every artifact, the manifest, SBOM, and provenance;
-- `sbom.spdx.json`, an SPDX 2.x JSON software bill of materials; and
+- `release-evidence.spdx.json`, an SPDX 2.x JSON software bill of materials; and
 - `provenance.sigstore.json`, repository-bound SLSA build provenance.
 
 The reusable `.github/workflows/release-evidence.yml` downloads artifacts from
@@ -62,9 +62,11 @@ if the CLI is absent or any subject cannot be verified.
 
 ## Building a bundle outside GitHub Actions
 
-Place artifacts, an SPDX document named `sbom.spdx.json`, and a Sigstore bundle
-named `provenance.sigstore.json` in a clean directory. The provenance must cover
-every artifact by name and SHA-256 digest. Then run:
+Place artifacts, an SPDX document named `release-evidence.spdx.json`, and a
+Sigstore bundle named `provenance.sigstore.json` in a clean directory. The
+provenance must cover every artifact by name and SHA-256 digest. Every relative
+file path in the complete bundle must also be unique when case-folded; this
+keeps uploads lossless on case-insensitive artifact stores. Then run:
 
 ```console
 python3 release/tools/release_bundle.py prepare PATH \
@@ -74,10 +76,11 @@ python3 release/tools/release_bundle.py audit PATH \
   --github-repository OWNER/REPOSITORY
 ```
 
-`prepare` rejects symlinks and unsafe paths and writes the manifest and
-canonical checksum file. `checksums` can regenerate `SHA256SUMS` from an
-existing manifest, but any regeneration invalidates review evidence and must be
-re-audited.
+`prepare` rejects symlinks, unsafe paths, case-insensitive path collisions, and
+file/directory prefix conflicts across artifacts and evidence before writing
+the manifest and canonical checksum file. `audit` repeats that whole-bundle
+check. `checksums` can regenerate `SHA256SUMS` from an existing manifest, but
+any regeneration invalidates review evidence and must be re-audited.
 
 ## Gate ownership
 

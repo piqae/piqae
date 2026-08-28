@@ -54,7 +54,7 @@
     "evidence": {
       "const": {
         "checksums": "SHA256SUMS",
-        "sbom": "sbom.spdx.json",
+        "sbom": "release-evidence.spdx.json",
         "provenance": "provenance.sigstore.json"
       }
     }
