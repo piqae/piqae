@@ -175,6 +175,63 @@ describe("Piqae MCP server", () => {
     await server.close();
   });
 
+  it("requires and forwards authoritative target binding topology", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        id: "tgb_test",
+        target_id: "tgt_test",
+        printer_id: "ptr_test",
+        agent_id: "agt_test",
+        profile_id: "profile_shipping",
+        profile_revision: 4,
+        destination_id: "pdst_test",
+        route_id: "rte_test",
+        role: "primary",
+        enabled: true,
+        created_at: "2026-08-28T00:00:00Z",
+        updated_at: "2026-08-28T00:00:00Z",
+      }),
+    );
+    globalThis.fetch = fetchMock as typeof fetch;
+    const { client, server } = await linked(config());
+    const missingRoute = await client.callTool({
+      name: "piqae_targets",
+      arguments: {
+        action: "bind",
+        target_id: "tgt_test",
+        printer_id: "ptr_test",
+        profile_id: "profile_shipping",
+        profile_revision: 4,
+        destination_id: "pdst_test",
+        role: "primary",
+      },
+    });
+    expect(missingRoute.isError).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const bound = await client.callTool({
+      name: "piqae_targets",
+      arguments: {
+        action: "bind",
+        target_id: "tgt_test",
+        printer_id: "ptr_test",
+        profile_id: "profile_shipping",
+        profile_revision: 4,
+        destination_id: "pdst_test",
+        route_id: "rte_test",
+        role: "primary",
+      },
+    });
+    expect(bound.isError).not.toBe(true);
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(request.body))).toMatchObject({
+      destination_id: "pdst_test",
+      route_id: "rte_test",
+    });
+    await client.close();
+    await server.close();
+  });
+
   it("advertises the complete grouped tool and knowledge surface", async () => {
     const { client, server } = await linked(config());
     const tools = await client.listTools();

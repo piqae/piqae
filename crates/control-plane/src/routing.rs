@@ -63,6 +63,8 @@ pub struct CreateBindingRequest {
     printer_id: String,
     profile_id: String,
     profile_revision: u64,
+    destination_id: String,
+    route_id: String,
     role: String,
     #[serde(default = "default_true")]
     enabled: bool,
@@ -448,6 +450,31 @@ pub async fn create_binding(
         .repository
         .get_printer(tenant.workspace_id, tenant.environment_id, printer_id)
         .await?;
+    let route = state
+        .destination_topology
+        .list_all_routes(crate::destination_topology::tenant_scope(tenant))
+        .await
+        .map_err(crate::destination_topology::map_storage_error)?
+        .into_iter()
+        .find(|route| {
+            (route.id.as_str(), route.destination_id.as_str())
+                == (request.route_id.as_str(), request.destination_id.as_str())
+        })
+        .ok_or_else(|| {
+            AppError::invalid(
+                "invalid_target_binding",
+                "The route does not belong to the selected physical destination.",
+            )
+        })?;
+    if !route.enabled
+        || route.printer_id != printer.id.to_string()
+        || route.agent_id != printer.agent_id.to_string()
+    {
+        return Err(AppError::invalid(
+            "invalid_target_binding",
+            "The route does not belong to the selected printer and node.",
+        ));
+    }
     let profile = printer
         .profiles
         .iter()
@@ -470,6 +497,8 @@ pub async fn create_binding(
         agent_id: printer.agent_id,
         profile_id: request.profile_id.trim().to_owned(),
         profile_revision: request.profile_revision,
+        destination_id: Some(request.destination_id),
+        route_id: Some(request.route_id),
         role: request.role,
         enabled: request.enabled,
         created_at: now,
@@ -711,6 +740,8 @@ fn design_constraint_projection(
                 "agent_id": binding.agent_id,
                 "profile_id": binding.profile_id,
                 "profile_revision": binding.profile_revision,
+                "destination_id": binding.destination_id,
+                "route_id": binding.route_id,
                 "role": binding.role,
                 "enabled": binding.enabled,
             })

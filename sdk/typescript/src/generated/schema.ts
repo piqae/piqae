@@ -4291,6 +4291,8 @@ export interface components {
             profile_id: string;
             /** Format: int64 */
             profile_revision: number;
+            destination_id: string;
+            route_id: string;
             /** @enum {string} */
             role: "primary" | "standby";
             /** @default true */
@@ -4304,6 +4306,10 @@ export interface components {
             profile_id: string;
             /** Format: int64 */
             profile_revision: number;
+            /** @description Authoritative physical destination captured by this binding. */
+            destination_id: string | null;
+            /** @description Preferred source route; recovery may use another compatible route within destination_id. */
+            route_id: string | null;
             /** @enum {string} */
             role: "primary" | "standby";
             enabled: boolean;

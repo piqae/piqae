@@ -41,6 +41,10 @@ impl AppError {
         self.status == StatusCode::NOT_FOUND
     }
 
+    pub(crate) fn is_conflict(&self) -> bool {
+        self.status == StatusCode::CONFLICT
+    }
+
     pub fn invalid(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,

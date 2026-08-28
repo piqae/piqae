@@ -5870,6 +5870,11 @@ impl Repository for MemoryRepository {
         environment_id: EnvironmentId,
         binding: &StoredTargetBinding,
     ) -> Result<StoredTargetBinding, RepositoryError> {
+        if binding.destination_id.as_deref().is_none_or(str::is_empty)
+            || binding.route_id.as_deref().is_none_or(str::is_empty)
+        {
+            return Err(RepositoryError::InvalidTransition);
+        }
         let mut state = self.state.write().await;
         state
             .targets
@@ -7152,6 +7157,376 @@ impl Repository for MemoryRepository {
         state
             .routing_attempts
             .push((job_id, from_binding_id, binding.id.clone()));
+        Ok(Some(job))
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "memory parity keeps destination, binding, profile, and media fences atomic"
+    )]
+    async fn reroute_job_to_destination_route_before_acceptance(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        request: DestinationRouteReassignment<'_>,
+    ) -> Result<Option<Job>, RepositoryError> {
+        if !matches!(request.reason, "node_recovered" | "standby_recovery") {
+            return Err(RepositoryError::Persistence(
+                "unsupported routing attempt reason".into(),
+            ));
+        }
+        let candidate_printer = request
+            .printer_id
+            .parse::<PrinterId>()
+            .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+        let candidate_agent = request
+            .agent_id
+            .parse::<AgentId>()
+            .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+        let mut state = self.state.write().await;
+        if state.job_acceptances.contains_key(&request.job_id)
+            || state
+                .leases
+                .get(&request.job_id)
+                .is_some_and(|(_, _, _, expiry)| *expiry > Utc::now())
+        {
+            return Ok(None);
+        }
+        let Some(record) = state.jobs.get(&request.job_id) else {
+            return Err(RepositoryError::NotFound);
+        };
+        if record.job.workspace_id != workspace_id
+            || record.job.environment_id != environment_id
+            || !matches!(
+                record.job.state,
+                JobState::WaitingForAgent | JobState::FailedRetryable
+            )
+            || (request.target_id.is_none()
+                && record
+                    .job
+                    .metadata
+                    .get("piqae.destination_id")
+                    .map(String::as_str)
+                    != Some(request.destination_id))
+            || (record
+                .job
+                .metadata
+                .get("piqae.destination_id")
+                .map(String::as_str)
+                == Some(request.destination_id)
+                && record
+                    .job
+                    .metadata
+                    .get("piqae.route_id")
+                    .map(String::as_str)
+                    == Some(request.route_id))
+        {
+            return Ok(None);
+        }
+        let mut job = record.job.clone();
+        let from_binding_id = job
+            .metadata
+            .get("piqae.binding_id")
+            .or_else(|| job.metadata.get("spool.binding_id"))
+            .cloned()
+            .unwrap_or_default();
+        let job_target = job
+            .metadata
+            .get("piqae.target_id")
+            .or_else(|| job.metadata.get("spool.target_id"))
+            .map(String::as_str);
+        if job_target != request.target_id {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        if let Some(target_id) = request.target_id {
+            let (Some(binding_id), Some(profile_id), Some(profile_revision)) = (
+                request.binding_id,
+                request.profile_id,
+                request.profile_revision,
+            ) else {
+                return Err(RepositoryError::Persistence(
+                    "target reroute requires a binding and immutable profile revision".into(),
+                ));
+            };
+            let binding_valid = state.target_bindings.get(binding_id).is_some_and(
+                |(workspace, environment, binding)| {
+                    *workspace == workspace_id
+                        && *environment == environment_id
+                        && binding.target_id == target_id
+                        && binding.printer_id == candidate_printer
+                        && binding.agent_id == candidate_agent
+                        && binding.profile_id == profile_id
+                        && binding.profile_revision == profile_revision
+                        && binding.destination_id.as_deref() == Some(request.destination_id)
+                        && binding.enabled
+                },
+            );
+            let target =
+                state
+                    .targets
+                    .get(target_id)
+                    .and_then(|(workspace, environment, target)| {
+                        (*workspace == workspace_id
+                            && *environment == environment_id
+                            && target.enabled)
+                            .then_some(target)
+                    });
+            let target_stock = target.and_then(|target| target.stock_id.clone());
+            let intended_stock = job
+                .metadata
+                .get("piqae.stock_id")
+                .or_else(|| job.metadata.get("spool.stock_id"))
+                .cloned();
+            if job.metadata.contains_key("piqae.document.media")
+                && request.expected_design_specification_revision.is_none()
+            {
+                return Err(RepositoryError::Persistence(
+                    "PrintPacket target reroute requires the expected design specification revision"
+                        .into(),
+                ));
+            }
+            let profile_valid = state
+                .printers
+                .get(&(workspace_id, environment_id, candidate_printer))
+                .is_some_and(|printer| {
+                    printer.agent_id == candidate_agent
+                        && printer.profiles.iter().any(|profile| {
+                            profile.profile_id == profile_id
+                                && profile.revision == profile_revision
+                                && profile.published
+                                && matches!(profile.status.as_deref(), None | Some("ready"))
+                                && profile.stock_id == intended_stock
+                        })
+                });
+            if target.is_none()
+                || !binding_valid
+                || (target_stock.is_some() && target_stock != intended_stock)
+                || !profile_valid
+            {
+                return Err(RepositoryError::ConcurrentStateChange);
+            }
+            if let Some(expected_revision) = request.expected_design_specification_revision {
+                let target = target.ok_or(RepositoryError::ConcurrentStateChange)?;
+                let stock_projection = target.stock_id.as_deref().and_then(|stock_id| {
+                    state
+                        .stocks
+                        .get(stock_id)
+                        .and_then(|(workspace, environment, stock)| {
+                            (*workspace == workspace_id && *environment == environment_id).then(
+                                || {
+                                    serde_json::json!({
+                                        "id": stock.id,
+                                        "revision": stock.revision,
+                                        "attributes": stock.attributes,
+                                        "archived": stock.archived,
+                                    })
+                                },
+                            )
+                        })
+                });
+                let mut binding_constraints = state
+                    .target_bindings
+                    .values()
+                    .filter(|(workspace, environment, binding)| {
+                        *workspace == workspace_id
+                            && *environment == environment_id
+                            && binding.target_id == target_id
+                    })
+                    .map(|(_, _, binding)| {
+                        serde_json::json!({
+                            "id": binding.id,
+                            "target_id": binding.target_id,
+                            "printer_id": binding.printer_id,
+                            "agent_id": binding.agent_id,
+                            "profile_id": binding.profile_id,
+                            "profile_revision": binding.profile_revision,
+                            "destination_id": binding.destination_id,
+                            "route_id": binding.route_id,
+                            "role": binding.role,
+                            "enabled": binding.enabled,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                binding_constraints
+                    .sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
+                let projection = serde_json::json!({
+                    "target": {
+                        "id": target.id,
+                        "stock_id": target.stock_id,
+                        "enabled": target.enabled,
+                        "routing_policy": target.routing_policy,
+                    },
+                    "stock": stock_projection,
+                    "bindings": binding_constraints,
+                });
+                let canonical = serde_json::to_vec(&projection)
+                    .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+                if format!("spec_{:x}", Sha256::digest(canonical)) != expected_revision {
+                    return Err(RepositoryError::ConcurrentStateChange);
+                }
+            }
+            job.metadata
+                .insert("piqae.binding_id".into(), binding_id.into());
+            job.metadata
+                .insert("piqae.profile_id".into(), profile_id.into());
+            job.metadata.insert(
+                "piqae.profile_revision".into(),
+                profile_revision.to_string(),
+            );
+            if job.metadata.contains_key("piqae.document.media") {
+                let (Some(stock_revision), Some(loaded_media_snapshot)) =
+                    (request.stock_revision, request.loaded_media_snapshot)
+                else {
+                    return Err(RepositoryError::Persistence(
+                        "PrintPacket target reroute requires a loaded-media fence".into(),
+                    ));
+                };
+                let snapshot: serde_json::Value = serde_json::from_str(loaded_media_snapshot)
+                    .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+                if !snapshot.get("stock").is_some_and(|stock| {
+                    stock.get("id").and_then(serde_json::Value::as_str) == intended_stock.as_deref()
+                        && stock.get("revision").and_then(serde_json::Value::as_u64)
+                            == Some(stock_revision)
+                }) {
+                    return Err(RepositoryError::ConcurrentStateChange);
+                }
+                let source = snapshot
+                    .get("source")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(RepositoryError::ConcurrentStateChange)?;
+                let confidence = snapshot
+                    .get("confidence")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(RepositoryError::ConcurrentStateChange)?;
+                let observed_at = snapshot
+                    .get("observed_at")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                    .map(|value| value.with_timezone(&Utc))
+                    .ok_or(RepositoryError::ConcurrentStateChange)?;
+                let fresh_until = snapshot
+                    .get("fresh_until")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                    .map(|value| value.with_timezone(&Utc))
+                    .ok_or(RepositoryError::ConcurrentStateChange)?;
+                let observation = state.loaded_media.get(&(
+                    workspace_id,
+                    environment_id,
+                    candidate_printer,
+                    source.to_owned(),
+                ));
+                if observation.is_none_or(|observation| {
+                    let authoritative_fresh_until =
+                        observation.observed_at + chrono::Duration::minutes(15);
+                    observation.stock_id != intended_stock
+                        || observation.stock_revision != Some(stock_revision)
+                        || observation.confidence != confidence
+                        || !matches!(
+                            observation.confidence.as_str(),
+                            "reported" | "operator_confirmed"
+                        )
+                        || observation.calibration_state != "current"
+                        || observation.observed_at != observed_at
+                        || authoritative_fresh_until != fresh_until
+                        || authoritative_fresh_until < Utc::now()
+                }) {
+                    return Err(RepositoryError::ConcurrentStateChange);
+                }
+                job.metadata
+                    .insert("piqae.stock_revision".into(), stock_revision.to_string());
+                job.metadata.insert(
+                    "piqae.loaded_media_snapshot".into(),
+                    loaded_media_snapshot.into(),
+                );
+            }
+            if job
+                .metadata
+                .get("piqae.document.render_mode")
+                .map(String::as_str)
+                == Some("node_render")
+            {
+                job.metadata.insert(
+                    "piqae.document.readiness_binding_id".into(),
+                    binding_id.into(),
+                );
+            }
+        } else {
+            let (Some(expected_revision), Some(ticket_digest)) = (
+                request.expected_capability_revision,
+                request.resolved_ticket_digest,
+            ) else {
+                return Err(RepositoryError::Persistence(
+                    "direct reroute requires an immutable resolved ticket".into(),
+                ));
+            };
+            let printer_revision = state
+                .printers
+                .get(&(workspace_id, environment_id, candidate_printer))
+                .map(|printer| printer.capability_revision);
+            let ticket_valid = state.resolved_print_tickets.get(ticket_digest).is_some_and(
+                |(workspace, environment, ticket)| {
+                    *workspace == workspace_id
+                        && *environment == environment_id
+                        && ticket.printer_id == candidate_printer
+                        && ticket.capability_revision == expected_revision
+                        && ticket.expires_at > Utc::now()
+                },
+            );
+            if printer_revision != Some(expected_revision) || !ticket_valid {
+                return Err(RepositoryError::ConcurrentStateChange);
+            }
+            job.metadata.insert(
+                "piqae.capability_revision".into(),
+                expected_revision.to_string(),
+            );
+            job.metadata
+                .insert("piqae.resolved_ticket_digest".into(), ticket_digest.into());
+        }
+        if let piqae_domain::ContentSource::EncryptedUpload { manifest, .. } = &job.content {
+            if manifest.binding.printer_id != candidate_printer.to_string()
+                || !state
+                    .encrypted_job_key_references
+                    .iter()
+                    .any(|(job_id, agent_id, _)| {
+                        *job_id == request.job_id && *agent_id == candidate_agent
+                    })
+            {
+                return Err(RepositoryError::ConcurrentStateChange);
+            }
+        }
+        for suffix in [
+            "target_id",
+            "binding_id",
+            "profile_id",
+            "profile_revision",
+            "stock_id",
+        ] {
+            if let Some(value) = job.metadata.remove(&format!("spool.{suffix}")) {
+                job.metadata
+                    .entry(format!("piqae.{suffix}"))
+                    .or_insert(value);
+            }
+        }
+        job.printer_id = candidate_printer;
+        job.metadata
+            .insert("piqae.destination_id".into(), request.destination_id.into());
+        job.metadata
+            .insert("piqae.route_id".into(), request.route_id.into());
+        job.metadata
+            .insert("piqae.route_agent_id".into(), request.agent_id.into());
+        let record = state
+            .jobs
+            .get_mut(&request.job_id)
+            .ok_or(RepositoryError::NotFound)?;
+        record.agent_id = candidate_agent;
+        record.job = job.clone();
+        state.leases.remove(&request.job_id);
+        state.routing_attempts.push((
+            request.job_id,
+            from_binding_id,
+            request.binding_id.unwrap_or(request.route_id).into(),
+        ));
         Ok(Some(job))
     }
 
@@ -9698,6 +10073,8 @@ mod routing_repository_tests {
             agent_id: primary_agent,
             profile_id: "profile_shipping".into(),
             profile_revision: 4,
+            destination_id: Some("pdst_recovery".into()),
+            route_id: Some("rte_primary".into()),
             role: "primary".into(),
             enabled: true,
             created_at: now,
@@ -9710,6 +10087,8 @@ mod routing_repository_tests {
             agent_id: standby_agent,
             profile_id: "profile_shipping".into(),
             profile_revision: 4,
+            destination_id: Some("pdst_recovery".into()),
+            route_id: Some("rte_standby".into()),
             role: "standby".into(),
             enabled: true,
             created_at: now,

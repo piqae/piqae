@@ -3425,6 +3425,18 @@ mod tests {
         )
         .expect("target JSON");
         let target_id = target["id"].as_str().expect("target id");
+        let primary_binding_route = application
+            .state
+            .destination_topology
+            .list_all_routes(piqae_storage_postgres::destination_topology::TenantScope {
+                workspace_id: application.tenant.workspace_id,
+                environment_id: application.tenant.environment_id,
+            })
+            .await
+            .expect("primary binding routes")
+            .into_iter()
+            .find(|route| route.printer_id == printer_id.to_string())
+            .expect("primary binding route");
 
         let binding_response = application
             .router
@@ -3434,7 +3446,9 @@ mod tests {
                 &format!("/v1/targets/{target_id}/bindings"),
                 "piq_test_integration",
                 Some(&format!(
-                    r#"{{"printer_id":"{printer_id}","profile_id":"profile_shipping","profile_revision":4,"role":"primary"}}"#
+                    r#"{{"printer_id":"{printer_id}","profile_id":"profile_shipping","profile_revision":4,"destination_id":"{}","route_id":"{}","role":"primary"}}"#,
+                    primary_binding_route.destination_id,
+                    primary_binding_route.id
                 )),
             ))
             .await
@@ -3494,6 +3508,56 @@ mod tests {
             )
             .await
             .expect("media standby presence");
+        application
+            .state
+            .destination_topology
+            .upsert_destination(
+                piqae_storage_postgres::destination_topology::TenantScope {
+                    workspace_id: application.tenant.workspace_id,
+                    environment_id: application.tenant.environment_id,
+                },
+                &piqae_storage_postgres::destination_topology::StoredPhysicalDestination {
+                    id: "pdst_media_standby".into(),
+                    name: "Media standby".into(),
+                    identity_confidence:
+                        piqae_storage_postgres::destination_topology::IdentityConfidence::Verified,
+                    state: "available".into(),
+                    scheduling_authority_id: None,
+                    identity_revision: 1,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+            )
+            .await
+            .expect("media standby physical destination");
+        application
+            .state
+            .destination_topology
+            .upsert_route(
+                piqae_storage_postgres::destination_topology::TenantScope {
+                    workspace_id: application.tenant.workspace_id,
+                    environment_id: application.tenant.environment_id,
+                },
+                &piqae_storage_postgres::destination_topology::StoredPrinterRoute {
+                    id: "rte_media_standby".into(),
+                    destination_id: "pdst_media_standby".into(),
+                    printer_id: media_standby_printer.to_string(),
+                    agent_id: media_standby_agent.to_string(),
+                    native_queue_id: "media-standby".into(),
+                    local_route_key: Some("rte_local_media_standby".into()),
+                    state: "available".into(),
+                    role: "standby".into(),
+                    priority: 100,
+                    enabled: true,
+                    capability_revision: 1,
+                    profile_revision: 4,
+                    last_seen_at: Some(Utc::now()),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+            )
+            .await
+            .expect("media standby route fixture");
         let media_standby_binding = application
             .router
             .clone()
@@ -3502,12 +3566,24 @@ mod tests {
                 &format!("/v1/targets/{target_id}/bindings"),
                 "piq_test_integration",
                 Some(&format!(
-                    r#"{{"printer_id":"{media_standby_printer}","profile_id":"profile_shipping","profile_revision":4,"role":"standby"}}"#
+                    r#"{{"printer_id":"{media_standby_printer}","profile_id":"profile_shipping","profile_revision":4,"destination_id":"pdst_media_standby","route_id":"rte_media_standby","role":"standby"}}"#
                 )),
             ))
             .await
             .expect("media standby binding response");
         assert_eq!(media_standby_binding.status(), StatusCode::CREATED);
+        let media_standby_binding: serde_json::Value = serde_json::from_slice(
+            &media_standby_binding
+                .into_body()
+                .collect()
+                .await
+                .expect("media standby binding body")
+                .to_bytes(),
+        )
+        .expect("media standby binding JSON");
+        let media_standby_binding_id = media_standby_binding["id"]
+            .as_str()
+            .expect("media standby binding id");
         application
             .repository
             .upsert_loaded_media(
@@ -3950,6 +4026,25 @@ mod tests {
             .expect("complete media fence render"),
             1
         );
+        application
+            .repository
+            .sync_agent_presence(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                "target-node-render",
+                &AgentHealth {
+                    started_at: now,
+                    observed_at: Utc::now(),
+                    sqlite_integrity_ok: true,
+                    executor_crashes: 0,
+                    last_error_code: None,
+                },
+                &virtual_print_packet_capabilities(),
+                Some(std::slice::from_ref(&restored_primary_profile)),
+            )
+            .await
+            .expect("target node-render capabilities");
         let print_path = format!(
             "/v1/printpacket/renders/{}/print",
             media_render["id"].as_str().expect("media render id")
@@ -4004,6 +4099,100 @@ mod tests {
                 .to_string()
         );
         assert_eq!(target_print["printer_id"], printer_id.as_ulid().to_string());
+        let mut target_node_job_ids = Vec::new();
+        for (policy, key) in [
+            ("prefer_node", "target-node-render-preferred"),
+            ("require_node", "target-node-render-required"),
+        ] {
+            let target_node_job = json_response(
+                &application.router,
+                idempotent_api_request(
+                    "POST",
+                    &print_path,
+                    "piq_test_integration",
+                    key,
+                    Some(
+                        &serde_json::json!({
+                            "target_id": target_id,
+                            "specification_revision": design["specification_revision"],
+                            "title": format!("Target {policy}"),
+                            "render_policy": policy
+                        })
+                        .to_string(),
+                    ),
+                ),
+            )
+            .await;
+            assert_eq!(
+                target_node_job["metadata"]["piqae.document.render_mode"], "node_render",
+                "target {policy} must evaluate the resolved node"
+            );
+            target_node_job_ids.push(
+                target_node_job["id"]
+                    .as_str()
+                    .expect("target node-render job id")
+                    .parse::<JobId>()
+                    .expect("typed target node-render job id"),
+            );
+        }
+        application
+            .state
+            .destination_topology
+            .upsert_route(
+                piqae_storage_postgres::destination_topology::TenantScope {
+                    workspace_id: application.tenant.workspace_id,
+                    environment_id: application.tenant.environment_id,
+                },
+                &piqae_storage_postgres::destination_topology::StoredPrinterRoute {
+                    id: "rte_media_standby".into(),
+                    destination_id: "pdst_media_standby".into(),
+                    printer_id: media_standby_printer.to_string(),
+                    agent_id: media_standby_agent.to_string(),
+                    native_queue_id: "media-standby".into(),
+                    local_route_key: Some("rte_local_media_standby".into()),
+                    state: "available".into(),
+                    role: "standby".into(),
+                    priority: 100,
+                    enabled: true,
+                    capability_revision: 1,
+                    profile_revision: 4,
+                    last_seen_at: Some(Utc::now()),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+            )
+            .await
+            .expect("media standby physical route");
+        application
+            .state
+            .destination_topology
+            .record_route_observation(
+                piqae_storage_postgres::destination_topology::TenantScope {
+                    workspace_id: application.tenant.workspace_id,
+                    environment_id: application.tenant.environment_id,
+                },
+                &piqae_storage_postgres::destination_topology::RouteObservation {
+                    id: "rob_media_standby".into(),
+                    route_id: "rte_media_standby".into(),
+                    sequence: 1,
+                    printer_state: "idle".into(),
+                    accepting_jobs: Some(true),
+                    state_reasons: Vec::new(),
+                    total_jobs: 0,
+                    connector_jobs: 0,
+                    other_piqae_or_external_jobs: 0,
+                    unknown_jobs: 0,
+                    active_jobs: 0,
+                    held_jobs: 0,
+                    estimated_busy_seconds: Some(0),
+                    privacy_level: "aggregate".into(),
+                    stock_state: serde_json::json!({}),
+                    observed_at: Utc::now(),
+                    fresh_until: Utc::now() + chrono::Duration::minutes(2),
+                },
+            )
+            .await
+            .expect("media standby route observation");
         application
             .repository
             .upsert_loaded_media(
@@ -4072,6 +4261,306 @@ mod tests {
             wrong_tray_design["specification_revision"], design["specification_revision"],
             "loaded observations are readiness evidence, not design constraints"
         );
+        let incomplete_direct_job = piqae_domain::Job {
+            id: JobId::new(),
+            workspace_id: application.tenant.workspace_id,
+            environment_id: application.tenant.environment_id,
+            printer_id,
+            title: "Incomplete direct recovery fence".into(),
+            source: None,
+            content_kind: piqae_domain::ContentKind::Pdf,
+            content: piqae_domain::ContentSource::Base64 {
+                data: "JVBERi0=".into(),
+            },
+            options: JobOptions::default(),
+            metadata: std::collections::BTreeMap::from([
+                ("piqae.destination_id".into(), "pdst_media_standby".into()),
+                ("piqae.route_id".into(), "rte_missing".into()),
+            ]),
+            deliveries: 1,
+            state: JobState::WaitingForAgent,
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            delivery_uncertain_since: None,
+        };
+        application
+            .repository
+            .create_job(
+                &incomplete_direct_job,
+                application.agent_id,
+                None,
+                b"incomplete direct reroute candidate",
+            )
+            .await
+            .expect("incomplete direct recovery fixture");
+        crate::api::schedule_waiting_destination_jobs(&application.state, application.tenant)
+            .await
+            .expect("an incomplete direct job must not poison target recovery");
+        let rerouted_target_print = application
+            .repository
+            .get_job(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                target_print_id,
+            )
+            .await
+            .expect("rerouted target PrintPacket job");
+        assert_eq!(rerouted_target_print.printer_id, media_standby_printer);
+        assert_eq!(
+            rerouted_target_print.metadata.get("piqae.binding_id"),
+            Some(&media_standby_binding_id.to_owned())
+        );
+        for job_id in &target_node_job_ids {
+            let job = application
+                .repository
+                .get_job(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    *job_id,
+                )
+                .await
+                .expect("renderer-incompatible standby leaves node-render job queued");
+            assert_eq!(job.printer_id, printer_id);
+        }
+        application
+            .repository
+            .sync_agent_presence(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                media_standby_agent,
+                "media-aware-standby-renderer-ready",
+                &AgentHealth {
+                    started_at: now,
+                    observed_at: Utc::now(),
+                    sqlite_integrity_ok: true,
+                    executor_crashes: 0,
+                    last_error_code: None,
+                },
+                &virtual_print_packet_capabilities(),
+                Some(std::slice::from_ref(&media_standby_snapshot)),
+            )
+            .await
+            .expect("standby gains exact PrintPacket render capability");
+        application
+            .repository
+            .sync_agent_presence(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                "primary-renderer-incompatible",
+                &AgentHealth {
+                    started_at: now,
+                    observed_at: Utc::now(),
+                    sqlite_integrity_ok: true,
+                    executor_crashes: 0,
+                    last_error_code: None,
+                },
+                &piqae_protocol::agent::DocumentRenderCapabilities::default(),
+                Some(std::slice::from_ref(&restored_primary_profile)),
+            )
+            .await
+            .expect("primary loses PrintPacket renderer capability");
+        application
+            .repository
+            .upsert_loaded_media(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                &piqae_storage_postgres::StoredLoadedMedia {
+                    printer_id,
+                    source: "main".into(),
+                    stock_id: Some(stock_id.to_owned()),
+                    stock_revision: Some(1),
+                    confidence: "operator_confirmed".into(),
+                    calibration_state: "current".into(),
+                    remaining_amount: None,
+                    observed_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+            )
+            .await
+            .expect("primary media ready but renderer incompatible");
+        let renderer_aware_initial_selection = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                &print_path,
+                "piq_test_integration",
+                "target-node-render-compatible-standby",
+                Some(
+                    &serde_json::json!({
+                        "target_id": target_id,
+                        "specification_revision": design["specification_revision"],
+                        "title": "Renderer-aware standby",
+                        "render_policy": "require_node"
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(
+            renderer_aware_initial_selection["printer_id"],
+            media_standby_printer.as_ulid().to_string(),
+            "require_node must choose a compatible standby over an incompatible primary"
+        );
+        let idempotent_retry_after_selection_drift = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                &print_path,
+                "piq_test_integration",
+                "target-node-render-required",
+                Some(
+                    &serde_json::json!({
+                        "target_id": target_id,
+                        "specification_revision": design["specification_revision"],
+                        "title": "Target require_node",
+                        "render_policy": "require_node"
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(
+            idempotent_retry_after_selection_drift["id"],
+            target_node_job_ids[1].as_ulid().to_string(),
+            "target and capability drift must not change canonical render-print idempotency"
+        );
+        crate::api::schedule_waiting_destination_jobs(&application.state, application.tenant)
+            .await
+            .expect("renderer-aware standby reroute");
+        for job_id in &target_node_job_ids {
+            let job = application
+                .repository
+                .get_job(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    *job_id,
+                )
+                .await
+                .expect("renderer-compatible standby job");
+            assert_eq!(job.printer_id, media_standby_printer);
+            assert_eq!(
+                job.metadata
+                    .get("piqae.document.render_decision_reason")
+                    .map(String::as_str),
+                Some(
+                    if job
+                        .metadata
+                        .get("piqae.document.render_policy")
+                        .map(String::as_str)
+                        == Some("prefer_node")
+                    {
+                        "policy_prefer_node"
+                    } else {
+                        "policy_require_node"
+                    }
+                )
+            );
+            assert_eq!(
+                job.metadata
+                    .get("piqae.document.readiness_binding_id")
+                    .map(String::as_str),
+                Some(media_standby_binding_id)
+            );
+        }
+        assert_eq!(
+            rerouted_target_print
+                .metadata
+                .get("piqae.route_id")
+                .map(String::as_str),
+            Some("rte_media_standby")
+        );
+        let rerouted_loaded_media: serde_json::Value = serde_json::from_str(
+            rerouted_target_print
+                .metadata
+                .get("piqae.loaded_media_snapshot")
+                .expect("rerouted loaded-media snapshot"),
+        )
+        .expect("rerouted loaded-media JSON");
+        assert_eq!(rerouted_loaded_media["source"], "main");
+        assert_eq!(
+            rerouted_loaded_media["stock"]["id"], stock_id,
+            "standby handoff must persist its own trusted loaded-stock evidence"
+        );
+        assert!(
+            crate::routing::printpacket_execution_failure(
+                &application.state,
+                application.tenant,
+                &rerouted_target_print,
+            )
+            .await
+            .expect("rerouted pre-handoff fence")
+            .is_none()
+        );
+        application
+            .repository
+            .upsert_loaded_media(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                &piqae_storage_postgres::StoredLoadedMedia {
+                    printer_id: media_standby_printer,
+                    source: "main".into(),
+                    stock_id: None,
+                    stock_revision: None,
+                    confidence: "operator_confirmed".into(),
+                    calibration_state: "current".into(),
+                    remaining_amount: None,
+                    observed_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+            )
+            .await
+            .expect("standby stock changes before handoff");
+        assert!(matches!(
+            crate::routing::printpacket_execution_failure(
+                &application.state,
+                application.tenant,
+                &rerouted_target_print,
+            )
+            .await
+            .expect("standby stock change fence"),
+            Some((piqae_domain::JobFailureReason::StockNotLoaded, _))
+        ));
+        application
+            .repository
+            .upsert_loaded_media(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                &piqae_storage_postgres::StoredLoadedMedia {
+                    printer_id: media_standby_printer,
+                    source: "main".into(),
+                    stock_id: Some(stock_id.to_owned()),
+                    stock_revision: Some(1),
+                    confidence: "operator_confirmed".into(),
+                    calibration_state: "current".into(),
+                    remaining_amount: None,
+                    observed_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+            )
+            .await
+            .expect("restore standby loaded stock");
+        application
+            .repository
+            .upsert_loaded_media(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                &piqae_storage_postgres::StoredLoadedMedia {
+                    printer_id,
+                    source: "main".into(),
+                    stock_id: None,
+                    stock_revision: None,
+                    confidence: "operator_confirmed".into(),
+                    calibration_state: "current".into(),
+                    remaining_amount: None,
+                    observed_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+            )
+            .await
+            .expect("restore wrong-stock primary selection fence");
         let standby_target_print = json_response(
             &application.router,
             idempotent_api_request(
@@ -4198,7 +4687,8 @@ mod tests {
                 .await
                 .expect("fenced target PrintPacket job")
                 .state,
-            JobState::FailedTerminal
+            JobState::WaitingForAgent,
+            "a primary observation must not fail a job now pinned to the compatible standby"
         );
         assert_eq!(
             application
@@ -4213,7 +4703,7 @@ mod tests {
                 .iter()
                 .filter(|event| event.reason == Some(piqae_domain::JobFailureReason::StockNotLoaded))
                 .count(),
-            1
+            0
         );
         application
             .repository
@@ -4389,14 +4879,9 @@ mod tests {
                 .to_bytes(),
         )
         .expect("reconnect response JSON");
-        assert_eq!(reconnect_sync.candidate_jobs.len(), 1);
-        assert_eq!(
-            reconnect_sync.candidate_jobs[0].job.id,
-            target_job["id"]
-                .as_str()
-                .expect("target job id")
-                .parse()
-                .expect("typed target job id")
+        assert!(
+            reconnect_sync.candidate_jobs.is_empty(),
+            "a target job already repinned to its standby destination must not be re-offered to the primary"
         );
 
         let cross_tenant = application
@@ -4420,7 +4905,9 @@ mod tests {
                 &format!("/v1/targets/{target_id}/bindings"),
                 "piq_test_integration",
                 Some(&format!(
-                    r#"{{"printer_id":"{printer_id}","profile_id":"profile_shipping","profile_revision":99,"role":"standby"}}"#
+                    r#"{{"printer_id":"{printer_id}","profile_id":"profile_shipping","profile_revision":99,"destination_id":"{}","route_id":"{}","role":"standby"}}"#,
+                    primary_binding_route.destination_id,
+                    primary_binding_route.id
                 )),
             ))
             .await
@@ -4632,6 +5119,18 @@ mod tests {
         let stockless_target_id = stockless_target["id"]
             .as_str()
             .expect("stockless target id");
+        let stockless_route = application
+            .state
+            .destination_topology
+            .list_all_routes(piqae_storage_postgres::destination_topology::TenantScope {
+                workspace_id: application.tenant.workspace_id,
+                environment_id: application.tenant.environment_id,
+            })
+            .await
+            .expect("stockless routes")
+            .into_iter()
+            .find(|route| route.printer_id == application.printer_id.to_string())
+            .expect("stockless printer route");
         let stockless_binding = application
             .router
             .clone()
@@ -4640,8 +5139,10 @@ mod tests {
                 &format!("/v1/targets/{stockless_target_id}/bindings"),
                 "piq_test_integration",
                 Some(&format!(
-                    r#"{{"printer_id":"{}","profile_id":"profile_shipping","profile_revision":4,"role":"primary"}}"#,
-                    application.printer_id
+                    r#"{{"printer_id":"{}","profile_id":"profile_shipping","profile_revision":4,"destination_id":"{}","route_id":"{}","role":"primary"}}"#,
+                    application.printer_id,
+                    stockless_route.destination_id,
+                    stockless_route.id
                 )),
             ))
             .await

@@ -6262,17 +6262,19 @@ components:
     CreateTargetBinding:
       type: object
       additionalProperties: false
-      required: [printer_id, profile_id, profile_revision, role]
+      required: [printer_id, profile_id, profile_revision, destination_id, route_id, role]
       properties:
         printer_id: { type: string }
         profile_id: { type: string, minLength: 1, maxLength: 120 }
         profile_revision: { type: integer, format: int64, minimum: 1 }
+        destination_id: { type: string, minLength: 1 }
+        route_id: { type: string, minLength: 1 }
         role: { type: string, enum: [primary, standby] }
         enabled: { type: boolean, default: true }
     TargetBinding:
       type: object
       required:
-        [id, target_id, printer_id, agent_id, profile_id, profile_revision, role, enabled, created_at, updated_at]
+        [id, target_id, printer_id, agent_id, profile_id, profile_revision, destination_id, route_id, role, enabled, created_at, updated_at]
       properties:
         id: { type: string, pattern: '^tgb_[0-9A-HJKMNP-TV-Z]{26}$' }
         target_id: { type: string }
@@ -6280,6 +6282,12 @@ components:
         agent_id: { type: string }
         profile_id: { type: string }
         profile_revision: { type: integer, format: int64, minimum: 1 }
+        destination_id:
+          type: [string, "null"]
+          description: Authoritative physical destination captured by this binding.
+        route_id:
+          type: [string, "null"]
+          description: Preferred source route; recovery may use another compatible route within destination_id.
         role: { type: string, enum: [primary, standby] }
         enabled: { type: boolean }
         created_at: { type: string, format: date-time }
