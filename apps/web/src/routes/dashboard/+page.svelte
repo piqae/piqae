@@ -9,7 +9,11 @@
   import RelativeTime from '$lib/components/RelativeTime.svelte';
   import Status from '$lib/components/Status.svelte';
   import JobTimeline from '$lib/components/dashboard/JobTimeline.svelte';
-  import { operationalViews, stateFilters } from '$lib/dashboard-navigation';
+  import {
+    operationalViews,
+    primaryOperationalView,
+    stateFilters
+  } from '$lib/dashboard-navigation';
   import { nativeNodeConnectUrlFromHandoff } from '$lib/node-connect-fragment';
   import {
     destinationNeedsReview,
@@ -45,6 +49,7 @@
   const views = $derived(
     operationalViews({ platform: { accounts: data.meta.platform.accounts && data.platformEnabled } })
   );
+  const primaryView = $derived(primaryOperationalView(data.view));
 
   let query = $state('');
   let customerFilter = $state('all');
@@ -151,7 +156,18 @@
     matches(route.nativeQueueId, route.id, route.customer?.name) &&
     (customerFilter === 'all' || route.customer?.externalId === customerFilter)
   ));
-  const reviewCount = $derived(reviewJobs.length + reviewDestinations.length + reviewRoutes.length);
+  const reviewCount = $derived(
+    data.jobs.filter(
+      (job) =>
+        (job.state === 'delivery_uncertain' && !job.deliveryResolution) ||
+        job.state.startsWith('failed')
+    ).length +
+      data.destinations.filter(destinationNeedsReview).length +
+      data.routes.filter(routeNeedsReview).length
+  );
+  const visibleReviewCount = $derived(
+    reviewJobs.length + reviewDestinations.length + reviewRoutes.length
+  );
   const reviewTitle = $derived(
     reviewCount === 0
       ? 'No actionable delivery, route, projection, or identity issues.'
@@ -174,8 +190,18 @@
               : data.view === 'queue'
                 ? visibleQueueRoutes.length
                 : data.view === 'needs_review'
-                  ? reviewCount
+                  ? visibleReviewCount
                   : visibleAccounts.length
+  );
+
+  const viewLabel = $derived(
+    data.view === 'needs_review'
+      ? 'review items'
+      : data.view === 'queue'
+        ? 'queue observations'
+        : data.view === 'destinations'
+          ? 'physical destinations'
+          : data.view
   );
 
   const stateOptions = $derived(stateFilters(data.view));
@@ -297,6 +323,18 @@
   const routePrinter = (route: (typeof data.routes)[number]) =>
     data.printers.find((printer) => printer.id === route.printerId && printer.customer?.externalId === route.customer?.externalId)
       ?? data.printers.find((printer) => printer.id === route.printerId);
+  const routesForPrinter = (printer: (typeof data.printers)[number]) =>
+    data.routes.filter(
+      (route) =>
+        route.printerId === printer.id &&
+        (!printer.customer || route.customer?.externalId === printer.customer.externalId)
+    );
+  const routesForNode = (node: (typeof data.agents)[number]) =>
+    data.routes.filter(
+      (route) =>
+        route.agentId.replace(/^agt_/, '') === node.id.replace(/^agt_/, '') &&
+        (!node.customer || route.customer?.externalId === node.customer.externalId)
+    );
 
   // Enrolment dialog.
   let enrolmentOpen = $state(false);
@@ -553,14 +591,48 @@
   </p>
 {/if}
 
-<Toolbar meta={`${resultCount} ${data.view}`}>
+<div class="operations-navigation">
   <SegmentedControl
-    value={data.view}
-    label="Switch operational view"
+    value={primaryView}
+    label="Primary operational view"
     options={views}
     onchange={switchView}
   />
-  <SearchField bind:value={query} label={`Search ${data.view}`} placeholder={`Search ${data.view}…`} />
+
+  <a
+    class:attention={reviewCount > 0}
+    class:active={data.view === 'needs_review'}
+    class="review-inbox"
+    href={operationalHref({ view: 'needs_review', state: null })}
+    aria-current={data.view === 'needs_review' ? 'page' : undefined}
+    aria-label={`Review inbox: ${reviewCount} actionable ${reviewCount === 1 ? 'issue' : 'issues'}`}
+  >
+    <Icon name="warning" size={14} />
+    <span>Review inbox</span>
+    <strong>{reviewCount}</strong>
+  </a>
+</div>
+
+{#if primaryView === 'jobs' && data.view !== 'needs_review'}
+  <nav class="secondary-navigation" aria-label="Jobs view">
+    <a class:active={data.view === 'jobs'} aria-current={data.view === 'jobs' ? 'page' : undefined} href={operationalHref({ view: 'jobs', state: null })}>All jobs</a>
+    <a class:active={data.view === 'queue'} aria-current={data.view === 'queue' ? 'page' : undefined} href={operationalHref({ view: 'queue', state: null })}>Queue telemetry</a>
+  </nav>
+{:else if primaryView === 'printers'}
+  <div class="printer-navigation">
+    <a class:active={data.view === 'printers'} aria-current={data.view === 'printers' ? 'page' : undefined} href={operationalHref({ view: 'printers', state: null })}>All printers</a>
+    <details class="advanced-navigation" open={data.view === 'destinations' || data.view === 'routes'}>
+      <summary>Advanced diagnostics</summary>
+      <nav aria-label="Advanced printer diagnostics">
+        <a class:active={data.view === 'destinations'} aria-current={data.view === 'destinations' ? 'page' : undefined} href={operationalHref({ view: 'destinations', state: null })}>Physical destinations</a>
+        <a class:active={data.view === 'routes'} aria-current={data.view === 'routes' ? 'page' : undefined} href={operationalHref({ view: 'routes', state: null })}>Routes and telemetry</a>
+      </nav>
+    </details>
+  </div>
+{/if}
+
+<Toolbar meta={`${resultCount} ${viewLabel}`}>
+  <SearchField bind:value={query} label={`Search ${viewLabel}`} placeholder={`Search ${viewLabel}…`} />
   {#if aggregateCustomers && data.view !== 'customers'}
     <select class="ui-select" bind:value={customerFilter} aria-label="Filter by customer">
       <option value="all">All customers</option>
@@ -612,8 +684,8 @@
             <td class="right muted"><RelativeTime value={route.latestObservation?.observedAt ?? route.updatedAt} /></td>
           </tr>
         {/each}
-        {#if reviewCount === 0}
-          <tr><td colspan={aggregateCustomers ? 4 : 3}><EmptyState message="Nothing needs review." compact /></td></tr>
+        {#if visibleReviewCount === 0}
+          <tr><td colspan={aggregateCustomers ? 4 : 3}><EmptyState message={reviewCount === 0 ? 'Nothing needs review.' : 'No review items match these filters.'} compact /></td></tr>
         {/if}
       </tbody>
     </table>
@@ -1021,6 +1093,7 @@
       <JobTimeline events={detail.events} />
     </div>
   {:else if detail?.kind === 'printer'}
+    {@const printerRoutes = routesForPrinter(detail.printer)}
     <div class="drawer-status">
       <Status value={detail.printer.state} />
       <span class="muted">Seen <RelativeTime value={detail.printer.lastSeenAt} /></span>
@@ -1036,6 +1109,25 @@
         { term: 'Printer ID', value: detail.printer.id, mono: true }
       ]}
     />
+
+    <div class="drawer-section">
+      <h3>Routing and destination<span>{printerRoutes.length}</span></h3>
+      {#each printerRoutes as route}
+        <a class="mini-row" href={detailHref('route', route.id)}>
+          <span class="cell-stack">
+            <strong>{destinationName(route.physicalDestinationId)}</strong>
+            <small class="mono">{route.nativeQueueId}</small>
+          </span>
+          <Status value={routeHealthSummary(route)} />
+        </a>
+      {:else}
+        <p class="ui-note warning">
+          No route projection currently connects this printer to a physical destination. The
+          printer inventory row alone does not prove jobs can be scheduled.
+        </p>
+      {/each}
+      <a class="drawer-text-link" href={operationalHref({ view: 'routes', state: null })}>View all route diagnostics</a>
+    </div>
 
     <div class="drawer-section">
       <h3>Native print profiles<span>{detail.printer.profiles.length}</span></h3>
@@ -1132,6 +1224,7 @@
     {/if}
   {:else if detail?.kind === 'node'}
     {@const runtimeQueue = queueFor(detail.node)}
+    {@const nodeRoutes = routesForNode(detail.node)}
     <div class="drawer-status">
       <Status value={detail.node.state} />
       <span class="muted">Seen <RelativeTime value={detail.node.lastSeenAt} /></span>
@@ -1286,6 +1379,25 @@
           operating-system queues are empty.
         </p>
       {/if}
+    </div>
+
+    <div class="drawer-section">
+      <h3>Routes and destinations<span>{nodeRoutes.length}</span></h3>
+      {#each nodeRoutes as route}
+        <a class="mini-row" href={detailHref('route', route.id)}>
+          <span class="cell-stack">
+            <strong>{destinationName(route.physicalDestinationId)}</strong>
+            <small class="mono">{route.nativeQueueId}</small>
+          </span>
+          <Status value={routeHealthSummary(route)} />
+        </a>
+      {:else}
+        <p class="ui-note warning">
+          This node has no route projections. A node heartbeat does not prove an operating-system
+          queue is connected to a schedulable destination.
+        </p>
+      {/each}
+      <a class="drawer-text-link" href={operationalHref({ view: 'routes', state: null })}>View all route diagnostics</a>
     </div>
 
     <div class="drawer-section">
@@ -1716,6 +1828,125 @@
 {/if}
 
 <style>
+  .operations-navigation {
+    min-height: 52px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .review-inbox {
+    min-height: 32px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    flex: 0 0 auto;
+    padding: 0 9px;
+    color: var(--text-secondary);
+    background: var(--surface);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-control);
+    font-size: var(--text-compact);
+    font-weight: 520;
+  }
+
+  .review-inbox strong {
+    min-width: 20px;
+    height: 20px;
+    display: grid;
+    place-items: center;
+    padding: 0 5px;
+    color: var(--text-secondary);
+    background: var(--surface-raised);
+    border-radius: 999px;
+    font-size: var(--text-meta);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .review-inbox:hover,
+  .review-inbox.active {
+    color: var(--text-primary);
+    border-color: var(--border-strong);
+  }
+
+  .review-inbox.attention {
+    color: var(--warning);
+    background: var(--warning-soft);
+    border-color: color-mix(in oklch, var(--warning), transparent 65%);
+  }
+
+  .review-inbox.attention strong {
+    color: var(--warning);
+    background: color-mix(in oklch, var(--warning-soft), var(--surface) 28%);
+  }
+
+  .secondary-navigation,
+  .printer-navigation,
+  .advanced-navigation nav {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .secondary-navigation,
+  .printer-navigation {
+    min-height: 42px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .secondary-navigation a,
+  .printer-navigation > a,
+  .advanced-navigation a,
+  .advanced-navigation summary {
+    min-height: 28px;
+    display: inline-flex;
+    align-items: center;
+    padding: 0 9px;
+    color: var(--text-tertiary);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-compact);
+    font-weight: 500;
+  }
+
+  .secondary-navigation a:hover,
+  .printer-navigation a:hover,
+  .advanced-navigation summary:hover,
+  .secondary-navigation a.active,
+  .printer-navigation a.active {
+    color: var(--text-primary);
+    background: var(--surface-raised);
+  }
+
+  .advanced-navigation {
+    display: flex;
+    align-items: center;
+  }
+
+  .advanced-navigation summary {
+    cursor: pointer;
+  }
+
+  .advanced-navigation[open] summary {
+    color: var(--text-secondary);
+  }
+
+  .advanced-navigation nav {
+    margin-left: 4px;
+  }
+
+  .drawer-text-link {
+    display: inline-block;
+    margin-top: 12px;
+    color: var(--accent);
+    font-size: var(--text-compact);
+    font-weight: 520;
+  }
+
   .operations-scope {
     display: flex;
     align-items: center;
@@ -2110,6 +2341,36 @@
   }
 
   @media (max-width: 620px) {
+    .operations-navigation {
+      align-items: stretch;
+      flex-direction: column;
+      padding: 10px 0;
+    }
+
+    .operations-navigation :global(.ui-segmented) {
+      width: 100%;
+    }
+
+    .operations-navigation :global(.ui-segmented button) {
+      flex: 1 1 auto;
+      padding-inline: 8px;
+    }
+
+    .review-inbox {
+      align-self: stretch;
+      justify-content: center;
+    }
+
+    .advanced-navigation {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    .advanced-navigation nav {
+      margin: 4px 0 0;
+      padding-left: 8px;
+    }
+
     .operations-scope {
       align-items: stretch;
       width: 100%;

@@ -16,12 +16,38 @@ test('operations surface exposes state with semantic navigation', async ({ page 
   await expect(page.getByRole('table')).toBeVisible();
 
   // Views are query-string state on the one page, not separate routes.
-  await page
-    .getByRole('group', { name: 'Switch operational view' })
-    .getByRole('button', { name: 'Printers' })
-    .click();
+  const primaryViews = page.getByRole('group', { name: 'Primary operational view' });
+  await expect(primaryViews.getByRole('button')).toHaveCount(4);
+  await expect(primaryViews.getByRole('button', { name: 'Queue' })).toHaveCount(0);
+  await expect(primaryViews.getByRole('button', { name: 'Routes' })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: /Review inbox/ })).toBeVisible();
+
+  await primaryViews.getByRole('button', { name: 'Printers' }).click();
   await expect(page).toHaveURL(/\/dashboard\?view=printers$/);
   await expect(page.getByRole('columnheader', { name: 'Printer' })).toBeVisible();
+  await expect(page.getByText('Advanced diagnostics')).toBeVisible();
+});
+
+test('secondary operations keep deep links and primary context', async ({ page }) => {
+  await page.goto('/dashboard?view=queue');
+  await expect(page.getByRole('button', { name: 'Jobs' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('navigation', { name: 'Jobs view' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Queue telemetry' })).toHaveAttribute('aria-current', 'page');
+
+  await page.goto('/dashboard?view=routes');
+  await expect(page.getByRole('button', { name: 'Printers' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('navigation', { name: 'Advanced printer diagnostics' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Routes and telemetry' })).toHaveAttribute('aria-current', 'page');
+
+  await page.goto('/dashboard?view=destinations');
+  await expect(page).toHaveURL(/\/dashboard\?view=destinations$/);
+  await expect(page.getByRole('button', { name: 'Printers' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('link', { name: 'Physical destinations' })).toHaveAttribute('aria-current', 'page');
+
+  await page.goto('/dashboard?view=needs_review');
+  await expect(page).toHaveURL(/\/dashboard\?view=needs_review$/);
+  await expect(page.getByRole('button', { name: 'Jobs' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('link', { name: /Review inbox/ })).toHaveAttribute('aria-current', 'page');
 });
 
 test('legacy dashboard routes redirect into the collapsed structure', async ({ request }) => {
