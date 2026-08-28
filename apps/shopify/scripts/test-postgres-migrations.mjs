@@ -34,6 +34,10 @@ const migration4 = await readFile(
   path.join(root, "migrations/0004_managed_piqae_accounts.sql"),
   "utf8",
 );
+const migration5 = await readFile(
+  path.join(root, "migrations/0005_template_targets_and_media.sql"),
+  "utf8",
+);
 const suffix = randomBytes(8).toString("hex");
 const schemas = [
   `piqae_shopify_fresh_${suffix}`,
@@ -130,6 +134,40 @@ async function assertions(client) {
       '{"schema":"piqae.shopify-printpacket-template/v1","document":{"format":"printpacket/v1","media":{"kind":"paged","size":"a4","margins":{"top_mm":10,"right_mm":10,"bottom_mm":10,"left_mm":10}},"theme":{"font_size_pt":10,"line_height":1.25,"text_color":{"red":0,"green":0,"blue":0}},"resources":{},"body":[]},"editor":{"mode":"visual","liquid":"","roundTrip":"lossless","warnings":[]},"assets":[]}',
     ],
   );
+  await client.query(
+    "UPDATE shopify_workflow_templates SET kind='label',page_size='100x50mm',design_target_id=$1,design_specification_revision=$2 WHERE shop=$3 AND id=$4",
+    ["tgt_alpha", "spec_alpha", "alpha.myshopify.com", templateId],
+  );
+  const association = await client.query(
+    "SELECT kind,page_size,design_target_id,design_specification_revision FROM shopify_workflow_templates WHERE shop=$1 AND id=$2",
+    ["alpha.myshopify.com", templateId],
+  );
+  if (
+    association.rows[0]?.kind !== "label" ||
+    association.rows[0]?.page_size !== "100x50mm" ||
+    association.rows[0]?.design_target_id !== "tgt_alpha" ||
+    association.rows[0]?.design_specification_revision !== "spec_alpha"
+  )
+    throw new Error("template target and media association was not retained");
+  await client.query(
+    "INSERT INTO shopify_workflow_template_revisions(template_id,shop,revision,name,kind,page_size,source,design_target_id,design_specification_revision) VALUES($1,$2,1,'Product label','label','100x50mm',$3,$4,$5)",
+    [templateId, "alpha.myshopify.com", "{}", "tgt_alpha", "spec_alpha"],
+  );
+  const revision = await client.query(
+    "SELECT design_target_id,design_specification_revision FROM shopify_workflow_template_revisions WHERE shop=$1 AND template_id=$2 AND revision=1",
+    ["alpha.myshopify.com", templateId],
+  );
+  if (
+    revision.rows[0]?.design_target_id !== "tgt_alpha" ||
+    revision.rows[0]?.design_specification_revision !== "spec_alpha"
+  )
+    throw new Error("published template target association was not retained");
+  await rejects(
+    client,
+    "UPDATE shopify_workflow_templates SET design_target_id=$1,design_specification_revision=NULL WHERE shop=$2 AND id=$3",
+    ["tgt_incomplete", "alpha.myshopify.com", templateId],
+    "23514",
+  );
   const crossRead = await client.query(
     "SELECT 1 FROM shopify_workflow_templates WHERE shop=$1 AND id=$2",
     ["beta.myshopify.com", templateId],
@@ -161,12 +199,30 @@ try {
       await client.query(migration3);
       await client.query(migration4);
       if (index === 1) {
+        await client.query(
+          "INSERT INTO shopify_workflow_templates(id,shop,name,kind,page_size,state,source) VALUES($1,$2,'Existing invoice','invoice','A4','draft','{}')",
+          ["33333333-3333-4333-8333-333333333333", "existing.myshopify.com"],
+        );
+      }
+      await client.query(migration5);
+      await client.query(migration5);
+      if (index === 1) {
         const retained = await client.query(
           "SELECT state FROM shopify_installations WHERE shop=$1",
           ["existing.myshopify.com"],
         );
         if (retained.rows[0]?.state !== "installed")
           throw new Error("N-1 installation was not retained");
+        const columns = await client.query(
+          "SELECT design_target_id,design_specification_revision FROM shopify_workflow_templates WHERE shop=$1 AND id=$2",
+          ["existing.myshopify.com", "33333333-3333-4333-8333-333333333333"],
+        );
+        if (
+          columns.rowCount !== 1 ||
+          columns.rows[0]?.design_target_id !== null ||
+          columns.rows[0]?.design_specification_revision !== null
+        )
+          throw new Error("N-1 template association was not retained safely");
       }
       await assertions(client);
     } finally {

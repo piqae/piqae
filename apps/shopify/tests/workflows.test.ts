@@ -33,8 +33,13 @@ describe("merchant workflow persistence", () => {
       state: "draft",
       source: starterTemplates[0]!.source,
       revision: 1,
+      designTargetId: "tgt_invoice",
+      designSpecificationRevision: "spec_invoice_3",
     });
-    expect(await repository.getTemplate(alpha, id)).not.toBeNull();
+    expect(await repository.getTemplate(alpha, id)).toMatchObject({
+      designTargetId: "tgt_invoice",
+      designSpecificationRevision: "spec_invoice_3",
+    });
     expect(await repository.getTemplate(beta, id)).toBeNull();
     expect(await repository.deleteTemplate(beta, id)).toBe(false);
     expect(await repository.getTemplate(alpha, id)).not.toBeNull();
@@ -145,6 +150,10 @@ describe("hybrid template authority", () => {
     );
     expect(JSON.stringify(index)).not.toContain("canonical");
     expect(index.digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(index.documents[0]).toMatchObject({
+      designTargetId: null,
+      designSpecificationRevision: null,
+    });
   });
 
   it("accepts the new PrintPacket envelope", () => {

@@ -1,4 +1,11 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import {
   Schema,
   type DOMOutputSpec,
@@ -26,6 +33,9 @@ import {
   isLineItemsExpression,
   type ShopifyAuthoringScope,
 } from "../core/shopify-editor-scopes";
+import type { ShopifyPrintTarget } from "../core/shopify-print-targets";
+
+type DesignStock = ShopifyPrintTarget["stock"];
 
 const schema = new Schema({
   nodes: {
@@ -139,15 +149,19 @@ export function PrintPacketEditor({
   value,
   disabled,
   customFields = [],
+  stock = null,
   onChange,
 }: {
   value: PrintPacket;
   disabled?: boolean;
   customFields?: readonly ShopifyDocumentField[];
+  stock?: DesignStock;
   onChange(document: PrintPacket): void;
 }) {
   const allAuthoringFields = [...AUTHORING_FIELDS, ...customFields];
   const canonicalBody = canonicalizeShopifyEditorBody(value.body);
+  const continuousPageBreaks =
+    value.media.kind !== "paged" && containsPageBreak(value.body);
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const latest = useRef(value);
@@ -470,6 +484,13 @@ export function PrintPacketEditor({
         </div>
       </div>
       <div className="piqae-editor-workspace">
+        {continuousPageBreaks ? (
+          <div className="piqae-media-diagnostic" role="alert">
+            Page breaks are not supported on {value.media.kind} media. Remove
+            them before publishing.
+          </div>
+        ) : null}
+        <MediaRuler value={value} stock={stock} />
         <div className="piqae-canvas-wrap">
           <div className="piqae-selection-rail" aria-live="polite">
             {selection?.path ? (
@@ -525,7 +546,11 @@ export function PrintPacketEditor({
               </p>
             )}
           </div>
-          <div className="piqae-page-sheet piqae-rendered-canvas">
+          <div
+            className={`piqae-page-sheet piqae-rendered-canvas piqae-media-${value.media.kind}`}
+            style={canvasStyle(value)}
+          >
+            <SafeAreaGuide stock={stock} />
             <DocumentCanvas
               blocks={canonicalBody}
               selectedPath={selection?.path}
@@ -564,10 +589,21 @@ export type BlockPathPart = {
 };
 export type BlockPath = BlockPathPart[];
 
-export function PrintPacketPreview({ value }: { value: PrintPacket }) {
+export function PrintPacketPreview({
+  value,
+  stock = null,
+}: {
+  value: PrintPacket;
+  stock?: DesignStock;
+}) {
   return (
     <div className="piqae-preview-stage" aria-label="Rendered document preview">
-      <div className="piqae-page-sheet piqae-rendered-canvas">
+      <MediaRuler value={value} stock={stock} />
+      <div
+        className={`piqae-page-sheet piqae-rendered-canvas piqae-media-${value.media.kind}`}
+        style={canvasStyle(value)}
+      >
+        <SafeAreaGuide stock={stock} />
         <DocumentCanvas
           blocks={value.body}
           editable={false}
@@ -577,6 +613,94 @@ export function PrintPacketPreview({ value }: { value: PrintPacket }) {
       </div>
     </div>
   );
+}
+
+function canvasStyle(value: PrintPacket): CSSProperties {
+  const media = value.media;
+  const margins = media.margins ?? {
+    top_mm: 0,
+    right_mm: 0,
+    bottom_mm: 0,
+    left_mm: 0,
+  };
+  let width = 210;
+  let height: number | null = 297;
+  if (media.kind === "paged") {
+    const portrait =
+      media.size === "a4"
+        ? [210, 297]
+        : media.size === "a5"
+          ? [148, 210]
+          : [215.9, 279.4];
+    [width, height] =
+      media.orientation === "landscape" ? portrait.reverse() : portrait;
+  } else if (media.kind === "continuous") {
+    width = media.width_mm;
+    height = null;
+  } else {
+    width = media.width_mm;
+    height = media.height_mm;
+  }
+  return {
+    "--piqae-media-width": `${width}mm`,
+    "--piqae-media-height": height === null ? "auto" : `${height}mm`,
+    "--piqae-media-min-height": `${height ?? 120}mm`,
+    padding: `${margins.top_mm}mm ${margins.right_mm}mm ${margins.bottom_mm}mm ${margins.left_mm}mm`,
+  } as CSSProperties;
+}
+
+function SafeAreaGuide({ stock }: { stock: DesignStock }) {
+  if (!stock?.safeAreaMm) return null;
+  const safe = stock.safeAreaMm;
+  return (
+    <div
+      className="piqae-safe-area-guide"
+      style={{
+        inset: `${safe.top}mm ${safe.right}mm ${safe.bottom}mm ${safe.left}mm`,
+      }}
+      aria-hidden="true"
+    />
+  );
+}
+
+function MediaRuler({
+  value,
+  stock,
+}: {
+  value: PrintPacket;
+  stock: DesignStock;
+}) {
+  const media = value.media;
+  const size =
+    media.kind === "paged"
+      ? `${media.size.toUpperCase()} · ${media.orientation ?? "portrait"}`
+      : media.kind === "continuous"
+        ? `${media.width_mm} mm continuous roll`
+        : `${media.width_mm} × ${media.height_mm} mm fixed label`;
+  return (
+    <div className="piqae-media-ruler" aria-label="Document media">
+      <strong>{size}</strong>
+      {stock?.safeAreaMm ? <span>Safe area shown</span> : null}
+      {stock?.gapMm !== null && stock?.gapMm !== undefined ? (
+        <span>{stock.gapMm} mm gap</span>
+      ) : null}
+      {stock?.markIntervalMm !== null && stock?.markIntervalMm !== undefined ? (
+        <span>{stock.markIntervalMm} mm mark interval</span>
+      ) : null}
+    </div>
+  );
+}
+
+function containsPageBreak(blocks: Block[]): boolean {
+  return blocks.some((block) => {
+    if (block.type === "page_break") return true;
+    if ("children" in block) return containsPageBreak(block.children);
+    if (block.type === "conditional")
+      return (
+        containsPageBreak(block.then) || containsPageBreak(block.else ?? [])
+      );
+    return false;
+  });
 }
 
 function DocumentCanvas({

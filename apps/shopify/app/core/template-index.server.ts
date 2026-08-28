@@ -38,6 +38,8 @@ export type TemplateIndex = {
     kind: string;
     pageSize: string;
     revision: number;
+    designTargetId: string | null;
+    designSpecificationRevision: string | null;
     digest: string;
   }>;
 };
@@ -55,6 +57,8 @@ export function buildTemplateIndex(
       kind: value.kind,
       pageSize: value.pageSize,
       revision: value.revision,
+      designTargetId: value.designTargetId ?? null,
+      designSpecificationRevision: value.designSpecificationRevision ?? null,
       digest: templateDigest(value.source),
     }));
   const digest = templateDigest(JSON.stringify(documents));

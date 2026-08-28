@@ -18,6 +18,15 @@ export function newInteractionId(orderIds) {
   return `${resource || "orders"}-${Date.now().toString(36)}-${interactionSequence.toString(36)}`;
 }
 
+export function stableOptionKey(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
 class PrintActionErrorBoundary extends Component {
   state = { error: "" };
 
@@ -135,6 +144,7 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   const [options, setOptions] = useState(null);
   const [documentId, setDocumentId] = useState("");
   const [destinationId, setDestinationId] = useState("");
+  const [targetSearch, setTargetSearch] = useState("");
   const [state, setState] = useState("loading");
   const [error, setError] = useState("");
   const [result, setResult] = useState("");
@@ -156,7 +166,7 @@ function AdminOrderPrintActionContent({ bulk = false }) {
       if (sequence !== requestSequence.current) return;
       const defaultDocument = chooseDefault(value.documents ?? []);
       const defaultDestination = chooseDefault(
-        (value.destinations ?? []).filter((item) => item.eligible),
+        (value.targets ?? []).filter((item) => item.eligible),
       );
       setOptions(value);
       setDocumentId(defaultDocument?.id ?? "");
@@ -179,6 +189,34 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   const selectedDocument = documentId
     ? options?.documents?.find(({ id }) => id === documentId)
     : undefined;
+  const allEligibleTargets =
+    options?.targets?.filter((item) => item.eligible) ?? [];
+  const compatibleTargets = allEligibleTargets.filter(
+    (target) =>
+      (!selectedDocument?.compatibilityKnown ||
+        selectedDocument.compatibleTargetIds.includes(target.id)) &&
+      `${target.name} ${target.stock?.name ?? ""} ${target.selectedPrinterName ?? ""}`
+        .toLowerCase()
+        .includes(targetSearch.toLowerCase()),
+  );
+  const selectedTarget = options?.targets?.find(
+    ({ id }) => id === destinationId,
+  );
+  useEffect(() => {
+    if (!selectedDocument || !options?.targets) return;
+    const allowed = options.targets.filter(
+      (target) =>
+        target.eligible &&
+        (!selectedDocument.compatibilityKnown ||
+          selectedDocument.compatibleTargetIds.includes(target.id)),
+    );
+    if (!allowed.some(({ id }) => id === destinationId))
+      setDestinationId(
+        allowed.find(({ id }) => id === selectedDocument.designTargetId)?.id ??
+          chooseDefault(allowed)?.id ??
+          "",
+      );
+  }, [selectedDocument?.id, options]);
   useEffect(() => {
     if (!options?.linked || !selectedDocument || orderIds.length === 0) return;
     const sequence = ++previewSequence.current;
@@ -221,7 +259,12 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   useEffect(() => {
     setNodeReadiness(null);
     const policy = options?.renderExecutionPolicy ?? "automatic";
-    if (!preview || !destinationId || policy === "cloud_only") return;
+    if (
+      !preview ||
+      !selectedTarget?.selectedPrinterId ||
+      policy === "cloud_only"
+    )
+      return;
     const sequence = ++requestSequence.current;
     loadWithTimeout((signal) =>
       authorizedJson("/api/print/admin/readiness", {
@@ -229,7 +272,7 @@ function AdminOrderPrintActionContent({ bulk = false }) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           renderId: preview.renderId,
-          printerId: destinationId,
+          printerId: selectedTarget.selectedPrinterId,
           renderCost: preview.renderCost,
         }),
         signal,
@@ -249,7 +292,11 @@ function AdminOrderPrintActionContent({ bulk = false }) {
           },
         });
       });
-  }, [preview?.renderId, destinationId, options?.renderExecutionPolicy]);
+  }, [
+    preview?.renderId,
+    selectedTarget?.selectedPrinterId,
+    options?.renderExecutionPolicy,
+  ]);
 
   useEffect(() => {
     if (!preview) return;
@@ -281,11 +328,12 @@ function AdminOrderPrintActionContent({ bulk = false }) {
           method: "POST",
           headers: {
             "content-type": "application/json",
-            "idempotency-key": `shopify-admin-${interactionId.current}`,
+            "idempotency-key": `shopify-admin-${interactionId.current}-${stableOptionKey(`${destinationId}:${selectedTarget.specificationRevision}`)}`,
           },
           body: JSON.stringify({
             renderId: preview.renderId,
-            printerId: destinationId,
+            targetId: destinationId,
+            specificationRevision: selectedTarget.specificationRevision,
             renderCost: preview.renderCost,
           }),
         },
@@ -303,8 +351,8 @@ function AdminOrderPrintActionContent({ bulk = false }) {
     }
   }
 
-  const eligible = options?.destinations?.filter((item) => item.eligible) ?? [];
-  const selectedDestination = eligible.find(({ id }) => id === destinationId);
+  const eligible = compatibleTargets;
+  const selectedDestination = selectedTarget;
   const policy = options?.renderExecutionPolicy ?? "automatic";
   const effectiveNodeRendering = nodeReadiness?.destination ??
     selectedDestination?.nodeRendering ?? {
@@ -378,16 +426,22 @@ function AdminOrderPrintActionContent({ bulk = false }) {
               Manage documents
             </s-button>
 
-            <s-text type="strong">Destination</s-text>
+            <s-text type="strong">Print target</s-text>
             <s-banner tone={policy === "require_node" ? "warning" : "info"}>
               {renderPolicySummary(policy)}
             </s-banner>
             {options.destinationError && (
               <s-banner tone="warning">{options.destinationError}</s-banner>
             )}
+            <s-text-field
+              label="Search targets"
+              value={targetSearch}
+              onInput={(event) => setTargetSearch(event.currentTarget.value)}
+              placeholder="Printer, target, or stock"
+            />
             {eligible.length > 0 ? (
               <s-select
-                label="Printer"
+                label="Target"
                 value={destinationId}
                 onChange={(event) =>
                   setDestinationId(event.currentTarget.value)
@@ -395,14 +449,16 @@ function AdminOrderPrintActionContent({ bulk = false }) {
               >
                 {eligible.map((destination) => (
                   <option key={destination.id} value={destination.id}>
-                    {destination.name} · Ready
+                    {destination.name} ·{" "}
+                    {destination.stock?.name ?? "stock not configured"}
                   </option>
                 ))}
               </s-select>
             ) : (
               <s-banner tone="info">
-                No connected printer is ready. PDF preview and browser printing
-                remain available.
+                No compatible target has a ready printer, pinned profile, and
+                reported matching stock. PDF preview and browser printing remain
+                available.
                 <s-button href={options.setupDestinationUrl}>
                   Set up a printer
                 </s-button>
@@ -412,6 +468,22 @@ function AdminOrderPrintActionContent({ bulk = false }) {
               <s-text>
                 Node renderer: {nodeReadinessMessage(effectiveNodeRendering)}
               </s-text>
+            )}
+            {selectedDestination && (
+              <>
+                <s-text>
+                  Printer: {selectedDestination.selectedPrinterName} · Profile:{" "}
+                  {selectedDestination.selectedProfileName} · Stock:{" "}
+                  {selectedDestination.stock?.name ?? "not configured"}
+                </s-text>
+                <s-text>
+                  Loaded media:{" "}
+                  {selectedDestination.mediaCompatibility?.status?.replaceAll(
+                    "_",
+                    " ",
+                  ) ?? "not reported"}
+                </s-text>
+              </>
             )}
             {nodeFallbackWarning(nodeReadiness?.destination, policy) && (
               <s-banner tone="warning">

@@ -36,6 +36,9 @@ import {
   customizedTemplateName,
   editorLiquidForMode,
   liquidCompatibilityNotice,
+  mediaForPageSize,
+  mediaPresetForDocument,
+  pageSizeForDocument,
 } from "../app/routes/app.templates.$templateId";
 import { customizedSystemDraft, templates } from "../app/routes/app.templates";
 import { selectedOrderIds } from "../app/routes/app.print";
@@ -367,7 +370,8 @@ describe("Shopify boundary", () => {
       admin,
       shop,
       orderIds: ["42"],
-      printerId: "printer_1",
+      targetId: "tgt_orders",
+      targetSpecificationRevision: "spec_orders_4",
       requestKey: "click-1",
     });
     expect(result).toEqual({
@@ -377,9 +381,11 @@ describe("Shopify boundary", () => {
     });
     expect(create.mock.calls[0]?.[1]).toMatch(/^shopify-render-[a-f0-9]{64}$/);
     expect(print.mock.calls[0]?.[2]).toMatch(
-      /^shopify-print-[a-f0-9]{64}-printer_1$/,
+      /^shopify-print-[a-f0-9]{64}-tgt_orders$/,
     );
     expect(print.mock.calls[0]?.[1]).toMatchObject({
+      target_id: "tgt_orders",
+      specification_revision: "spec_orders_4",
       render_policy: "automatic",
     });
     expect(create.mock.calls[0]?.[0]).toMatchObject({
@@ -548,7 +554,8 @@ describe("Shopify boundary", () => {
       shop,
       previewId: preview.previewId,
       renderId: preview.renderId,
-      printerId: "printer_1",
+      targetId: "tgt_orders",
+      targetSpecificationRevision: "spec_orders_4",
       requestKey: "approve-click",
       renderCost: preview.renderCost,
     });
@@ -562,7 +569,8 @@ describe("Shopify boundary", () => {
     expect(approve).toHaveBeenCalledWith(
       "preview_1",
       expect.objectContaining({
-        printer_id: "printer_1",
+        target_id: "tgt_orders",
+        specification_revision: "spec_orders_4",
         render_policy: "automatic",
         render_cost: expect.objectContaining({
           document_count: 1,
@@ -590,6 +598,38 @@ describe("Shopify boundary", () => {
         page_count: 2,
         pdf_bytes: 48_000,
       }),
+    });
+  });
+
+  it("keeps canonical document media authoritative for editor sizing", () => {
+    const label = mediaForPageSize("100x50mm");
+    expect(label).toMatchObject({
+      kind: "label",
+      width_mm: 100,
+      height_mm: 50,
+    });
+    expect(
+      pageSizeForDocument({
+        format: "printpacket/v1",
+        media: label,
+        body: [],
+      }),
+    ).toBe("100x50mm label");
+    expect(
+      mediaPresetForDocument({
+        format: "printpacket/v1",
+        media: label,
+        body: [],
+      }),
+    ).toBe("100x50mm");
+    expect(mediaForPageSize("80mm")).toMatchObject({
+      kind: "continuous",
+      width_mm: 80,
+    });
+    expect(mediaForPageSize("custom-label")).toMatchObject({
+      kind: "label",
+      width_mm: 62,
+      height_mm: 29,
     });
   });
 

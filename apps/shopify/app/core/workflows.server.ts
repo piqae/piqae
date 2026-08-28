@@ -26,6 +26,8 @@ export type MerchantTemplate = {
   state: "draft" | "published";
   source: string;
   revision: number;
+  designTargetId?: string | null;
+  designSpecificationRevision?: string | null;
   updatedAt: string;
 };
 export type AutomationRule = {
@@ -253,14 +255,14 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
   }
   async listTemplates(shop: string) {
     const result = await this.pool.query(
-      "SELECT id,name,kind,page_size,state,source,revision,updated_at FROM shopify_workflow_templates WHERE shop=$1 ORDER BY updated_at DESC LIMIT 100",
+      "SELECT id,name,kind,page_size,state,source,revision,design_target_id,design_specification_revision,updated_at FROM shopify_workflow_templates WHERE shop=$1 ORDER BY updated_at DESC LIMIT 100",
       [normalizeShopDomain(shop)],
     );
     return result.rows.map(templateRow);
   }
   async getTemplate(shop: string, id: string) {
     const result = await this.pool.query(
-      "SELECT id,name,kind,page_size,state,source,revision,updated_at FROM shopify_workflow_templates WHERE shop=$1 AND id=$2",
+      "SELECT id,name,kind,page_size,state,source,revision,design_target_id,design_specification_revision,updated_at FROM shopify_workflow_templates WHERE shop=$1 AND id=$2",
       [normalizeShopDomain(shop), id],
     );
     return result.rows[0] ? templateRow(result.rows[0]) : null;
@@ -270,7 +272,7 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
     try {
       await client.query("BEGIN");
       const result = await client.query(
-        "INSERT INTO shopify_workflow_templates(id,shop,name,kind,page_size,state,source,revision) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(id,shop) DO UPDATE SET name=EXCLUDED.name,kind=EXCLUDED.kind,page_size=EXCLUDED.page_size,state=EXCLUDED.state,source=EXCLUDED.source,revision=CASE WHEN EXCLUDED.state='published' THEN shopify_workflow_templates.revision+1 ELSE shopify_workflow_templates.revision END,updated_at=now() RETURNING id,name,kind,page_size,state,source,revision,updated_at",
+        "INSERT INTO shopify_workflow_templates(id,shop,name,kind,page_size,state,source,revision,design_target_id,design_specification_revision) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(id,shop) DO UPDATE SET name=EXCLUDED.name,kind=EXCLUDED.kind,page_size=EXCLUDED.page_size,state=EXCLUDED.state,source=EXCLUDED.source,design_target_id=EXCLUDED.design_target_id,design_specification_revision=EXCLUDED.design_specification_revision,revision=CASE WHEN EXCLUDED.state='published' THEN shopify_workflow_templates.revision+1 ELSE shopify_workflow_templates.revision END,updated_at=now() RETURNING id,name,kind,page_size,state,source,revision,design_target_id,design_specification_revision,updated_at",
         [
           v.id,
           normalizeShopDomain(shop),
@@ -280,12 +282,14 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
           v.state,
           v.source,
           v.revision,
+          v.designTargetId ?? null,
+          v.designSpecificationRevision ?? null,
         ],
       );
       const saved = templateRow(result.rows[0]);
       if (saved.state === "published") {
         await client.query(
-          "INSERT INTO shopify_workflow_template_revisions(template_id,shop,revision,name,kind,page_size,source) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING",
+          "INSERT INTO shopify_workflow_template_revisions(template_id,shop,revision,name,kind,page_size,source,design_target_id,design_specification_revision) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING",
           [
             saved.id,
             normalizeShopDomain(shop),
@@ -294,6 +298,8 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
             saved.kind,
             saved.pageSize,
             saved.source,
+            saved.designTargetId,
+            saved.designSpecificationRevision,
           ],
         );
       }
@@ -403,6 +409,8 @@ function templateRow(x: any): MerchantTemplate {
     state: x.state,
     source: x.source,
     revision: x.revision,
+    designTargetId: x.design_target_id ?? null,
+    designSpecificationRevision: x.design_specification_revision ?? null,
     updatedAt: new Date(x.updated_at).toISOString(),
   };
 }

@@ -7,6 +7,7 @@ import {
 import { CredentialVault } from "../app/core/credentials.server";
 import { MemoryShopRepository } from "../app/core/model";
 import { MemoryWorkflowRepository } from "../app/core/workflows.server";
+import { starterTemplates } from "../app/core/starter-templates";
 
 describe("admin print options", () => {
   it("returns published documents and a setup state before Piqae is linked", async () => {
@@ -18,7 +19,7 @@ describe("admin print options", () => {
       kind: "invoice",
       pageSize: "A4",
       state: "published",
-      source: "{}",
+      source: starterTemplates[0]!.source,
       revision: 1,
     });
     await workflowRepository.saveTemplate("fixtures.myshopify.com", {
@@ -27,7 +28,7 @@ describe("admin print options", () => {
       kind: "packing_slip",
       pageSize: "A4",
       state: "draft",
-      source: "{}",
+      source: starterTemplates[0]!.source,
       revision: 1,
     });
 
@@ -43,7 +44,7 @@ describe("admin print options", () => {
     expect(result.documents).toEqual([
       expect.objectContaining({ id: "published-invoice", name: "Invoice" }),
     ]);
-    expect(result.destinations).toEqual([]);
+    expect(result.targets).toEqual([]);
     expect(result.setupDestinationUrl).toBe("/app/printers");
     expect(result.renderExecutionPolicy).toBe("automatic");
   });
@@ -70,7 +71,7 @@ describe("admin print options", () => {
       baseUrl: "https://unused.example.invalid",
       managedClientFactory: () =>
         ({
-          printers: { list: async () => ({ data: [] }) },
+          targets: { list: async () => [] },
         }) as never,
     });
 

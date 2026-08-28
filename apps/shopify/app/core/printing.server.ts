@@ -115,10 +115,17 @@ export class ShopifyPrintingService {
     shop: string;
     previewId: string;
     renderId: string;
-    printerId: string;
+    printerId?: string;
+    targetId?: string;
+    targetSpecificationRevision?: string;
     requestKey: string;
     renderCost?: PrintPacketRenderCost;
   }) {
+    if (
+      Boolean(input.targetId) === Boolean(input.printerId) ||
+      Boolean(input.targetId) !== Boolean(input.targetSpecificationRevision)
+    )
+      throw new Error("Choose exactly one print target or printer");
     const shop = normalizeShopDomain(input.shop);
     if (!(await this.shops.ownsRender(shop, input.renderId)))
       throw new Error("Preview not found");
@@ -131,10 +138,16 @@ export class ShopifyPrintingService {
     );
     if (preview.render_id !== input.renderId)
       throw new Error("Preview not found");
+    const destination = input.targetId
+      ? {
+          target_id: input.targetId,
+          specification_revision: input.targetSpecificationRevision!,
+        }
+      : { printer_id: input.printerId! };
     const approved = await client.printPackets.previews.approve(
       input.previewId,
       {
-        printer_id: input.printerId,
+        ...destination,
         title: "Shopify order documents",
         render_policy: settings.renderExecutionPolicy,
         render_cost: input.renderCost,
@@ -237,11 +250,18 @@ export class ShopifyPrintingService {
     shop: string;
     orderIds: string[];
     printerId?: string;
+    targetId?: string;
+    targetSpecificationRevision?: string;
     requestKey?: string;
     templateId?: string;
     systemTemplateKey?: "receipt";
     resourceType?: "orders" | "draft_orders";
   }): Promise<PrintResult> {
+    if (
+      (input.targetId && input.printerId) ||
+      Boolean(input.targetId) !== Boolean(input.targetSpecificationRevision)
+    )
+      throw new Error("Target prints require one exact specification revision");
     const shop = normalizeShopDomain(input.shop);
     const link = await this.shops.get(shop);
     if (!link) throw new Error("Connect a Piqae account before printing");
@@ -263,6 +283,8 @@ export class ShopifyPrintingService {
           shop,
           ids: orders.map((o) => o.id),
           template: templateRevisionId,
+          destination: input.targetId ?? input.printerId ?? "download",
+          targetSpecificationRevision: input.targetSpecificationRevision ?? "",
           requestKey: input.requestKey ?? "",
         }),
       )
@@ -289,17 +311,23 @@ export class ShopifyPrintingService {
       `shopify-render-${digest}`,
       ownership,
     );
-    if (input.printerId) {
+    if (input.printerId || input.targetId) {
       const settings = await this.workflow.getSettings(shop);
       const completed = await waitForRender(client, render);
       if (completed.state !== "completed")
         throw new Error(
           `document render failed: ${completed.failure_code ?? completed.state}`,
         );
+      const destination = input.targetId
+        ? {
+            target_id: input.targetId,
+            specification_revision: input.targetSpecificationRevision!,
+          }
+        : { printer_id: input.printerId! };
       const job = await client.printPackets.renders.print(
         completed.id,
         {
-          printer_id: input.printerId,
+          ...destination,
           title: `Shopify orders ${orders.map((o) => o.name).join(", ")}`,
           render_policy: settings.renderExecutionPolicy,
           render_cost: measuredRenderCost(
@@ -308,13 +336,13 @@ export class ShopifyPrintingService {
             orders.length,
           ),
         },
-        `shopify-print-${digest}-${input.printerId}`,
+        `shopify-print-${digest}-${input.targetId ?? input.printerId}`,
       );
       await workflows().recordActivity(shop, {
         id: stableActivityId(digest),
         orderName: orders.map((order) => order.name).join(", "),
         documentName: "Order document",
-        destination: input.printerId,
+        destination: input.targetId ?? input.printerId!,
         state: "accepted",
       });
       return { mode: "direct", renderId: render.id, jobId: job.id };

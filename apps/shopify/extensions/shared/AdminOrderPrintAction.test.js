@@ -5,6 +5,7 @@ import {
   loadWithTimeout,
   messageForLoadError,
   newInteractionId,
+  stableOptionKey,
   PRINT_PLACEHOLDER_URL,
   canUseDestinationForPolicy,
   renderPolicySummary,
@@ -19,6 +20,15 @@ describe("admin print action state", () => {
     expect(first).toMatch(/Order-1004-[a-z0-9]+-[a-z0-9]+$/);
     expect(second).not.toBe(first);
     expect(first.length).toBeLessThanOrEqual(128);
+  });
+
+  it("changes approval idempotency when a target specification changes", () => {
+    expect(stableOptionKey("tgt_orders:spec_1")).toBe(
+      stableOptionKey("tgt_orders:spec_1"),
+    );
+    expect(stableOptionKey("tgt_orders:spec_2")).not.toBe(
+      stableOptionKey("tgt_orders:spec_1"),
+    );
   });
 
   it("uses a same-origin first-paint print placeholder", () => {

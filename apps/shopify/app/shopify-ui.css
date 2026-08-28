@@ -157,14 +157,66 @@
   font-family: system-ui, sans-serif;
 }
 .piqae-page-sheet {
+  position: relative;
   box-sizing: border-box;
-  width: min(210mm, calc(100% - 2rem));
-  min-height: 297mm;
+  width: min(var(--piqae-media-width, 210mm), calc(100% - 2rem));
+  min-height: var(--piqae-media-min-height, 297mm);
+  height: var(--piqae-media-height, auto);
   margin: 0 auto 2rem;
   padding: 14mm;
   background: white;
   color: #202223;
   box-shadow: 0 2px 14px rgb(0 0 0 / 14%);
+}
+.piqae-media-continuous {
+  height: auto;
+  background-image: linear-gradient(
+    to bottom,
+    transparent calc(100% - 1px),
+    color-mix(in srgb, currentColor 12%, transparent) 1px
+  );
+}
+.piqae-media-label {
+  overflow: auto;
+}
+.piqae-safe-area-guide {
+  position: absolute;
+  z-index: 0;
+  border: 1px dashed #8a6116;
+  pointer-events: none;
+}
+.piqae-rendered-canvas > :not(.piqae-safe-area-guide) {
+  position: relative;
+  z-index: 1;
+}
+.piqae-media-ruler {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.35rem 0.85rem;
+  margin: 0.75rem auto;
+  color: color-mix(in srgb, currentColor 72%, transparent);
+  font-size: 0.78rem;
+}
+.piqae-media-diagnostic {
+  margin: 0.75rem auto;
+  padding: 0.65rem 0.8rem;
+  max-width: 48rem;
+  border: 1px solid #e0a93b;
+  border-radius: 0.5rem;
+  background: #fff5d9;
+  color: #4b3600;
+}
+.piqae-target-status {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.65rem;
+  border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  border-radius: 0.5rem;
+}
+.piqae-target-status > span,
+.piqae-target-status > small {
+  overflow-wrap: anywhere;
 }
 .piqae-page-sheet .ProseMirror {
   min-height: 260mm;

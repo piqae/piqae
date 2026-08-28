@@ -28,6 +28,11 @@ import { publishCanonicalTemplate } from "../core/template-publisher.server";
 import { createProductionServices } from "../services.server";
 import { shopifyCustomDocumentFields } from "../core/shopify-document-fields";
 import { importOrderPrinterProTemplate } from "../core/order-printer-pro-import.server";
+import { loadShopifyPrintTargets } from "../core/shopify-print-targets.server";
+import {
+  targetSupportsDocument,
+  type ShopifyPrintTarget,
+} from "../core/shopify-print-targets";
 import {
   canonicalToLiquid,
   liquidToCanonical,
@@ -72,12 +77,29 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         state: "draft",
         source: starterSource.source,
         revision: 1,
+        designTargetId: null,
+        designSpecificationRevision: null,
         updatedAt: new Date(0).toISOString(),
       };
+  }
+  const services = createProductionServices();
+  const link = await services.repository.get(session.shop);
+  let printTargets: ShopifyPrintTarget[] = [];
+  let printTargetError = "";
+  if (link) {
+    try {
+      printTargets = await loadShopifyPrintTargets(
+        services.clientForLink(link),
+      );
+    } catch {
+      printTargetError = "Print targets are temporarily unavailable";
+    }
   }
   return {
     template,
     initialTemplate,
+    printTargets,
+    printTargetError,
     customFields: shopifyCustomDocumentFields(
       (await workflows().getSettings(session.shop)).metafieldAllowlist,
     ),
@@ -138,7 +160,6 @@ export async function action({ request, params }: ActionFunctionArgs) {
       return redirect(`/app/templates/${encodeURIComponent(saved.id)}`, 303);
     }
     const kind = bounded(form, "kind", 30, true);
-    const pageSize = bounded(form, "pageSize", 10, true);
     if (
       ![
         "invoice",
@@ -146,9 +167,9 @@ export async function action({ request, params }: ActionFunctionArgs) {
         "receipt",
         "returns",
         "credit_note",
+        "label",
         "custom",
-      ].includes(kind) ||
-      !["A4", "A5", "Letter", "80mm"].includes(pageSize)
+      ].includes(kind)
     )
       throw new Error("Template format is invalid");
     // Starter documents remain pristine. Editing one transparently creates a
@@ -180,6 +201,36 @@ export async function action({ request, params }: ActionFunctionArgs) {
       envelope.document = document;
       envelope.editor.liquid = canonicalToLiquid(document).source;
     }
+    if (
+      envelope.document.media.kind !== "paged" &&
+      documentHasPageBreak(envelope.document.body)
+    )
+      throw new Error(
+        `Page breaks are not supported on ${envelope.document.media.kind} media`,
+      );
+    const pageSize = pageSizeForDocument(envelope.document);
+    const designTargetId = bounded(form, "designTargetId", 128);
+    let designSpecificationRevision: string | null = null;
+    if (designTargetId) {
+      const services = createProductionServices();
+      const link = await services.repository.get(session.shop);
+      if (!link)
+        throw new Error("Connect Piqae before assigning a print target");
+      const specification = await services
+        .clientForLink(link)
+        .targets.designSpecification(designTargetId);
+      const [target] = await loadShopifyPrintTargets({
+        targets: {
+          list: async () => [specification.target],
+          designSpecification: async () => specification,
+        },
+      });
+      if (!target || !targetSupportsDocument(target, envelope.document))
+        throw new Error(
+          "The selected print target does not support this document media",
+        );
+      designSpecificationRevision = specification.specification_revision;
+    }
     let source = serializeTemplateEnvelope(envelope);
     if (intent === "publish") {
       const services = createProductionServices();
@@ -201,6 +252,8 @@ export async function action({ request, params }: ActionFunctionArgs) {
       state: intent === "publish" ? "published" : "draft",
       source,
       revision: existing?.revision ?? 1,
+      designTargetId: designTargetId || null,
+      designSpecificationRevision,
     });
     await syncTemplateIndex(admin, workflows(), session.shop);
     if (savingFromStarter)
@@ -226,14 +279,24 @@ const WORKSPACES = [
 ] as const;
 
 export default function TemplateEditor() {
-  const { template, initialTemplate, customFields } =
-    useLoaderData<typeof loader>();
+  const {
+    template,
+    initialTemplate,
+    customFields,
+    printTargets,
+    printTargetError,
+  } = useLoaderData<typeof loader>();
   const result = useActionData<typeof action>();
   const initial = parseTemplateEnvelope(
     initialTemplate?.source ?? starterTemplates[0]!.source,
   );
   if (!template) removeSystemOwnership(initial);
   const [document, setDocument] = useState(initial.document);
+  const [kind, setKind] = useState(initialTemplate?.kind ?? "invoice");
+  const [designTargetId, setDesignTargetId] = useState(
+    template?.designTargetId ?? "",
+  );
+  const [targetSearch, setTargetSearch] = useState("");
   const [name, setName] = useState(
     template?.name ??
       (initialTemplate
@@ -250,11 +313,23 @@ export default function TemplateEditor() {
   );
   const [error, setError] = useState("");
   const starter = Boolean(initial.system?.immutable);
+  const compatibleTargets = printTargets.filter(
+    (target) =>
+      targetSupportsDocument(target, document) &&
+      `${target.name} ${target.stock?.name ?? ""} ${target.selectedPrinterName ?? ""}`
+        .toLowerCase()
+        .includes(targetSearch.toLowerCase()),
+  );
+  const selectedTarget = printTargets.find(
+    (target) => target.id === designTargetId,
+  );
   useEffect(() => {
     setDocument(initial.document);
     setMode(initial.editor.mode === "liquid" ? "liquid" : "visual");
     setLiquid(initial.editor.liquid);
     setImportMetadata(initial.editor.import);
+    setKind(initialTemplate?.kind ?? "invoice");
+    setDesignTargetId(initialTemplate?.designTargetId ?? "");
   }, [initialTemplate?.source]);
   useEffect(() => {
     if (result && "imported" in result && result.imported?.ok) {
@@ -350,12 +425,35 @@ export default function TemplateEditor() {
                     <span>Document type</span>
                     <select
                       name="kind"
-                      defaultValue={initialTemplate?.kind ?? "invoice"}
+                      value={kind}
+                      onChange={(event) => {
+                        const nextKind = event.currentTarget.value;
+                        setKind(nextKind);
+                        if (nextKind === "receipt")
+                          setDocument({
+                            ...document,
+                            media: mediaForPageSize("80mm"),
+                          });
+                        else if (nextKind === "label")
+                          setDocument({
+                            ...document,
+                            media: mediaForPageSize("100x50mm"),
+                          });
+                        else if (
+                          nextKind !== "custom" &&
+                          document.media.kind !== "paged"
+                        )
+                          setDocument({
+                            ...document,
+                            media: mediaForPageSize("A4"),
+                          });
+                      }}
                     >
                       <option value="invoice">Invoice</option>
                       <option value="packing_slip">Packing slip</option>
                       <option value="receipt">Receipt</option>
                       <option value="credit_note">Credit note</option>
+                      <option value="label">Label</option>
                       <option value="returns">Returns form</option>
                       <option value="custom">Custom</option>
                     </select>
@@ -364,14 +462,135 @@ export default function TemplateEditor() {
                     <span>Media</span>
                     <select
                       name="pageSize"
-                      defaultValue={initialTemplate?.pageSize ?? "A4"}
+                      value={mediaPresetForDocument(document)}
+                      onChange={(event) => {
+                        const media = mediaForPageSize(
+                          event.currentTarget.value,
+                        );
+                        setDocument({
+                          ...document,
+                          media,
+                        });
+                        if (media.kind === "continuous") setKind("receipt");
+                        else if (media.kind === "label") setKind("label");
+                        else if (kind === "receipt" || kind === "label")
+                          setKind("custom");
+                      }}
                     >
                       <option>A4</option>
                       <option>A5</option>
                       <option>Letter</option>
                       <option value="80mm">80 mm receipt</option>
+                      <option value="custom-continuous">
+                        Custom roll width
+                      </option>
+                      <option value="100x50mm">100 × 50 mm label</option>
+                      <option value="custom-label">Custom fixed label</option>
                     </select>
                   </label>
+                  {document.media.kind !== "paged" ? (
+                    <label className="piqae-field">
+                      <span>Width (mm)</span>
+                      <input
+                        type="number"
+                        min="10"
+                        max="1000"
+                        step="0.1"
+                        value={document.media.width_mm}
+                        onChange={(event) => {
+                          const width = event.currentTarget.valueAsNumber;
+                          if (Number.isFinite(width))
+                            setDocument((current) =>
+                              current.media.kind === "paged"
+                                ? current
+                                : {
+                                    ...current,
+                                    media: {
+                                      ...current.media,
+                                      width_mm: width,
+                                    },
+                                  },
+                            );
+                        }}
+                      />
+                    </label>
+                  ) : null}
+                  {document.media.kind === "label" ? (
+                    <label className="piqae-field">
+                      <span>Height (mm)</span>
+                      <input
+                        type="number"
+                        min="5"
+                        max="1000"
+                        step="0.1"
+                        value={document.media.height_mm}
+                        onChange={(event) => {
+                          const height = event.currentTarget.valueAsNumber;
+                          if (Number.isFinite(height))
+                            setDocument((current) =>
+                              current.media.kind !== "label"
+                                ? current
+                                : {
+                                    ...current,
+                                    media: {
+                                      ...current.media,
+                                      height_mm: height,
+                                    },
+                                  },
+                            );
+                        }}
+                      />
+                    </label>
+                  ) : null}
+                  <label className="piqae-field">
+                    <span>Find print target</span>
+                    <input
+                      type="search"
+                      value={targetSearch}
+                      placeholder="Printer, target, or stock"
+                      onChange={(event) =>
+                        setTargetSearch(event.currentTarget.value)
+                      }
+                    />
+                  </label>
+                  <label className="piqae-field">
+                    <span>Print target</span>
+                    <select
+                      name="designTargetId"
+                      value={designTargetId}
+                      onChange={(event) =>
+                        setDesignTargetId(event.currentTarget.value)
+                      }
+                    >
+                      <option value="">Choose at print time</option>
+                      {compatibleTargets.map((target) => (
+                        <option key={target.id} value={target.id}>
+                          {target.name} ·{" "}
+                          {target.stock?.name ?? "stock not configured"}
+                        </option>
+                      ))}
+                      {selectedTarget &&
+                      !compatibleTargets.some(
+                        ({ id }) => id === selectedTarget.id,
+                      ) ? (
+                        <option value={selectedTarget.id} disabled>
+                          {selectedTarget.name} · incompatible with current
+                          media
+                        </option>
+                      ) : null}
+                    </select>
+                  </label>
+                  {printTargetError ? (
+                    <p className="piqae-menu-note">{printTargetError}</p>
+                  ) : null}
+                  {selectedTarget ? (
+                    <TargetStatus
+                      target={selectedTarget}
+                      savedSpecificationRevision={
+                        template?.designSpecificationRevision ?? null
+                      }
+                    />
+                  ) : null}
                   <DocumentSettingsFields
                     value={document}
                     onChange={setDocument}
@@ -454,12 +673,16 @@ export default function TemplateEditor() {
               </div>
             ) : null}
             {workspace === "preview" ? (
-              <PrintPacketPreview value={document} />
+              <PrintPacketPreview
+                value={document}
+                stock={selectedTarget?.stock}
+              />
             ) : workspace === "visual" ? (
               <PrintPacketEditor
                 value={document}
                 disabled={false}
                 customFields={customFields}
+                stock={selectedTarget?.stock}
                 onChange={setDocument}
               />
             ) : (
@@ -500,6 +723,131 @@ export default function TemplateEditor() {
       </s-section>
     </s-page>
   );
+}
+
+function TargetStatus({
+  target,
+  savedSpecificationRevision,
+}: {
+  target: ShopifyPrintTarget;
+  savedSpecificationRevision: string | null;
+}) {
+  const media = target.mediaCompatibility;
+  const changed =
+    savedSpecificationRevision !== null &&
+    savedSpecificationRevision !== target.specificationRevision;
+  return (
+    <div className="piqae-target-status" data-status={media.status}>
+      <strong>{target.ready ? "Ready" : "Needs attention"}</strong>
+      <span>{target.selectedPrinterName ?? "No selected printer"}</span>
+      <span>{target.selectedProfileName ?? "No pinned profile"}</span>
+      <span>{target.stock?.name ?? "No target stock configured"}</span>
+      <span>Loaded media: {media.status.replaceAll("_", " ")}</span>
+      {media.profileDimensionsMm ? (
+        <small>
+          Pinned profile: {media.profileDimensionsMm.widthMm} ×{" "}
+          {media.profileDimensionsMm.heightMm} mm
+        </small>
+      ) : null}
+      {media.reasons.map((reason) => (
+        <small key={reason}>{reason.replaceAll("_", " ")}</small>
+      ))}
+      {changed ? (
+        <small>
+          Target configuration changed since this template was saved. Saving
+          revalidates and pins the current revision.
+        </small>
+      ) : null}
+      {media.observedAt ? (
+        <small>Observed {new Date(media.observedAt).toLocaleString()}</small>
+      ) : (
+        <small>No loaded-media observation reported</small>
+      )}
+    </div>
+  );
+}
+
+export function pageSizeForDocument(document: PrintPacket): string {
+  if (document.media.kind === "paged")
+    return document.media.size === "a4"
+      ? "A4"
+      : document.media.size === "a5"
+        ? "A5"
+        : "Letter";
+  if (document.media.kind === "continuous")
+    return `${mediaDimension(document.media.width_mm)}mm roll`;
+  return `${mediaDimension(document.media.width_mm)}x${mediaDimension(document.media.height_mm)}mm label`;
+}
+
+export function mediaPresetForDocument(document: PrintPacket): string {
+  if (document.media.kind === "paged") return pageSizeForDocument(document);
+  if (document.media.kind === "continuous")
+    return Math.abs(document.media.width_mm - 80) <= 0.05
+      ? "80mm"
+      : "custom-continuous";
+  return Math.abs(document.media.width_mm - 100) <= 0.05 &&
+    Math.abs(document.media.height_mm - 50) <= 0.05
+    ? "100x50mm"
+    : "custom-label";
+}
+
+export function mediaForPageSize(value: string): PrintPacket["media"] {
+  const margins = {
+    top_mm: 10,
+    right_mm: 10,
+    bottom_mm: 10,
+    left_mm: 10,
+  };
+  if (value === "A4" || value === "A5" || value === "Letter")
+    return {
+      kind: "paged",
+      size: value === "A4" ? "a4" : value === "A5" ? "a5" : "letter",
+      margins,
+    };
+  if (value === "80mm")
+    return {
+      kind: "continuous",
+      width_mm: 80,
+      margins: { ...margins, right_mm: 4, left_mm: 4 },
+    };
+  if (value === "custom-continuous")
+    return {
+      kind: "continuous",
+      width_mm: 76,
+      margins: { ...margins, right_mm: 4, left_mm: 4 },
+    };
+  if (value === "100x50mm")
+    return {
+      kind: "label",
+      width_mm: 100,
+      height_mm: 50,
+      margins: { top_mm: 3, right_mm: 3, bottom_mm: 3, left_mm: 3 },
+    };
+  if (value === "custom-label")
+    return {
+      kind: "label",
+      width_mm: 62,
+      height_mm: 29,
+      margins: { top_mm: 2, right_mm: 2, bottom_mm: 2, left_mm: 2 },
+    };
+  throw new Error("Template media is invalid");
+}
+
+function mediaDimension(value: number): string {
+  if (!Number.isFinite(value) || value < 5 || value > 1000)
+    throw new Error("Document media dimensions must be between 5 and 1000 mm");
+  return String(Math.round(value * 100) / 100);
+}
+
+function documentHasPageBreak(blocks: PrintPacket["body"]): boolean {
+  return blocks.some((block) => {
+    if (block.type === "page_break") return true;
+    if ("children" in block) return documentHasPageBreak(block.children);
+    return block.type === "conditional"
+      ? documentHasPageBreak(block.then) ||
+          documentHasPageBreak(block.else ?? [])
+      : false;
+  });
 }
 
 export function templateStateLabel(

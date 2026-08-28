@@ -6,6 +6,12 @@ import type { ShopLink } from "./model";
 import { normalizeShopDomain } from "./model";
 import type { WorkflowRepository } from "./workflows.server";
 import type { RenderExecutionPolicy } from "./workflows.server";
+import { parseTemplateEnvelope } from "./template-model";
+import { loadShopifyPrintTargets } from "./shopify-print-targets.server";
+import {
+  targetSupportsDocument,
+  type ShopifyPrintTarget,
+} from "./shopify-print-targets";
 
 /**
  * Selects the account's provisioned starter revision instead of a merchant
@@ -22,20 +28,22 @@ export type AdminPrintOptions = {
     name: string;
     kind: string;
     isDefault: boolean;
+    designTargetId: string | null;
+    compatibilityKnown: boolean;
+    compatibleTargetIds: string[];
   }>;
-  destinations: Array<{
-    id: string;
-    name: string;
-    state: string;
-    eligible: boolean;
-    isDefault: boolean;
-    nodeRendering: {
-      supported: boolean;
-      ready: boolean;
-      cacheState: "ready" | "warming" | "missing" | "unknown";
-      reason: string;
-    };
-  }>;
+  targets: Array<
+    ShopifyPrintTarget & {
+      eligible: boolean;
+      isDefault: boolean;
+      nodeRendering: {
+        supported: boolean;
+        ready: boolean;
+        cacheState: "ready" | "warming" | "missing" | "unknown";
+        reason: string;
+      };
+    }
+  >;
   manageDocumentsUrl: string;
   setupDestinationUrl: string;
   destinationError?: string;
@@ -59,18 +67,24 @@ export async function loadAdminPrintOptions(input: {
   const published = templates.filter(
     (template) => template.state === "published",
   );
-  const documents = published.map((template) => ({
-    id: template.id,
-    name: template.name,
-    kind: template.kind,
-    isDefault: template.id === settings.defaultTemplateId,
+  const parsedDocuments = published.map((template) => ({
+    template,
+    document: parseTemplateEnvelope(template.source).document,
   }));
 
   if (!link) {
     return {
       linked: false,
-      documents,
-      destinations: [],
+      documents: parsedDocuments.map(({ template }) => ({
+        id: template.id,
+        name: template.name,
+        kind: template.kind,
+        isDefault: template.id === settings.defaultTemplateId,
+        designTargetId: template.designTargetId ?? null,
+        compatibilityKnown: true,
+        compatibleTargetIds: [],
+      })),
+      targets: [],
       manageDocumentsUrl: "/app/templates",
       setupDestinationUrl: "/app/printers",
       renderExecutionPolicy: settings.renderExecutionPolicy,
@@ -85,16 +99,16 @@ export async function loadAdminPrintOptions(input: {
           accessToken: () => input.vault.open(link.encryptedCredential, shop),
         });
   if (!client) throw new Error("PIQAE_MANAGED_ACCOUNT_NOT_READY");
-  let destinations: AdminPrintOptions["destinations"] = [];
+  let targets: AdminPrintOptions["targets"] = [];
   let destinationError: string | undefined;
   try {
-    const page = await client.printers.list({ limit: 100 });
-    destinations = page.data.map((printer) => ({
-      id: printer.id,
-      name: printer.name,
-      state: printer.state,
-      eligible: printer.state === "online",
-      isDefault: printer.id === settings.defaultPrinterId,
+    const loaded = await loadShopifyPrintTargets(client);
+    targets = loaded.map((target) => ({
+      ...target,
+      eligible: target.ready,
+      isDefault: parsedDocuments.some(
+        ({ template }) => template.designTargetId === target.id,
+      ),
       // Readiness is deliberately fail-closed until the platform's signed
       // per-destination renderer decision is available. Printer online state
       // alone does not prove renderer ABI or resource-cache compatibility.
@@ -102,7 +116,8 @@ export async function loadAdminPrintOptions(input: {
         supported: false,
         ready: false,
         cacheState: "unknown",
-        reason: "Node renderer capability has not been verified",
+        reason:
+          "Node renderer capability is checked against each rendered document",
       },
     }));
   } catch {
@@ -120,13 +135,29 @@ export async function loadAdminPrintOptions(input: {
           name: "Default document",
           kind: "document",
           isDefault: true,
+          designTargetId: null,
+          compatibilityKnown: false,
+          compatibleTargetIds: targets.map(({ id }) => id),
         },
       ]
     : [];
   return {
     linked: true,
-    documents: documents.length > 0 ? documents : accountDefault,
-    destinations,
+    documents:
+      parsedDocuments.length > 0
+        ? parsedDocuments.map(({ template, document }) => ({
+            id: template.id,
+            name: template.name,
+            kind: template.kind,
+            isDefault: template.id === settings.defaultTemplateId,
+            designTargetId: template.designTargetId ?? null,
+            compatibilityKnown: true,
+            compatibleTargetIds: targets
+              .filter((target) => targetSupportsDocument(target, document))
+              .map(({ id }) => id),
+          }))
+        : accountDefault,
+    targets,
     manageDocumentsUrl: "/app/templates",
     setupDestinationUrl: "/app/printers",
     destinationError,
