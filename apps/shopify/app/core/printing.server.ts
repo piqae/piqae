@@ -11,6 +11,7 @@ import {
   fetchDraftOrders,
   fetchOrders,
   parseShopifyDataBindings,
+  shopifyDocumentInput,
   type AdminGraphql,
 } from "./orders.server";
 import { workflows, type WorkflowRepository } from "./workflows.server";
@@ -76,7 +77,7 @@ export class ShopifyPrintingService {
       )
       .digest("hex");
     const client = this.clientFor(link, shop);
-    const renderInput = { shop, orders };
+    const renderInput = shopifyDocumentInput(shop, orders);
     const render = await client.printPackets.renders.create(
       {
         template_revision_id: templateRevisionId,
@@ -190,7 +191,34 @@ export class ShopifyPrintingService {
     shop: string,
     fallback: string,
     templateId?: string,
+    systemTemplateKey?: "receipt",
   ) {
+    if (templateId && systemTemplateKey)
+      throw new Error("Select one document source");
+    if (systemTemplateKey) {
+      const selected = (await this.workflow.listTemplates(shop)).find(
+        (candidate) => {
+          if (candidate.state !== "published") return false;
+          try {
+            return (
+              parseTemplateEnvelope(candidate.source).system?.key ===
+              systemTemplateKey
+            );
+          } catch {
+            return false;
+          }
+        },
+      );
+      if (!selected)
+        throw new Error("The published receipt document is unavailable");
+      const revision = parseTemplateEnvelope(selected.source).published
+        ?.piqaeRevisionId;
+      if (!revision)
+        throw new Error(
+          "The published receipt has no pinned Piqae revision; reconnect or publish it before printing",
+        );
+      return revision;
+    }
     if (!templateId || templateId === ACCOUNT_DEFAULT_DOCUMENT_ID)
       return fallback;
     const selected = await this.workflow.getTemplate(shop, templateId);
@@ -211,6 +239,7 @@ export class ShopifyPrintingService {
     printerId?: string;
     requestKey?: string;
     templateId?: string;
+    systemTemplateKey?: "receipt";
     resourceType?: "orders" | "draft_orders";
   }): Promise<PrintResult> {
     const shop = normalizeShopDomain(input.shop);
@@ -220,6 +249,7 @@ export class ShopifyPrintingService {
       shop,
       link.templateRevisionId,
       input.templateId,
+      input.systemTemplateKey,
     );
     const settings = await this.workflow.getSettings(shop);
     const bindings = parseShopifyDataBindings(settings.metafieldAllowlist);
@@ -238,7 +268,7 @@ export class ShopifyPrintingService {
       )
       .digest("hex");
     const client = this.clientFor(link, shop);
-    const renderInput = { shop, orders };
+    const renderInput = shopifyDocumentInput(shop, orders);
     const render = await client.printPackets.renders.create(
       {
         template_revision_id: templateRevisionId,

@@ -5,6 +5,7 @@ import {
   validatePrintPacket,
 } from "../app/core/template-model";
 import { starterTemplates } from "../app/core/starter-templates";
+import starterSpecifications from "./fixtures/printpacket/starter-specifications.json";
 const allNodes = (nodes: any[]): any[] =>
   nodes.flatMap((node) => [
     node,
@@ -13,13 +14,24 @@ const allNodes = (nodes: any[]): any[] =>
     ...(Array.isArray(node.else) ? allNodes(node.else) : []),
   ]);
 describe("PrintPacket model", () => {
+  it("keeps the checked cross-runtime renderer fixtures identical to every starter", () => {
+    expect(
+      Object.fromEntries(
+        starterTemplates.map(({ id, specification }) => [id, specification]),
+      ),
+    ).toEqual(starterSpecifications);
+  });
   it("ships only semantic, reflowable starters", () => {
     for (const starter of starterTemplates) {
       expect(starter.specification.format).toBe("printpacket/v1");
       expect(JSON.stringify(starter.specification)).not.toContain("canvas");
+      const nodes = allNodes(starter.specification.body);
+      expect(nodes.some((node) => node.type === "repeat")).toBe(true);
       expect(
-        allNodes(starter.specification.body).some(
-          (node) => node.type === "table",
+        nodes.some((node) =>
+          starter.kind === "label"
+            ? node.type === "barcode"
+            : node.type === "table",
         ),
       ).toBe(true);
       expect(parseTemplateEnvelope(starter.source).document).toEqual(

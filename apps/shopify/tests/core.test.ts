@@ -2,8 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import { CredentialVault } from "../app/core/credentials.server";
 import {
   fetchOrders,
+  normalizedLabelCode128Candidate,
+  normalizeMoneyAmount,
   normalizeOrderGid,
   parseShopifyDataBindings,
+  shopifyDocumentInput,
   type AdminGraphql,
 } from "../app/core/orders.server";
 import {
@@ -41,6 +44,7 @@ import { MemoryWorkflowRepository } from "../app/core/workflows.server";
 import {
   parseTemplateEnvelope,
   removeSystemOwnership,
+  serializeTemplateEnvelope,
 } from "../app/core/template-model";
 
 const shop = "fixture-shop.myshopify.com";
@@ -144,8 +148,69 @@ describe("Shopify boundary", () => {
   it("normalizes GraphQL money without trusting client order content", async () => {
     const [value] = await fetchOrders(admin, ["42", "42"]);
     expect(admin.graphql).toHaveBeenCalledTimes(1);
-    expect(value?.lineItems[0]?.total).toBe("20.00");
-    expect(value?.total).toBe("23.00");
+    expect(value?.lineItems[0]?.total).toBe(20);
+    expect(value?.lineItems[0]?.labelCode128).toBe("942000000001");
+    expect(value?.total).toBe(23);
+    expect(typeof value?.total).toBe("number");
+  });
+  it("normalizes only Code128 candidates that fit the fixed product label", () => {
+    expect(normalizedLabelCode128Candidate("VALID-BARCODE", "VALID-SKU")).toBe(
+      "VALID-BARCODE",
+    );
+    expect(normalizedLabelCode128Candidate("bār", "  VALID-SKU  ")).toBe(
+      "VALID-SKU",
+    );
+    expect(normalizedLabelCode128Candidate("", "ÜNICODE-SKU")).toBeNull();
+    expect(normalizedLabelCode128Candidate("A".repeat(35), "fallback")).toBe(
+      "A".repeat(35),
+    );
+    expect(
+      normalizedLabelCode128Candidate("A".repeat(36), "DENSE-FALLBACK"),
+    ).toBe("DENSE-FALLBACK");
+    expect(
+      normalizedLabelCode128Candidate("A".repeat(36), "B".repeat(36)),
+    ).toBeNull();
+    expect(
+      normalizedLabelCode128Candidate("A".repeat(81), "B".repeat(81)),
+    ).toBeNull();
+    expect(normalizedLabelCode128Candidate("\n", "")).toBeNull();
+  });
+  it("rejects an RFC3339-shaped order timestamp with an impossible calendar date", async () => {
+    const invalidDateAdmin = {
+      graphql: vi.fn<AdminGraphql["graphql"]>(async () =>
+        Response.json({
+          data: { order: { ...order, createdAt: "2026-02-30T00:00:00Z" } },
+        }),
+      ),
+    };
+    await expect(fetchOrders(invalidDateAdmin, ["42"])).rejects.toThrow(
+      "timestamp is invalid",
+    );
+  });
+  it("normalizes Shopify decimals into the bounded canonical numeric contract", () => {
+    expect(normalizeMoneyAmount("0.000001")).toBe(0.000001);
+    expect(normalizeMoneyAmount("900719925.474099")).toBe(900719925.474099);
+    expect(normalizeMoneyAmount("-0.00")).toBe(0);
+    for (const invalid of [
+      "01.00",
+      "1e3",
+      "1.0000001",
+      "9007199254.740991",
+      Number.POSITIVE_INFINITY,
+    ]) {
+      expect(() => normalizeMoneyAmount(invalid)).toThrow("Shopify money");
+    }
+  });
+  it("builds the canonical shop/orders render root and rejects non-Shopify identity", async () => {
+    const [normalized] = await fetchOrders(admin, ["42"]);
+    const input = shopifyDocumentInput(shop, [normalized!], "Fixture Shop");
+    expect(input).toMatchObject({
+      shop: { name: "Fixture Shop", domain: shop },
+      orders: [{ name: "#1042", total: 23 }],
+    });
+    expect(() =>
+      shopifyDocumentInput("attacker.example", [normalized!]),
+    ).toThrow("invalid Shopify shop domain");
   });
   it("normalizes taxonomy and only explicitly allowlisted custom data", async () => {
     admin.graphql.mockClear();
@@ -185,6 +250,17 @@ describe("Shopify boundary", () => {
   });
 
   it("exposes Shopify taxonomy and allowlisted custom data as generic document paths", () => {
+    expect(
+      SHOPIFY_DOCUMENT_FIELDS.find(({ label }) => label === "Shop name")?.path,
+    ).toBe("shop.name");
+    expect(
+      SHOPIFY_DOCUMENT_FIELDS.find(({ label }) => label === "Item total")?.path,
+    ).toBe("item.total");
+    expect(
+      SHOPIFY_DOCUMENT_FIELDS.find(
+        ({ label }) => label === "Label barcode (Code 128 safe)",
+      )?.path,
+    ).toBe("item.labelCode128");
     expect(
       SHOPIFY_DOCUMENT_FIELDS.find(
         ({ label }) => label === "Shopify category ID",
@@ -306,6 +382,12 @@ describe("Shopify boundary", () => {
     expect(print.mock.calls[0]?.[1]).toMatchObject({
       render_policy: "automatic",
     });
+    expect(create.mock.calls[0]?.[0]).toMatchObject({
+      input: {
+        shop: { name: "fixture-shop", domain: shop },
+        orders: [{ name: "#1042", total: 23 }],
+      },
+    });
   });
   it("fails closed when a selected published document has no pinned Piqae revision", async () => {
     const repository = new MemoryShopRepository();
@@ -340,6 +422,61 @@ describe("Shopify boundary", () => {
         requestKey: "preview-unpinned",
       }),
     ).rejects.toThrow("has no published Piqae revision");
+  });
+  it("pins POS receipt rendering to the published canonical receipt revision", async () => {
+    const repository = new MemoryShopRepository();
+    const workflow = new MemoryWorkflowRepository();
+    const vault = new CredentialVault(Buffer.alloc(32, 9));
+    await repository.put({
+      shop,
+      piqaeAccountId: "acct_1",
+      encryptedCredential: vault.seal("token", shop),
+      templateRevisionId: "invoice_revision",
+      createdAt: new Date().toISOString(),
+    });
+    const receipt = starterTemplates.find(({ id }) => id === "receipt")!;
+    const envelope = parseTemplateEnvelope(receipt.source);
+    envelope.published = {
+      piqaeTemplateId: "receipt_template",
+      piqaeRevisionId: "receipt_revision",
+      canonicalDigest: "a".repeat(64),
+    };
+    await workflow.saveTemplate(shop, {
+      ...receipt,
+      source: serializeTemplateEnvelope(envelope),
+      state: "published",
+      revision: 1,
+    });
+    const create = vi.fn(async () => ({
+      id: "receipt_render",
+      state: "completed",
+      failure_code: null,
+    }));
+    const service = new ShopifyPrintingService(
+      repository,
+      vault,
+      () =>
+        ({
+          printPackets: {
+            renders: { create },
+          },
+        }) as never,
+      "https://app.example",
+      undefined,
+      workflow,
+    );
+    await expect(
+      service.printOrders({
+        admin,
+        shop,
+        orderIds: ["42"],
+        systemTemplateKey: "receipt",
+      }),
+    ).resolves.toMatchObject({ mode: "download", renderId: "receipt_render" });
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({ template_revision_id: "receipt_revision" }),
+      expect.stringMatching(/^shopify-render-/),
+    );
   });
   it("approves the exact rendered preview without rendering again", async () => {
     const repository = new MemoryShopRepository();
@@ -726,14 +863,17 @@ describe("Shopify document experience", () => {
       "Invoice",
       "Packing slip",
     ]);
-    expect(new Set(starterTemplates.map(({ id }) => id)).size).toBe(2);
+    expect(new Set(starterTemplates.map(({ id }) => id)).size).toBe(4);
     for (const template of starterTemplates) {
       expect(template.specification.format).toBe("printpacket/v1");
       expect(template.specification.body.length).toBeGreaterThan(0);
-      expect(JSON.stringify(template.specification)).toContain(
-        '"type":"table"',
-      );
     }
+    expect(starterTemplates.find(({ id }) => id === "receipt")?.pageSize).toBe(
+      "80mm",
+    );
+    expect(
+      starterTemplates.find(({ id }) => id === "product-label")?.pageSize,
+    ).toBe("100x50mm");
     expect(editorDocument.format).toBe("printpacket/v1");
   });
 

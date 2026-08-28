@@ -1,0 +1,102 @@
+{
+  "format": "printpacket/v1",
+  "media": {
+    "kind": "paged",
+    "size": "a4"
+  },
+  "theme": {
+    "font_size_pt": 10,
+    "line_height": 1.25
+  },
+  "resources": {},
+  "body": [
+    {
+      "type": "repeat",
+      "items": {
+        "type": "path",
+        "path": ["orders"]
+      },
+      "children": [
+        {
+          "type": "heading",
+          "level": 1,
+          "content": [
+            {
+              "type": "value",
+              "value": {
+                "type": "path",
+                "path": ["shop", "name"]
+              }
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "value",
+              "value": {
+                "type": "current_path",
+                "path": ["name"]
+              }
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "items": {
+            "type": "current_path",
+            "path": ["lineItems"]
+          },
+          "columns": [
+            {
+              "header": [{ "type": "text", "value": "Item" }],
+              "cell": [
+                {
+                  "type": "value",
+                  "value": {
+                    "type": "current_path",
+                    "path": ["title"]
+                  }
+                }
+              ]
+            },
+            {
+              "header": [{ "type": "text", "value": "SKU" }],
+              "cell": [
+                {
+                  "type": "value",
+                  "value": {
+                    "type": "current_path",
+                    "path": ["sku"]
+                  }
+                }
+              ]
+            },
+            {
+              "header": [{ "type": "text", "value": "Total" }],
+              "cell": [
+                {
+                  "type": "value",
+                  "value": {
+                    "type": "format_money",
+                    "amount": {
+                      "type": "current_path",
+                      "path": ["total"]
+                    },
+                    "currency": {
+                      "type": "current_path",
+                      "path": ["currency"]
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "empty": []
+        },
+        { "type": "page_break" }
+      ]
+    }
+  ]
+}

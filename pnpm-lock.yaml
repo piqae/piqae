@@ -93,6 +93,9 @@ importers:
       '@piqae/sdk':
         specifier: workspace:*
         version: link:../../sdk/typescript
+      '@printpacket/core':
+        specifier: workspace:*
+        version: link:../../sdk/printpacket
       '@react-router/node':
         specifier: 7.12.0
         version: 7.12.0(react-router@7.12.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(typescript@5.9.3)

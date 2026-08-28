@@ -1,0 +1,56 @@
+{
+  "shop": {
+    "name": "Fixture Coffee",
+    "domain": "fixture-coffee.myshopify.com"
+  },
+  "orders": [
+    {
+      "id": "gid://shopify/Order/42",
+      "name": "#1042",
+      "createdAt": "2026-08-09T00:00:00Z",
+      "currency": "NZD",
+      "customer": {
+        "id": "gid://shopify/Customer/7",
+        "displayName": "Fixture Customer",
+        "email": "customer@example.test"
+      },
+      "shippingAddress": {
+        "formatted": "Fixture Customer\n1 Example Street\nChristchurch 8011\nNew Zealand"
+      },
+      "billingAddress": null,
+      "note": "",
+      "shippingMethod": "Courier",
+      "statusUrl": "https://fixture-coffee.myshopify.com/orders/status/fixture",
+      "metafields": {},
+      "lineItems": [
+        {
+          "id": "gid://shopify/LineItem/8",
+          "title": "House Coffee",
+          "sku": "COF-500-WB",
+          "labelCode128": "942000000001",
+          "quantity": 2,
+          "unitPrice": 10,
+          "total": 20,
+          "currency": "NZD",
+          "product": {
+            "id": "gid://shopify/Product/7",
+            "title": "House Coffee",
+            "vendor": "Fixture Coffee",
+            "productType": "Coffee",
+            "category": null,
+            "metafields": {}
+          },
+          "variant": {
+            "id": "gid://shopify/ProductVariant/11",
+            "title": "500g / Whole Beans",
+            "barcode": "942000000001",
+            "metafields": {}
+          }
+        }
+      ],
+      "subtotal": 20,
+      "tax": 3,
+      "total": 23
+    }
+  ]
+}

@@ -20,6 +20,12 @@ import {
   SHOPIFY_DOCUMENT_FIELDS,
   type ShopifyDocumentField,
 } from "../core/shopify-document-fields";
+import {
+  authoringPathExpression,
+  canonicalizeShopifyEditorBody,
+  isLineItemsExpression,
+  type ShopifyAuthoringScope,
+} from "../core/shopify-editor-scopes";
 
 const schema = new Schema({
   nodes: {
@@ -125,34 +131,8 @@ const schema = new Schema({
   },
 });
 
-const AUTHORING_FIELDS: readonly ShopifyDocumentField[] = [
-  ...SHOPIFY_DOCUMENT_FIELDS,
-  { label: "Shop name", path: "shop.name", group: "Order" },
-  {
-    label: "Billing address",
-    path: "order.billingAddress.formatted",
-    group: "Order",
-  },
-  {
-    label: "Order subtotal",
-    path: "order.subtotal",
-    group: "Order",
-    conditionable: true,
-  },
-  {
-    label: "Order tax",
-    path: "order.taxTotal",
-    group: "Order",
-    conditionable: true,
-  },
-  {
-    label: "Order total",
-    path: "order.total",
-    group: "Order",
-    conditionable: true,
-  },
-  { label: "Order status link", path: "order.statusUrl", group: "Order" },
-];
+const AUTHORING_FIELDS: readonly ShopifyDocumentField[] =
+  SHOPIFY_DOCUMENT_FIELDS;
 export const SHOPIFY_VARIABLES = AUTHORING_FIELDS.map((field) => field.path);
 
 export function PrintPacketEditor({
@@ -166,7 +146,8 @@ export function PrintPacketEditor({
   customFields?: readonly ShopifyDocumentField[];
   onChange(document: PrintPacket): void;
 }) {
-  const authoringFields = [...AUTHORING_FIELDS, ...customFields];
+  const allAuthoringFields = [...AUTHORING_FIELDS, ...customFields];
+  const canonicalBody = canonicalizeShopifyEditorBody(value.body);
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const latest = useRef(value);
@@ -175,12 +156,19 @@ export function PrintPacketEditor({
     block: Block;
     path?: BlockPath;
   } | null>(null);
-  latest.current = value;
+  const insertionScope = selection?.path
+    ? scopeForBlockPath(canonicalBody, selection.path)
+    : "order";
+  const insertionFields = contextualFieldSuggestions(
+    allAuthoringFields,
+    insertionScope,
+  );
+  latest.current = { ...value, body: canonicalBody };
   useEffect(() => {
     if (!host.current) return;
     const state = EditorState.create({
       schema,
-      doc: blocksToDoc(value.body),
+      doc: blocksToDoc(canonicalBody),
       plugins: [
         history(),
         keymap({ "Mod-z": undo, "Shift-Mod-z": redo }),
@@ -213,7 +201,9 @@ export function PrintPacketEditor({
               }
             : null,
         );
-        onChange({ ...latest.current, body: docToBlocks(next.doc) });
+        const body = canonicalizeShopifyEditorBody(docToBlocks(next.doc));
+        latest.current = { ...latest.current, body };
+        onChange(latest.current);
       },
     });
     return () => {
@@ -226,9 +216,10 @@ export function PrintPacketEditor({
     if (!instance) return;
     const inserted = docToBlocks(schema.nodes.doc!.create(null, [node]))[0];
     if (!inserted) return;
-    const body = selection?.path
+    const authoredBody = selection?.path
       ? insertBlockAfterPath(latest.current.body, selection.path, inserted)
       : [...latest.current.body, inserted];
+    const body = canonicalizeShopifyEditorBody(authoredBody);
     const nextDocument = { ...latest.current, body };
     latest.current = nextDocument;
     instance.updateState(
@@ -240,7 +231,9 @@ export function PrintPacketEditor({
   const insertVariable = (path: string) =>
     insert(
       schema.nodes.variable!.create({
-        expression: JSON.stringify({ type: "path", path: path.split(".") }),
+        expression: JSON.stringify(
+          authoringPathExpression(path, insertionScope),
+        ),
         label: path,
       }),
     );
@@ -248,10 +241,8 @@ export function PrintPacketEditor({
     const instance = view.current;
     if (!instance || !selection) return;
     if (selection.path) {
-      const body = replaceBlockAtPath(
-        latest.current.body,
-        selection.path,
-        block,
+      const body = canonicalizeShopifyEditorBody(
+        replaceBlockAtPath(latest.current.body, selection.path, block),
       );
       const nextDocument = { ...latest.current, body };
       latest.current = nextDocument;
@@ -283,7 +274,9 @@ export function PrintPacketEditor({
     const instance = view.current;
     if (!instance || !selection) return;
     if (selection.path) {
-      const body = removeBlockAtPath(latest.current.body, selection.path);
+      const body = canonicalizeShopifyEditorBody(
+        removeBlockAtPath(latest.current.body, selection.path),
+      );
       const nextDocument = { ...latest.current, body };
       latest.current = nextDocument;
       instance.updateState(
@@ -305,10 +298,8 @@ export function PrintPacketEditor({
   };
   const moveSelected = (direction: -1 | 1) => {
     if (!selection?.path) return;
-    const body = moveBlockAtPath(
-      latest.current.body,
-      selection.path,
-      direction,
+    const body = canonicalizeShopifyEditorBody(
+      moveBlockAtPath(latest.current.body, selection.path, direction),
     );
     const nextPath = selection.path.map((part, index) =>
       index === selection.path!.length - 1
@@ -325,10 +316,12 @@ export function PrintPacketEditor({
   };
   const duplicateSelected = () => {
     if (!selection?.path) return;
-    const body = insertBlockAfterPath(
-      latest.current.body,
-      selection.path,
-      structuredClone(selection.block),
+    const body = canonicalizeShopifyEditorBody(
+      insertBlockAfterPath(
+        latest.current.body,
+        selection.path,
+        structuredClone(selection.block),
+      ),
     );
     const nextDocument = { ...latest.current, body };
     latest.current = nextDocument;
@@ -372,7 +365,7 @@ export function PrintPacketEditor({
             }
           />
           <InsertDataButton
-            fields={authoringFields}
+            fields={insertionFields}
             disabled={disabled}
             onInsert={insertVariable}
           />
@@ -421,7 +414,7 @@ export function PrintPacketEditor({
             onClick={() =>
               insertBlock({
                 type: "qr",
-                value: pathExpression("order.statusUrl"),
+                value: currentPathExpression("statusUrl"),
                 size_mm: 24,
               })
             }
@@ -433,7 +426,7 @@ export function PrintPacketEditor({
             onClick={() =>
               insertBlock({
                 type: "barcode",
-                value: pathExpression("order.name"),
+                value: currentPathExpression("name"),
                 symbology: "code128",
                 width_mm: 48,
                 height_mm: 16,
@@ -488,7 +481,8 @@ export function PrintPacketEditor({
                 <SelectionSettings
                   block={selection.block}
                   disabled={disabled}
-                  authoringFields={authoringFields}
+                  authoringFields={insertionFields}
+                  scope={insertionScope}
                   onChange={updateSelected}
                 />
                 <span className="piqae-selection-spacer" />
@@ -533,16 +527,18 @@ export function PrintPacketEditor({
           </div>
           <div className="piqae-page-sheet piqae-rendered-canvas">
             <DocumentCanvas
-              blocks={value.body}
+              blocks={canonicalBody}
               selectedPath={selection?.path}
               editable={!disabled}
-              authoringFields={authoringFields}
+              authoringFields={allAuthoringFields}
               onSelect={(block, path) =>
                 setSelection({ position: -1, block, path })
               }
               onChange={(block, path) => {
                 setSelection({ position: -1, block, path });
-                const body = replaceBlockAtPath(value.body, path, block);
+                const body = canonicalizeShopifyEditorBody(
+                  replaceBlockAtPath(canonicalBody, path, block),
+                );
                 latest.current = { ...latest.current, body };
                 view.current?.updateState(
                   EditorState.create({ schema, doc: blocksToDoc(body) }),
@@ -590,6 +586,7 @@ function DocumentCanvas({
   editable = true,
   selectedPath,
   authoringFields = AUTHORING_FIELDS,
+  scope = "order",
   onSelect,
   onChange,
 }: {
@@ -599,6 +596,7 @@ function DocumentCanvas({
   editable?: boolean;
   selectedPath?: BlockPath;
   authoringFields?: readonly ShopifyDocumentField[];
+  scope?: ShopifyAuthoringScope;
   onSelect(block: Block, path: BlockPath): void;
   onChange(block: Block, path: BlockPath): void;
 }) {
@@ -613,6 +611,7 @@ function DocumentCanvas({
           selectedPath={selectedPath}
           selected={sameBlockPath(selectedPath, [...path, { branch, index }])}
           authoringFields={authoringFields}
+          scope={scope}
           onSelect={onSelect}
           onChange={onChange}
         />
@@ -628,6 +627,7 @@ function CanvasBlock({
   selectedPath,
   selected,
   authoringFields,
+  scope,
   onSelect,
   onChange,
 }: {
@@ -637,6 +637,7 @@ function CanvasBlock({
   selectedPath?: BlockPath;
   selected: boolean;
   authoringFields: readonly ShopifyDocumentField[];
+  scope: ShopifyAuthoringScope;
   onSelect(block: Block, path: BlockPath): void;
   onChange(block: Block, path: BlockPath): void;
 }) {
@@ -654,15 +655,15 @@ function CanvasBlock({
         onClick={select}
       >
         <ExpressionEditor
-          value={editableInline(block.content)}
-          fields={contextualFieldSuggestions(authoringFields)}
+          value={editableInlineWithScope(block.content, scope)}
+          fields={contextualFieldSuggestions(authoringFields, scope)}
           disabled={!editable}
           multiline
           onChange={(source) =>
             onChange(
               {
                 ...block,
-                content: parseContextualInline(source, block.content),
+                content: parseContextualInline(source, block.content, scope),
               },
               path,
             )
@@ -893,6 +894,7 @@ function CanvasBlock({
             editable={editable}
             selectedPath={selectedPath}
             authoringFields={authoringFields}
+            scope={scope}
             onSelect={onSelect}
             onChange={onChange}
           />
@@ -913,6 +915,7 @@ function CanvasBlock({
               editable={editable}
               selectedPath={selectedPath}
               authoringFields={authoringFields}
+              scope={scope}
               onSelect={onSelect}
               onChange={onChange}
             />
@@ -921,6 +924,10 @@ function CanvasBlock({
       </section>
     );
   const children = "children" in block ? block.children : [];
+  const childScope =
+    block.type === "repeat" && isLineItemsExpression(block.items, scope)
+      ? "item"
+      : scope;
   const className =
     block.type === "grid"
       ? "piqae-canvas-grid"
@@ -955,6 +962,7 @@ function CanvasBlock({
           editable={editable}
           selectedPath={selectedPath}
           authoringFields={authoringFields}
+          scope={childScope}
           onSelect={onSelect}
           onChange={onChange}
         />
@@ -1381,15 +1389,17 @@ function SelectionSettings({
   block,
   disabled,
   authoringFields,
+  scope,
   onChange,
 }: {
   block: Block;
   disabled?: boolean;
   authoringFields: readonly ShopifyDocumentField[];
+  scope: ShopifyAuthoringScope;
   onChange(block: Block): void;
 }) {
   const listId = useId();
-  const fields = selectionFields({ block, disabled, listId, onChange });
+  const fields = selectionFields({ block, disabled, listId, scope, onChange });
   if (!fields) return null;
   return (
     <span className="piqae-bar-fields">
@@ -1414,11 +1424,13 @@ function selectionFields({
   block,
   disabled,
   listId,
+  scope,
   onChange,
 }: {
   block: Block;
   disabled?: boolean;
   listId: string;
+  scope: ShopifyAuthoringScope;
   onChange(block: Block): void;
 }): ReactNode {
   const allPaths = `${listId}-all`;
@@ -1483,10 +1495,13 @@ function selectionFields({
         <BarPath
           label="Line items"
           list={allPaths}
-          value={expressionLabel(block.items)}
+          value={authoringExpressionLabel(block.items, scope)}
           disabled={disabled}
           onChange={(items) =>
-            onChange({ ...block, items: pathExpression(items) })
+            onChange({
+              ...block,
+              items: authoringPathExpression(items, scope),
+            })
           }
         />
         <BarToggle
@@ -1503,10 +1518,13 @@ function selectionFields({
         <BarPath
           label="Repeat for each"
           list={allPaths}
-          value={expressionLabel(block.items)}
+          value={authoringExpressionLabel(block.items, scope)}
           disabled={disabled}
           onChange={(items) =>
-            onChange({ ...block, items: pathExpression(items) })
+            onChange({
+              ...block,
+              items: authoringPathExpression(items, scope),
+            })
           }
         />
         <BarNumber
@@ -1526,10 +1544,13 @@ function selectionFields({
         <BarPath
           label="Show when"
           list={`${listId}-conditions`}
-          value={expressionLabel(block.condition)}
+          value={authoringExpressionLabel(block.condition, scope)}
           disabled={disabled}
           onChange={(condition) =>
-            onChange({ ...block, condition: pathExpression(condition) })
+            onChange({
+              ...block,
+              condition: authoringPathExpression(condition, scope),
+            })
           }
         />
         {block.else?.length ? null : (
@@ -1660,10 +1681,13 @@ function selectionFields({
         <BarPath
           label="Value"
           list={allPaths}
-          value={expressionLabel(block.value)}
+          value={authoringExpressionLabel(block.value, scope)}
           disabled={disabled}
           onChange={(value) =>
-            onChange({ ...block, value: pathExpression(value) })
+            onChange({
+              ...block,
+              value: authoringPathExpression(value, scope),
+            })
           }
         />
         <BarNumber
@@ -1700,10 +1724,13 @@ function selectionFields({
         <BarPath
           label="Value"
           list={allPaths}
-          value={expressionLabel(block.value)}
+          value={authoringExpressionLabel(block.value, scope)}
           disabled={disabled}
           onChange={(value) =>
-            onChange({ ...block, value: pathExpression(value) })
+            onChange({
+              ...block,
+              value: authoringPathExpression(value, scope),
+            })
           }
         />
         <BarNumber
@@ -1929,17 +1956,6 @@ function BarToggle({
   );
 }
 
-function editableInline(content: Inline[]) {
-  return content
-    .map((item) =>
-      item.type === "text"
-        ? item.value
-        : item.type === "line_break"
-          ? "\n"
-          : `{{ ${expressionLabel(item.value)} }}`,
-    )
-    .join("");
-}
 function editableInlineWithScope(content: Inline[], currentAlias: string) {
   return content
     .map((item) =>
@@ -1984,37 +2000,34 @@ function parseEditableInline(
 export function parseContextualInline(
   source: string,
   original: Inline[] = [],
-  currentAlias?: string,
+  currentAlias: ShopifyAuthoringScope = "order",
 ): Inline[] {
   const parsed = parseEditableInline(source, original);
-  if (!currentAlias) return parsed;
   return parsed.map((item) => {
-    if (
-      item.type !== "value" ||
-      item.value.type !== "path" ||
-      item.value.path[0] !== currentAlias
-    )
-      return item;
+    if (item.type !== "value" || item.value.type !== "path") return item;
     return {
       ...item,
-      value: {
-        type: "current_path",
-        path: item.value.path.slice(1),
-      },
+      value: authoringPathExpression(item.value.path.join("."), currentAlias),
     };
   });
 }
 
 export function contextualFieldSuggestions(
   fields: readonly ShopifyDocumentField[],
-  currentAlias?: string,
+  currentAlias?: ShopifyAuthoringScope,
 ) {
   if (!currentAlias) return [...fields];
-  return [...fields].sort((left, right) => {
-    const leftCurrent = left.path.startsWith(`${currentAlias}.`) ? 0 : 1;
-    const rightCurrent = right.path.startsWith(`${currentAlias}.`) ? 0 : 1;
-    return leftCurrent - rightCurrent;
-  });
+  return fields
+    .filter(
+      (field) =>
+        field.path.startsWith(`${currentAlias}.`) ||
+        field.path.startsWith("shop."),
+    )
+    .sort((left, right) => {
+      const leftCurrent = left.path.startsWith(`${currentAlias}.`) ? 0 : 1;
+      const rightCurrent = right.path.startsWith(`${currentAlias}.`) ? 0 : 1;
+      return leftCurrent - rightCurrent;
+    });
 }
 
 export function incompleteExpressionQuery(source: string) {
@@ -2414,6 +2427,35 @@ function blockIcon(block: Block): IconName {
   };
   return icons[block.type] ?? "text";
 }
+function scopeForBlockPath(
+  blocks: Block[],
+  path: BlockPath,
+): ShopifyAuthoringScope {
+  let scope: ShopifyAuthoringScope = "order";
+  let siblings = blocks;
+  for (const [depth, part] of path.entries()) {
+    const block = siblings[part.index];
+    if (!block) break;
+    const next = path[depth + 1];
+    if (!next) return scope;
+    if (
+      block.type === "repeat" &&
+      next.branch === "children" &&
+      isLineItemsExpression(block.items, scope)
+    )
+      scope = "item";
+    siblings =
+      next.branch === "then" && block.type === "conditional"
+        ? block.then
+        : next.branch === "else" && block.type === "conditional"
+          ? (block.else ?? [])
+          : "children" in block
+            ? block.children
+            : [];
+  }
+  return scope;
+}
+
 function pathExpression(value: string): Expression {
   return {
     type: "path",
@@ -2569,12 +2611,20 @@ function expressionLabel(value: Expression) {
   if (value.type === "current_path") return value.path.join(".");
   return value.type.replaceAll("_", " ");
 }
+function authoringExpressionLabel(
+  value: Expression,
+  scope: ShopifyAuthoringScope,
+) {
+  return value.type === "current_path"
+    ? [scope, ...value.path].join(".")
+    : expressionLabel(value);
+}
 function defaultTable(): Block {
   const current = (key: string): Expression =>
     ({ type: "current_path", path: [key] }) as Expression;
   return {
     type: "table",
-    items: { type: "path", path: ["order", "lineItems"] },
+    items: currentPathExpression("lineItems"),
     repeat_header: true,
     empty: [],
     columns: [
@@ -2597,7 +2647,7 @@ function defaultTable(): Block {
             value: {
               type: "format_money",
               amount: current("total"),
-              currency: { type: "path", path: ["order", "currencyCode"] },
+              currency: current("currency"),
             },
           },
         ],
@@ -2618,11 +2668,11 @@ function defaultColumn(): Extract<Block, { type: "table" }>["columns"][number] {
 function defaultConditional(): Block {
   return {
     type: "conditional",
-    condition: pathExpression("order.note"),
+    condition: currentPathExpression("note"),
     then: [
       {
         type: "paragraph",
-        content: [{ type: "value", value: pathExpression("order.note") }],
+        content: [{ type: "value", value: currentPathExpression("note") }],
       },
     ],
     else: [],
@@ -2631,7 +2681,7 @@ function defaultConditional(): Block {
 function defaultRepeat(): Block {
   return {
     type: "repeat",
-    items: pathExpression("order.lineItems"),
+    items: currentPathExpression("lineItems"),
     gap_mm: 4,
     children: [
       {
