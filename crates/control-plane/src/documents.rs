@@ -1,6 +1,10 @@
 use crate::{
     AppState,
-    api::{CreateJobRequest, authenticate_native, create_job_internal},
+    api::{
+        CreateJobRequest, authenticate_native, create_job_internal_with_target_binding,
+        resolve_target_printpacket_printer,
+    },
+    authentication::TenantContext,
     error::AppError,
 };
 use axum::{
@@ -15,7 +19,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::BytesMut;
 use futures::StreamExt as _;
 use piqae_auth::Scope;
-use piqae_domain::{ContentKind, ContentSource, JobOptions};
+use piqae_domain::{ContentKind, ContentSource, Job, JobOptions};
 use piqae_protocol::agent::{PrintPacketNodeRender, PrintPacketResourceDescriptor};
 use piqae_storage_postgres::{CreateDocumentResult, StoredDocumentPreview, StoredDocumentRender};
 use printpacket_renderer::{PRINT_PACKET_DOCUMENT_FORMAT, PrintPacketV1};
@@ -855,6 +859,65 @@ async fn evaluate_readiness(
     })
 }
 
+/// Revalidates the exact immutable `PrintPacket` payload against a replacement
+/// printer before a waiting node-render job is moved to that route. A cloud-PDF
+/// job has no renderer capability dependency and is therefore unaffected.
+pub(crate) async fn reroute_candidate_supports_rendered_job(
+    state: &AppState,
+    tenant: TenantContext,
+    job: &Job,
+    printer_id: &str,
+) -> Result<bool, AppError> {
+    if job
+        .metadata
+        .get("piqae.document.render_mode")
+        .map(String::as_str)
+        != Some("node_render")
+    {
+        return Ok(true);
+    }
+    let Some(render_id) = job.metadata.get("piqae.document.render_id") else {
+        return Ok(false);
+    };
+    let policy = match job
+        .metadata
+        .get("piqae.document.render_policy")
+        .map(String::as_str)
+    {
+        Some("automatic") => "automatic",
+        Some("prefer_node") => "prefer_node",
+        Some("require_node") => "require_node",
+        _ => return Ok(false),
+    };
+    printer_supports_exact_render(state, tenant, printer_id, render_id, policy).await
+}
+
+pub(crate) async fn printer_supports_exact_render(
+    state: &AppState,
+    tenant: TenantContext,
+    printer_id: &str,
+    render_id: &str,
+    policy: &str,
+) -> Result<bool, AppError> {
+    let policy = match policy {
+        "automatic" => RenderPolicy::Automatic,
+        "prefer_node" => RenderPolicy::PreferNode,
+        "require_node" => RenderPolicy::RequireNode,
+        _ => return Ok(false),
+    };
+    let readiness = evaluate_readiness(
+        state,
+        tenant.workspace_id,
+        tenant.environment_id,
+        printer_id,
+        render_id,
+        policy,
+        None,
+    )
+    .await?;
+    Ok(readiness.destination.ready)
+}
+
 async fn render_readiness(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1056,13 +1119,26 @@ async fn print_render(
         };
     let (mut selected_mode, mut decision_reason) =
         render_decision(request.render_policy, measured_cost.as_ref());
+    let readiness_destination = if matches!(request.render_policy, RenderPolicy::CloudOnly) {
+        None
+    } else {
+        resolve_request_readiness_printer(
+            &state,
+            tenant,
+            &request,
+            &document_media,
+            &render.id,
+            selected_mode == "node_render",
+        )
+        .await?
+    };
     if !matches!(request.render_policy, RenderPolicy::CloudOnly) {
-        if let Some(printer_id) = request.printer_id.as_deref() {
+        if let Some(readiness_destination) = readiness_destination.as_ref() {
             let readiness = evaluate_readiness(
                 &state,
                 tenant.workspace_id,
                 tenant.environment_id,
-                printer_id,
+                &readiness_destination.printer_id,
                 &render.id,
                 request.render_policy,
                 measured_cost.as_ref(),
@@ -1089,6 +1165,12 @@ async fn print_render(
             decision_reason = "node_destination_unresolved_pdf_fallback";
         }
     }
+    // Idempotency is based only on the immutable render plus the caller's
+    // semantic request. Node readiness, target selection, and measured routing
+    // metadata may legitimately drift between retries and must not turn the
+    // same external operation into an idempotency conflict.
+    let canonical_print_request = serde_json::to_vec(&(render.id.as_str(), &request))
+        .map_err(|_| AppError::invalid("invalid_print_request", "Print request is invalid."))?;
     let acquisition_sha256 = hex::encode(Sha256::digest(
         [render.id.as_bytes(), b"\0", idempotency_key.as_bytes()].concat(),
     ));
@@ -1147,7 +1229,7 @@ async fn print_render(
             cost.document_count.to_string(),
         );
     }
-    create_job_internal(
+    create_job_internal_with_target_binding(
         state,
         headers,
         CreateJobRequest {
@@ -1164,6 +1246,8 @@ async fn print_render(
             metadata,
             resolved_ticket_digest: None,
         },
+        readiness_destination.and_then(|destination| destination.binding_id),
+        canonical_print_request,
     )
     .await
 }
@@ -1377,17 +1461,32 @@ async fn approve_preview(
             .repository
             .get_document_preview(t.workspace_id, t.environment_id, &id)
             .await?;
-        let printer_id = request.printer_id.as_deref().ok_or_else(|| {
+        let render = state
+            .repository
+            .get_document_render(t.workspace_id, t.environment_id, &pending.render_id)
+            .await?;
+        let document_media =
+            render_document_media(&state, t.workspace_id, t.environment_id, &render).await?;
+        let readiness_destination = resolve_request_readiness_printer(
+            &state,
+            t,
+            &request,
+            &document_media,
+            &pending.render_id,
+            true,
+        )
+        .await?
+        .ok_or_else(|| {
             AppError::conflict(
                 "node_render_destination_unresolved",
-                "require_node requires an exact printer destination.",
+                "require_node requires an exact printer or target destination.",
             )
         })?;
         let readiness = evaluate_readiness(
             &state,
             t.workspace_id,
             t.environment_id,
-            printer_id,
+            &readiness_destination.printer_id,
             &pending.render_id,
             request.render_policy,
             request.render_cost.as_ref(),
@@ -1436,6 +1535,68 @@ async fn approve_preview(
         }),
     )
         .into_response())
+}
+
+struct ReadinessDestination {
+    printer_id: String,
+    binding_id: Option<String>,
+}
+
+async fn resolve_request_readiness_printer(
+    state: &AppState,
+    tenant: TenantContext,
+    request: &PrintRenderRequest,
+    document_media: &printpacket_renderer::Media,
+    render_id: &str,
+    require_renderer: bool,
+) -> Result<Option<ReadinessDestination>, AppError> {
+    if let Some(printer_id) = request.printer_id.as_ref() {
+        return Ok(Some(ReadinessDestination {
+            printer_id: printer_id.clone(),
+            binding_id: None,
+        }));
+    }
+    let Some(target_id) = request.target_id.as_deref() else {
+        return Ok(None);
+    };
+    let policy = match request.render_policy {
+        RenderPolicy::Automatic => "automatic",
+        RenderPolicy::CloudOnly => "cloud_only",
+        RenderPolicy::PreferNode => "prefer_node",
+        RenderPolicy::RequireNode => "require_node",
+    };
+    let resolved = resolve_target_printpacket_printer(
+        state,
+        tenant,
+        target_id,
+        document_media,
+        request.options.bin.as_deref(),
+        require_renderer.then_some((render_id, policy)),
+    )
+    .await;
+    let (printer_id, binding_id) = match resolved {
+        Ok(destination) => destination,
+        Err(error)
+            if require_renderer
+                && !matches!(request.render_policy, RenderPolicy::RequireNode)
+                && error.is_conflict() =>
+        {
+            resolve_target_printpacket_printer(
+                state,
+                tenant,
+                target_id,
+                document_media,
+                request.options.bin.as_deref(),
+                None,
+            )
+            .await?
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(Some(ReadinessDestination {
+        printer_id,
+        binding_id: Some(binding_id),
+    }))
 }
 
 const fn default_print_deliveries() -> u16 {

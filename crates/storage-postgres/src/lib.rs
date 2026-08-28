@@ -758,6 +758,13 @@ pub struct StoredTargetBinding {
     pub agent_id: AgentId,
     pub profile_id: String,
     pub profile_revision: u64,
+    /// Authoritative logical destination captured when the binding is made.
+    #[serde(default)]
+    pub destination_id: Option<String>,
+    /// Preferred source route; another healthy route is allowed only within
+    /// the same authoritative destination.
+    #[serde(default)]
+    pub route_id: Option<String>,
     pub role: String,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
@@ -768,9 +775,16 @@ pub struct StoredTargetBinding {
 pub struct DestinationRouteReassignment<'a> {
     pub job_id: JobId,
     pub target_id: Option<&'a str>,
+    pub binding_id: Option<&'a str>,
+    pub destination_id: &'a str,
     pub route_id: &'a str,
+    pub printer_id: &'a str,
+    pub agent_id: &'a str,
     pub profile_id: Option<&'a str>,
     pub profile_revision: Option<u64>,
+    pub stock_revision: Option<u64>,
+    pub expected_design_specification_revision: Option<&'a str>,
+    pub loaded_media_snapshot: Option<&'a str>,
     pub expected_capability_revision: Option<u64>,
     pub resolved_ticket_digest: Option<&'a str>,
     pub reason: &'a str,
@@ -4906,7 +4920,7 @@ impl PostgresStore {
             .await?;
         let rows = sqlx::query(
             "SELECT id, target_id, printer_id, agent_id, profile_id, profile_revision,
-                    role, enabled, created_at, updated_at
+                    role, enabled, destination_id, route_id, created_at, updated_at
              FROM target_bindings
              WHERE target_id = $1 AND workspace_id = $2 AND environment_id = $3
              ORDER BY CASE role WHEN 'primary' THEN 0 ELSE 1 END, created_at, id",
@@ -4956,23 +4970,40 @@ impl PostgresStore {
                 "target binding profile is not published".into(),
             ));
         }
+        let (Some(destination_id), Some(route_id)) = (
+            binding.destination_id.as_deref(),
+            binding.route_id.as_deref(),
+        ) else {
+            return Err(StorageError::InvalidData(
+                "target binding requires an exact destination and route".into(),
+            ));
+        };
+        let route_valid: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM printer_routes
+             WHERE workspace_id=$1 AND environment_id=$2
+               AND id=$3 AND destination_id=$4 AND printer_id=$5 AND agent_id=$6
+               AND enabled AND retired_at IS NULL)",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(route_id)
+        .bind(destination_id)
+        .bind(binding.printer_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !route_valid {
+            return Err(StorageError::InvalidData(
+                "target binding route does not match destination, printer, and agent".into(),
+            ));
+        }
         let row = sqlx::query(
             "INSERT INTO target_bindings (
                 id, workspace_id, environment_id, target_id, printer_id, agent_id,
                 profile_id, profile_revision, role, enabled, destination_id, route_id
-             ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-                (SELECT route.destination_id FROM printer_routes AS route
-                 WHERE route.workspace_id=$2 AND route.environment_id=$3
-                   AND route.printer_id=$5 AND route.agent_id=$6
-                   AND route.retired_at IS NULL LIMIT 1),
-                (SELECT route.id FROM printer_routes AS route
-                 WHERE route.workspace_id=$2 AND route.environment_id=$3
-                   AND route.printer_id=$5 AND route.agent_id=$6
-                   AND route.retired_at IS NULL LIMIT 1)
-             )
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
              RETURNING id, target_id, printer_id, agent_id, profile_id, profile_revision,
-                       role, enabled, created_at, updated_at",
+                       role, enabled, destination_id, route_id, created_at, updated_at",
         )
         .bind(&binding.id)
         .bind(workspace_id.to_string())
@@ -4986,6 +5017,8 @@ impl PostgresStore {
         })?)
         .bind(&binding.role)
         .bind(binding.enabled)
+        .bind(destination_id)
+        .bind(route_id)
         .fetch_one(&mut *transaction)
         .await
         .map_err(map_create_conflict)?;
@@ -5003,7 +5036,7 @@ impl PostgresStore {
     ) -> Result<StoredTargetBinding, StorageError> {
         let row = sqlx::query(
             "SELECT id, target_id, printer_id, agent_id, profile_id, profile_revision,
-                    role, enabled, created_at, updated_at
+                    role, enabled, destination_id, route_id, created_at, updated_at
              FROM target_bindings
              WHERE id = $1 AND target_id = $2 AND workspace_id = $3 AND environment_id = $4",
         )
@@ -6790,11 +6823,15 @@ impl PostgresStore {
         Ok(Some(job))
     }
 
-    /// Atomically reassign a pre-acceptance job to another route of the same
-    /// physical destination. Target jobs require a published immutable profile;
-    /// direct jobs require an exact candidate-printer resolved ticket. Encrypted
-    /// content additionally requires a key envelope already produced for the
-    /// candidate agent.
+    /// Atomically reassign a pre-acceptance direct job within its destination,
+    /// or a target job to an authoritative standby binding destination. Target
+    /// jobs require a published immutable profile; direct jobs require an exact
+    /// candidate-printer resolved ticket. Encrypted content additionally
+    /// requires an envelope whose immutable printer binding still matches.
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "one transaction keeps every target, route, profile, stock, media, lease, and acceptance fence auditable"
+    )]
     pub async fn reroute_job_to_destination_route_before_acceptance(
         &self,
         workspace_id: WorkspaceId,
@@ -6838,11 +6875,16 @@ impl PostgresStore {
             transaction.commit().await?;
             return Ok(None);
         }
-        let destination_id: String = row
+        let from_destination_id: String = row
             .try_get::<Option<String>, _>("destination_id")?
             .ok_or_else(|| StorageError::InvalidData("job has no physical destination".into()))?;
+        if request.target_id.is_none() && from_destination_id != request.destination_id {
+            return Err(StorageError::ConcurrentStateChange);
+        }
         let from_route_id: Option<String> = row.try_get("route_id")?;
-        if from_route_id.as_deref() == Some(request.route_id) {
+        if from_destination_id == request.destination_id
+            && from_route_id.as_deref() == Some(request.route_id)
+        {
             transaction.commit().await?;
             return Ok(None);
         }
@@ -6870,14 +6912,22 @@ impl PostgresStore {
         .bind(workspace_id.to_string())
         .bind(environment_id.to_string())
         .bind(request.route_id)
-        .bind(&destination_id)
+        .bind(request.destination_id)
         .bind(request.target_id)
         .fetch_optional(&mut *transaction)
         .await?
         .ok_or(StorageError::ConcurrentStateChange)?;
         let candidate_printer: String = candidate.try_get("printer_id")?;
         let candidate_agent: String = candidate.try_get("agent_id")?;
+        if candidate_printer != request.printer_id || candidate_agent != request.agent_id {
+            return Err(StorageError::ConcurrentStateChange);
+        }
         let mut job = job_from_row(row.try_get("payload")?, &state)?;
+        let from_binding_id = job
+            .metadata
+            .get("piqae.binding_id")
+            .or_else(|| job.metadata.get("spool.binding_id"))
+            .cloned();
         let job_target = job
             .metadata
             .get("piqae.target_id")
@@ -6887,20 +6937,156 @@ impl PostgresStore {
             return Err(StorageError::ConcurrentStateChange);
         }
         if request.target_id.is_some() {
-            let (Some(profile_id), Some(profile_revision)) =
-                (request.profile_id, request.profile_revision)
-            else {
+            let (Some(binding_id), Some(profile_id), Some(profile_revision)) = (
+                request.binding_id,
+                request.profile_id,
+                request.profile_revision,
+            ) else {
                 return Err(StorageError::InvalidData(
-                    "target reroute requires a profile ID and revision".into(),
+                    "target reroute requires a binding and immutable profile revision".into(),
                 ));
             };
+            let target_row = sqlx::query(
+                "SELECT id,stock_id,enabled,routing_policy FROM targets
+                 WHERE workspace_id=$1 AND environment_id=$2 AND id=$3
+                 FOR SHARE",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(request.target_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(StorageError::ConcurrentStateChange)?;
+            if !target_row.try_get::<bool, _>("enabled")? {
+                return Err(StorageError::ConcurrentStateChange);
+            }
+            let target_stock: Option<String> = target_row.try_get("stock_id")?;
+            let binding_rows = sqlx::query(
+                "SELECT id,target_id,printer_id,agent_id,profile_id,profile_revision,
+                        destination_id,route_id,role,enabled
+                 FROM target_bindings
+                 WHERE workspace_id=$1 AND environment_id=$2 AND target_id=$3
+                 ORDER BY id
+                 FOR SHARE",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(request.target_id)
+            .fetch_all(&mut *transaction)
+            .await?;
+            let expected_profile_revision = i64::try_from(profile_revision).map_err(|error| {
+                StorageError::InvalidData(format!("profile revision is too large: {error}"))
+            })?;
+            let binding_valid = binding_rows.iter().any(|binding| {
+                binding.try_get::<String, _>("id").ok().as_deref() == Some(binding_id)
+                    && binding.try_get::<String, _>("printer_id").ok().as_deref()
+                        == Some(candidate_printer.as_str())
+                    && binding.try_get::<String, _>("agent_id").ok().as_deref()
+                        == Some(candidate_agent.as_str())
+                    && binding.try_get::<String, _>("profile_id").ok().as_deref()
+                        == Some(profile_id)
+                    && binding.try_get::<i64, _>("profile_revision").ok()
+                        == Some(expected_profile_revision)
+                    && binding
+                        .try_get::<Option<String>, _>("destination_id")
+                        .ok()
+                        .flatten()
+                        .as_deref()
+                        == Some(request.destination_id)
+                    && binding.try_get::<bool, _>("enabled").unwrap_or(false)
+            });
+            if !binding_valid {
+                return Err(StorageError::ConcurrentStateChange);
+            }
             let intended_stock = job
                 .metadata
                 .get("piqae.stock_id")
-                .or_else(|| job.metadata.get("spool.stock_id"));
-            let target_stock: Option<String> = candidate.try_get("stock_id")?;
-            if target_stock.as_ref() != intended_stock {
+                .or_else(|| job.metadata.get("spool.stock_id"))
+                .cloned();
+            if job.metadata.contains_key("piqae.document.media")
+                && request.expected_design_specification_revision.is_none()
+            {
+                return Err(StorageError::InvalidData(
+                    "PrintPacket target reroute requires the expected design specification revision"
+                        .into(),
+                ));
+            }
+            if target_stock.is_some() && target_stock.as_ref() != intended_stock.as_ref() {
                 return Err(StorageError::ConcurrentStateChange);
+            }
+            let stock_projection = if let Some(stock_id) = target_stock.as_deref() {
+                let stock = sqlx::query(
+                    "SELECT revision,attributes,archived FROM stocks
+                     WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 FOR SHARE",
+                )
+                .bind(workspace_id.to_string())
+                .bind(environment_id.to_string())
+                .bind(stock_id)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(StorageError::ConcurrentStateChange)?;
+                let current_revision = u64::try_from(stock.try_get::<i64, _>("revision")?)
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+                if stock.try_get::<bool, _>("archived")?
+                    || request
+                        .stock_revision
+                        .is_some_and(|revision| revision != current_revision)
+                {
+                    return Err(StorageError::ConcurrentStateChange);
+                }
+                Some(serde_json::json!({
+                    "id": stock_id,
+                    "revision": current_revision,
+                    "attributes": stock.try_get::<serde_json::Value, _>("attributes")?,
+                    "archived": stock.try_get::<bool, _>("archived")?,
+                }))
+            } else {
+                None
+            };
+            if let Some(expected_revision) = request.expected_design_specification_revision {
+                let mut binding_constraints = binding_rows
+                    .iter()
+                    .map(|binding| {
+                        let printer_id = binding
+                            .try_get::<String, _>("printer_id")?
+                            .parse::<PrinterId>()
+                            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+                        let agent_id = binding
+                            .try_get::<String, _>("agent_id")?
+                            .parse::<AgentId>()
+                            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+                        Ok(serde_json::json!({
+                            "id": binding.try_get::<String, _>("id")?,
+                            "target_id": binding.try_get::<String, _>("target_id")?,
+                            "printer_id": printer_id,
+                            "agent_id": agent_id,
+                            "profile_id": binding.try_get::<String, _>("profile_id")?,
+                            "profile_revision": u64::try_from(binding.try_get::<i64, _>("profile_revision")?)
+                                .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+                            "destination_id": binding.try_get::<Option<String>, _>("destination_id")?,
+                            "route_id": binding.try_get::<Option<String>, _>("route_id")?,
+                            "role": binding.try_get::<String, _>("role")?,
+                            "enabled": binding.try_get::<bool, _>("enabled")?,
+                        }))
+                    })
+                    .collect::<Result<Vec<_>, StorageError>>()?;
+                binding_constraints
+                    .sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
+                let projection = serde_json::json!({
+                    "target": {
+                        "id": target_row.try_get::<String, _>("id")?,
+                        "stock_id": target_stock,
+                        "enabled": target_row.try_get::<bool, _>("enabled")?,
+                        "routing_policy": target_row.try_get::<String, _>("routing_policy")?,
+                    },
+                    "stock": stock_projection,
+                    "bindings": binding_constraints,
+                });
+                let canonical = serde_json::to_vec(&projection)?;
+                let current_revision = format!("spec_{:x}", Sha256::digest(canonical));
+                if current_revision != expected_revision {
+                    return Err(StorageError::ConcurrentStateChange);
+                }
             }
             let profiles: Vec<PrinterProfileSnapshot> =
                 serde_json::from_value(candidate.try_get("profiles")?)?;
@@ -6909,17 +7095,106 @@ impl PostgresStore {
                     && profile.revision == profile_revision
                     && profile.published
                     && matches!(profile.status.as_deref(), None | Some("ready"))
-                    && profile.stock_id.as_ref() == intended_stock
+                    && profile.stock_id.as_ref() == intended_stock.as_ref()
             });
             if !compatible {
                 return Err(StorageError::ConcurrentStateChange);
             }
             job.metadata
                 .insert("piqae.profile_id".into(), profile_id.into());
+            job.metadata
+                .insert("piqae.binding_id".into(), binding_id.into());
             job.metadata.insert(
                 "piqae.profile_revision".into(),
                 profile_revision.to_string(),
             );
+            if job.metadata.contains_key("piqae.document.media") {
+                let (Some(stock_revision), Some(loaded_media_snapshot)) =
+                    (request.stock_revision, request.loaded_media_snapshot)
+                else {
+                    return Err(StorageError::InvalidData(
+                        "PrintPacket target reroute requires a loaded-media fence".into(),
+                    ));
+                };
+                let snapshot: serde_json::Value = serde_json::from_str(loaded_media_snapshot)
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+                let snapshot_stock_matches = snapshot.get("stock").is_some_and(|stock| {
+                    stock.get("id").and_then(serde_json::Value::as_str) == intended_stock.as_deref()
+                        && stock.get("revision").and_then(serde_json::Value::as_u64)
+                            == Some(stock_revision)
+                });
+                if !snapshot_stock_matches {
+                    return Err(StorageError::ConcurrentStateChange);
+                }
+                let snapshot_source = snapshot
+                    .get("source")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(StorageError::ConcurrentStateChange)?;
+                let snapshot_confidence = snapshot
+                    .get("confidence")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(StorageError::ConcurrentStateChange)?;
+                let snapshot_observed_at = snapshot
+                    .get("observed_at")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                    .map(|value| value.with_timezone(&Utc))
+                    .ok_or(StorageError::ConcurrentStateChange)?;
+                let snapshot_fresh_until = snapshot
+                    .get("fresh_until")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                    .map(|value| value.with_timezone(&Utc))
+                    .ok_or(StorageError::ConcurrentStateChange)?;
+                let loaded = sqlx::query(
+                    "SELECT stock_id, stock_revision, confidence, calibration_state, observed_at
+                     FROM printer_loaded_media
+                     WHERE workspace_id=$1 AND environment_id=$2 AND printer_id=$3 AND source=$4
+                     FOR SHARE",
+                )
+                .bind(workspace_id.to_string())
+                .bind(environment_id.to_string())
+                .bind(&candidate_printer)
+                .bind(snapshot_source)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(StorageError::ConcurrentStateChange)?;
+                let loaded_revision = loaded
+                    .try_get::<Option<i64>, _>("stock_revision")?
+                    .map(u64::try_from)
+                    .transpose()
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+                let loaded_observed_at = loaded.try_get::<DateTime<Utc>, _>("observed_at")?;
+                let authoritative_fresh_until = loaded_observed_at + chrono::TimeDelta::minutes(15);
+                if loaded.try_get::<Option<String>, _>("stock_id")? != intended_stock
+                    || loaded_revision != Some(stock_revision)
+                    || loaded.try_get::<String, _>("confidence")? != snapshot_confidence
+                    || !matches!(snapshot_confidence, "reported" | "operator_confirmed")
+                    || loaded.try_get::<String, _>("calibration_state")? != "current"
+                    || loaded_observed_at != snapshot_observed_at
+                    || authoritative_fresh_until != snapshot_fresh_until
+                    || authoritative_fresh_until < Utc::now()
+                {
+                    return Err(StorageError::ConcurrentStateChange);
+                }
+                job.metadata
+                    .insert("piqae.stock_revision".into(), stock_revision.to_string());
+                job.metadata.insert(
+                    "piqae.loaded_media_snapshot".into(),
+                    loaded_media_snapshot.into(),
+                );
+            }
+            if job
+                .metadata
+                .get("piqae.document.render_mode")
+                .map(String::as_str)
+                == Some("node_render")
+            {
+                job.metadata.insert(
+                    "piqae.document.readiness_binding_id".into(),
+                    binding_id.into(),
+                );
+            }
         } else {
             let (Some(expected_revision), Some(ticket_digest)) = (
                 request.expected_capability_revision,
@@ -6956,10 +7231,10 @@ impl PostgresStore {
             job.metadata
                 .insert("piqae.resolved_ticket_digest".into(), ticket_digest.into());
         }
-        if matches!(
-            job.content,
-            piqae_domain::ContentSource::EncryptedUpload { .. }
-        ) {
+        if let piqae_domain::ContentSource::EncryptedUpload { manifest, .. } = &job.content {
+            if manifest.binding.printer_id != candidate_printer {
+                return Err(StorageError::ConcurrentStateChange);
+            }
             let candidate_has_envelope: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM encrypted_job_key_references
                  WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND agent_id=$4)",
@@ -6990,9 +7265,11 @@ impl PostgresStore {
         job.printer_id = PrinterId::from_str(&candidate_printer)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
         job.metadata
-            .insert("piqae.destination_id".into(), destination_id.clone());
+            .insert("piqae.destination_id".into(), request.destination_id.into());
         job.metadata
             .insert("piqae.route_id".into(), request.route_id.into());
+        job.metadata
+            .insert("piqae.route_agent_id".into(), request.agent_id.into());
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
             .bind(format!(
                 "{workspace_id}:{environment_id}:{candidate_printer}"
@@ -7009,11 +7286,11 @@ impl PostgresStore {
         .fetch_one(&mut *transaction)
         .await?;
         let updated = sqlx::query(
-            "UPDATE jobs SET printer_id=$4,agent_id=$5,route_id=$6,payload=$7,
-                    per_printer_sequence=$8,lease_owner=NULL,lease_id=NULL,
+            "UPDATE jobs SET printer_id=$4,agent_id=$5,route_id=$6,destination_id=$7,payload=$8,
+                    per_printer_sequence=$9,lease_owner=NULL,lease_id=NULL,
                     lease_token_hash=NULL,lease_until=NULL,updated_at=now()
              WHERE id=$1 AND workspace_id=$2 AND environment_id=$3
-               AND destination_id=$9
+               AND destination_id=$10
                AND state IN ('waiting_for_agent','failed_retryable')
                AND (lease_until IS NULL OR lease_until<=now())
                AND NOT EXISTS(SELECT 1 FROM job_acceptances acceptance
@@ -7027,9 +7304,10 @@ impl PostgresStore {
         .bind(&candidate_printer)
         .bind(&candidate_agent)
         .bind(request.route_id)
+        .bind(request.destination_id)
         .bind(serde_json::to_value(&job)?)
         .bind(sequence)
-        .bind(&destination_id)
+        .bind(&from_destination_id)
         .execute(&mut *transaction)
         .await?;
         if updated.rows_affected() != 1 {
@@ -7044,19 +7322,21 @@ impl PostgresStore {
              (id,workspace_id,environment_id,job_id,target_id,from_binding_id,to_binding_id,
               from_agent_id,to_agent_id,from_printer_id,to_printer_id,reason,
               destination_id,from_route_id,to_route_id)
-             VALUES ($1,$2,$3,$4,$5,NULL,NULL,$6,$7,$8,$9,$10,$11,$12,$13)",
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
         )
         .bind(&attempt_id)
         .bind(workspace_id.to_string())
         .bind(environment_id.to_string())
         .bind(request.job_id.to_string())
         .bind(request.target_id)
+        .bind(from_binding_id.as_deref())
+        .bind(request.binding_id)
         .bind(&from_agent)
         .bind(&candidate_agent)
         .bind(&from_printer)
         .bind(&candidate_printer)
         .bind(request.reason)
-        .bind(&destination_id)
+        .bind(request.destination_id)
         .bind(&from_route_id)
         .bind(request.route_id)
         .execute(&mut *transaction)
@@ -7074,13 +7354,16 @@ impl PostgresStore {
             "attempt_id": attempt_id,
             "job_id": request.job_id,
             "target_id": request.target_id,
-            "destination_id": destination_id,
+            "destination_id": request.destination_id,
+            "from_destination_id": from_destination_id,
+            "to_destination_id": request.destination_id,
             "from_route_id": from_route_id,
             "to_route_id": request.route_id,
             "from_agent_id": from_agent,
             "to_agent_id": candidate_agent,
             "from_printer_id": from_printer,
             "to_printer_id": candidate_printer,
+            "to_binding_id": request.binding_id,
             "reason": request.reason,
             "occurred_at": Utc::now(),
         }))
@@ -12557,6 +12840,8 @@ fn binding_from_row(row: &PgRow) -> Result<StoredTargetBinding, StorageError> {
         profile_revision: u64::try_from(profile_revision).map_err(|error| {
             StorageError::InvalidData(format!("profile revision is negative: {error}"))
         })?,
+        destination_id: row.try_get("destination_id")?,
+        route_id: row.try_get("route_id")?,
         role: row.try_get("role")?,
         enabled: row.try_get("enabled")?,
         created_at: row.try_get("created_at")?,

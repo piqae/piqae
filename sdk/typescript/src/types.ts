@@ -662,6 +662,8 @@ export interface TargetBinding {
   agent_id: PiqaeId;
   profile_id: PiqaeId;
   profile_revision: number;
+  destination_id: PiqaeId | null;
+  route_id: PiqaeId | null;
   role: 'primary' | 'standby';
   enabled: boolean;
   created_at: string;
@@ -672,6 +674,8 @@ export interface CreateTargetBinding {
   printer_id: PiqaeId;
   profile_id: PiqaeId;
   profile_revision: number;
+  destination_id: PiqaeId;
+  route_id: PiqaeId;
   role: 'primary' | 'standby';
   enabled?: boolean;
 }

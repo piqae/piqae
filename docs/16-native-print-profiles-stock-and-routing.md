@@ -527,6 +527,16 @@ delivery_uncertain
 
 The target is ready when routing policy finds an eligible binding.
 
+Creating a binding names all of `printer_id`, immutable `profile_id` and
+`profile_revision`, authoritative `destination_id`, and preferred `route_id`.
+The route must be enabled and belong to that destination, printer, node, and
+tenant. A healthy alternate route may replace the preferred route only within
+the same physical destination. Primary bindings remain ahead of standbys;
+route health ranks alternatives within a binding, not ahead of binding role.
+Standby bindings may intentionally point at a different physical destination,
+which enables pre-acceptance cross-printer failover while preserving the stable
+target API address.
+
 ## API design
 
 ### Native endpoints

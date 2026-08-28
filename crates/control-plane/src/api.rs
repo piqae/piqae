@@ -1902,19 +1902,29 @@ pub async fn create_job(
     headers: HeaderMap,
     Json(request): Json<CreateJobRequest>,
 ) -> Result<Response, AppError> {
-    create_job_impl(state, headers, request, false).await
+    create_job_impl(state, headers, request, false, None, None).await
 }
 
-/// Creates a job from a trusted control-plane workflow that may attach
-/// reserved `piqae.*` metadata. This is deliberately not an HTTP handler;
-/// public callers always pass through [`create_job`] and cannot set these
-/// routing keys.
-pub(crate) async fn create_job_internal(
+/// Creates a trusted job while requiring the target resolver to retain the
+/// binding whose node-render readiness was already proven. The pin is kept
+/// outside the request so target topology drift cannot change the canonical
+/// idempotency payload for an otherwise identical caller request.
+pub(crate) async fn create_job_internal_with_target_binding(
     state: AppState,
     headers: HeaderMap,
     request: CreateJobRequest,
+    target_binding_id: Option<String>,
+    canonical_request_bytes: Vec<u8>,
 ) -> Result<Response, AppError> {
-    create_job_impl(state, headers, request, true).await
+    create_job_impl(
+        state,
+        headers,
+        request,
+        true,
+        target_binding_id,
+        Some(canonical_request_bytes),
+    )
+    .await
 }
 
 async fn create_job_impl(
@@ -1922,16 +1932,27 @@ async fn create_job_impl(
     headers: HeaderMap,
     request: CreateJobRequest,
     allow_reserved_metadata: bool,
+    required_target_binding_id: Option<String>,
+    canonical_request_bytes: Option<Vec<u8>>,
 ) -> Result<Response, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
     validate_create(&request, allow_reserved_metadata)?;
-    let mut destination = resolve_job_destination(&state, tenant, &request).await?;
+    let mut destination = resolve_job_destination(
+        &state,
+        tenant,
+        &request,
+        required_target_binding_id.as_deref(),
+    )
+    .await?;
     validate_printpacket_target_media(&state, tenant, &request, &mut destination).await?;
     let printer_native_metadata =
         validate_printer_native_job(&state, tenant, &request, &destination).await?;
     let resolved_ticket = validate_resolved_ticket(&state, tenant, &request, &destination).await?;
     validate_encrypted_job(&state, tenant, &request, &destination).await?;
-    let request_bytes = serde_json::to_vec(&request)?;
+    let request_bytes = match canonical_request_bytes {
+        Some(bytes) => bytes,
+        None => serde_json::to_vec(&request)?,
+    };
     let now = Utc::now();
     let persisted =
         persist_job_content(&state, tenant, request.content_type, request.content).await?;
@@ -2127,6 +2148,7 @@ async fn resolve_job_destination(
     state: &AppState,
     tenant: TenantContext,
     request: &CreateJobRequest,
+    required_target_binding_id: Option<&str>,
 ) -> Result<ResolvedJobDestination, AppError> {
     match (
         request
@@ -2192,6 +2214,8 @@ async fn resolve_job_destination(
                 true,
                 printpacket_media.as_ref(),
                 request.options.bin.as_deref(),
+                required_target_binding_id,
+                None,
             )
             .await
         }
@@ -2314,6 +2338,10 @@ fn encrypted_recipient_valid(recipient: &piqae_domain::EncryptedContentRecipient
             .is_ok_and(|value| value.len() == 48)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "target resolution keeps immutable media, binding, route, and renderer constraints explicit"
+)]
 async fn resolve_target_destination(
     state: &AppState,
     tenant: TenantContext,
@@ -2321,6 +2349,8 @@ async fn resolve_target_destination(
     allow_offline: bool,
     printpacket_media: Option<&printpacket_renderer::Media>,
     requested_source: Option<&str>,
+    required_binding_id: Option<&str>,
+    required_render: Option<(&str, &str)>,
 ) -> Result<ResolvedJobDestination, AppError> {
     let target = state
         .repository
@@ -2355,9 +2385,15 @@ async fn resolve_target_destination(
         .await
         .map_err(crate::destination_topology::map_storage_error)?;
     let mut ranked_by_destination = HashMap::<String, Vec<String>>::new();
-    let mut best_ready = None::<(usize, ResolvedJobDestination)>;
+    let mut best_ready = None::<((usize, usize, usize), ResolvedJobDestination)>;
     let mut configured_fallback = None;
-    for binding in bindings.into_iter().filter(|binding| binding.enabled) {
+    for (binding_index, binding) in bindings
+        .into_iter()
+        .filter(|binding| {
+            binding.enabled && required_binding_id.is_none_or(|required| binding.id == required)
+        })
+        .enumerate()
+    {
         let agent_exists = agents.iter().any(|agent| agent.id == binding.agent_id);
         if !agent_exists {
             continue;
@@ -2411,6 +2447,18 @@ async fn resolve_target_destination(
                 continue;
             }
         }
+        if let Some((render_id, render_policy)) = required_render
+            && !crate::documents::printer_supports_exact_render(
+                state,
+                tenant,
+                &printer.id.to_string(),
+                render_id,
+                render_policy,
+            )
+            .await?
+        {
+            continue;
+        }
         let mut metadata = BTreeMap::from([
             ("piqae.target_id".into(), target.id.clone()),
             ("piqae.binding_id".into(), binding.id.clone()),
@@ -2421,18 +2469,56 @@ async fn resolve_target_destination(
                 profile.revision.to_string(),
             ),
         ]);
-        let topology_route = topology_routes.iter().find(|route| {
-            route.enabled
-                && route.printer_id == printer.id.to_string()
-                && route.agent_id == printer.agent_id.to_string()
-        });
-        if let Some(route) = topology_route {
-            metadata.insert("piqae.destination_id".into(), route.destination_id.clone());
-            metadata.insert("piqae.route_id".into(), route.id.clone());
+        let matching_routes = topology_routes
+            .iter()
+            .filter(|route| {
+                route.enabled
+                    && binding.destination_id.as_deref() == Some(route.destination_id.as_str())
+                    && route.printer_id == printer.id.to_string()
+                    && route.agent_id == printer.agent_id.to_string()
+            })
+            .collect::<Vec<_>>();
+        let Some(binding_destination_id) = binding.destination_id.as_deref() else {
+            continue;
+        };
+        if !ranked_by_destination.contains_key(binding_destination_id) {
+            let ranked = crate::destination_topology::ranked_ready_routes(
+                state,
+                crate::destination_topology::tenant_scope(tenant),
+                binding_destination_id,
+            )
+            .await?
+            .into_iter()
+            .map(|candidate| candidate.id)
+            .collect();
+            ranked_by_destination.insert(binding_destination_id.to_owned(), ranked);
         }
+        let Some(ranked) = ranked_by_destination.get(binding_destination_id) else {
+            continue;
+        };
+        let topology_route = ranked
+            .iter()
+            .find_map(|ranked_id| matching_routes.iter().find(|route| route.id == *ranked_id))
+            .copied()
+            .or_else(|| {
+                matching_routes
+                    .iter()
+                    .find(|route| binding.route_id.as_deref() == Some(route.id.as_str()))
+                    .copied()
+            })
+            .or_else(|| matching_routes.first().copied());
+        let Some(topology_route) = topology_route else {
+            continue;
+        };
+        metadata.insert(
+            "piqae.destination_id".into(),
+            topology_route.destination_id.clone(),
+        );
+        metadata.insert("piqae.route_id".into(), topology_route.id.clone());
         if let Some(stock_id) = target.stock_id.as_ref().or(profile.stock_id.as_ref()) {
             metadata.insert("piqae.stock_id".into(), stock_id.clone());
         }
+        let binding_role_rank = usize::from(binding.role != "primary");
         let destination = ResolvedJobDestination {
             printer_id: printer.id,
             agent_id: printer.agent_id,
@@ -2440,33 +2526,15 @@ async fn resolve_target_destination(
             binding: Some(binding),
         };
         if agent_ready && printer.state == PrinterState::Online {
-            let rank = if let Some(route) = topology_route {
-                if !ranked_by_destination.contains_key(&route.destination_id) {
-                    let ranked = crate::destination_topology::ranked_ready_routes(
-                        state,
-                        crate::destination_topology::tenant_scope(tenant),
-                        &route.destination_id,
-                    )
-                    .await?
-                    .into_iter()
-                    .map(|candidate| candidate.id)
-                    .collect();
-                    ranked_by_destination.insert(route.destination_id.clone(), ranked);
-                }
-                ranked_by_destination
-                    .get(&route.destination_id)
-                    .and_then(|ranked| ranked.iter().position(|id| id == &route.id))
-            } else {
-                Some(usize::MAX - 1)
-            };
+            let rank = ranked.iter().position(|id| id == &topology_route.id);
             if let Some(rank) = rank
                 && best_ready
                     .as_ref()
-                    .is_none_or(|(current, _)| rank < *current)
+                    .is_none_or(|(current, _)| (binding_role_rank, binding_index, rank) < *current)
             {
-                best_ready = Some((rank, destination));
+                best_ready = Some(((binding_role_rank, binding_index, rank), destination));
+                continue;
             }
-            continue;
         }
         if allow_offline && configured_fallback.is_none() {
             configured_fallback = Some(destination);
@@ -2488,7 +2556,39 @@ async fn resolve_target_destination(
     ))
 }
 
-async fn schedule_waiting_destination_jobs(
+pub(crate) async fn resolve_target_printpacket_printer(
+    state: &AppState,
+    tenant: TenantContext,
+    target_id: &str,
+    document_media: &printpacket_renderer::Media,
+    requested_source: Option<&str>,
+    required_render: Option<(&str, &str)>,
+) -> Result<(String, String), AppError> {
+    let destination = resolve_target_destination(
+        state,
+        tenant,
+        target_id,
+        true,
+        Some(document_media),
+        requested_source,
+        None,
+        required_render,
+    )
+    .await?;
+    let binding_id = destination
+        .binding
+        .as_ref()
+        .map(|binding| binding.id.clone())
+        .ok_or_else(|| {
+            AppError::conflict(
+                "target_binding_changed",
+                "The target no longer resolves to an immutable profile binding.",
+            )
+        })?;
+    Ok((destination.printer_id.to_string(), binding_id))
+}
+
+pub(crate) async fn schedule_waiting_destination_jobs(
     state: &AppState,
     tenant: TenantContext,
 ) -> Result<(), AppError> {
@@ -2500,15 +2600,6 @@ async fn schedule_waiting_destination_jobs(
         let Some(destination_id) = job.metadata.get("piqae.destination_id") else {
             continue;
         };
-        let routes = crate::destination_topology::ranked_ready_routes(
-            state,
-            crate::destination_topology::tenant_scope(tenant),
-            destination_id,
-        )
-        .await?;
-        if routes.is_empty() {
-            continue;
-        }
         let target_id = job
             .metadata
             .get("piqae.target_id")
@@ -2521,19 +2612,95 @@ async fn schedule_waiting_destination_jobs(
         } else {
             Vec::new()
         };
-        for route in routes {
-            if job.metadata.get("piqae.route_id") == Some(&route.id) {
-                break;
+        let routes = if target_id.is_some() {
+            let mut routes = Vec::new();
+            for binding in bindings.iter().filter(|binding| binding.enabled) {
+                let Some(binding_destination) = binding.destination_id.as_deref() else {
+                    continue;
+                };
+                routes.extend(
+                    crate::destination_topology::ranked_ready_routes(
+                        state,
+                        crate::destination_topology::tenant_scope(tenant),
+                        binding_destination,
+                    )
+                    .await?
+                    .into_iter()
+                    .filter(|route| {
+                        route.printer_id == binding.printer_id.to_string()
+                            && route.agent_id == binding.agent_id.to_string()
+                    }),
+                );
             }
+            routes
+        } else {
+            crate::destination_topology::ranked_ready_routes(
+                state,
+                crate::destination_topology::tenant_scope(tenant),
+                destination_id,
+            )
+            .await?
+        };
+        if routes.is_empty() {
+            continue;
+        }
+        for route in routes {
             let binding = target_id.and_then(|_| {
                 bindings.iter().find(|binding| {
                     binding.enabled
+                        && binding.destination_id.as_deref() == Some(route.destination_id.as_str())
                         && binding.printer_id.to_string() == route.printer_id
                         && binding.agent_id.to_string() == route.agent_id
                 })
             });
             if target_id.is_some() && binding.is_none() {
                 continue;
+            }
+            let media_fence = if let (Some(target_id), Some(binding), Some(encoded_media)) =
+                (target_id, binding, job.metadata.get("piqae.document.media"))
+            {
+                let Ok(media) = serde_json::from_str::<printpacket_renderer::Media>(encoded_media)
+                else {
+                    continue;
+                };
+                let Some(expected_revision) =
+                    job.metadata.get("piqae.design_specification_revision")
+                else {
+                    continue;
+                };
+                match crate::routing::validate_printpacket_media_fence(
+                    state,
+                    tenant,
+                    target_id,
+                    &binding.id,
+                    expected_revision,
+                    &media,
+                    job.options.bin.as_deref(),
+                )
+                .await
+                {
+                    Ok(fence) => Some(fence),
+                    Err(error) if error.is_conflict() || error.is_not_found() => continue,
+                    Err(error) => return Err(error),
+                }
+            } else {
+                None
+            };
+            match crate::documents::reroute_candidate_supports_rendered_job(
+                state,
+                tenant,
+                &job,
+                &route.printer_id,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) if error.is_conflict() || error.is_not_found() => continue,
+                Err(error) => return Err(error),
+            }
+            if job.metadata.get("piqae.route_id") == Some(&route.id) {
+                break;
             }
             let capability_revision = job
                 .metadata
@@ -2544,6 +2711,13 @@ async fn schedule_waiting_destination_jobs(
                 .metadata
                 .get(&route_ticket_key)
                 .or_else(|| job.metadata.get("piqae.resolved_ticket_digest"));
+            if target_id.is_none()
+                && (capability_revision.is_none() || resolved_ticket_digest.is_none())
+            {
+                // A legacy/incomplete direct job cannot be safely moved, but it
+                // must not poison recovery for every other waiting job.
+                continue;
+            }
             let rerouted = state
                 .repository
                 .reroute_job_to_destination_route_before_acceptance(
@@ -2552,9 +2726,21 @@ async fn schedule_waiting_destination_jobs(
                     piqae_storage_postgres::DestinationRouteReassignment {
                         job_id: job.id,
                         target_id: target_id.map(String::as_str),
+                        binding_id: binding.map(|value| value.id.as_str()),
+                        destination_id: &route.destination_id,
                         route_id: &route.id,
+                        printer_id: &route.printer_id,
+                        agent_id: &route.agent_id,
                         profile_id: binding.map(|value| value.profile_id.as_str()),
                         profile_revision: binding.map(|value| value.profile_revision),
+                        stock_revision: media_fence.as_ref().map(|value| value.stock_revision),
+                        expected_design_specification_revision: job
+                            .metadata
+                            .get("piqae.design_specification_revision")
+                            .map(String::as_str),
+                        loaded_media_snapshot: media_fence
+                            .as_ref()
+                            .map(|value| value.loaded_media_snapshot.as_str()),
                         expected_capability_revision: capability_revision,
                         resolved_ticket_digest: resolved_ticket_digest.map(String::as_str),
                         reason: "standby_recovery",

@@ -25,6 +25,24 @@ Node offers without the authoritative page count are incompatible and cannot
 select node rendering. Policy may select the retained server PDF only when the
 caller explicitly permits cloud fallback.
 
+Printing a render accepts exactly one of `printer_id` or `target_id`. A target
+request also requires the current `specification_revision` returned by
+`GET /v1/targets/{id}/design-specification`. Target selection is media-aware
+and renderer-aware: `prefer_node` and node-selected `automatic` search the
+primary binding and then standbys for a printer that supports the exact packet,
+resources, immutable profile, and loaded stock. If none does, their approved
+fallback remains the retained PDF; `require_node` fails closed. `cloud_only`
+never depends on node renderer capability.
+
+The chosen binding is pinned through job registration without becoming part of
+the caller's idempotency payload. Before local acceptance, a waiting target job
+may move to another ready binding—even on another physical destination—only
+after the control plane atomically revalidates its route, immutable profile,
+stock revision, trusted loaded-media observation, and exact node renderer for a
+node-render job. The persisted job, route agent, binding, destination, and media
+snapshot change together. A lease or accepted local responsibility fences this
+automatic move; native handoff is never silently rewound.
+
 JPEG resources are uploaded once by lowercase SHA-256 using
 `PUT /v1/printpacket/resources/{digest}`. Uploads are bounded to 4 MiB,
 verified before registration, tenant-scoped, retained while referenced by a
