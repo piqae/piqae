@@ -1395,33 +1395,65 @@ final class PiqaeNodeKitTests: XCTestCase {
     }
 
     func testCancellingOneDuplicateWakeCallerDoesNotCancelSharedReconciliation() async throws {
-        let runtime = PiqaeFakeEmbeddedRuntime()
-        await runtime.setCloudReconcileDelayNanoseconds(100_000_000)
-        let node = wakeTestNode(runtime: runtime, id: "ins_wake_collapse_cancel")
-        try await node.start()
-        defer { Task { await node.stop() } }
-        let hint = try PiqaeWakeHint(collapseID: "shared-hint", source: .backgroundPush)
-        let context = PiqaeExecutionContext(
-            phase: .background,
-            source: .backgroundPush,
-            remainingSeconds: 10
-        )
+        // Repetition covers cancellation arriving around waiter registration.
+        // The explicit gate, rather than a short sleep, keeps the shared pass
+        // pending until every assertion about the cancelled joiner is made.
+        for iteration in 0..<25 {
+            let runtime = GatedWakeReconcileRuntime()
+            let node = wakeTestNode(
+                runtime: runtime,
+                id: "ins_wake_collapse_cancel_\(iteration)"
+            )
+            try await node.start()
+            let hint = try PiqaeWakeHint(
+                collapseID: "shared-hint-\(iteration)",
+                source: .backgroundPush
+            )
+            let context = PiqaeExecutionContext(
+                phase: .background,
+                source: .backgroundPush,
+                remainingSeconds: 10
+            )
 
-        let first = Task { await node.handleWakeHint(hint, context: context) }
-        let started = await eventually { await runtime.reconcileCallCount() == 1 }
-        XCTAssertTrue(started)
-        let second = Task { await node.handleWakeHint(hint, context: context) }
-        try await Task.sleep(nanoseconds: 10_000_000)
-        second.cancel()
+            let first = Task { await node.handleWakeHint(hint, context: context) }
+            let started = await eventually { await runtime.reconcileCallCount() == 1 }
+            XCTAssertTrue(started, "shared pass did not start at iteration \(iteration)")
 
-        guard case .deferred = await second.value else {
-            XCTFail("The cancelled joiner must detach promptly")
-            return
+            let second = Task { await node.handleWakeHint(hint, context: context) }
+            let joined = await eventually {
+                await node.wakeWaiterCountForTesting(collapseID: hint.collapseID) == 2
+            }
+            XCTAssertTrue(joined, "duplicate caller did not join at iteration \(iteration)")
+
+            second.cancel()
+            let result = WakeResultRecorder()
+            let observeCancellation = Task {
+                await result.record(second.value)
+            }
+            let detachedBeforeRelease = await eventually(attempts: 50) {
+                await result.value != nil
+            }
+            let cancelledResult = await result.value
+
+            // Releasing only after the prompt-detach observation makes a
+            // cancellation propagation bug fail without hanging the suite.
+            await runtime.release()
+            let firstResult = await first.value
+            await observeCancellation.value
+            let reconcileCalls = await runtime.reconcileCallCount()
+            await node.stop()
+
+            XCTAssertTrue(
+                detachedBeforeRelease,
+                "cancelled joiner did not detach promptly at iteration \(iteration)"
+            )
+            guard case .deferred = cancelledResult else {
+                XCTFail("cancelled joiner returned \(String(describing: cancelledResult))")
+                continue
+            }
+            XCTAssertEqual(firstResult, .reconciled, "iteration \(iteration)")
+            XCTAssertEqual(reconcileCalls, 1, "iteration \(iteration)")
         }
-        let firstResult = await first.value
-        XCTAssertEqual(firstResult, .reconciled)
-        let reconcileCalls = await runtime.reconcileCallCount()
-        XCTAssertEqual(reconcileCalls, 1)
     }
 
     func testWakeCancellationReturnsPromptlyWhileCloudPassIsPending() async throws {
@@ -2049,7 +2081,7 @@ final class PiqaeNodeKitTests: XCTestCase {
     }
 
     private func wakeTestNode(
-        runtime: PiqaeFakeEmbeddedRuntime,
+        runtime: any PiqaeEmbeddedNodeRuntime,
         id: String
     ) -> PiqaeNode {
         PiqaeNode(
@@ -2110,6 +2142,54 @@ final class PiqaeNodeKitTests: XCTestCase {
             workspaceName: workspace,
             enabled: true
         )
+    }
+}
+
+private actor GatedWakeReconcileRuntime: PiqaeEmbeddedNodeRuntime {
+    private var callCount = 0
+    private var gates: [CheckedContinuation<Void, Never>] = []
+    private var released = false
+
+    func start() async throws {}
+
+    func stop() async throws {
+        release()
+    }
+
+    func report(_ event: PiqaeHostLifecycleEvent) async throws {}
+
+    func reconcileCloudOutcome(
+        timeoutMilliseconds: UInt64
+    ) async throws -> PiqaeCloudReconcileOutcome {
+        callCount += 1
+        if !released {
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    gates.append(continuation)
+                }
+            } onCancel: {
+                Task { await self.release() }
+            }
+        }
+        try Task.checkCancellation()
+        return .noCloud
+    }
+
+    func reconcileCallCount() -> Int { callCount }
+
+    func release() {
+        released = true
+        let pending = gates
+        gates.removeAll(keepingCapacity: true)
+        for gate in pending { gate.resume() }
+    }
+}
+
+private actor WakeResultRecorder {
+    private(set) var value: PiqaeWakeHintResult?
+
+    func record(_ result: PiqaeWakeHintResult) {
+        value = result
     }
 }
 

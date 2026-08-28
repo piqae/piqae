@@ -58,6 +58,12 @@ public final class PiqaeNode: @unchecked Sendable {
         await engine.handleWakeHint(hint, context: context)
     }
 
+    #if DEBUG
+    func wakeWaiterCountForTesting(collapseID: String) async -> Int {
+        await engine.wakeWaiterCountForTesting(collapseID: collapseID)
+    }
+    #endif
+
     /// Closes handoff admission synchronously from an OS expiration callback.
     /// Actor cleanup follows asynchronously, but no later generation can begin
     /// a native handoff after this returns.
@@ -358,6 +364,9 @@ actor PiqaeNodeEngine {
         let task: Task<PiqaeWakeHintResult, Never>
     }
     private var wakeTasks: [String: WakeTask] = [:]
+    #if DEBUG
+    private var wakeWaiterCounts: [String: Int] = [:]
+    #endif
     private var observers: [UUID: AsyncStream<PiqaeNodeSnapshot>.Continuation] = [:]
     private var snapshotValue: PiqaeNodeSnapshot
 
@@ -893,7 +902,7 @@ actor PiqaeNodeEngine {
             return .deferred(reason: "The host application is suspended.")
         }
         if let existing = wakeTasks[hint.collapseID] {
-            return await PiqaeWakeTaskWaiter().wait(for: existing.task)
+            return await waitForWakeTask(existing.task, collapseID: hint.collapseID)
         }
         let token = UUID()
         let task = Task<PiqaeWakeHintResult, Never> { [weak self] in
@@ -905,8 +914,32 @@ actor PiqaeNodeEngine {
             return result
         }
         wakeTasks[hint.collapseID] = WakeTask(token: token, task: task)
+        return await waitForWakeTask(task, collapseID: hint.collapseID)
+    }
+
+    private func waitForWakeTask(
+        _ task: Task<PiqaeWakeHintResult, Never>,
+        collapseID: String
+    ) async -> PiqaeWakeHintResult {
+        #if DEBUG
+        wakeWaiterCounts[collapseID, default: 0] += 1
+        defer {
+            let remaining = (wakeWaiterCounts[collapseID] ?? 1) - 1
+            if remaining == 0 {
+                wakeWaiterCounts.removeValue(forKey: collapseID)
+            } else {
+                wakeWaiterCounts[collapseID] = remaining
+            }
+        }
+        #endif
         return await PiqaeWakeTaskWaiter().wait(for: task)
     }
+
+    #if DEBUG
+    func wakeWaiterCountForTesting(collapseID: String) -> Int {
+        wakeWaiterCounts[collapseID] ?? 0
+    }
+    #endif
 
     private func removeWakeTask(collapseID: String, token: UUID) {
         if wakeTasks[collapseID]?.token == token {
