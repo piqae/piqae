@@ -42,6 +42,7 @@ let package = Package(
             publicHeadersPath: "include",
             cSettings: abiSettings,
             linkerSettings: [
+                .linkedFramework("CoreFoundation"),
                 .linkedLibrary("bsm", .when(platforms: [.macOS]))
             ]
         ),

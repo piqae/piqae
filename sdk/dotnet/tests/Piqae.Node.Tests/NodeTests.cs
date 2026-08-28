@@ -237,12 +237,36 @@ public sealed class NodeTests
         Assert.Equal(first.Job.JobId, second.Job.JobId);
         Assert.Equal(first.Output.Sha256, second.Output.Sha256);
         var operation = node.NextAdapterOperation("com.piqae.tests.fake-printer");
-        Assert.Equal("pdf", operation.GetProperty("operation").GetProperty("content_kind").GetString());
+        var operationData = operation.GetProperty("operation");
+        Assert.Equal("pdf", operationData.GetProperty("content_kind").GetString());
+        var replay = node.NextAdapterOperation("com.piqae.tests.fake-printer")
+            .GetProperty("operation");
+        Assert.Equal(
+            operationData.GetProperty("operation_id").GetString(),
+            replay.GetProperty("operation_id").GetString());
+        Assert.Equal(
+            operationData.GetProperty("fence").GetString(),
+            replay.GetProperty("fence").GetString());
+        var operationId = operationData.GetProperty("operation_id").GetString()!;
+        var fence = operationData.GetProperty("fence").GetString()!;
+        node.BeginAdapterHandoff("com.piqae.tests.fake-printer", operationId, fence);
+        node.CompleteAdapterOperation(
+            "com.piqae.tests.fake-printer",
+            operationId,
+            fence,
+            AdapterOperationOutcomeKind.Accepted,
+            nativeJobId: "native-printpacket-1");
         Assert.Equal(
             JsonValueKind.Null,
             node.NextAdapterOperation("com.piqae.tests.fake-printer")
                 .GetProperty("operation")
                 .ValueKind);
+        node.CompleteAdapterOperation(
+            "com.piqae.tests.fake-printer",
+            operationId,
+            fence,
+            AdapterOperationOutcomeKind.CompletedReported,
+            nativeJobId: "native-printpacket-1");
 
         var unsupported = new PrintPacket(
             receipt.Template,
