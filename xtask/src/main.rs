@@ -966,7 +966,7 @@ const CHECKS: &[Check] = &[
                 "docker",
                 "build",
                 "--target",
-                "shopify-workspace-dependencies",
+                "shopify-production-build",
                 "--file",
                 "deploy/docker/Dockerfile.shopify",
                 ".",

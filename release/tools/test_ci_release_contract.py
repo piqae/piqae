@@ -21,20 +21,32 @@ class CiReleaseContractTest(unittest.TestCase):
         sdk_source = dockerfile.index("COPY sdk/typescript sdk/typescript")
         build = dockerfile.index("RUN pnpm --filter @printpacket/core build")
         sdk_build = dockerfile.index("RUN pnpm --filter @piqae/sdk build")
-        resolve = dockerfile.index("await import('@printpacket/core')")
+        workspace_resolve = dockerfile.index("await import('@printpacket/core')")
         application = dockerfile.index("COPY apps/shopify apps/shopify")
+        deploy = dockerfile.index(
+            "RUN pnpm --filter @piqae/shopify-app --prod deploy --legacy /app"
+        )
+        production_resolve = dockerfile.index(
+            "RUN cd /app && node --input-type=module"
+        )
+        final_copy = dockerfile.index(
+            "COPY --from=shopify-production-build --chown=node:node /app /app"
+        )
         self.assertLess(manifest, install)
         self.assertLess(sdk_manifest, install)
         self.assertLess(install, source)
         self.assertLess(install, sdk_source)
         self.assertLess(source, build)
         self.assertLess(sdk_source, sdk_build)
-        self.assertLess(build, resolve)
+        self.assertLess(build, workspace_resolve)
         self.assertLess(sdk_build, application)
-        self.assertLess(resolve, application)
+        self.assertLess(workspace_resolve, application)
+        self.assertLess(application, deploy)
+        self.assertLess(deploy, production_resolve)
+        self.assertLess(production_resolve, final_copy)
 
         clean_target = (
-            "docker build --target shopify-workspace-dependencies "
+            "docker build --target shopify-production-build "
             "--file deploy/docker/Dockerfile.shopify ."
         )
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -48,7 +60,7 @@ class CiReleaseContractTest(unittest.TestCase):
             '"docker"',
             '"build"',
             '"--target"',
-            '"shopify-workspace-dependencies"',
+            '"shopify-production-build"',
             '"deploy/docker/Dockerfile.shopify"',
         ):
             self.assertIn(argument, xtask)
