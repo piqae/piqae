@@ -19,7 +19,7 @@ from typing import Any, Iterable
 SCHEMA_VERSION = 1
 MANIFEST_NAME = "release-manifest.json"
 CHECKSUMS_NAME = "SHA256SUMS"
-DEFAULT_SBOM_NAME = "sbom.spdx.json"
+DEFAULT_SBOM_NAME = "release-evidence.spdx.json"
 DEFAULT_PROVENANCE_NAME = "provenance.sigstore.json"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -87,16 +87,47 @@ def _write_json(path: Path, value: Any) -> None:
     )
 
 
+def _require_casefold_unique_paths(paths: Iterable[str], context: str) -> None:
+    seen_files: dict[tuple[str, ...], str] = {}
+    seen_directories: dict[tuple[str, ...], str] = {}
+    for value in paths:
+        folded = tuple(part.casefold() for part in PurePosixPath(value).parts)
+        previous_file = seen_files.get(folded)
+        if previous_file is not None:
+            raise AuditError(
+                f"case-colliding {context}: {previous_file!r} and {value!r}"
+            )
+        previous_child = seen_directories.get(folded)
+        if previous_child is not None:
+            raise AuditError(
+                f"case-colliding {context}: file {value!r} conflicts with the "
+                f"directory used by {previous_child!r}"
+            )
+        for component_count in range(1, len(folded)):
+            directory = folded[:component_count]
+            previous_file = seen_files.get(directory)
+            if previous_file is not None:
+                raise AuditError(
+                    f"case-colliding {context}: file {previous_file!r} conflicts "
+                    f"with the directory used by {value!r}"
+                )
+            seen_directories.setdefault(directory, value)
+        seen_files[folded] = value
+
+
 def _relative_files(root: Path, excluded: set[str]) -> list[str]:
     result: list[str] = []
+    all_files: list[str] = []
     for path in root.rglob("*"):
         if path.is_symlink():
             raise AuditError(f"release bundles must not contain symlinks: {path}")
         if not path.is_file():
             continue
         relative = path.relative_to(root).as_posix()
+        all_files.append(relative)
         if relative not in excluded:
             result.append(relative)
+    _require_casefold_unique_paths(sorted(all_files), "release bundle paths")
     return sorted(result)
 
 
@@ -193,6 +224,7 @@ def _validate_provenance(path: Path, artifacts: dict[str, str]) -> None:
 
 def _read_checksums(path: Path) -> dict[str, str]:
     checksums: dict[str, str] = {}
+    casefolded_names: dict[str, str] = {}
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         match = CHECKSUM_RE.fullmatch(line)
         if not match:
@@ -201,6 +233,13 @@ def _read_checksums(path: Path) -> dict[str, str]:
         _safe_relative_path(name)
         if name in checksums:
             raise AuditError(f"duplicate checksum entry: {name}")
+        folded = name.casefold()
+        previous = casefolded_names.get(folded)
+        if previous is not None:
+            raise AuditError(
+                f"case-colliding checksum entries: {previous!r} and {name!r}"
+            )
+        casefolded_names[folded] = name
         checksums[name] = digest
     if not checksums:
         raise AuditError("checksum file is empty")
@@ -264,7 +303,6 @@ def _load_manifest(root: Path) -> tuple[dict[str, Any], dict[str, str], list[str
         raise AuditError("manifest must contain at least one artifact")
     artifacts: dict[str, str] = {}
     paths: list[str] = []
-    casefolded_paths: set[str] = set()
     for artifact in raw_artifacts:
         if not isinstance(artifact, dict):
             raise AuditError("manifest artifact must be an object")
@@ -276,21 +314,28 @@ def _load_manifest(root: Path) -> tuple[dict[str, Any], dict[str, str], list[str
         _safe_relative_path(path_value)
         if path_value in artifacts:
             raise AuditError(f"duplicate manifest artifact: {path_value}")
-        folded = path_value.casefold()
-        if folded in casefolded_paths:
-            raise AuditError(f"case-colliding manifest artifact: {path_value}")
-        casefolded_paths.add(folded)
         if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
             raise AuditError(f"invalid manifest digest: {path_value}")
         if not isinstance(size, int) or size < 0:
             raise AuditError(f"invalid manifest size: {path_value}")
         artifacts[path_value] = digest
         paths.append(path_value)
+    _require_casefold_unique_paths(
+        paths
+        + [
+            MANIFEST_NAME,
+            CHECKSUMS_NAME,
+            evidence["sbom"],
+            evidence["provenance"],
+        ],
+        "manifest paths",
+    )
     return manifest, artifacts, paths
 
 
 def write_checksums(root: Path) -> None:
     manifest, _, artifact_paths = _load_manifest(root)
+    _relative_files(root, set())
     evidence = manifest["evidence"]
     names = sorted(
         artifact_paths

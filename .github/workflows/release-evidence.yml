@@ -36,7 +36,7 @@ jobs:
         with:
           path: release-candidate
           format: spdx-json
-          output-file: release-candidate/sbom.spdx.json
+          output-file: release-candidate/release-evidence.spdx.json
           upload-artifact: false
           upload-release-assets: false
       - name: Attest artifact provenance
