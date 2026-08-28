@@ -4,7 +4,9 @@ export type ShopifyDocumentField = {
   label: string;
   path: string;
   group:
+    | "Shop"
     | "Order"
+    | "Financial"
     | "Customer"
     | "Shipping"
     | "Item"
@@ -19,6 +21,18 @@ export type ShopifyDocumentField = {
  */
 export const SHOPIFY_DOCUMENT_FIELDS: readonly ShopifyDocumentField[] = [
   {
+    label: "Shop name",
+    path: "shop.name",
+    group: "Shop",
+    conditionable: true,
+  },
+  {
+    label: "Shop domain",
+    path: "shop.domain",
+    group: "Shop",
+    conditionable: true,
+  },
+  {
     label: "Order number",
     path: "order.name",
     group: "Order",
@@ -28,6 +42,30 @@ export const SHOPIFY_DOCUMENT_FIELDS: readonly ShopifyDocumentField[] = [
     label: "Order date",
     path: "order.createdAt",
     group: "Order",
+    conditionable: true,
+  },
+  {
+    label: "Order currency",
+    path: "order.currency",
+    group: "Financial",
+    conditionable: true,
+  },
+  {
+    label: "Subtotal",
+    path: "order.subtotal",
+    group: "Financial",
+    conditionable: true,
+  },
+  {
+    label: "Tax",
+    path: "order.tax",
+    group: "Financial",
+    conditionable: true,
+  },
+  {
+    label: "Total",
+    path: "order.total",
+    group: "Financial",
     conditionable: true,
   },
   {
@@ -49,6 +87,30 @@ export const SHOPIFY_DOCUMENT_FIELDS: readonly ShopifyDocumentField[] = [
     conditionable: true,
   },
   {
+    label: "Billing address",
+    path: "order.billingAddress.formatted",
+    group: "Shipping",
+    conditionable: true,
+  },
+  {
+    label: "Shipping method",
+    path: "order.shippingMethod",
+    group: "Shipping",
+    conditionable: true,
+  },
+  {
+    label: "Order note",
+    path: "order.note",
+    group: "Order",
+    conditionable: true,
+  },
+  {
+    label: "Order status URL",
+    path: "order.statusUrl",
+    group: "Order",
+    conditionable: true,
+  },
+  {
     label: "Item title",
     path: "item.title",
     group: "Item",
@@ -56,9 +118,33 @@ export const SHOPIFY_DOCUMENT_FIELDS: readonly ShopifyDocumentField[] = [
   },
   { label: "Item SKU", path: "item.sku", group: "Item", conditionable: true },
   {
+    label: "Label barcode (Code 128 safe)",
+    path: "item.labelCode128",
+    group: "Item",
+    conditionable: true,
+  },
+  {
     label: "Item quantity",
     path: "item.quantity",
     group: "Item",
+    conditionable: true,
+  },
+  {
+    label: "Item unit price",
+    path: "item.unitPrice",
+    group: "Financial",
+    conditionable: true,
+  },
+  {
+    label: "Item total",
+    path: "item.total",
+    group: "Financial",
+    conditionable: true,
+  },
+  {
+    label: "Item currency",
+    path: "item.currency",
+    group: "Financial",
     conditionable: true,
   },
   {

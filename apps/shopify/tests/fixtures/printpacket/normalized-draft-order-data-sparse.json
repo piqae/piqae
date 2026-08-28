@@ -1,0 +1,84 @@
+{
+  "shop": {
+    "name": "Sparse Fixture",
+    "domain": "sparse-fixture.myshopify.com"
+  },
+  "orders": [
+    {
+      "id": "gid://shopify/DraftOrder/81",
+      "name": "#D81",
+      "createdAt": "2026-08-28T01:00:00Z",
+      "currency": "NZD",
+      "customer": null,
+      "shippingAddress": null,
+      "billingAddress": null,
+      "note": "",
+      "shippingMethod": "",
+      "statusUrl": "",
+      "metafields": {},
+      "lineItems": [
+        {
+          "id": "gid://shopify/DraftOrderLineItem/82",
+          "title": "Draft SKU fallback",
+          "sku": "DRAFT-SKU",
+          "labelCode128": "DRAFT-SKU",
+          "quantity": 2,
+          "unitPrice": 4.75,
+          "total": 9.5,
+          "currency": "NZD",
+          "product": null,
+          "variant": {
+            "id": "gid://shopify/ProductVariant/83",
+            "title": "Invalid draft barcode",
+            "barcode": "番号",
+            "metafields": {}
+          }
+        },
+        {
+          "id": "gid://shopify/DraftOrderLineItem/84",
+          "title": "Draft Unicode SKU omitted",
+          "sku": "CAFÉ-SKU",
+          "labelCode128": null,
+          "quantity": 1,
+          "unitPrice": 0,
+          "total": 0,
+          "currency": "NZD",
+          "product": null,
+          "variant": null
+        },
+        {
+          "id": "gid://shopify/DraftOrderLineItem/85",
+          "title": "Draft dense values omitted",
+          "sku": "Ü",
+          "labelCode128": null,
+          "quantity": 1,
+          "unitPrice": 0,
+          "total": 0,
+          "currency": "NZD",
+          "product": null,
+          "variant": {
+            "id": "gid://shopify/ProductVariant/86",
+            "title": "Dense draft barcode",
+            "barcode": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "metafields": {}
+          }
+        },
+        {
+          "id": "gid://shopify/DraftOrderLineItem/87",
+          "title": "Draft no machine code",
+          "sku": "",
+          "labelCode128": null,
+          "quantity": 1,
+          "unitPrice": 0,
+          "total": 0,
+          "currency": "NZD",
+          "product": null,
+          "variant": null
+        }
+      ],
+      "subtotal": 9.5,
+      "tax": 1.24,
+      "total": 10.74
+    }
+  ]
+}

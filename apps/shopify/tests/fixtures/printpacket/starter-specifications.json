@@ -1,0 +1,1125 @@
+{
+  "invoice": {
+    "format": "printpacket/v1",
+    "media": {
+      "kind": "paged",
+      "size": "a4",
+      "orientation": "portrait",
+      "margins": {
+        "top_mm": 14,
+        "right_mm": 14,
+        "bottom_mm": 16,
+        "left_mm": 14
+      }
+    },
+    "theme": {
+      "font_size_pt": 10,
+      "line_height": 1.35,
+      "text_color": {
+        "red": 32,
+        "green": 34,
+        "blue": 35
+      }
+    },
+    "resources": {},
+    "header": {
+      "first": [],
+      "default": [],
+      "last": []
+    },
+    "body": [
+      {
+        "type": "repeat",
+        "items": {
+          "type": "path",
+          "path": ["orders"]
+        },
+        "gap_mm": 10,
+        "children": [
+          {
+            "type": "grid",
+            "columns": [2, 1],
+            "gap_mm": 8,
+            "children": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "value",
+                    "value": {
+                      "type": "path",
+                      "path": ["shop", "name"]
+                    },
+                    "style": {
+                      "bold": true
+                    }
+                  }
+                ]
+              },
+              {
+                "type": "heading",
+                "level": 1,
+                "content": [
+                  {
+                    "type": "text",
+                    "value": "INVOICE"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "value",
+                "value": {
+                  "type": "current_path",
+                  "path": ["name"]
+                },
+                "style": {
+                  "bold": true
+                }
+              }
+            ]
+          },
+          {
+            "type": "conditional",
+            "condition": {
+              "type": "exists",
+              "value": {
+                "type": "current_path",
+                "path": ["shippingAddress", "formatted"]
+              }
+            },
+            "then": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "value",
+                    "value": {
+                      "type": "current_path",
+                      "path": ["shippingAddress", "formatted"]
+                    },
+                    "style": {}
+                  }
+                ]
+              }
+            ],
+            "else": []
+          },
+          {
+            "type": "divider"
+          },
+          {
+            "type": "table",
+            "items": {
+              "type": "current_path",
+              "path": ["lineItems"]
+            },
+            "repeat_header": true,
+            "columns": [
+              {
+                "header": [
+                  {
+                    "type": "text",
+                    "value": "Item",
+                    "style": {
+                      "bold": true
+                    }
+                  }
+                ],
+                "cell": [
+                  {
+                    "type": "value",
+                    "value": {
+                      "type": "current_path",
+                      "path": ["title"]
+                    }
+                  }
+                ],
+                "width": 5,
+                "align": "left"
+              },
+              {
+                "header": [
+                  {
+                    "type": "text",
+                    "value": "SKU",
+                    "style": {
+                      "bold": true
+                    }
+                  }
+                ],
+                "cell": [
+                  {
+                    "type": "value",
+                    "value": {
+                      "type": "current_path",
+                      "path": ["sku"]
+                    }
+                  }
+                ],
+                "width": 2,
+                "align": "left"
+              },
+              {
+                "header": [
+                  {
+                    "type": "text",
+                    "value": "Qty",
+                    "style": {
+                      "bold": true
+                    }
+                  }
+                ],
+                "cell": [
+                  {
+                    "type": "value",
+                    "value": {
+                      "type": "current_path",
+                      "path": ["quantity"]
+                    }
+                  }
+                ],
+                "width": 1,
+                "align": "right"
+              },
+              {
+                "header": [
+                  {
+                    "type": "text",
+                    "value": "Price",
+                    "style": {
+                      "bold": true
+                    }
+                  }
+                ],
+                "cell": [
+                  {
+                    "type": "value",
+                    "value": {
+                      "type": "format_money",
+                      "amount": {
+                        "type": "current_path",
+                        "path": ["unitPrice"]
+                      },
+                      "currency": {
+                        "type": "current_path",
+                        "path": ["currency"]
+                      }
+                    }
+                  }
+                ],
+                "width": 2,
+                "align": "right"
+              },
+              {
+                "header": [
+                  {
+                    "type": "text",
+                    "value": "Total",
+                    "style": {
+                      "bold": true
+                    }
+                  }
+                ],
+                "cell": [
+                  {
+                    "type": "value",
+                    "value": {
+                      "type": "format_money",
+                      "amount": {
+                        "type": "current_path",
+                        "path": ["total"]
+                      },
+                      "currency": {
+                        "type": "current_path",
+                        "path": ["currency"]
+                      }
+                    }
+                  }
+                ],
+                "width": 2,
+                "align": "right"
+              }
+            ],
+            "empty": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "value": "No items"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "divider"
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "value": "Subtotal "
+              },
+              {
+                "type": "value",
+                "value": {
+                  "type": "format_money",
+                  "amount": {
+                    "type": "current_path",
+                    "path": ["subtotal"]
+                  },
+                  "currency": {
+                    "type": "current_path",
+                    "path": ["currency"]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "value": "Tax "
+              },
+              {
+                "type": "value",
+                "value": {
+                  "type": "format_money",
+                  "amount": {
+                    "type": "current_path",
+                    "path": ["tax"]
+                  },
+                  "currency": {
+                    "type": "current_path",
+                    "path": ["currency"]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "value": "Total ",
+                "style": {
+                  "bold": true
+                }
+              },
+              {
+                "type": "value",
+                "value": {
+                  "type": "format_money",
+                  "amount": {
+                    "type": "current_path",
+                    "path": ["total"]
+                  },
+                  "currency": {
+                    "type": "current_path",
+                    "path": ["currency"]
+                  }
+                },
+                "style": {
+                  "bold": true
+                }
+              }
+            ]
+          },
+          {
+            "type": "page_break"
+          }
+        ]
+      }
+    ],
+    "footer": {
+      "first": [],
+      "default": [],
+      "last": []
+    }
+  },
+  "packing-slip": {
+    "format": "printpacket/v1",
+    "media": {
+      "kind": "paged",
+      "size": "a4",
+      "orientation": "portrait",
+      "margins": {
+        "top_mm": 14,
+        "right_mm": 14,
+        "bottom_mm": 16,
+        "left_mm": 14
+      }
+    },
+    "theme": {
+      "font_size_pt": 10,
+      "line_height": 1.35,
+      "text_color": {
+        "red": 32,
+        "green": 34,
+        "blue": 35
+      }
+    },
+    "resources": {},
+    "header": {
+      "first": [],
+      "default": [],
+      "last": []
+    },
+    "body": [
+      {
+        "type": "repeat",
+        "items": {
+          "type": "path",
+          "path": ["orders"]
+        },
+        "gap_mm": 10,
+        "children": [
+          {
+            "type": "grid",
+            "columns": [2, 1],
+            "gap_mm": 10,
+            "children": [
+              {
+                "type": "stack",
+                "gap_mm": 3,
+                "children": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "value",
+                        "value": {
+                          "type": "path",
+                          "path": ["shop", "name"]
+                        },
+                        "style": {
+                          "bold": true
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "type": "conditional",
+                    "condition": {
+                      "type": "compare",
+                      "operator": "not_equal",
+                      "left": {
+                        "type": "format_string",
+                        "operation": "trim",
+                        "value": {
+                          "type": "coalesce",
+                          "values": [
+                            {
+                              "type": "current_path",
+                              "path": ["statusUrl"]
+                            },
+                            {
+                              "type": "literal",
+                              "value": ""
+                            }
+                          ]
+                        }
+                      },
+                      "right": {
+                        "type": "literal",
+                        "value": ""
+                      }
+                    },
+                    "then": [
+                      {
+                        "type": "qr",
+                        "value": {
+                          "type": "current_path",
+                          "path": ["statusUrl"]
+                        },
+                        "size_mm": 24
+                      }
+                    ],
+                    "else": []
+                  }
+                ]
+              },
+              {
+                "type": "stack",
+                "gap_mm": 1,
+                "children": [
+                  {
+                    "type": "heading",
+                    "level": 1,
+                    "content": [
+                      {
+                        "type": "text",
+                        "value": "PACKING SLIP"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "value",
+                        "value": {
+                          "type": "current_path",
+                          "path": ["name"]
+                        },
+                        "style": {
+                          "bold": true
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "value",
+                        "value": {
+                          "type": "current_path",
+                          "path": ["createdAt"]
+                        },
+                        "style": {}
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "spacer",
+            "height_mm": 7
+          },
+          {
+            "type": "grid",
+            "columns": [1, 1],
+            "gap_mm": 12,
+            "children": [
+              {
+                "type": "stack",
+                "gap_mm": 1,
+                "children": [
+                  {
+                    "type": "heading",
+                    "level": 2,
+                    "content": [
+                      {
+                        "type": "text",
+                        "value": "SHIP TO"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "conditional",
+                    "condition": {
+                      "type": "exists",
+                      "value": {
+                        "type": "current_path",
+                        "path": ["shippingAddress", "formatted"]
+                      }
+                    },
+                    "then": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "value",
+                            "value": {
+                              "type": "current_path",
+                              "path": ["shippingAddress", "formatted"]
+                            },
+                            "style": {}
+                          }
+                        ]
+                      }
+                    ],
+                    "else": []
+                  }
+                ]
+              },
+              {
+                "type": "stack",
+                "gap_mm": 1,
+                "children": [
+                  {
+                    "type": "heading",
+                    "level": 2,
+                    "content": [
+                      {
+                        "type": "text",
+                        "value": "CUSTOMER"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "conditional",
+                    "condition": {
+                      "type": "exists",
+                      "value": {
+                        "type": "current_path",
+                        "path": ["customer", "displayName"]
+                      }
+                    },
+                    "then": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "value",
+                            "value": {
+                              "type": "current_path",
+                              "path": ["customer", "displayName"]
+                            },
+                            "style": {}
+                          }
+                        ]
+                      }
+                    ],
+                    "else": []
+                  },
+                  {
+                    "type": "conditional",
+                    "condition": {
+                      "type": "exists",
+                      "value": {
+                        "type": "current_path",
+                        "path": ["customer", "email"]
+                      }
+                    },
+                    "then": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "value",
+                            "value": {
+                              "type": "current_path",
+                              "path": ["customer", "email"]
+                            },
+                            "style": {}
+                          }
+                        ]
+                      }
+                    ],
+                    "else": []
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "spacer",
+            "height_mm": 6
+          },
+          {
+            "type": "divider",
+            "width_pt": 1
+          },
+          {
+            "type": "table",
+            "items": {
+              "type": "current_path",
+              "path": ["lineItems"]
+            },
+            "repeat_header": true,
+            "columns": [
+              {
+                "header": [
+                  {
+                    "type": "text",
+                    "value": "Item",
+                    "style": {
+                      "bold": true
+                    }
+                  }
+                ],
+                "cell": [
+                  {
+                    "type": "value",
+                    "value": {
+                      "type": "current_path",
+                      "path": ["title"]
+                    }
+                  }
+                ],
+                "width": 5,
+                "align": "left"
+              },
+              {
+                "header": [
+                  {
+                    "type": "text",
+                    "value": "SKU",
+                    "style": {
+                      "bold": true
+                    }
+                  }
+                ],
+                "cell": [
+                  {
+                    "type": "value",
+                    "value": {
+                      "type": "current_path",
+                      "path": ["sku"]
+                    }
+                  }
+                ],
+                "width": 2,
+                "align": "left"
+              },
+              {
+                "header": [
+                  {
+                    "type": "text",
+                    "value": "Qty",
+                    "style": {
+                      "bold": true
+                    }
+                  }
+                ],
+                "cell": [
+                  {
+                    "type": "value",
+                    "value": {
+                      "type": "current_path",
+                      "path": ["quantity"]
+                    }
+                  }
+                ],
+                "width": 1,
+                "align": "right"
+              }
+            ],
+            "empty": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "value": "No items"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "divider"
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "value": "Thank you for your order."
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "value",
+                "value": {
+                  "type": "current_path",
+                  "path": ["name"]
+                },
+                "style": {}
+              }
+            ]
+          },
+          {
+            "type": "page_break"
+          }
+        ]
+      }
+    ],
+    "footer": {
+      "first": [],
+      "default": [],
+      "last": []
+    }
+  },
+  "receipt": {
+    "format": "printpacket/v1",
+    "media": {
+      "kind": "continuous",
+      "width_mm": 80,
+      "margins": {
+        "top_mm": 4,
+        "right_mm": 4,
+        "bottom_mm": 4,
+        "left_mm": 4
+      }
+    },
+    "theme": {
+      "font_size_pt": 10,
+      "line_height": 1.35,
+      "text_color": {
+        "red": 32,
+        "green": 34,
+        "blue": 35
+      }
+    },
+    "resources": {},
+    "header": {
+      "first": [],
+      "default": [],
+      "last": []
+    },
+    "body": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "value",
+            "value": {
+              "type": "path",
+              "path": ["shop", "name"]
+            },
+            "style": {
+              "bold": true
+            }
+          }
+        ]
+      },
+      {
+        "type": "repeat",
+        "items": {
+          "type": "path",
+          "path": ["orders"]
+        },
+        "gap_mm": 6,
+        "children": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "value",
+                "value": {
+                  "type": "current_path",
+                  "path": ["name"]
+                },
+                "style": {
+                  "bold": true
+                }
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "value",
+                "value": {
+                  "type": "format_date",
+                  "value": {
+                    "type": "current_path",
+                    "path": ["createdAt"]
+                  },
+                  "format": "day_month_year"
+                }
+              }
+            ]
+          },
+          {
+            "type": "divider"
+          },
+          {
+            "type": "table",
+            "items": {
+              "type": "current_path",
+              "path": ["lineItems"]
+            },
+            "repeat_header": true,
+            "columns": [
+              {
+                "header": [
+                  {
+                    "type": "text",
+                    "value": "Item",
+                    "style": {
+                      "bold": true
+                    }
+                  }
+                ],
+                "cell": [
+                  {
+                    "type": "value",
+                    "value": {
+                      "type": "current_path",
+                      "path": ["title"]
+                    }
+                  }
+                ],
+                "width": 5,
+                "align": "left"
+              },
+              {
+                "header": [
+                  {
+                    "type": "text",
+                    "value": "Qty",
+                    "style": {
+                      "bold": true
+                    }
+                  }
+                ],
+                "cell": [
+                  {
+                    "type": "value",
+                    "value": {
+                      "type": "current_path",
+                      "path": ["quantity"]
+                    }
+                  }
+                ],
+                "width": 1,
+                "align": "right"
+              },
+              {
+                "header": [
+                  {
+                    "type": "text",
+                    "value": "Total",
+                    "style": {
+                      "bold": true
+                    }
+                  }
+                ],
+                "cell": [
+                  {
+                    "type": "value",
+                    "value": {
+                      "type": "format_money",
+                      "amount": {
+                        "type": "current_path",
+                        "path": ["total"]
+                      },
+                      "currency": {
+                        "type": "current_path",
+                        "path": ["currency"]
+                      }
+                    }
+                  }
+                ],
+                "width": 2,
+                "align": "right"
+              }
+            ],
+            "empty": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "value": "No items"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "divider"
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "value": "Tax "
+              },
+              {
+                "type": "value",
+                "value": {
+                  "type": "format_money",
+                  "amount": {
+                    "type": "current_path",
+                    "path": ["tax"]
+                  },
+                  "currency": {
+                    "type": "current_path",
+                    "path": ["currency"]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "value": "Total ",
+                "style": {
+                  "bold": true
+                }
+              },
+              {
+                "type": "value",
+                "value": {
+                  "type": "format_money",
+                  "amount": {
+                    "type": "current_path",
+                    "path": ["total"]
+                  },
+                  "currency": {
+                    "type": "current_path",
+                    "path": ["currency"]
+                  }
+                },
+                "style": {
+                  "bold": true
+                }
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "value": "Thank you."
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "footer": {
+      "first": [],
+      "default": [],
+      "last": []
+    }
+  },
+  "product-label": {
+    "format": "printpacket/v1",
+    "media": {
+      "kind": "label",
+      "width_mm": 100,
+      "height_mm": 50,
+      "margins": {
+        "top_mm": 3,
+        "right_mm": 3,
+        "bottom_mm": 3,
+        "left_mm": 3
+      }
+    },
+    "theme": {
+      "font_size_pt": 10,
+      "line_height": 1.35,
+      "text_color": {
+        "red": 32,
+        "green": 34,
+        "blue": 35
+      }
+    },
+    "resources": {},
+    "header": {
+      "first": [],
+      "default": [],
+      "last": []
+    },
+    "body": [
+      {
+        "type": "repeat",
+        "items": {
+          "type": "path",
+          "path": ["orders"]
+        },
+        "children": [
+          {
+            "type": "repeat",
+            "items": {
+              "type": "current_path",
+              "path": ["lineItems"]
+            },
+            "children": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "value",
+                    "value": {
+                      "type": "current_path",
+                      "path": ["title"]
+                    },
+                    "style": {
+                      "bold": true
+                    }
+                  }
+                ]
+              },
+              {
+                "type": "conditional",
+                "condition": {
+                  "type": "exists",
+                  "value": {
+                    "type": "current_path",
+                    "path": ["variant", "title"]
+                  }
+                },
+                "then": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "value",
+                        "value": {
+                          "type": "current_path",
+                          "path": ["variant", "title"]
+                        },
+                        "style": {}
+                      }
+                    ]
+                  }
+                ],
+                "else": []
+              },
+              {
+                "type": "conditional",
+                "condition": {
+                  "type": "exists",
+                  "value": {
+                    "type": "current_path",
+                    "path": ["labelCode128"]
+                  }
+                },
+                "then": [
+                  {
+                    "type": "barcode",
+                    "value": {
+                      "type": "current_path",
+                      "path": ["labelCode128"]
+                    },
+                    "symbology": "code128",
+                    "width_mm": 70,
+                    "height_mm": 12,
+                    "human_readable": true
+                  }
+                ],
+                "else": []
+              },
+              {
+                "type": "page_break"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "footer": {
+      "first": [],
+      "default": [],
+      "last": []
+    }
+  }
+}

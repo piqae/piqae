@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  SHOPIFY_VARIABLES,
   blocksToDoc,
   completeExpression,
   contextualFieldSuggestions,
@@ -12,8 +13,13 @@ import {
   replaceBlockAtPath,
   searchDocumentFields,
 } from "../app/components/PrintPacketEditor";
+import {
+  authoringPathExpression,
+  canonicalizeShopifyEditorBody,
+} from "../app/core/shopify-editor-scopes";
 import type { ShopifyDocumentField } from "../app/core/shopify-document-fields";
-import type { Block } from "../app/core/template-model";
+import type { Block, PrintPacket } from "../app/core/template-model";
+import editorGeneratedPacket from "./fixtures/printpacket/editor-generated-packet.json";
 
 describe("PrintPacket editor serialization", () => {
   it("preserves computed values, line breaks, and non-text layout blocks", () => {
@@ -198,10 +204,10 @@ describe("PrintPacket editor serialization", () => {
     ]);
   });
 
-  it("converts contextual item expressions while retaining global Shopify data", () => {
+  it("converts contextual item expressions while retaining root shop data", () => {
     expect(
       parseContextualInline(
-        "{{ item.title }} — {{ order.name }} — {{ item.product.metafields.custom.bin.value }}",
+        "{{ item.title }} — {{ shop.name }} — {{ item.product.metafields.custom.bin.value }}",
         [],
         "item",
       ),
@@ -213,7 +219,7 @@ describe("PrintPacket editor serialization", () => {
       { type: "text", value: " — " },
       {
         type: "value",
-        value: { type: "path", path: ["order", "name"] },
+        value: { type: "path", path: ["shop", "name"] },
       },
       { type: "text", value: " — " },
       {
@@ -224,6 +230,98 @@ describe("PrintPacket editor serialization", () => {
         },
       },
     ]);
+  });
+
+  it("compiles the friendly order and item aliases into canonical renderer scopes", () => {
+    expect(authoringPathExpression("order.name", "order")).toEqual({
+      type: "current_path",
+      path: ["name"],
+    });
+    expect(authoringPathExpression("item.sku", "item")).toEqual({
+      type: "current_path",
+      path: ["sku"],
+    });
+    expect(authoringPathExpression("shop.name", "item")).toEqual({
+      type: "path",
+      path: ["shop", "name"],
+    });
+    expect(SHOPIFY_VARIABLES).toContain("order.tax");
+    expect(SHOPIFY_VARIABLES).not.toContain("order.taxTotal");
+  });
+
+  it("emits the exact batch-safe packet consumed by the real renderer fixture", () => {
+    const authored: PrintPacket = {
+      format: "printpacket/v1",
+      media: { kind: "paged", size: "a4" },
+      theme: { font_size_pt: 10, line_height: 1.25 },
+      resources: {},
+      body: [
+        {
+          type: "heading",
+          level: 1,
+          content: [
+            {
+              type: "value",
+              value: { type: "path", path: ["shop", "name"] },
+            },
+          ],
+        },
+        {
+          type: "paragraph",
+          content: [
+            {
+              type: "value",
+              value: { type: "path", path: ["order", "name"] },
+            },
+          ],
+        },
+        {
+          type: "table",
+          items: { type: "path", path: ["order", "lineItems"] },
+          columns: [
+            {
+              header: [{ type: "text", value: "Item" }],
+              cell: [
+                {
+                  type: "value",
+                  value: { type: "path", path: ["item", "title"] },
+                },
+              ],
+            },
+            {
+              header: [{ type: "text", value: "SKU" }],
+              cell: [
+                {
+                  type: "value",
+                  value: { type: "path", path: ["item", "sku"] },
+                },
+              ],
+            },
+            {
+              header: [{ type: "text", value: "Total" }],
+              cell: [
+                {
+                  type: "value",
+                  value: {
+                    type: "format_money",
+                    amount: { type: "path", path: ["item", "total"] },
+                    currency: {
+                      type: "path",
+                      path: ["item", "currency"],
+                    },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        { type: "page_break" },
+      ],
+    };
+    expect({
+      ...authored,
+      body: canonicalizeShopifyEditorBody(authored.body),
+    }).toEqual(editorGeneratedPacket);
   });
 
   it("finds and completes expressions from a contextual Shopify field catalogue", () => {
@@ -238,11 +336,7 @@ describe("PrintPacket editor serialization", () => {
     ];
     expect(
       contextualFieldSuggestions(fields, "item").map((field) => field.path),
-    ).toEqual([
-      "item.sku",
-      "item.product.metafields.custom.origin.value",
-      "order.name",
-    ]);
+    ).toEqual(["item.sku", "item.product.metafields.custom.origin.value"]);
     expect(searchDocumentFields(fields, "custom origin")[0]?.path).toBe(
       "item.product.metafields.custom.origin.value",
     );

@@ -33,6 +33,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     admin,
     shop,
     orderIds: [orderId],
+    systemTemplateKey: "receipt",
     requestKey: request.headers.get("idempotency-key") ?? undefined,
   });
   if (result.mode === "download")

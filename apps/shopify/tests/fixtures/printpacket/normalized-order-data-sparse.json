@@ -1,0 +1,84 @@
+{
+  "shop": {
+    "name": "Sparse Fixture",
+    "domain": "sparse-fixture.myshopify.com"
+  },
+  "orders": [
+    {
+      "id": "gid://shopify/Order/73",
+      "name": "#1073",
+      "createdAt": "2026-08-28T00:00:00Z",
+      "currency": "NZD",
+      "customer": null,
+      "shippingAddress": null,
+      "billingAddress": null,
+      "note": "",
+      "shippingMethod": "",
+      "statusUrl": "",
+      "metafields": {},
+      "lineItems": [
+        {
+          "id": "gid://shopify/LineItem/74",
+          "title": "Invalid barcode with SKU fallback",
+          "sku": "SKU-FALLBACK",
+          "labelCode128": "SKU-FALLBACK",
+          "quantity": 1,
+          "unitPrice": 12.5,
+          "total": 12.5,
+          "currency": "NZD",
+          "product": null,
+          "variant": {
+            "id": "gid://shopify/ProductVariant/75",
+            "title": "Unicode barcode",
+            "barcode": "bār",
+            "metafields": {}
+          }
+        },
+        {
+          "id": "gid://shopify/LineItem/76",
+          "title": "Unicode SKU omitted",
+          "sku": "ÜNICODE-SKU",
+          "labelCode128": null,
+          "quantity": 1,
+          "unitPrice": 0,
+          "total": 0,
+          "currency": "NZD",
+          "product": null,
+          "variant": null
+        },
+        {
+          "id": "gid://shopify/LineItem/77",
+          "title": "Dense values omitted",
+          "sku": "Ü",
+          "labelCode128": null,
+          "quantity": 1,
+          "unitPrice": 0,
+          "total": 0,
+          "currency": "NZD",
+          "product": null,
+          "variant": {
+            "id": "gid://shopify/ProductVariant/78",
+            "title": "Dense barcode",
+            "barcode": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "metafields": {}
+          }
+        },
+        {
+          "id": "gid://shopify/LineItem/79",
+          "title": "No machine code",
+          "sku": "",
+          "labelCode128": null,
+          "quantity": 1,
+          "unitPrice": 0,
+          "total": 0,
+          "currency": "NZD",
+          "product": null,
+          "variant": null
+        }
+      ],
+      "subtotal": 12.5,
+      "tax": 0,
+      "total": 12.5
+    }
+  ]
+}

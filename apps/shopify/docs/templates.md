@@ -2,7 +2,9 @@
 
 The Shopify app owns authoring and Shopify data adaptation. Piqae receives only a validated `printpacket/v1` document and normalized data; Piqae has no Shopify or Liquid behavior.
 
-Four immutable, dynamic starters are seeded: Invoice, Packing slip, 80 mm Receipt and Credit note. All use semantic flow tables backed by line-item collections. They reflow and paginate rather than placing fields at fixed coordinates. **Customize** creates a merchant draft. Publishing pins one immutable Piqae revision used by preview, PDF download and direct print.
+Four immutable, dynamic starters are seeded: Invoice, Packing slip, 80 mm Receipt and 100 × 50 mm Product label. All use semantic flow content backed by line-item collections. Paged documents reflow and paginate, receipts use bounded continuous-roll layout, and product labels produce fixed-size pages rather than placing fields at arbitrary coordinates. **Customize** creates a merchant draft. Publishing pins one immutable Piqae revision used by preview, PDF download and direct print.
+
+The render input is one canonical `{shop, orders}` object. Shop identity is a bounded `{name, domain}` object, never a scalar. Money values are numeric at the PrintPacket boundary: Shopify Decimal strings are accepted only in plain notation with at most six fractional digits and a safe scaled integer, then encoded with `printpacket.canonical-data/v1`. Invalid, ambiguous, non-finite or oversized values fail before a render is registered. The same input therefore has one cross-runtime cache identity in the cloud and on every compatible node.
 
 ## Word-like editor
 

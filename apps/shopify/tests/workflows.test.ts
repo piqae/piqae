@@ -14,6 +14,7 @@ import { starterTemplates } from "../app/core/starter-templates";
 import { templateDigest } from "../app/core/template-digest.server";
 import {
   buildTemplateIndex,
+  isActiveTemplate,
   seedStarterTemplates,
 } from "../app/core/template-index.server";
 
@@ -124,7 +125,7 @@ describe("hybrid template authority", () => {
     await seedStarterTemplates(repository, alpha);
     await seedStarterTemplates(repository, alpha);
     const templates = await repository.listTemplates(alpha);
-    expect(templates).toHaveLength(2);
+    expect(templates).toHaveLength(starterTemplates.length);
     expect(
       templates.every(
         (value) => parseTemplateEnvelope(value.source).system?.immutable,
@@ -139,7 +140,9 @@ describe("hybrid template authority", () => {
       await repository.listTemplates(alpha),
       await repository.getSettings(alpha),
     );
-    expect(index.documents).toHaveLength(2);
+    expect(index.documents).toHaveLength(
+      (await repository.listTemplates(alpha)).filter(isActiveTemplate).length,
+    );
     expect(JSON.stringify(index)).not.toContain("canonical");
     expect(index.digest).toMatch(/^[a-f0-9]{64}$/);
   });

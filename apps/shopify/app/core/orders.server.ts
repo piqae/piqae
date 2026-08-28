@@ -3,6 +3,7 @@ import {
   parseShopifyDataBindings,
   type ShopifyDataBindings,
 } from "./shopify-data-bindings";
+import { canonicalDataBytes, type JsonObject } from "@printpacket/core";
 export {
   parseShopifyDataBindings,
   type ShopifyDataBindings,
@@ -31,16 +32,25 @@ export interface NormalizedOrder {
     id: string;
     title: string;
     sku: string;
+    labelCode128: string | null;
     quantity: number;
-    unitPrice: string;
-    total: string;
+    unitPrice: number;
+    total: number;
     currency: string;
     product: NormalizedProduct | null;
     variant: NormalizedVariant | null;
   }>;
-  subtotal: string;
-  tax: string;
-  total: string;
+  subtotal: number;
+  tax: number;
+  total: number;
+}
+
+export interface ShopifyDocumentInput extends Record<string, unknown> {
+  shop: {
+    name: string;
+    domain: string;
+  };
+  orders: NormalizedOrder[];
 }
 
 export type NormalizedMetaobject = {
@@ -84,7 +94,14 @@ export type NormalizedVariant = {
 const MAX_METAFIELDS_PER_OWNER = 20;
 const MAX_METAOBJECT_FIELDS = 24;
 const MAX_METAOBJECT_VALUE_BYTES = 16 * 1024;
-const MAX_NORMALIZED_PAYLOAD_BYTES = 8 * 1024 * 1024;
+const MONEY_SCALE = 6;
+const MONEY_SCALE_FACTOR = 1_000_000;
+const CODE128_MAX_INPUT_BYTES = 80;
+const CODE128_FIXED_MODULES = 55;
+const CODE128_MODULES_PER_BYTE = 11;
+const CODE128_MIN_MODULE_WIDTH_POINTS = 0.45;
+const PRODUCT_LABEL_BARCODE_WIDTH_MM = 70;
+const POINTS_PER_MM = 72 / 25.4;
 
 const ORDER_QUERY = `#graphql
  query PiqaePrintableOrder($id: ID!, $after: String, $orderFields: [HasMetafieldsIdentifier!]!, $productFields: [HasMetafieldsIdentifier!]!, $variantFields: [HasMetafieldsIdentifier!]!) {
@@ -170,12 +187,12 @@ export async function fetchDraftOrders(
       lines.push(...connection.nodes);
       pageInfo = connection.pageInfo;
     }
-    const money = (set: any) => String(set?.shopMoney?.amount ?? "0");
+    const money = (set: any) => normalizeMoneyAmount(set?.shopMoney?.amount);
     return {
-      id: draft.id,
-      name: draft.name,
-      createdAt: draft.createdAt,
-      currency: draft.currencyCode,
+      id: stringValue(draft.id),
+      name: stringValue(draft.name),
+      createdAt: normalizedDateTime(draft.createdAt),
+      currency: normalizedCurrency(draft.currencyCode),
       customer: draft.email
         ? {
             id: "",
@@ -195,12 +212,16 @@ export async function fetchDraftOrders(
       ),
       lineItems: lines.map((line: any) => ({
         id: stringValue(line.id),
-        title: line.title,
-        sku: line.sku ?? "",
-        quantity: line.quantity,
+        title: stringValue(line.title),
+        sku: stringValue(line.sku),
+        labelCode128: normalizedLabelCode128Candidate(
+          line.variant?.barcode,
+          line.sku,
+        ),
+        quantity: normalizedQuantity(line.quantity),
         unitPrice: money(line.originalUnitPriceSet),
         total: money(line.discountedTotalSet),
-        currency: draft.currencyCode,
+        currency: normalizedCurrency(draft.currencyCode),
         product: normalizeProduct(line.product, selection, "product"),
         variant: normalizeVariant(line.variant, selection, "variant"),
       })),
@@ -209,7 +230,7 @@ export async function fetchDraftOrders(
       total: money(draft.totalPriceSet),
     } satisfies NormalizedOrder;
   });
-  assertPayloadSize(orders);
+  assertOrdersPayload(orders);
   return orders;
 }
 
@@ -252,17 +273,17 @@ export async function fetchOrders(
       allLines.push(...connection.nodes);
       pageInfo = connection.pageInfo;
     }
-    const money = (set: any) => String(set?.shopMoney?.amount ?? "0");
+    const money = (set: any) => normalizeMoneyAmount(set?.shopMoney?.amount);
     return {
-      id: order.id,
-      name: order.name,
-      createdAt: order.createdAt,
-      currency: order.currencyCode,
+      id: stringValue(order.id),
+      name: stringValue(order.name),
+      createdAt: normalizedDateTime(order.createdAt),
+      currency: normalizedCurrency(order.currencyCode),
       customer: order.customer
         ? {
-            displayName: order.customer.displayName ?? "",
-            email: order.customer.email ?? "",
-            id: order.customer.id,
+            displayName: stringValue(order.customer.displayName),
+            email: stringValue(order.customer.email),
+            id: stringValue(order.customer.id),
           }
         : null,
       shippingAddress: normalizedAddress(order.shippingAddress),
@@ -277,12 +298,16 @@ export async function fetchOrders(
       ),
       lineItems: allLines.map((line: any) => ({
         id: stringValue(line.id),
-        title: line.title,
-        sku: line.sku ?? "",
-        quantity: line.quantity,
+        title: stringValue(line.title),
+        sku: stringValue(line.sku),
+        labelCode128: normalizedLabelCode128Candidate(
+          line.variant?.barcode,
+          line.sku,
+        ),
+        quantity: normalizedQuantity(line.quantity),
         unitPrice: money(line.originalUnitPriceSet),
         total: money(line.discountedTotalSet),
-        currency: order.currencyCode,
+        currency: normalizedCurrency(order.currencyCode),
         product: normalizeProduct(line.product, selection, "product"),
         variant: normalizeVariant(line.variant, selection, "variant"),
       })),
@@ -291,8 +316,64 @@ export async function fetchOrders(
       total: money(order.totalPriceSet),
     } satisfies NormalizedOrder;
   });
-  assertPayloadSize(orders);
+  assertOrdersPayload(orders);
   return orders;
+}
+
+/**
+ * Build the only Shopify render-data shape submitted to PrintPacket. Money is
+ * numeric before this boundary and the canonical encoder proves the exact
+ * binary64/cache contract and 4 MiB limit used by every node renderer.
+ */
+export function shopifyDocumentInput(
+  shopDomain: string,
+  orders: NormalizedOrder[],
+  shopName?: string,
+): ShopifyDocumentInput {
+  const domain = shopDomain.trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(domain))
+    throw new Error("invalid Shopify shop domain");
+  const fallbackName = domain.slice(0, -".myshopify.com".length);
+  const name = stringValue(shopName?.trim() || fallbackName);
+  if (!name) throw new Error("Shopify shop name is required");
+  const input = {
+    shop: { name, domain },
+    orders,
+  } satisfies ShopifyDocumentInput;
+  try {
+    canonicalDataBytes(input as unknown as JsonObject);
+  } catch {
+    throw new Error(
+      "Shopify document data exceeds the PrintPacket data contract",
+    );
+  }
+  return input;
+}
+
+/**
+ * Shopify GraphQL exposes Decimal money as a string. PrintPacket money is a
+ * JSON number, so accept at most six decimal places, reject exponent/ambiguous
+ * spellings, and require the scaled integer to remain JavaScript-safe. This
+ * makes the resulting binary64 value deterministic across cloud and nodes.
+ */
+export function normalizeMoneyAmount(value: unknown): number {
+  if (typeof value !== "string" && typeof value !== "number")
+    throw new Error("Shopify money amount is invalid");
+  const raw = String(value);
+  const match = /^(-?)(0|[1-9][0-9]*)(?:\.([0-9]{1,6}))?$/.exec(raw);
+  if (!match) throw new Error("Shopify money amount is invalid");
+  const fraction = (match[3] ?? "").padEnd(MONEY_SCALE, "0");
+  const magnitude = BigInt(`${match[2]}${fraction}`);
+  if (magnitude > BigInt(Number.MAX_SAFE_INTEGER))
+    throw new Error("Shopify money amount exceeds the PrintPacket safe range");
+  const normalizedScaled = match[1] === "-" ? -magnitude : magnitude;
+  const amount = Number(normalizedScaled) / MONEY_SCALE_FACTOR;
+  if (!Number.isFinite(amount))
+    throw new Error("Shopify money amount is invalid");
+  const canonical = `${match[1] ?? ""}${match[2]}.${fraction}`;
+  if (magnitude !== 0n && amount.toFixed(MONEY_SCALE) !== canonical)
+    throw new Error("Shopify money amount exceeds exact PrintPacket precision");
+  return Object.is(amount, -0) ? 0 : amount;
 }
 
 type NormalizedBindingSelection = {
@@ -451,10 +532,90 @@ function normalizeVariant(
   };
 }
 
+/**
+ * Select the first candidate that the canonical renderer can encode at the
+ * starter label's fixed 70 mm width. Code 128-B uses 55 fixed modules plus 11
+ * per input byte, including the mandatory quiet zones used by the renderer.
+ */
+export function normalizedLabelCode128Candidate(
+  barcode: unknown,
+  sku: unknown,
+): string | null {
+  for (const source of [barcode, sku]) {
+    if (typeof source !== "string") continue;
+    const candidate = source.trim();
+    if (
+      candidate.length < 1 ||
+      candidate.length > CODE128_MAX_INPUT_BYTES ||
+      !/^[\x20-\x7e]+$/.test(candidate)
+    )
+      continue;
+    const modules =
+      CODE128_FIXED_MODULES + candidate.length * CODE128_MODULES_PER_BYTE;
+    const moduleWidth =
+      (PRODUCT_LABEL_BARCODE_WIDTH_MM * POINTS_PER_MM) / modules;
+    if (moduleWidth >= CODE128_MIN_MODULE_WIDTH_POINTS) return candidate;
+  }
+  return null;
+}
+
 function stringValue(value: unknown): string {
   return typeof value === "string"
     ? value.slice(0, MAX_METAOBJECT_VALUE_BYTES)
     : "";
+}
+
+function normalizedCurrency(value: unknown): string {
+  const currency = stringValue(value);
+  if (!/^[A-Z]{3}$/.test(currency))
+    throw new Error("Shopify currency code is invalid");
+  return currency;
+}
+
+function normalizedQuantity(value: unknown): number {
+  if (
+    !Number.isSafeInteger(value) ||
+    Number(value) < 0 ||
+    Number(value) > 1_000_000_000
+  )
+    throw new Error("Shopify line-item quantity is invalid");
+  return Number(value);
+}
+
+function normalizedDateTime(value: unknown): string {
+  const timestamp = stringValue(value);
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.exec(
+      timestamp,
+    );
+  const year = Number(match?.[1]);
+  const month = Number(match?.[2]);
+  const day = Number(match?.[3]);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [
+    31,
+    leap ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ];
+  if (
+    !match ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > (daysInMonth[month - 1] ?? 0) ||
+    !Number.isFinite(Date.parse(timestamp))
+  )
+    throw new Error("Shopify order timestamp is invalid");
+  return timestamp;
 }
 
 function boundedJsonValue(value: unknown): unknown {
@@ -466,14 +627,16 @@ function boundedJsonValue(value: unknown): unknown {
   return JSON.parse(serialized) as unknown;
 }
 
-function assertPayloadSize(orders: NormalizedOrder[]) {
-  if (
-    Buffer.byteLength(JSON.stringify(orders), "utf8") >
-    MAX_NORMALIZED_PAYLOAD_BYTES
-  )
+function assertOrdersPayload(orders: NormalizedOrder[]) {
+  // A complete shop wrapper is checked immediately before submission. This
+  // catches an oversized order selection at the fetch boundary as well.
+  try {
+    canonicalDataBytes({ orders } as unknown as JsonObject);
+  } catch {
     throw new Error(
-      "Shopify document data exceeds the normalized payload limit",
+      "Shopify document data exceeds the PrintPacket data contract",
     );
+  }
 }
 
 function normalizedAddress(value: Record<string, unknown> | null | undefined) {

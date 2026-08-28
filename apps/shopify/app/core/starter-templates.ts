@@ -31,6 +31,25 @@ const currentValue = (parts: string[], bold = false): Block => ({
     },
   ],
 });
+const optionalCurrentValue = (parts: string[], bold = false): Block => ({
+  type: "conditional",
+  condition: { type: "exists", value: current(...parts) },
+  then: [currentValue(parts, bold)],
+  else: [],
+});
+const nonEmptyCurrent = (...parts: string[]) => ({
+  type: "compare" as const,
+  operator: "not_equal" as const,
+  left: {
+    type: "format_string" as const,
+    operation: "trim" as const,
+    value: {
+      type: "coalesce" as const,
+      values: [current(...parts), literal("")],
+    },
+  },
+  right: literal(""),
+});
 const currentMoney = (...parts: string[]) => ({
   type: "format_money" as const,
   amount: current(...parts),
@@ -93,6 +112,15 @@ const base = (body: Block[], continuous = false): PrintPacket => ({
   body,
   footer: region(),
 });
+const label = (body: Block[]): PrintPacket => ({
+  ...base(body),
+  media: {
+    kind: "label",
+    width_mm: 100,
+    height_mm: 50,
+    margins: { top_mm: 3, right_mm: 3, bottom_mm: 3, left_mm: 3 },
+  },
+});
 const documents = {
   invoice: base([
     {
@@ -104,10 +132,10 @@ const documents = {
           type: "grid",
           columns: [2, 1],
           gap_mm: 8,
-          children: [value(["shop"], true), text("INVOICE", 1)],
+          children: [value(["shop", "name"], true), text("INVOICE", 1)],
         },
         currentValue(["name"], true),
-        currentValue(["shippingAddress", "formatted"]),
+        optionalCurrentValue(["shippingAddress", "formatted"]),
         { type: "divider" },
         items(),
         { type: "divider" },
@@ -157,9 +185,16 @@ const documents = {
               children: [
                 value(["shop", "name"], true),
                 {
-                  type: "qr",
-                  value: current("statusUrl"),
-                  size_mm: 24,
+                  type: "conditional",
+                  condition: nonEmptyCurrent("statusUrl"),
+                  then: [
+                    {
+                      type: "qr",
+                      value: current("statusUrl"),
+                      size_mm: 24,
+                    },
+                  ],
+                  else: [],
                 },
               ],
             },
@@ -185,7 +220,7 @@ const documents = {
               gap_mm: 1,
               children: [
                 text("SHIP TO", 2),
-                currentValue(["shippingAddress", "formatted"]),
+                optionalCurrentValue(["shippingAddress", "formatted"]),
               ],
             },
             {
@@ -193,8 +228,8 @@ const documents = {
               gap_mm: 1,
               children: [
                 text("CUSTOMER", 2),
-                currentValue(["customer", "displayName"]),
-                currentValue(["customer", "email"]),
+                optionalCurrentValue(["customer", "displayName"]),
+                optionalCurrentValue(["customer", "email"]),
               ],
             },
           ],
@@ -209,6 +244,91 @@ const documents = {
       ],
     },
   ]),
+  receipt: base(
+    [
+      value(["shop", "name"], true),
+      {
+        type: "repeat",
+        items: path("orders"),
+        gap_mm: 6,
+        children: [
+          currentValue(["name"], true),
+          {
+            type: "paragraph",
+            content: [
+              {
+                type: "value",
+                value: {
+                  type: "format_date",
+                  value: current("createdAt"),
+                  format: "day_month_year",
+                },
+              },
+            ],
+          },
+          { type: "divider" },
+          items("lineItems", [
+            column("Item", current("title"), 5),
+            column("Qty", current("quantity"), 1, "right"),
+            column("Total", currentMoney("total"), 2, "right"),
+          ]),
+          { type: "divider" },
+          {
+            type: "paragraph",
+            content: [
+              { type: "text", value: "Tax " },
+              { type: "value", value: currentMoney("tax") },
+            ],
+          },
+          {
+            type: "paragraph",
+            content: [
+              { type: "text", value: "Total ", style: { bold: true } },
+              {
+                type: "value",
+                value: currentMoney("total"),
+                style: { bold: true },
+              },
+            ],
+          },
+          text("Thank you."),
+        ],
+      },
+    ],
+    true,
+  ),
+  "product-label": label([
+    {
+      type: "repeat",
+      items: path("orders"),
+      children: [
+        {
+          type: "repeat",
+          items: current("lineItems"),
+          children: [
+            currentValue(["title"], true),
+            optionalCurrentValue(["variant", "title"]),
+            {
+              type: "conditional",
+              condition: { type: "exists", value: current("labelCode128") },
+              then: [
+                {
+                  type: "barcode",
+                  value: current("labelCode128"),
+                  symbology: "code128",
+                  width_mm: 70,
+                  height_mm: 12,
+                  human_readable: true,
+                },
+              ],
+              else: [],
+            },
+            { type: "page_break" },
+          ],
+        },
+      ],
+    },
+  ]),
 } as const;
 void literal;
 void (null as unknown as Inline);
@@ -218,14 +338,21 @@ export type StarterTemplate = {
   details: string;
   status: "Published";
   specification: PrintPacket;
-  kind: "invoice" | "packing_slip" | "receipt" | "credit_note";
-  pageSize: "A4" | "80mm";
+  kind: "invoice" | "packing_slip" | "receipt" | "credit_note" | "label";
+  pageSize: "A4" | "80mm" | "100x50mm";
   source: string;
 };
 export const starterTemplates: readonly StarterTemplate[] = Object.entries(
   documents,
 ).map(([id, specification]) => {
-  const kind = id === "packing-slip" ? "packing_slip" : "invoice";
+  const kind =
+    id === "packing-slip"
+      ? "packing_slip"
+      : id === "product-label"
+        ? "label"
+        : id === "receipt"
+          ? "receipt"
+          : "invoice";
   const liquid = canonicalToLiquid(specification);
   return {
     id,
@@ -233,11 +360,22 @@ export const starterTemplates: readonly StarterTemplate[] = Object.entries(
       .split("-")
       .map((x) => x[0]!.toUpperCase() + x.slice(1))
       .join(" "),
-    details: `${kind.replaceAll("_", " ")} · ${specification.media.kind === "continuous" ? "80 mm" : "A4"}`,
+    details: `${kind.replaceAll("_", " ")} · ${
+      specification.media.kind === "continuous"
+        ? "80 mm"
+        : specification.media.kind === "label"
+          ? "100 × 50 mm"
+          : "A4"
+    }`,
     status: "Published",
     specification,
     kind,
-    pageSize: specification.media.kind === "continuous" ? "80mm" : "A4",
+    pageSize:
+      specification.media.kind === "continuous"
+        ? "80mm"
+        : specification.media.kind === "label"
+          ? "100x50mm"
+          : "A4",
     source: serializeTemplateEnvelope({
       schema: "piqae.shopify-printpacket-template/v1",
       document: specification,
