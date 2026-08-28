@@ -653,23 +653,45 @@ async fn prehandoff_transitions_finalize_only_unaccepted_route_leases() {
         .expect("claim failure job")
         .pop()
         .expect("failure lease");
-    let outcome = store
-        .fail_agent_lease_before_handoff(
-            workspace,
-            environment,
-            agent,
-            failed_job.id,
-            lease.lease_id,
-            &lease.lease_token,
-            JobFailureReason::ContentChecksumMismatch,
-            "invalid stored fixture",
-        )
-        .await
-        .expect("terminalize route-leased failure");
-    assert!(matches!(
-        outcome,
-        PreHandoffTransitionOutcome::Transitioned(_)
-    ));
+    let first_fence = store.fail_agent_lease_before_handoff(
+        workspace,
+        environment,
+        agent,
+        failed_job.id,
+        lease.lease_id,
+        &lease.lease_token,
+        JobFailureReason::StockNotLoaded,
+        "fresh loaded-stock observation expired",
+    );
+    let second_fence = store.fail_agent_lease_before_handoff(
+        workspace,
+        environment,
+        agent,
+        failed_job.id,
+        lease.lease_id,
+        &lease.lease_token,
+        JobFailureReason::StockNotLoaded,
+        "fresh loaded-stock observation expired",
+    );
+    let (first_fence, second_fence) = tokio::join!(first_fence, second_fence);
+    assert_eq!(
+        [first_fence.as_ref(), second_fence.as_ref()]
+            .into_iter()
+            .filter(|outcome| {
+                matches!(outcome, Ok(PreHandoffTransitionOutcome::Transitioned(_)))
+            })
+            .count(),
+        1,
+        "concurrent media fences must produce exactly one durable transition"
+    );
+    assert_eq!(
+        [first_fence.as_ref(), second_fence.as_ref()]
+            .into_iter()
+            .filter(Result::is_err)
+            .count(),
+        1,
+        "the stale lease loses the execution-boundary race"
+    );
     let projection: (String, bool, String, bool) = sqlx::query_as(
         "SELECT attempt.state,attempt.final_at IS NOT NULL,
                 reservation.state,reservation.released_at IS NOT NULL
@@ -692,7 +714,29 @@ async fn prehandoff_transitions_finalize_only_unaccepted_route_leases() {
         .list_job_events(workspace, environment, failed_job.id)
         .await
         .expect("failure events");
+    assert_eq!(
+        failure_events
+            .iter()
+            .filter(|event| event.reason == Some(JobFailureReason::StockNotLoaded))
+            .count(),
+        1
+    );
     assert_eq!(failure_events.last().and_then(|event| event.agent_id), None);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM webhook_events
+             WHERE workspace_id=$1 AND environment_id=$2
+               AND event_type='job.updated' AND payload->>'id'=$3
+               AND payload->>'state'='failed_terminal'",
+        )
+        .bind(workspace.to_string())
+        .bind(environment.to_string())
+        .bind(failed_job.id.as_ulid().to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("media fence outbox count"),
+        1
+    );
 
     for (index, attempt_state) in ["accepted_by_node", "queued_local", "handing_to_spooler"]
         .into_iter()
@@ -726,13 +770,15 @@ async fn prehandoff_transitions_finalize_only_unaccepted_route_leases() {
             .expect("unsafe lease");
         assert!(matches!(
             store
-                .block_agent_lease_for_node_update(
+                .fail_agent_lease_before_handoff(
                     workspace,
                     environment,
                     agent,
                     unsafe_job.id,
                     lease.lease_id,
                     &lease.lease_token,
+                    JobFailureReason::TargetConfigurationChanged,
+                    "target changed after local acceptance",
                 )
                 .await
                 .expect("classify local responsibility"),

@@ -63,13 +63,19 @@ Stocks hold stable business identities and optional portable design facts:
 
 A target binds that stock to one or more exact printer/profile revisions.
 `GET /v1/targets/{target_id}/readiness` reports the currently selected primary
-or standby binding and why other bindings are unavailable.
+or standby binding and why other bindings are unavailable. This is generic
+route readiness: a stockless target may carry PDF or an independently validated
+printer-native job. PrintPacket stock safety is the separate per-destination
+`media_compatibility` projection.
 
 `GET /v1/targets/{target_id}/design-specification` performs these joins in one
-tenant-scoped read and returns a `specification_revision` that changes with the
-target, stock, binding, capability, or immutable profile inputs. Save that
-revision with artwork and re-fetch before printing to detect production setup
-changes.
+tenant-scoped read and returns a `specification_revision` that changes only
+with target routing constraints, the stock revision/attributes, or immutable
+binding identities. Heartbeats, printer timestamps, current loaded-media
+evidence, and temporary availability do not churn it. Save that revision with
+artwork and re-fetch before printing to detect production setup changes.
+Unavailable binding printer/profile snapshots are skipped from `destinations`
+but remain visible with reasons under `readiness.bindings`.
 
 Before presenting a printable template, a design application should:
 
@@ -77,11 +83,47 @@ Before presenting a printable template, a design application should:
 2. check target readiness;
 3. load the selected binding's printer/profile revision;
 4. use stock geometry as the intended design size;
-5. compare it with the profile `summary.dimensions_mm`;
-6. block or warn when geometry is missing or materially different.
+5. require the selected destination's `media_compatibility.status` to be
+   `ready`; and
+6. use `media_compatibility.profile_dimensions_mm` to compare the immutable
+   profile with the stock, while failing closed when the stock itself omits
+   the required kind, width, or height.
 
-Dimensions are facts, not proof that the correct roll or tray is physically
-loaded.
+Sheet width/height describe physical stock and therefore match portrait or
+landscape page geometry. An explicit stock `orientation` of `portrait` or
+`landscape` restricts output; `either` or omission allows either. Label width and
+height are ordered and cannot rotate unless stock explicitly declares
+`rotatable: true`.
+
+`media_compatibility` reports `ready`, `not_reported`, `stale`, `untrusted`, or
+`incompatible`, with actionable `reasons`. Its optional `loaded_media` evidence
+identifies the source, confidence, observation time, 15-minute `fresh_until`,
+and exact loaded stock revision. Only `reported` or `operator_confirmed`
+evidence with current calibration can authorize a new handoff. Missing,
+inferred, unknown, or expired evidence never means that the expected stock is
+loaded. Evidence is selected from the immutable profile `summary.source` or
+profile `options.bin`. A per-job bin can change that source only when the exact
+profile declares `bin` as a safe override; a correct roll in another tray does
+not satisfy the pinned source.
+
+Printing a rendered PrintPacket to a target requires the current
+`specification_revision`. Registration validates the document media against
+the target stock and immutable profile dimensions, then pins the binding,
+profile, stock, and specification revisions. Piqae repeats those checks after
+the server lease is claimed and immediately before an offer can transfer
+native responsibility. A changed target/profile/driver, stale loaded-stock
+evidence, or incompatible document media ends that unaccepted attempt with a
+durable actionable event. Correct the setup and create a new print attempt;
+never assume that the failed attempt printed. Direct concrete-printer and
+printer-native jobs retain their distinct contracts and do not silently fall
+back into this target-media path.
+
+The lower-level `POST /v1/print-intents/validate` path also fails closed when
+an intent names a stock revision. It compares every declared document page box
+with the explicit stock kind and geometry, checks an exact workflow profile
+when one is pinned, and requires fresh trusted evidence for the selected media
+source. A loaded-media-only problem returns `operator_action_required`; an
+invalid document, stock, workflow, profile, or capability returns `invalid`.
 
 ## Tenant boundary
 

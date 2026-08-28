@@ -1654,7 +1654,10 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Resolve target readiness from synchronized node facts */
+        /**
+         * Resolve target readiness from synchronized node facts
+         * @description Generic route readiness only. Stock and loaded-media safety are reported separately by each design-specification destination so stockless PDF or printer-native targets remain valid.
+         */
         get: operations["getTargetReadiness"];
         put?: never;
         post?: never;
@@ -1676,7 +1679,9 @@ export interface paths {
         /**
          * Get a consolidated, design-facing print specification
          * @description Returns the stock geometry, current target readiness, and the exact
-         *     immutable printer/profile revisions behind each binding. Opaque native
+         *     immutable printer/profile revisions behind each currently resolvable
+         *     binding. Missing printers or profile revisions remain visible in the
+         *     readiness binding list rather than failing this whole projection. Opaque native
          *     driver blobs are intentionally never returned. Clients should retain
          *     the returned revisions with saved designs and re-fetch before printing.
          */
@@ -3825,6 +3830,7 @@ export interface components {
             /** Format: int64 */
             capability_revision: number;
             workflow?: components["schemas"]["ResourceRevision"] | null;
+            /** @description When present, validation requires exact active stock, compatible document page geometry, and fresh trusted loaded-stock evidence. */
             stock?: components["schemas"]["ResourceRevision"] | null;
             /** @default {} */
             portable_options?: components["schemas"]["JobOptions"];
@@ -3846,7 +3852,10 @@ export interface components {
             message: string;
         };
         PrintIntentValidation: {
-            /** @enum {string} */
+            /**
+             * @description operator_action_required means document and configuration validation passed but loaded-stock evidence is missing, stale, untrusted, or mismatched.
+             * @enum {string}
+             */
             status: "valid" | "invalid" | "operator_action_required";
             /** Format: int64 */
             capability_revision: number;
@@ -3993,6 +4002,11 @@ export interface components {
              *     PrintPacket or printer-native capability contract. The job remains
              *     blocked without lease retries until an authenticated capability
              *     report proves compatibility has been restored.
+             *     `target_configuration_changed`, `stock_not_loaded`, and
+             *     `document_media_incompatible` are server-side pre-handoff fences:
+             *     no native responsibility was accepted and the actionable event is
+             *     durable. Submit a new attempt only after correcting and preflighting
+             *     the destination; never infer that the original attempt printed.
              */
             reason: string | null;
             message: string | null;
@@ -4311,17 +4325,43 @@ export interface components {
             selected_binding_id: string | null;
             bindings: components["schemas"]["BindingReadiness"][];
         };
+        /** @description A currently resolvable binding. Consult readiness.bindings for unavailable bindings that cannot expose a printer/profile snapshot. */
         DesignSpecificationDestination: {
             binding: components["schemas"]["TargetBinding"];
             printer: components["schemas"]["Printer"];
             profile: components["schemas"]["PrinterProfileSnapshot"];
+            media_compatibility: components["schemas"]["TargetMediaCompatibility"];
+        };
+        TargetMediaDimensions: {
+            width_mm: number;
+            height_mm: number;
+        };
+        TargetLoadedMediaEvidence: {
+            source: string;
+            /** @enum {string} */
+            confidence: "reported" | "operator_confirmed" | "inferred" | "unknown";
+            /** Format: date-time */
+            observed_at: string;
+            /**
+             * Format: date-time
+             * @description After this instant the observation cannot authorize a new native handoff.
+             */
+            fresh_until: string;
+            stock: components["schemas"]["ResourceRevision"] | null;
+        };
+        TargetMediaCompatibility: {
+            /** @enum {string} */
+            status: "ready" | "not_reported" | "stale" | "untrusted" | "incompatible";
+            reasons: string[];
+            profile_dimensions_mm: components["schemas"]["TargetMediaDimensions"] | null;
+            loaded_media: components["schemas"]["TargetLoadedMediaEvidence"] | null;
         };
         DesignSpecification: {
             target: components["schemas"]["Target"];
             stock: components["schemas"]["Stock"] | null;
             readiness: components["schemas"]["TargetReadiness"];
             destinations: components["schemas"]["DesignSpecificationDestination"][];
-            /** @description Stable digest-like revision derived from target, stock, capability, profile and binding revisions. */
+            /** @description Stable digest-like revision derived only from target routing constraints, the stock revision/attributes, and immutable binding identities. Heartbeats, printer timestamps, loaded-media evidence, and temporary availability never change it. */
             specification_revision: string;
         };
         Printer: {
@@ -4860,6 +4900,8 @@ export interface components {
         PrintPacketPrintRequest: {
             printer_id?: string;
             target_id?: string;
+            /** @description Required with target_id. Must equal the latest target design-specification revision. */
+            specification_revision?: string;
             title: string;
             options?: components["schemas"]["JobOptions"];
             /** @default 1 */

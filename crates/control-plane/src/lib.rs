@@ -2016,6 +2016,30 @@ mod tests {
         }
         let _ = sync_virtual_document_node(&application, supported.clone(), false).await;
 
+        let printer_with_target_revision = application
+            .router
+            .clone()
+            .oneshot(idempotent_api_request(
+                "POST",
+                &format!("/v1/printpacket/renders/{render_id}/print"),
+                "piq_test_integration",
+                "printer-with-target-revision",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "specification_revision": "spec_invalid_for_direct_printer",
+                        "title": "Invalid direct printer revision"
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .expect("direct printer revision response");
+        assert_eq!(
+            printer_with_target_revision.status(),
+            StatusCode::BAD_REQUEST
+        );
+
         let required = json_response(
             &application.router,
             idempotent_api_request(
@@ -3337,7 +3361,7 @@ mod tests {
                 "POST",
                 "/v1/stocks",
                 "piq_test_integration",
-                Some(r#"{"name":"Shipping A4","sku":"A4-SHIP","attributes":{"width_mm":210}}"#),
+                Some(r#"{"name":"Shipping A4","sku":"A4-SHIP","attributes":{"kind":"sheet","width_mm":210,"height_mm":297}}"#),
             ))
             .await
             .expect("stock response");
@@ -3351,7 +3375,31 @@ mod tests {
                 .to_bytes(),
         )
         .expect("stock JSON");
-        assert!(stock["id"].as_str().expect("stock id").starts_with("stk_"));
+        let stock_id = stock["id"].as_str().expect("stock id");
+        assert!(stock_id.starts_with("stk_"));
+        let mut media_printer = profiled_printer_snapshot(printer_id);
+        media_printer.profiles[0].stock_id = Some(stock_id.to_owned());
+        media_printer.profiles[0].summary.dimensions_mm = Some([210.0, 297.0]);
+        media_printer.profiles[0].summary.source = Some("main".into());
+        media_printer.capabilities.bins = vec!["main".into(), "rear".into()];
+        let media_sync = AgentSyncRequest {
+            printers: Some(vec![media_printer]),
+            printer_revision: 2,
+            route_observations: vec![live_route_observation(printer_id, 2)],
+            ..sync_request.clone()
+        };
+        let media_sync_response = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                &application,
+                "POST",
+                "/v1/agent/sync",
+                serde_json::to_vec(&media_sync).expect("media sync JSON"),
+            ))
+            .await
+            .expect("media sync response");
+        assert_eq!(media_sync_response.status(), StatusCode::OK);
 
         let target_response = application
             .router
@@ -3360,7 +3408,9 @@ mod tests {
                 "POST",
                 "/v1/targets",
                 "piq_test_integration",
-                Some(r#"{"name":"Shipping labels"}"#),
+                Some(&format!(
+                    r#"{{"name":"Shipping documents","stock_id":"{stock_id}"}}"#
+                )),
             ))
             .await
             .expect("target response");
@@ -3390,6 +3440,137 @@ mod tests {
             .await
             .expect("binding response");
         assert_eq!(binding_response.status(), StatusCode::CREATED);
+        let binding: serde_json::Value = serde_json::from_slice(
+            &binding_response
+                .into_body()
+                .collect()
+                .await
+                .expect("binding body")
+                .to_bytes(),
+        )
+        .expect("binding JSON");
+        let binding_id = binding["id"].as_str().expect("binding id");
+
+        let media_standby_agent = AgentId::new();
+        let media_standby_printer = PrinterId::new();
+        let mut restored_primary_profile = stored_profiled_printer(printer_id);
+        restored_primary_profile.profiles[0].stock_id = Some(stock_id.to_owned());
+        restored_primary_profile.profiles[0].summary = Some(serde_json::json!({
+            "dimensions_mm": [210.0, 297.0],
+            "source": "main"
+        }));
+        restored_primary_profile.capabilities.bins = vec!["main".into(), "rear".into()];
+        application
+            .repository
+            .add_printer(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                media_standby_printer,
+                media_standby_agent,
+            )
+            .await;
+        let mut media_standby_snapshot = stored_profiled_printer(media_standby_printer);
+        media_standby_snapshot.profiles[0].stock_id = Some(stock_id.to_owned());
+        media_standby_snapshot.profiles[0].summary = Some(serde_json::json!({
+            "dimensions_mm": [210.0, 297.0],
+            "source": "main"
+        }));
+        application
+            .repository
+            .sync_agent_presence(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                media_standby_agent,
+                "media-aware-standby",
+                &AgentHealth {
+                    started_at: Utc::now(),
+                    observed_at: Utc::now(),
+                    sqlite_integrity_ok: true,
+                    executor_crashes: 0,
+                    last_error_code: None,
+                },
+                &piqae_protocol::agent::DocumentRenderCapabilities::default(),
+                Some(std::slice::from_ref(&media_standby_snapshot)),
+            )
+            .await
+            .expect("media standby presence");
+        let media_standby_binding = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "POST",
+                &format!("/v1/targets/{target_id}/bindings"),
+                "piq_test_integration",
+                Some(&format!(
+                    r#"{{"printer_id":"{media_standby_printer}","profile_id":"profile_shipping","profile_revision":4,"role":"standby"}}"#
+                )),
+            ))
+            .await
+            .expect("media standby binding response");
+        assert_eq!(media_standby_binding.status(), StatusCode::CREATED);
+        application
+            .repository
+            .upsert_loaded_media(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                &piqae_storage_postgres::StoredLoadedMedia {
+                    printer_id: media_standby_printer,
+                    source: "main".into(),
+                    stock_id: Some(stock_id.to_owned()),
+                    stock_revision: Some(1),
+                    confidence: "operator_confirmed".into(),
+                    calibration_state: "current".into(),
+                    remaining_amount: None,
+                    observed_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+            )
+            .await
+            .expect("media standby loaded stock");
+
+        let loaded_media_response = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "PUT",
+                &format!("/v1/printers/{printer_id}/loaded-media"),
+                "piq_test_integration",
+                Some(&format!(
+                    r#"{{"source":"main","stock":{{"id":"{stock_id}","revision":1}},"calibration_state":"current"}}"#
+                )),
+            ))
+            .await
+            .expect("loaded media response");
+        assert_eq!(loaded_media_response.status(), StatusCode::OK);
+        let print_intent = serde_json::json!({
+            "intent": {
+                "schema_version": 1,
+                "printer_id": printer_id,
+                "capability_revision": 7,
+                "workflow": null,
+                "stock": {"id": stock_id, "revision": 1},
+                "portable_options": {"bin": "main"},
+                "semantic_options": {},
+                "document_manifest": {
+                    "page_count": 1,
+                    "page_boxes": [{"width_mm": 210, "height_mm": 297}],
+                    "color_spaces": ["DeviceRGB"],
+                    "separations": [],
+                    "scaling": "none"
+                }
+            }
+        });
+        let valid_intent = json_response(
+            &application.router,
+            api_request(
+                "POST",
+                "/v1/print-intents/validate",
+                "piq_test_integration",
+                Some(&print_intent.to_string()),
+            ),
+        )
+        .await;
+        assert_eq!(valid_intent["status"], "valid");
 
         let readiness_response = application
             .router
@@ -3415,6 +3596,690 @@ mod tests {
         assert_eq!(readiness["status"], "ready");
         assert_eq!(readiness["bindings"][0]["status"], "ready");
 
+        let design = json_response(
+            &application.router,
+            api_request(
+                "GET",
+                &format!("/v1/targets/{target_id}/design-specification"),
+                "piq_test_integration",
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            design["destinations"][0]["media_compatibility"]["status"],
+            "ready"
+        );
+        assert_eq!(
+            design["destinations"][0]["media_compatibility"]["loaded_media"]["stock"]["revision"],
+            1
+        );
+        let heartbeat_time = Utc::now();
+        let heartbeat_sync = AgentSyncRequest {
+            printer_revision: 3,
+            health: AgentHealth {
+                started_at: now,
+                observed_at: heartbeat_time,
+                sqlite_integrity_ok: true,
+                executor_crashes: 0,
+                last_error_code: None,
+            },
+            route_observations: vec![live_route_observation(printer_id, 3)],
+            ..media_sync.clone()
+        };
+        let heartbeat_response = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                &application,
+                "POST",
+                "/v1/agent/sync",
+                serde_json::to_vec(&heartbeat_sync).expect("heartbeat sync JSON"),
+            ))
+            .await
+            .expect("heartbeat sync response");
+        assert_eq!(heartbeat_response.status(), StatusCode::OK);
+        let design_after_heartbeat = json_response(
+            &application.router,
+            api_request(
+                "GET",
+                &format!("/v1/targets/{target_id}/design-specification"),
+                "piq_test_integration",
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            design_after_heartbeat["specification_revision"], design["specification_revision"],
+            "ordinary heartbeat and inventory timestamps are not design constraints"
+        );
+        let mut fence_metadata = BTreeMap::from([
+            ("piqae.target_id".into(), target_id.to_owned()),
+            ("piqae.binding_id".into(), binding_id.to_owned()),
+            ("piqae.profile_id".into(), "profile_shipping".into()),
+            ("piqae.profile_revision".into(), "4".into()),
+            ("piqae.stock_id".into(), stock_id.to_owned()),
+            ("piqae.stock_revision".into(), "1".into()),
+            (
+                "piqae.document.media".into(),
+                r#"{"kind":"paged","size":"a4","orientation":"portrait","margins":{"top_mm":10.0,"right_mm":10.0,"bottom_mm":10.0,"left_mm":10.0}}"#.into(),
+            ),
+        ]);
+        fence_metadata.insert(
+            "piqae.design_specification_revision".into(),
+            design["specification_revision"]
+                .as_str()
+                .expect("specification revision")
+                .to_owned(),
+        );
+        let fenced_job = piqae_domain::Job {
+            id: JobId::new(),
+            workspace_id: application.tenant.workspace_id,
+            environment_id: application.tenant.environment_id,
+            printer_id,
+            title: "Media fence".into(),
+            source: Some("test".into()),
+            content_kind: piqae_domain::ContentKind::Pdf,
+            content: piqae_domain::ContentSource::Base64 {
+                data: "JVBERi0=".into(),
+            },
+            options: JobOptions::default(),
+            metadata: fence_metadata,
+            deliveries: 1,
+            state: JobState::WaitingForAgent,
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            delivery_uncertain_since: None,
+        };
+        assert!(
+            crate::routing::printpacket_execution_failure(
+                &application.state,
+                application.tenant,
+                &fenced_job,
+            )
+            .await
+            .expect("fresh media fence")
+            .is_none()
+        );
+        let mut missing_alternate_profile = media_standby_snapshot.clone();
+        missing_alternate_profile.profiles.clear();
+        application
+            .repository
+            .sync_agent_presence(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                media_standby_agent,
+                "media-aware-standby",
+                &AgentHealth {
+                    started_at: Utc::now(),
+                    observed_at: Utc::now(),
+                    sqlite_integrity_ok: true,
+                    executor_crashes: 0,
+                    last_error_code: None,
+                },
+                &piqae_protocol::agent::DocumentRenderCapabilities::default(),
+                Some(std::slice::from_ref(&missing_alternate_profile)),
+            )
+            .await
+            .expect("alternate profile disappears");
+        let design_without_alternate = json_response(
+            &application.router,
+            api_request(
+                "GET",
+                &format!("/v1/targets/{target_id}/design-specification"),
+                "piq_test_integration",
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            design_without_alternate["destinations"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            design_without_alternate["specification_revision"],
+            design["specification_revision"]
+        );
+        assert!(
+            crate::routing::printpacket_execution_failure(
+                &application.state,
+                application.tenant,
+                &fenced_job,
+            )
+            .await
+            .expect("unrelated missing profile must not abort sync")
+            .is_none()
+        );
+        application
+            .repository
+            .sync_agent_presence(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                media_standby_agent,
+                "media-aware-standby",
+                &AgentHealth {
+                    started_at: Utc::now(),
+                    observed_at: Utc::now(),
+                    sqlite_integrity_ok: true,
+                    executor_crashes: 0,
+                    last_error_code: None,
+                },
+                &piqae_protocol::agent::DocumentRenderCapabilities::default(),
+                Some(std::slice::from_ref(&media_standby_snapshot)),
+            )
+            .await
+            .expect("restore alternate profile");
+        let mut missing_pinned_profile = stored_profiled_printer(printer_id);
+        missing_pinned_profile.profiles.clear();
+        application
+            .repository
+            .sync_agent_presence(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                "test-routing",
+                &AgentHealth {
+                    started_at: now,
+                    observed_at: Utc::now(),
+                    sqlite_integrity_ok: true,
+                    executor_crashes: 0,
+                    last_error_code: None,
+                },
+                &piqae_protocol::agent::DocumentRenderCapabilities::default(),
+                Some(std::slice::from_ref(&missing_pinned_profile)),
+            )
+            .await
+            .expect("pinned profile disappears");
+        let missing_profile_failure = crate::routing::printpacket_execution_failure(
+            &application.state,
+            application.tenant,
+            &fenced_job,
+        )
+        .await
+        .expect("missing pinned profile classification")
+        .expect("missing pinned profile must fence");
+        assert_eq!(
+            missing_profile_failure.0,
+            piqae_domain::JobFailureReason::TargetConfigurationChanged
+        );
+        let mut durable_missing_profile_job = fenced_job.clone();
+        durable_missing_profile_job.id = JobId::new();
+        application
+            .repository
+            .create_cloud_job(
+                &durable_missing_profile_job,
+                application.agent_id,
+                None,
+                b"missing-pinned-profile-registration",
+                false,
+            )
+            .await
+            .expect("durable missing-profile job");
+        let missing_profile_lease = application
+            .repository
+            .claim_jobs(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                "virtual-missing-profile-fence",
+                16,
+            )
+            .await
+            .expect("missing-profile lease")
+            .into_iter()
+            .find(|lease| lease.job.id == durable_missing_profile_job.id)
+            .expect("exact missing-profile lease");
+        let missing_profile_transition = application
+            .repository
+            .fail_agent_lease_before_handoff(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                durable_missing_profile_job.id,
+                missing_profile_lease.lease_id,
+                &missing_profile_lease.lease_token,
+                missing_profile_failure.0,
+                missing_profile_failure.1,
+            )
+            .await
+            .expect("durable missing-profile transition");
+        assert!(matches!(
+            missing_profile_transition,
+            piqae_storage_postgres::PreHandoffTransitionOutcome::Transitioned(_)
+        ));
+        assert_eq!(
+            application
+                .repository
+                .list_job_events(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    durable_missing_profile_job.id,
+                )
+                .await
+                .expect("missing-profile events")
+                .iter()
+                .filter(|event| {
+                    event.reason == Some(piqae_domain::JobFailureReason::TargetConfigurationChanged)
+                })
+                .count(),
+            1
+        );
+        application
+            .repository
+            .sync_agent_presence(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                "test-routing",
+                &AgentHealth {
+                    started_at: now,
+                    observed_at: Utc::now(),
+                    sqlite_integrity_ok: true,
+                    executor_crashes: 0,
+                    last_error_code: None,
+                },
+                &piqae_protocol::agent::DocumentRenderCapabilities::default(),
+                Some(std::slice::from_ref(&restored_primary_profile)),
+            )
+            .await
+            .expect("restore pinned profile");
+        let media_template = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                "/v1/printpacket/templates",
+                "piq_test_integration",
+                "media-fence-template",
+                Some(
+                    &serde_json::json!({
+                        "name": "Media fence A4",
+                        "specification": {
+                            "format": "printpacket/v1",
+                            "media": {"kind": "paged", "size": "a4"},
+                            "body": [{"type": "paragraph", "content": [{"type": "text", "value": "fence"}]}]
+                        }
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        let media_revision = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                &format!(
+                    "/v1/printpacket/templates/{}/publish",
+                    media_template["id"].as_str().expect("media template id")
+                ),
+                "piq_test_integration",
+                "media-fence-publish",
+                Some(
+                    &serde_json::json!({"specification": media_template["specification"]})
+                        .to_string(),
+                ),
+            ),
+        )
+        .await;
+        let media_render = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                "/v1/printpacket/renders",
+                "piq_test_integration",
+                "media-fence-render",
+                Some(
+                    &serde_json::json!({
+                        "template_revision_id": media_revision["id"],
+                        "input": {}
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(
+            crate::document_render_worker::DocumentRenderWorker::new(
+                application.state.clone(),
+                "virtual-media-fence-renderer",
+            )
+            .run_once(1)
+            .await
+            .expect("complete media fence render"),
+            1
+        );
+        let print_path = format!(
+            "/v1/printpacket/renders/{}/print",
+            media_render["id"].as_str().expect("media render id")
+        );
+        let missing_revision = application
+            .router
+            .clone()
+            .oneshot(idempotent_api_request(
+                "POST",
+                &print_path,
+                "piq_test_integration",
+                "media-fence-print-missing-revision",
+                Some(
+                    &serde_json::json!({
+                        "target_id": target_id,
+                        "title": "Media fence without revision"
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .expect("missing specification revision response");
+        assert_eq!(missing_revision.status(), StatusCode::CONFLICT);
+        let target_print = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                &print_path,
+                "piq_test_integration",
+                "media-fence-print",
+                Some(
+                    &serde_json::json!({
+                        "target_id": target_id,
+                        "specification_revision": design["specification_revision"],
+                        "title": "Media-fenced PrintPacket"
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        let target_print_id = target_print["id"]
+            .as_str()
+            .expect("target PrintPacket job id")
+            .parse::<JobId>()
+            .expect("typed target PrintPacket job id");
+        assert_eq!(
+            target_print["metadata"]["piqae.stock_revision"],
+            stock["revision"]
+                .as_u64()
+                .expect("stock revision")
+                .to_string()
+        );
+        assert_eq!(target_print["printer_id"], printer_id.as_ulid().to_string());
+        application
+            .repository
+            .upsert_loaded_media(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                &piqae_storage_postgres::StoredLoadedMedia {
+                    printer_id,
+                    source: "rear".into(),
+                    stock_id: Some(stock_id.to_owned()),
+                    stock_revision: Some(1),
+                    confidence: "operator_confirmed".into(),
+                    calibration_state: "current".into(),
+                    remaining_amount: None,
+                    observed_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+            )
+            .await
+            .expect("correct stock in unrelated tray");
+        application
+            .repository
+            .upsert_loaded_media(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                &piqae_storage_postgres::StoredLoadedMedia {
+                    printer_id,
+                    source: "main".into(),
+                    stock_id: None,
+                    stock_revision: None,
+                    confidence: "operator_confirmed".into(),
+                    calibration_state: "current".into(),
+                    remaining_amount: None,
+                    observed_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+            )
+            .await
+            .expect("wrong stock in immutable profile tray");
+        let wrong_tray_design = json_response(
+            &application.router,
+            api_request(
+                "GET",
+                &format!("/v1/targets/{target_id}/design-specification"),
+                "piq_test_integration",
+                None,
+            ),
+        )
+        .await;
+        let primary_destination = wrong_tray_design["destinations"]
+            .as_array()
+            .and_then(|destinations| {
+                destinations.iter().find(|destination| {
+                    destination["printer"]["id"] == printer_id.as_ulid().to_string()
+                })
+            })
+            .expect("primary design destination");
+        assert_eq!(
+            primary_destination["media_compatibility"]["status"],
+            "incompatible"
+        );
+        assert_eq!(
+            primary_destination["media_compatibility"]["loaded_media"]["source"], "main",
+            "a correct unrelated tray must not satisfy the immutable profile source"
+        );
+        assert_eq!(
+            wrong_tray_design["specification_revision"], design["specification_revision"],
+            "loaded observations are readiness evidence, not design constraints"
+        );
+        let standby_target_print = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                &print_path,
+                "piq_test_integration",
+                "media-fence-print-ready-standby",
+                Some(
+                    &serde_json::json!({
+                        "target_id": target_id,
+                        "specification_revision": design["specification_revision"],
+                        "title": "Media-aware standby PrintPacket"
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(
+            standby_target_print["printer_id"],
+            media_standby_printer.as_ulid().to_string(),
+            "PrintPacket selection must skip a wrong-stock primary"
+        );
+        let unsafe_source_override = application
+            .router
+            .clone()
+            .oneshot(idempotent_api_request(
+                "POST",
+                &print_path,
+                "piq_test_integration",
+                "media-fence-print-unsafe-tray-override",
+                Some(
+                    &serde_json::json!({
+                        "target_id": target_id,
+                        "specification_revision": design["specification_revision"],
+                        "title": "Unsafe tray override",
+                        "options": {"bin": "rear"}
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .expect("unsafe source override response");
+        assert_eq!(unsafe_source_override.status(), StatusCode::CONFLICT);
+        application
+            .repository
+            .upsert_loaded_media(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                &piqae_storage_postgres::StoredLoadedMedia {
+                    printer_id,
+                    source: "main".into(),
+                    stock_id: Some(stock_id.to_owned()),
+                    stock_revision: Some(1),
+                    confidence: "operator_confirmed".into(),
+                    calibration_state: "current".into(),
+                    remaining_amount: None,
+                    observed_at: Utc::now() - chrono::Duration::minutes(16),
+                    updated_at: Utc::now(),
+                },
+            )
+            .await
+            .expect("stale loaded-media fixture");
+        assert!(matches!(
+            crate::routing::printpacket_execution_failure(
+                &application.state,
+                application.tenant,
+                &fenced_job,
+            )
+            .await
+            .expect("stale media fence"),
+            Some((piqae_domain::JobFailureReason::StockNotLoaded, _))
+        ));
+        let stale_intent = json_response(
+            &application.router,
+            api_request(
+                "POST",
+                "/v1/print-intents/validate",
+                "piq_test_integration",
+                Some(&print_intent.to_string()),
+            ),
+        )
+        .await;
+        assert_eq!(
+            stale_intent["status"], "operator_action_required",
+            "{stale_intent}"
+        );
+        assert_eq!(stale_intent["errors"][0]["code"], "loaded_media_stale");
+        let stale_sync = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                &application,
+                "POST",
+                "/v1/agent/sync",
+                serde_json::to_vec(&media_sync).expect("stale media sync JSON"),
+            ))
+            .await
+            .expect("stale media sync response");
+        assert_eq!(stale_sync.status(), StatusCode::OK);
+        let stale_sync: AgentSyncResponse = serde_json::from_slice(
+            &stale_sync
+                .into_body()
+                .collect()
+                .await
+                .expect("stale media sync body")
+                .to_bytes(),
+        )
+        .expect("stale media sync JSON");
+        assert!(
+            stale_sync
+                .candidate_jobs
+                .iter()
+                .all(|offer| offer.job.id != target_print_id)
+        );
+        assert_eq!(
+            application
+                .repository
+                .get_job(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    target_print_id,
+                )
+                .await
+                .expect("fenced target PrintPacket job")
+                .state,
+            JobState::FailedTerminal
+        );
+        assert_eq!(
+            application
+                .repository
+                .list_job_events(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    target_print_id,
+                )
+                .await
+                .expect("fenced target PrintPacket events")
+                .iter()
+                .filter(|event| event.reason == Some(piqae_domain::JobFailureReason::StockNotLoaded))
+                .count(),
+            1
+        );
+        application
+            .repository
+            .create_cloud_job(
+                &fenced_job,
+                application.agent_id,
+                None,
+                b"media-fence-registration",
+                false,
+            )
+            .await
+            .expect("durable fenced job");
+        let lease = application
+            .repository
+            .claim_jobs(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                "virtual-media-fence",
+                16,
+            )
+            .await
+            .expect("media fence lease")
+            .into_iter()
+            .find(|lease| lease.job.id == fenced_job.id)
+            .expect("exact media fence lease");
+        let blocked = application
+            .repository
+            .fail_agent_lease_before_handoff(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                fenced_job.id,
+                lease.lease_id,
+                &lease.lease_token,
+                piqae_domain::JobFailureReason::StockNotLoaded,
+                "Fresh trusted loaded-stock evidence expired before native acceptance.",
+            )
+            .await
+            .expect("durable pre-handoff media fence");
+        let piqae_storage_postgres::PreHandoffTransitionOutcome::Transitioned(blocked) = blocked
+        else {
+            panic!("unaccepted virtual job must be fenced")
+        };
+        assert_eq!(blocked.job.state, JobState::FailedTerminal);
+        assert!(
+            application
+                .repository
+                .list_job_events(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    fenced_job.id,
+                )
+                .await
+                .expect("media fence events")
+                .iter()
+                .any(|event| {
+                    event.reason == Some(piqae_domain::JobFailureReason::StockNotLoaded)
+                        && event.agent_id.is_none()
+                })
+        );
+
+        application
+            .repository
+            .set_agent_offline(media_standby_agent)
+            .await;
         application
             .repository
             .set_agent_offline(application.agent_id)
@@ -3476,7 +4341,7 @@ mod tests {
             agent_id: application.agent_id,
             protocol_version: 1,
             agent_version: "test-routing".into(),
-            printer_revision: 2,
+            printer_revision: 4,
             acknowledged_command_cursor: None,
             event_cursor: None,
             queue: QueueSnapshot {
@@ -3497,7 +4362,7 @@ mod tests {
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
             capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
-            route_observations: vec![live_route_observation(printer_id, 2)],
+            route_observations: vec![live_route_observation(printer_id, 4)],
             topology_changes: Vec::new(),
             native_handoffs: Vec::new(),
             runtime: None,
@@ -3562,18 +4427,8 @@ mod tests {
             .expect("invalid binding response");
         assert_eq!(wrong_revision.status(), StatusCode::NOT_FOUND);
 
-        let standby_agent = AgentId::new();
-        let standby_printer = PrinterId::new();
-        application
-            .repository
-            .add_printer(
-                application.tenant.workspace_id,
-                application.tenant.environment_id,
-                standby_printer,
-                standby_agent,
-            )
-            .await;
-        let standby_snapshot = stored_profiled_printer(standby_printer);
+        let standby_agent = media_standby_agent;
+        let standby_printer = media_standby_printer;
         application
             .repository
             .sync_agent_presence(
@@ -3589,24 +4444,10 @@ mod tests {
                     last_error_code: None,
                 },
                 &piqae_protocol::agent::DocumentRenderCapabilities::default(),
-                Some(std::slice::from_ref(&standby_snapshot)),
+                Some(std::slice::from_ref(&media_standby_snapshot)),
             )
             .await
             .expect("standby presence");
-        let standby_binding = application
-            .router
-            .clone()
-            .oneshot(api_request(
-                "POST",
-                &format!("/v1/targets/{target_id}/bindings"),
-                "piq_test_integration",
-                Some(&format!(
-                    r#"{{"printer_id":"{standby_printer}","profile_id":"profile_shipping","profile_revision":4,"role":"standby"}}"#
-                )),
-            ))
-            .await
-            .expect("standby binding response");
-        assert_eq!(standby_binding.status(), StatusCode::CREATED);
         application
             .repository
             .revoke_agent(
@@ -3776,7 +4617,150 @@ mod tests {
                 support_pack_digest_sha256: "c".repeat(64),
                 printer_ids: vec![application.printer_id.to_string()],
             });
-        let _ = sync_virtual_document_node(&application, capabilities.clone(), false).await;
+        let _ = sync_virtual_document_node(&application, capabilities.clone(), true).await;
+
+        let stockless_target = json_response(
+            &application.router,
+            api_request(
+                "POST",
+                "/v1/targets",
+                "piq_test_integration",
+                Some(r#"{"name":"Stockless generic output"}"#),
+            ),
+        )
+        .await;
+        let stockless_target_id = stockless_target["id"]
+            .as_str()
+            .expect("stockless target id");
+        let stockless_binding = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "POST",
+                &format!("/v1/targets/{stockless_target_id}/bindings"),
+                "piq_test_integration",
+                Some(&format!(
+                    r#"{{"printer_id":"{}","profile_id":"profile_shipping","profile_revision":4,"role":"primary"}}"#,
+                    application.printer_id
+                )),
+            ))
+            .await
+            .expect("stockless binding response");
+        assert_eq!(stockless_binding.status(), StatusCode::CREATED);
+        let stockless_readiness = json_response(
+            &application.router,
+            api_request(
+                "GET",
+                &format!("/v1/targets/{stockless_target_id}/readiness"),
+                "piq_test_integration",
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(stockless_readiness["status"], "ready");
+        let stockless_design = json_response(
+            &application.router,
+            api_request(
+                "GET",
+                &format!("/v1/targets/{stockless_target_id}/design-specification"),
+                "piq_test_integration",
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            stockless_design["destinations"][0]["media_compatibility"]["status"],
+            "incompatible"
+        );
+        let stockless_pdf = application
+            .router
+            .clone()
+            .oneshot(idempotent_api_request(
+                "POST",
+                "/v1/jobs",
+                "piq_test_integration",
+                "stockless-target-pdf",
+                Some(
+                    &serde_json::json!({
+                        "target_id": stockless_target_id,
+                        "title": "Stockless PDF",
+                        "content_type": "pdf",
+                        "content": {"type": "base64", "data": "JVBERi0="}
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .expect("stockless PDF response");
+        let stockless_pdf_status = stockless_pdf.status();
+        let stockless_pdf_body = stockless_pdf
+            .into_body()
+            .collect()
+            .await
+            .expect("stockless PDF body")
+            .to_bytes();
+        assert_eq!(
+            stockless_pdf_status,
+            StatusCode::CREATED,
+            "{}",
+            String::from_utf8_lossy(&stockless_pdf_body)
+        );
+        let stockless_pdf: serde_json::Value =
+            serde_json::from_slice(&stockless_pdf_body).expect("stockless PDF JSON");
+        let stockless_raw = application
+            .router
+            .clone()
+            .oneshot(idempotent_api_request(
+                "POST",
+                "/v1/jobs",
+                "piq_test_integration",
+                "stockless-target-raw",
+                Some(
+                    &serde_json::json!({
+                        "target_id": stockless_target_id,
+                        "title": "Stockless raw",
+                        "content_type": "raw",
+                        "printer_native": {
+                            "output_profile_id": "escpos.generic/v1",
+                            "language_profile_id": "escpos.generic/v1"
+                        },
+                        "content": {"type": "base64", "data": "G0BmaXh0dXJl"}
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .expect("stockless raw response");
+        let stockless_raw_status = stockless_raw.status();
+        let stockless_raw_body = stockless_raw
+            .into_body()
+            .collect()
+            .await
+            .expect("stockless raw body")
+            .to_bytes();
+        assert_eq!(stockless_raw_status, StatusCode::CREATED);
+        let stockless_raw: serde_json::Value =
+            serde_json::from_slice(&stockless_raw_body).expect("stockless raw JSON");
+        for job in [&stockless_pdf, &stockless_raw] {
+            let cancellation = application
+                .router
+                .clone()
+                .oneshot(api_request(
+                    "POST",
+                    &format!(
+                        "/v1/jobs/{}/cancel",
+                        job["id"].as_str().expect("stockless job id")
+                    ),
+                    "piq_test_integration",
+                    None,
+                ))
+                .await
+                .expect("stockless job cancellation");
+            assert!(matches!(
+                cancellation.status(),
+                StatusCode::OK | StatusCode::ACCEPTED
+            ));
+        }
 
         let wrong = application
             .router

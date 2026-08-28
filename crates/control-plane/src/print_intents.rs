@@ -398,6 +398,7 @@ async fn validate_for_tenant(
         .await?;
     let mut errors = Vec::new();
     let mut intent = intent;
+    let mut pinned_profile: Option<(String, u64)> = None;
     if intent.capability_revision == 0 || intent.capability_revision != printer.capability_revision
     {
         errors.push(finding(
@@ -450,6 +451,7 @@ async fn validate_for_tenant(
                     )),
                     _ => {}
                 }
+                pinned_profile = workflow.profile_id.clone().zip(workflow.profile_revision);
                 if workflow.stock_id.is_some() != workflow.stock_revision.is_some() {
                     errors.push(finding(
                         "workflow_stock_invalid",
@@ -567,7 +569,67 @@ async fn validate_for_tenant(
             .get_stock(workspace_id, environment_id, &stock.id)
             .await
         {
-            Ok(current) if current.revision == stock.revision && !current.archived => {}
+            Ok(current) if current.revision == stock.revision && !current.archived => {
+                if !document_manifest_matches_stock(&intent.document_manifest, &current) {
+                    errors.push(finding(
+                        "document_media_incompatible",
+                        "document_manifest.page_boxes",
+                        "Document page geometry does not match the explicit stock kind and dimensions.",
+                    ));
+                }
+                let pinned_profile_snapshot =
+                    pinned_profile
+                        .as_ref()
+                        .and_then(|(profile_id, profile_revision)| {
+                            printer.profiles.iter().find(|profile| {
+                                profile.profile_id == *profile_id
+                                    && profile.revision == *profile_revision
+                            })
+                        });
+                if pinned_profile.is_some()
+                    && pinned_profile_snapshot.is_none_or(|profile| {
+                        !crate::routing::stock_profile_dimensions_compatible(
+                            &current,
+                            crate::routing::profile_dimensions(profile).as_ref(),
+                        )
+                    })
+                {
+                    errors.push(finding(
+                        "profile_media_incompatible",
+                        "workflow",
+                        "The workflow's immutable profile dimensions do not match the stock.",
+                    ));
+                }
+                let loaded_source = pinned_profile_snapshot.map_or_else(
+                    || options.bin.clone(),
+                    |profile| {
+                        match crate::routing::effective_profile_media_source(
+                            profile,
+                            options.bin.as_deref(),
+                        ) {
+                            Ok(source) => source,
+                            Err(code) => {
+                                errors.push(finding(
+                                    code,
+                                    "portable_options.bin",
+                                    "The selected media source is not an immutable profile source or allowed safe override.",
+                                ));
+                                None
+                            }
+                        }
+                    },
+                );
+                validate_loaded_stock(
+                    state,
+                    workspace_id,
+                    environment_id,
+                    printer_id,
+                    loaded_source.as_deref(),
+                    stock,
+                    &mut errors,
+                )
+                .await?;
+            }
             _ => errors.push(finding(
                 "stock_revision_unavailable",
                 "stock",
@@ -577,12 +639,132 @@ async fn validate_for_tenant(
     }
     let status = if errors.is_empty() {
         "valid"
+    } else if errors.iter().all(|finding| {
+        matches!(
+            finding.get("code").and_then(Value::as_str),
+            Some(
+                "loaded_media_not_reported"
+                    | "loaded_media_stale"
+                    | "loaded_media_untrusted"
+                    | "loaded_stock_mismatch"
+            )
+        )
+    }) {
+        "operator_action_required"
     } else {
         "invalid"
     };
     Ok(
         json!({"status":status,"capability_revision":printer.capability_revision,"errors":errors,"warnings":[],"normalized_intent":if errors.is_empty() { serde_json::to_value(intent)? } else { Value::Null }}),
     )
+}
+
+async fn validate_loaded_stock(
+    state: &AppState,
+    workspace_id: piqae_domain::WorkspaceId,
+    environment_id: piqae_domain::EnvironmentId,
+    printer_id: PrinterId,
+    expected_source: Option<&str>,
+    stock: &ResourceRevision,
+    errors: &mut Vec<Value>,
+) -> Result<(), AppError> {
+    let observations = state
+        .repository
+        .list_loaded_media(workspace_id, environment_id, printer_id)
+        .await?;
+    let observation = match expected_source {
+        Some(source) => observations
+            .iter()
+            .find(|observation| observation.source == source),
+        None if observations.len() == 1 => observations.first(),
+        None => None,
+    };
+    let Some(observation) = observation else {
+        errors.push(finding(
+            "loaded_media_not_reported",
+            "stock",
+            "No loaded-stock evidence exists for the selected media source.",
+        ));
+        return Ok(());
+    };
+    if observation.observed_at + Duration::seconds(crate::routing::LOADED_MEDIA_FRESHNESS_SECONDS)
+        < Utc::now()
+    {
+        errors.push(finding(
+            "loaded_media_stale",
+            "stock",
+            "Loaded-stock evidence expired and must be observed again.",
+        ));
+    } else if !matches!(
+        observation.confidence.as_str(),
+        "reported" | "operator_confirmed"
+    ) || observation.calibration_state != "current"
+    {
+        errors.push(finding(
+            "loaded_media_untrusted",
+            "stock",
+            "Loaded-stock evidence is inferred, unknown, or not currently calibrated.",
+        ));
+    } else if observation.stock_id.as_deref() != Some(stock.id.as_str())
+        || observation.stock_revision != Some(stock.revision)
+    {
+        errors.push(finding(
+            "loaded_stock_mismatch",
+            "stock",
+            "The observed loaded stock does not match the requested immutable stock revision.",
+        ));
+    }
+    Ok(())
+}
+
+fn document_manifest_matches_stock(
+    manifest: &Value,
+    stock: &piqae_storage_postgres::StoredStock,
+) -> bool {
+    let (Some(stock_width), stock_height) = crate::routing::stock_dimensions(stock) else {
+        return false;
+    };
+    let Some(page_boxes) = manifest.get("page_boxes").and_then(Value::as_array) else {
+        return false;
+    };
+    if page_boxes.is_empty() {
+        return false;
+    }
+    page_boxes.iter().all(|page| {
+        let Some(width) = page.get("width_mm").and_then(Value::as_f64) else {
+            return false;
+        };
+        let Some(height) = page.get("height_mm").and_then(Value::as_f64) else {
+            return false;
+        };
+        let document_orientation = if width > height {
+            "landscape"
+        } else {
+            "portrait"
+        };
+        if crate::routing::stock_kind_matches(stock, &["roll", "continuous", "receipt"]) {
+            crate::routing::dimension_close(width, stock_width)
+        } else if crate::routing::stock_kind_matches(stock, &["sheet", "card", "envelope"]) {
+            crate::routing::stock_orientation_allows(stock, document_orientation)
+                && crate::routing::dimensions_match_unordered(
+                    Some(stock_width),
+                    stock_height,
+                    width,
+                    height,
+                )
+        } else if crate::routing::stock_kind_matches(stock, &["label", "roll_label"]) {
+            crate::routing::dimensions_match_ordered(Some(stock_width), stock_height, width, height)
+                || (crate::routing::stock_label_rotatable(stock)
+                    && crate::routing::dimensions_match_unordered(
+                        Some(stock_width),
+                        stock_height,
+                        width,
+                        height,
+                    ))
+        } else {
+            false
+        }
+    })
 }
 
 fn finding(code: &str, path: &str, message: &str) -> Value {

@@ -32,7 +32,11 @@ describe("PiqaeClient", () => {
     );
     await client.printPackets.renders.print(
       render.id,
-      { target_id: "tgt_1", title: "Invoice" },
+      {
+        target_id: "tgt_1",
+        specification_revision: "spec_current",
+        title: "Invoice",
+      },
       "print-0001",
     );
     expect(String(fetcher.mock.calls[0]?.[0])).toBe(

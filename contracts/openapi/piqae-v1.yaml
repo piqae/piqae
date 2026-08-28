@@ -2034,6 +2034,7 @@ paths:
       - $ref: "#/components/parameters/TargetId"
     get:
       summary: Resolve target readiness from synchronized node facts
+      description: Generic route readiness only. Stock and loaded-media safety are reported separately by each design-specification destination so stockless PDF or printer-native targets remain valid.
       tags: [Routing]
       operationId: getTargetReadiness
       responses:
@@ -2051,7 +2052,9 @@ paths:
       summary: Get a consolidated, design-facing print specification
       description: |
         Returns the stock geometry, current target readiness, and the exact
-        immutable printer/profile revisions behind each binding. Opaque native
+        immutable printer/profile revisions behind each currently resolvable
+        binding. Missing printers or profile revisions remain visible in the
+        readiness binding list rather than failing this whole projection. Opaque native
         driver blobs are intentionally never returned. Clients should retain
         the returned revisions with saved designs and re-fetch before printing.
       tags: [Routing, Printers]
@@ -5630,6 +5633,7 @@ components:
             - { $ref: "#/components/schemas/ResourceRevision" }
             - { type: "null" }
         stock:
+          description: When present, validation requires exact active stock, compatible document page geometry, and fresh trusted loaded-stock evidence.
           oneOf:
             - { $ref: "#/components/schemas/ResourceRevision" }
             - { type: "null" }
@@ -5662,7 +5666,10 @@ components:
       additionalProperties: false
       required: [status, capability_revision, errors, warnings]
       properties:
-        status: { type: string, enum: [valid, invalid, operator_action_required] }
+        status:
+          type: string
+          enum: [valid, invalid, operator_action_required]
+          description: operator_action_required means document and configuration validation passed but loaded-stock evidence is missing, stale, untrusted, or mismatched.
         capability_revision: { type: integer, format: int64, minimum: 1 }
         errors: { type: array, maxItems: 128, items: { $ref: "#/components/schemas/PrintIntentFinding" } }
         warnings: { type: array, maxItems: 128, items: { $ref: "#/components/schemas/PrintIntentFinding" } }
@@ -5908,6 +5915,11 @@ components:
             PrintPacket or printer-native capability contract. The job remains
             blocked without lease retries until an authenticated capability
             report proves compatibility has been restored.
+            `target_configuration_changed`, `stock_not_loaded`, and
+            `document_media_incompatible` are server-side pre-handoff fences:
+            no native responsibility was accepted and the actionable event is
+            durable. Submit a new attempt only after correcting and preflighting
+            the destination; never infer that the original attempt printed.
         message:
           type: [string, "null"]
         agent_id:
@@ -6299,11 +6311,56 @@ components:
     DesignSpecificationDestination:
       type: object
       additionalProperties: false
-      required: [binding, printer, profile]
+      description: A currently resolvable binding. Consult readiness.bindings for unavailable bindings that cannot expose a printer/profile snapshot.
+      required: [binding, printer, profile, media_compatibility]
       properties:
         binding: { $ref: "#/components/schemas/TargetBinding" }
         printer: { $ref: "#/components/schemas/Printer" }
         profile: { $ref: "#/components/schemas/PrinterProfileSnapshot" }
+        media_compatibility: { $ref: "#/components/schemas/TargetMediaCompatibility" }
+    TargetMediaDimensions:
+      type: object
+      additionalProperties: false
+      required: [width_mm, height_mm]
+      properties:
+        width_mm: { type: number, exclusiveMinimum: 0 }
+        height_mm: { type: number, exclusiveMinimum: 0 }
+    TargetLoadedMediaEvidence:
+      type: object
+      additionalProperties: false
+      required: [source, confidence, observed_at, fresh_until, stock]
+      properties:
+        source: { type: string, minLength: 1, maxLength: 255 }
+        confidence: { type: string, enum: [reported, operator_confirmed, inferred, unknown] }
+        observed_at: { type: string, format: date-time }
+        fresh_until:
+          type: string
+          format: date-time
+          description: After this instant the observation cannot authorize a new native handoff.
+        stock:
+          oneOf:
+            - { $ref: "#/components/schemas/ResourceRevision" }
+            - { type: "null" }
+    TargetMediaCompatibility:
+      type: object
+      additionalProperties: false
+      required: [status, reasons, profile_dimensions_mm, loaded_media]
+      properties:
+        status:
+          type: string
+          enum: [ready, not_reported, stale, untrusted, incompatible]
+        reasons:
+          type: array
+          maxItems: 32
+          items: { type: string, maxLength: 255 }
+        profile_dimensions_mm:
+          oneOf:
+            - { $ref: "#/components/schemas/TargetMediaDimensions" }
+            - { type: "null" }
+        loaded_media:
+          oneOf:
+            - { $ref: "#/components/schemas/TargetLoadedMediaEvidence" }
+            - { type: "null" }
     DesignSpecification:
       type: object
       additionalProperties: false
@@ -6320,7 +6377,7 @@ components:
           items: { $ref: "#/components/schemas/DesignSpecificationDestination" }
         specification_revision:
           type: string
-          description: Stable digest-like revision derived from target, stock, capability, profile and binding revisions.
+          description: Stable digest-like revision derived only from target routing constraints, the stock revision/attributes, and immutable binding identities. Heartbeats, printer timestamps, loaded-media evidence, and temporary availability never change it.
     Printer:
       type: object
       required:
@@ -6888,6 +6945,11 @@ components:
       properties:
         printer_id: { type: string }
         target_id: { type: string }
+        specification_revision:
+          type: string
+          minLength: 6
+          maxLength: 80
+          description: Required with target_id. Must equal the latest target design-specification revision.
         title: { type: string, minLength: 1, maxLength: 255 }
         options: { $ref: "#/components/schemas/JobOptions" }
         deliveries: { type: integer, minimum: 1, maximum: 100, default: 1 }
@@ -6895,8 +6957,11 @@ components:
         render_cost: { $ref: "#/components/schemas/PrintPacketRenderCost" }
       oneOf:
         - required: [printer_id]
-          not: { required: [target_id] }
-        - required: [target_id]
+          not:
+            anyOf:
+              - required: [target_id]
+              - required: [specification_revision]
+        - required: [target_id, specification_revision]
           not: { required: [printer_id] }
     PrintPacketRenderPolicy:
       type: string
