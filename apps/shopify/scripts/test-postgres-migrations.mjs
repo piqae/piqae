@@ -131,7 +131,7 @@ async function assertions(client) {
 
   const templateId = "11111111-1111-4111-8111-111111111111";
   await client.query(
-    "INSERT INTO shopify_workflow_templates(id,shop,name,kind,page_size,draft_source,draft_revision) VALUES($1,$2,'Invoice','invoice','A4',$3,1)",
+    "INSERT INTO shopify_workflow_templates(id,shop,name,kind,page_size,draft_source,draft_revision,state,source,revision) VALUES($1,$2,'Invoice','invoice','A4',$3,1,'draft',$3,1)",
     [
       templateId,
       "alpha.myshopify.com",
@@ -242,6 +242,10 @@ try {
           "INSERT INTO shopify_workflow_templates(id,shop,name,kind,page_size,state,source) VALUES($1,$2,'Existing invoice','invoice','A4','draft','{}')",
           ["33333333-3333-4333-8333-333333333333", "existing.myshopify.com"],
         );
+        await client.query(
+          "INSERT INTO shopify_workflow_templates(id,shop,name,kind,page_size,state,source) VALUES($1,$2,'Invalid legacy source','invoice','A4','published','not-json')",
+          ["44444444-4444-4444-8444-444444444444", "existing.myshopify.com"],
+        );
       }
       await client.query(migration5);
       await client.query(migration5);
@@ -255,13 +259,16 @@ try {
         if (retained.rows[0]?.state !== "installed")
           throw new Error("N-1 installation was not retained");
         const columns = await client.query(
-          "SELECT design_target_id,design_specification_revision,draft_source,draft_revision,published_revision FROM shopify_workflow_templates WHERE shop=$1 AND id=$2",
+          "SELECT state,source,revision,design_target_id,design_specification_revision,draft_source,draft_revision,published_revision FROM shopify_workflow_templates WHERE shop=$1 AND id=$2",
           ["existing.myshopify.com", "33333333-3333-4333-8333-333333333333"],
         );
         if (
           columns.rowCount !== 1 ||
           columns.rows[0]?.design_target_id !== null ||
           columns.rows[0]?.design_specification_revision !== null ||
+          columns.rows[0]?.state !== "draft" ||
+          columns.rows[0]?.source !== "{}" ||
+          columns.rows[0]?.revision !== 1 ||
           columns.rows[0]?.draft_source !== "{}" ||
           columns.rows[0]?.draft_revision !== 1 ||
           columns.rows[0]?.published_revision !== null
@@ -269,6 +276,16 @@ try {
           throw new Error(
             "N-1 draft/published pointers were not retained safely",
           );
+        const invalidLegacy = await client.query(
+          "SELECT r.media FROM shopify_workflow_template_revisions r WHERE r.shop=$1 AND r.template_id=$2 AND r.revision=1",
+          ["existing.myshopify.com", "44444444-4444-4444-8444-444444444444"],
+        );
+        if (
+          invalidLegacy.rowCount !== 1 ||
+          invalidLegacy.rows[0]?.media?.kind !== "paged" ||
+          invalidLegacy.rows[0]?.media?.size !== "a4"
+        )
+          throw new Error("invalid legacy JSON was not backfilled safely");
       }
       await assertions(client);
     } finally {

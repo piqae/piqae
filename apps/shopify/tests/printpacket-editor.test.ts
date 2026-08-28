@@ -14,6 +14,7 @@ import {
   searchDocumentFields,
   canvasGeometry,
   canvasStyle,
+  responsiveCanvasGeometry,
   safeAreaStyle,
 } from "../app/components/PrintPacketEditor";
 import {
@@ -44,6 +45,33 @@ describe("PrintPacket editor serialization", () => {
       safeAreaStyle(label, { top: 2, right: 4, bottom: 3, left: 5 }),
     ).toEqual({ top: "4%", right: "4%", bottom: "6%", left: "5%" });
   });
+  it.each([320, 768])(
+    "preserves A4 portrait, landscape, and label ratios at a %i px browser width",
+    (browserWidth) => {
+      const portrait = structuredClone(starterTemplates[0]!.specification);
+      const landscape = structuredClone(portrait);
+      if (landscape.media.kind !== "paged")
+        throw new Error("invoice must be paged");
+      landscape.media.orientation = "landscape";
+      const label = starterTemplates.find(
+        ({ id }) => id === "product-label",
+      )!.specification;
+
+      for (const [document, expectedRatio] of [
+        [portrait, 210 / 297],
+        [landscape, 297 / 210],
+        [label, 100 / 50],
+      ] as const) {
+        const geometry = responsiveCanvasGeometry(document, browserWidth);
+        expect(geometry.widthPx).toBeLessThanOrEqual(browserWidth - 32);
+        expect(geometry.heightPx).not.toBeNull();
+        expect(geometry.widthPx / geometry.heightPx!).toBeCloseTo(
+          expectedRatio,
+          8,
+        );
+      }
+    },
+  );
   it("preserves computed values, line breaks, and non-text layout blocks", () => {
     const blocks: Block[] = [
       {

@@ -12,6 +12,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
   const renderId = typeof body.renderId === "string" ? body.renderId : "";
   const printerId = typeof body.printerId === "string" ? body.printerId : "";
   const targetId = typeof body.targetId === "string" ? body.targetId : "";
+  const templateId = typeof body.templateId === "string" ? body.templateId : "";
   const specificationRevision =
     typeof body.specificationRevision === "string"
       ? body.specificationRevision
@@ -23,6 +24,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
     Boolean(targetId) === Boolean(printerId) ||
     Boolean(targetId) !== Boolean(specificationRevision) ||
     (specificationRevision && !ID.test(specificationRevision)) ||
+    (targetId && !ID.test(templateId)) ||
     !requestKey
   )
     return cors(
@@ -37,6 +39,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
       printerId: printerId || undefined,
       targetId: targetId || undefined,
       targetSpecificationRevision: specificationRevision || undefined,
+      templateId: templateId || undefined,
       requestKey,
       renderCost,
     });

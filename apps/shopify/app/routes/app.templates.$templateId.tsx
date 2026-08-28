@@ -33,6 +33,7 @@ import { importOrderPrinterProTemplate } from "../core/order-printer-pro-import.
 import { loadShopifyPrintTargets } from "../core/shopify-print-targets.server";
 import {
   targetSupportsDocument,
+  selectTargetDestination,
   type ShopifyPrintTarget,
 } from "../core/shopify-print-targets";
 import {
@@ -92,9 +93,12 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   let printTargetError = "";
   if (link) {
     try {
-      printTargets = await loadShopifyPrintTargets(
+      const loaded = await loadShopifyPrintTargets(
         services.clientForLink(link),
       );
+      printTargets = loaded.targets;
+      if (loaded.partial)
+        printTargetError = "Some print targets are temporarily unavailable";
     } catch {
       printTargetError = "Print targets are temporarily unavailable";
     }
@@ -192,6 +196,8 @@ export async function action({ request, params }: ActionFunctionArgs) {
     // Starter documents remain pristine. Editing one transparently creates a
     // merchant-owned copy so the first edit feels like editing a normal file.
     if (savingFromStarter) existing = null;
+    if (existing && expectedDraftRevision === null)
+      throw new Error("Document revision is required; reload before saving");
     const envelope = parseTemplateEnvelope(
       validateDocumentSource(bounded(form, "source", 262144, true)),
     );
@@ -230,12 +236,13 @@ export async function action({ request, params }: ActionFunctionArgs) {
       const specification = await services
         .clientForLink(link)
         .targets.designSpecification(designTargetId);
-      const [target] = await loadShopifyPrintTargets({
+      const loaded = await loadShopifyPrintTargets({
         targets: {
           list: async () => [specification.target],
           designSpecification: async () => specification,
         },
       });
+      const [target] = loaded.targets;
       if (!target || !targetSupportsDocument(target, envelope.document))
         throw new Error(
           "The selected print target does not support this document media",
@@ -324,7 +331,7 @@ export default function TemplateEditor() {
   const [document, setDocument] = useState(initial.document);
   const [kind, setKind] = useState(initialTemplate?.kind ?? "invoice");
   const [designTargetId, setDesignTargetId] = useState(
-    template?.designTargetId ?? "",
+    initialTemplate?.designTargetId ?? "",
   );
   const [targetSearch, setTargetSearch] = useState("");
   const [name, setName] = useState(
@@ -346,7 +353,7 @@ export default function TemplateEditor() {
   const compatibleTargets = printTargets.filter(
     (target) =>
       targetSupportsDocument(target, document) &&
-      `${target.name} ${target.stock?.name ?? ""} ${target.selectedPrinterName ?? ""}`
+      `${target.name} ${target.stock?.name ?? ""} ${target.destinations.map(({ printerName }) => printerName).join(" ")}`
         .toLowerCase()
         .includes(targetSearch.toLowerCase()),
   );
@@ -518,6 +525,35 @@ export default function TemplateEditor() {
                       <option value="custom-label">Custom fixed label</option>
                     </select>
                   </label>
+                  {document.media.kind === "paged" ? (
+                    <label className="piqae-field">
+                      <span>Orientation</span>
+                      <select
+                        name="orientation"
+                        value={document.media.orientation ?? "portrait"}
+                        onChange={(event) => {
+                          const orientation =
+                            event.currentTarget.value === "landscape"
+                              ? "landscape"
+                              : "portrait";
+                          setDocument((current) =>
+                            current.media.kind !== "paged"
+                              ? current
+                              : {
+                                  ...current,
+                                  media: {
+                                    ...current.media,
+                                    orientation,
+                                  },
+                                },
+                          );
+                        }}
+                      >
+                        <option value="portrait">Portrait</option>
+                        <option value="landscape">Landscape</option>
+                      </select>
+                    </label>
+                  ) : null}
                   {document.media.kind !== "paged" ? (
                     <label className="piqae-field">
                       <span>Width (mm)</span>
@@ -616,6 +652,7 @@ export default function TemplateEditor() {
                   {selectedTarget ? (
                     <TargetStatus
                       target={selectedTarget}
+                      document={document}
                       savedSpecificationRevision={
                         template?.designSpecificationRevision ?? null
                       }
@@ -762,29 +799,39 @@ export default function TemplateEditor() {
 
 function TargetStatus({
   target,
+  document,
   savedSpecificationRevision,
 }: {
   target: ShopifyPrintTarget;
+  document: PrintPacket;
   savedSpecificationRevision: string | null;
 }) {
-  const media = target.mediaCompatibility;
+  const destination = selectTargetDestination(target, document);
+  const media =
+    destination?.mediaCompatibility ??
+    target.destinations[0]?.mediaCompatibility;
   const changed =
     savedSpecificationRevision !== null &&
     savedSpecificationRevision !== target.specificationRevision;
   return (
-    <div className="piqae-target-status" data-status={media.status}>
-      <strong>{target.ready ? "Ready" : "Needs attention"}</strong>
-      <span>{target.selectedPrinterName ?? "No selected printer"}</span>
-      <span>{target.selectedProfileName ?? "No pinned profile"}</span>
+    <div
+      className="piqae-target-status"
+      data-status={media?.status ?? "not_reported"}
+    >
+      <strong>{destination ? "Compatible" : "Needs attention"}</strong>
+      <span>{destination?.printerName ?? "No compatible printer"}</span>
+      <span>{destination?.profileName ?? "No compatible pinned profile"}</span>
       <span>{target.stock?.name ?? "No target stock configured"}</span>
-      <span>Loaded media: {media.status.replaceAll("_", " ")}</span>
-      {media.profileDimensionsMm ? (
+      <span>
+        Loaded media: {media?.status.replaceAll("_", " ") ?? "not reported"}
+      </span>
+      {media?.profileDimensionsMm ? (
         <small>
           Pinned profile: {media.profileDimensionsMm.widthMm} ×{" "}
           {media.profileDimensionsMm.heightMm} mm
         </small>
       ) : null}
-      {media.reasons.map((reason) => (
+      {(media?.reasons ?? ["loaded_media_not_reported"]).map((reason) => (
         <small key={reason}>{reason.replaceAll("_", " ")}</small>
       ))}
       {changed ? (
@@ -793,7 +840,7 @@ function TargetStatus({
           revalidates and pins the current revision.
         </small>
       ) : null}
-      {media.observedAt ? (
+      {media?.observedAt ? (
         <small>Observed {new Date(media.observedAt).toLocaleString()}</small>
       ) : (
         <small>No loaded-media observation reported</small>

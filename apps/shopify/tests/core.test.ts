@@ -126,6 +126,33 @@ const admin = {
   ),
 };
 
+async function publishPinnedDocument(
+  workflow: MemoryWorkflowRepository,
+  input: {
+    id: string;
+    piqaeRevisionId: string;
+    targetId: string;
+    specificationRevision: string;
+  },
+) {
+  const starter = starterTemplates[0]!;
+  const envelope = parseTemplateEnvelope(starter.source);
+  envelope.published = {
+    piqaeTemplateId: `piqae_${input.id}`,
+    piqaeRevisionId: input.piqaeRevisionId,
+    canonicalDigest: "a".repeat(64),
+  };
+  return workflow.saveTemplate(shop, {
+    ...starter,
+    id: input.id,
+    source: serializeTemplateEnvelope(envelope),
+    state: "published",
+    revision: 1,
+    designTargetId: input.targetId,
+    designSpecificationRevision: input.specificationRevision,
+  });
+}
+
 describe("Shopify boundary", () => {
   it("uses named checkbox values and enforces the Admin bulk limit", () => {
     const form = new FormData();
@@ -338,6 +365,7 @@ describe("Shopify boundary", () => {
   });
   it("uses stable idempotency and prefers direct printing when a printer is selected", async () => {
     const repository = new MemoryShopRepository();
+    const workflow = new MemoryWorkflowRepository();
     const vault = new CredentialVault(Buffer.alloc(32, 9));
     await repository.put({
       shop,
@@ -345,6 +373,12 @@ describe("Shopify boundary", () => {
       encryptedCredential: vault.seal("token", shop),
       templateRevisionId: "rev_1",
       createdAt: new Date().toISOString(),
+    });
+    await publishPinnedDocument(workflow, {
+      id: "invoice",
+      piqaeRevisionId: "rev_1",
+      targetId: "tgt_orders",
+      specificationRevision: "spec_orders_4",
     });
     const create = vi.fn(async (..._args: unknown[]) => ({
       id: "render_1",
@@ -365,6 +399,8 @@ describe("Shopify boundary", () => {
           },
         }) as never,
       "https://app.example",
+      undefined,
+      workflow,
     );
     const result = await service.printOrders({
       admin,
@@ -372,6 +408,7 @@ describe("Shopify boundary", () => {
       orderIds: ["42"],
       targetId: "tgt_orders",
       targetSpecificationRevision: "spec_orders_4",
+      templateId: "invoice",
       requestKey: "click-1",
     });
     expect(result).toEqual({
@@ -394,6 +431,44 @@ describe("Shopify boundary", () => {
         orders: [{ name: "#1042", total: 23 }],
       },
     });
+    await expect(
+      service.printOrders({
+        admin,
+        shop,
+        orderIds: ["42"],
+        targetId: "tgt_orders",
+        targetSpecificationRevision: "spec_orders_5",
+        templateId: "invoice",
+        requestKey: "changed-target",
+      }),
+    ).rejects.toThrow("changed after this document was published");
+    expect(create).toHaveBeenCalledTimes(1);
+
+    for (const renderExecutionPolicy of [
+      "prefer_node",
+      "require_node",
+    ] as const) {
+      await workflow.saveSettings(shop, {
+        ...(await workflow.getSettings(shop)),
+        renderExecutionPolicy,
+      });
+      await expect(
+        service.printOrders({
+          admin,
+          shop,
+          orderIds: ["42"],
+          targetId: "tgt_orders",
+          targetSpecificationRevision: "spec_orders_4",
+          templateId: "invoice",
+          requestKey: `policy-${renderExecutionPolicy}`,
+        }),
+      ).resolves.toMatchObject({ mode: "direct" });
+      expect(print.mock.calls.at(-1)?.[1]).toMatchObject({
+        target_id: "tgt_orders",
+        specification_revision: "spec_orders_4",
+        render_policy: renderExecutionPolicy,
+      });
+    }
   });
   it("fails closed when a selected published document has no pinned Piqae revision", async () => {
     const repository = new MemoryShopRepository();
@@ -486,6 +561,7 @@ describe("Shopify boundary", () => {
   });
   it("approves the exact rendered preview without rendering again", async () => {
     const repository = new MemoryShopRepository();
+    const workflow = new MemoryWorkflowRepository();
     const vault = new CredentialVault(Buffer.alloc(32, 7));
     await repository.put({
       shop,
@@ -493,6 +569,12 @@ describe("Shopify boundary", () => {
       encryptedCredential: vault.seal("token", shop),
       templateRevisionId: "rev_preview",
       createdAt: new Date().toISOString(),
+    });
+    await publishPinnedDocument(workflow, {
+      id: "preview-invoice",
+      piqaeRevisionId: "rev_preview",
+      targetId: "tgt_orders",
+      specificationRevision: "spec_orders_4",
     });
     const createRender = vi.fn(async () => ({
       id: "render_preview",
@@ -527,7 +609,11 @@ describe("Shopify boundary", () => {
       printPackets: {
         renders: {
           create: createRender,
-          retrieve: vi.fn(),
+          retrieve: vi.fn(async () => ({
+            id: "render_preview",
+            state: "completed",
+            template_revision_id: "rev_preview",
+          })),
           print: vi.fn(),
           readiness,
         },
@@ -543,11 +629,14 @@ describe("Shopify boundary", () => {
       vault,
       () => client,
       "https://app.example",
+      undefined,
+      workflow,
     );
     const preview = await service.previewOrders({
       admin,
       shop,
       orderIds: ["42"],
+      templateId: "preview-invoice",
       requestKey: "preview-click",
     });
     const result = await service.approvePreview({
@@ -556,6 +645,7 @@ describe("Shopify boundary", () => {
       renderId: preview.renderId,
       targetId: "tgt_orders",
       targetSpecificationRevision: "spec_orders_4",
+      templateId: "preview-invoice",
       requestKey: "approve-click",
       renderCost: preview.renderCost,
     });
@@ -599,6 +689,18 @@ describe("Shopify boundary", () => {
         pdf_bytes: 48_000,
       }),
     });
+    await expect(
+      service.approvePreview({
+        shop,
+        previewId: preview.previewId,
+        renderId: preview.renderId,
+        targetId: "tgt_orders",
+        targetSpecificationRevision: "spec_orders_5",
+        templateId: "preview-invoice",
+        requestKey: "approve-after-drift",
+      }),
+    ).rejects.toThrow("changed after this document was published");
+    expect(approve).toHaveBeenCalledTimes(1);
   });
 
   it("keeps canonical document media authoritative for editor sizing", () => {

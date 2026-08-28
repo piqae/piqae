@@ -9,7 +9,7 @@ import type { RenderExecutionPolicy } from "./workflows.server";
 import { parseTemplateEnvelope } from "./template-model";
 import { loadShopifyPrintTargets } from "./shopify-print-targets.server";
 import {
-  targetSupportsDocument,
+  selectTargetDestination,
   type ShopifyPrintTarget,
 } from "./shopify-print-targets";
 
@@ -29,19 +29,28 @@ export type AdminPrintOptions = {
     kind: string;
     isDefault: boolean;
     designTargetId: string | null;
+    designSpecificationRevision: string | null;
+    targetBindingStatus:
+      | "ready"
+      | "unbound"
+      | "target_missing"
+      | "unknown"
+      | "document_invalid"
+      | "revision_changed"
+      | "media_incompatible";
     compatibilityKnown: boolean;
     compatibleTargetIds: string[];
+    advisoryDestination: null | {
+      printerName: string;
+      profileName: string;
+      mediaStatus: string;
+      readinessStatus: string;
+    };
   }>;
   targets: Array<
     ShopifyPrintTarget & {
       eligible: boolean;
       isDefault: boolean;
-      nodeRendering: {
-        supported: boolean;
-        ready: boolean;
-        cacheState: "ready" | "warming" | "missing" | "unknown";
-        reason: string;
-      };
     }
   >;
   manageDocumentsUrl: string;
@@ -65,23 +74,35 @@ export async function loadAdminPrintOptions(input: {
     input.workflows.listTemplates(shop),
   ]);
   const published = templates.filter((template) => template.published);
-  const parsedDocuments = published.map((template) => ({
-    template,
-    published: template.published!,
-    document: parseTemplateEnvelope(template.published!.source).document,
-  }));
+  const parsedDocuments = published.map((template) => {
+    let document: ReturnType<typeof parseTemplateEnvelope>["document"] | null =
+      null;
+    try {
+      document = parseTemplateEnvelope(template.published!.source).document;
+    } catch {
+      // One damaged publication must not hide every printable document.
+    }
+    return { template, published: template.published!, document };
+  });
 
   if (!link) {
     return {
       linked: false,
-      documents: parsedDocuments.map(({ template, published }) => ({
+      documents: parsedDocuments.map(({ template, published, document }) => ({
         id: template.id,
         name: published.name,
         kind: published.kind,
         isDefault: template.id === settings.defaultTemplateId,
         designTargetId: published.designTargetId,
-        compatibilityKnown: true,
+        designSpecificationRevision: published.designSpecificationRevision,
+        targetBindingStatus: !document
+          ? "document_invalid"
+          : published.designTargetId
+            ? "target_missing"
+            : "unbound",
+        compatibilityKnown: document !== null,
         compatibleTargetIds: [],
+        advisoryDestination: null,
       })),
       targets: [],
       manageDocumentsUrl: "/app/templates",
@@ -102,22 +123,14 @@ export async function loadAdminPrintOptions(input: {
   let destinationError: string | undefined;
   try {
     const loaded = await loadShopifyPrintTargets(client);
-    targets = loaded.map((target) => ({
+    if (loaded.partial)
+      destinationError = "Some printer status is temporarily unavailable";
+    targets = loaded.targets.map((target) => ({
       ...target,
-      eligible: target.ready,
+      eligible: target.hasMediaCandidate,
       isDefault: parsedDocuments.some(
         ({ published }) => published.designTargetId === target.id,
       ),
-      // Readiness is deliberately fail-closed until the platform's signed
-      // per-destination renderer decision is available. Printer online state
-      // alone does not prove renderer ABI or resource-cache compatibility.
-      nodeRendering: {
-        supported: false,
-        ready: false,
-        cacheState: "unknown",
-        reason:
-          "Node renderer capability is checked against each rendered document",
-      },
     }));
   } catch {
     // A printer-list outage must not hide document preview or PDF download.
@@ -135,8 +148,11 @@ export async function loadAdminPrintOptions(input: {
           kind: "document",
           isDefault: true,
           designTargetId: null,
+          designSpecificationRevision: null,
+          targetBindingStatus: "unbound" as const,
           compatibilityKnown: false,
           compatibleTargetIds: targets.map(({ id }) => id),
+          advisoryDestination: null,
         },
       ]
     : [];
@@ -144,17 +160,55 @@ export async function loadAdminPrintOptions(input: {
     linked: true,
     documents:
       parsedDocuments.length > 0
-        ? parsedDocuments.map(({ template, published, document }) => ({
-            id: template.id,
-            name: published.name,
-            kind: published.kind,
-            isDefault: template.id === settings.defaultTemplateId,
-            designTargetId: published.designTargetId,
-            compatibilityKnown: true,
-            compatibleTargetIds: targets
-              .filter((target) => targetSupportsDocument(target, document))
-              .map(({ id }) => id),
-          }))
+        ? parsedDocuments.map(({ template, published, document }) => {
+            const target = published.designTargetId
+              ? targets.find(({ id }) => id === published.designTargetId)
+              : undefined;
+            const revisionCurrent = Boolean(
+              target &&
+              published.designSpecificationRevision ===
+                target.specificationRevision,
+            );
+            const advisoryDestination =
+              target && document
+                ? selectTargetDestination(target, document)
+                : null;
+            const mediaCompatible = advisoryDestination !== null;
+            const targetBindingStatus = !document
+              ? "document_invalid"
+              : !published.designTargetId
+                ? "unbound"
+                : !target
+                  ? destinationError
+                    ? "unknown"
+                    : "target_missing"
+                  : !revisionCurrent
+                    ? "revision_changed"
+                    : !mediaCompatible
+                      ? "media_incompatible"
+                      : "ready";
+            return {
+              id: template.id,
+              name: published.name,
+              kind: published.kind,
+              isDefault: template.id === settings.defaultTemplateId,
+              designTargetId: published.designTargetId,
+              designSpecificationRevision:
+                published.designSpecificationRevision,
+              targetBindingStatus,
+              compatibilityKnown: document !== null,
+              compatibleTargetIds:
+                targetBindingStatus === "ready" && target ? [target.id] : [],
+              advisoryDestination: advisoryDestination
+                ? {
+                    printerName: advisoryDestination.printerName,
+                    profileName: advisoryDestination.profileName,
+                    mediaStatus: advisoryDestination.mediaCompatibility.status,
+                    readinessStatus: advisoryDestination.readinessStatus,
+                  }
+                : null,
+            };
+          })
         : accountDefault,
     targets,
     manageDocumentsUrl: "/app/templates",

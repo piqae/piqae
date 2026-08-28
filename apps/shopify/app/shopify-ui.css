@@ -170,11 +170,6 @@
 }
 .piqae-media-continuous {
   height: auto;
-  background-image: linear-gradient(
-    to bottom,
-    transparent calc(100% - 1px),
-    color-mix(in srgb, currentColor 12%, transparent) 1px
-  );
 }
 .piqae-media-label {
   overflow: auto;

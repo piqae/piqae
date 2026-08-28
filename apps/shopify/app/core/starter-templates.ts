@@ -323,7 +323,6 @@ const documents = {
               ],
               else: [],
             },
-            { type: "page_break" },
           ],
         },
       ],

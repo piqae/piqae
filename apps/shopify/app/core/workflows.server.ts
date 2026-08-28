@@ -337,8 +337,8 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
       )
         throw new WorkflowConflictError();
       const draftRevision = existing ? Number(existing.draft_revision) + 1 : 1;
-      await client.query(
-        "INSERT INTO shopify_workflow_templates(id,shop,name,kind,page_size,draft_source,draft_revision,design_target_id,design_specification_revision) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id,shop) DO UPDATE SET name=EXCLUDED.name,kind=EXCLUDED.kind,page_size=EXCLUDED.page_size,draft_source=EXCLUDED.draft_source,draft_revision=EXCLUDED.draft_revision,design_target_id=EXCLUDED.design_target_id,design_specification_revision=EXCLUDED.design_specification_revision,updated_at=now()",
+      const draftWrite = await client.query(
+        "INSERT INTO shopify_workflow_templates(id,shop,name,kind,page_size,draft_source,draft_revision,design_target_id,design_specification_revision,state,source,revision) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(id,shop) DO UPDATE SET name=EXCLUDED.name,kind=EXCLUDED.kind,page_size=EXCLUDED.page_size,draft_source=EXCLUDED.draft_source,draft_revision=EXCLUDED.draft_revision,design_target_id=EXCLUDED.design_target_id,design_specification_revision=EXCLUDED.design_specification_revision,updated_at=now() WHERE $13::integer IS NOT NULL AND shopify_workflow_templates.draft_revision=$13 RETURNING draft_revision",
         [
           v.id,
           normalizedShop,
@@ -349,10 +349,19 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
           draftRevision,
           v.designTargetId ?? null,
           v.designSpecificationRevision ?? null,
+          v.state,
+          v.source,
+          Math.max(1, v.revision),
+          v.expectedDraftRevision ?? null,
         ],
       );
+      if (draftWrite.rowCount !== 1) throw new WorkflowConflictError();
       if (v.state === "published") {
-        const revision = Number(existing?.published_revision ?? 0) + 1;
+        const highest = await client.query(
+          "SELECT COALESCE(MAX(revision),0) AS revision FROM shopify_workflow_template_revisions WHERE template_id=$1 AND shop=$2",
+          [v.id, normalizedShop],
+        );
+        const revision = Number(highest.rows[0]?.revision ?? 0) + 1;
         const media = parseTemplateEnvelope(v.source).document.media;
         await client.query(
           "INSERT INTO shopify_workflow_template_revisions(template_id,shop,revision,name,kind,page_size,source,design_target_id,design_specification_revision,media) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",

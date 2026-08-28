@@ -7,30 +7,17 @@ export type MediaCompatibilityStatus =
   | "untrusted"
   | "incompatible";
 
-export type ShopifyPrintTarget = {
-  id: string;
-  name: string;
-  specificationRevision: string;
-  ready: boolean;
+export type ShopifyPrintTargetDestination = {
+  bindingId: string;
+  role: "primary" | "standby";
+  enabled: boolean;
+  destinationId: string | null;
+  routeId: string | null;
+  printerId: string;
+  printerName: string;
+  profileName: string;
+  readinessStatus: string;
   readinessReasons: string[];
-  selectedPrinterId: string | null;
-  selectedPrinterName: string | null;
-  selectedProfileName: string | null;
-  stock: null | {
-    id: string;
-    name: string;
-    kind: string | null;
-    widthMm: number | null;
-    heightMm: number | null;
-    gapMm: number | null;
-    markIntervalMm: number | null;
-    safeAreaMm: {
-      top: number;
-      right: number;
-      bottom: number;
-      left: number;
-    } | null;
-  };
   mediaCompatibility: {
     status: MediaCompatibilityStatus;
     reasons: string[];
@@ -42,30 +29,131 @@ export type ShopifyPrintTarget = {
   };
 };
 
+export type ShopifyPrintTarget = {
+  id: string;
+  name: string;
+  specificationRevision: string;
+  hasMediaCandidate: boolean;
+  configurationReasons: string[];
+  /** Ordered primary-then-standby candidates. Core remains routing authority. */
+  destinations: ShopifyPrintTargetDestination[];
+  stock: null | {
+    id: string;
+    name: string;
+    kind: string | null;
+    orientation: "portrait" | "landscape" | "either" | null;
+    rotatable: boolean;
+    widthMm: number | null;
+    heightMm: number | null;
+    gapMm: number | null;
+    markIntervalMm: number | null;
+    safeAreaMm: {
+      top: number;
+      right: number;
+      bottom: number;
+      left: number;
+    } | null;
+  };
+};
+
 export function targetSupportsDocument(
   target: ShopifyPrintTarget,
   document: PrintPacketV1,
 ): boolean {
-  const stock = target.stock;
+  return selectTargetDestination(target, document) !== null;
+}
+
+/**
+ * Selects an advisory exact binding for editor/display purposes. The target
+ * print request deliberately carries only target + specification revision;
+ * core re-evaluates renderer capability, topology and liveness at handoff.
+ */
+export function selectTargetDestination(
+  target: ShopifyPrintTarget,
+  document: PrintPacketV1,
+): ShopifyPrintTargetDestination | null {
+  return (
+    target.destinations.find(
+      (destination) =>
+        destination.enabled &&
+        destination.destinationId !== null &&
+        destination.routeId !== null &&
+        destination.mediaCompatibility.status === "ready" &&
+        mediaMatchesDocument(
+          target.stock,
+          destination.mediaCompatibility.profileDimensionsMm,
+          document,
+        ),
+    ) ?? null
+  );
+}
+
+function mediaMatchesDocument(
+  stock: ShopifyPrintTarget["stock"],
+  profileDimensions: { widthMm: number; heightMm: number } | null,
+  document: PrintPacketV1,
+): boolean {
   if (!stock?.kind) return false;
   if (document.media.kind === "paged") {
-    if (!["sheet", "card", "envelope"].includes(stock.kind)) return false;
+    if (stock.kind !== "sheet") return false;
     const dimensions = pagedDimensions(
       document.media.size,
       document.media.orientation,
     );
-    return dimensionsMatch(stock, dimensions.widthMm, dimensions.heightMm);
+    const orientation = document.media.orientation ?? "portrait";
+    return (
+      (stock.orientation === null ||
+        stock.orientation === "either" ||
+        stock.orientation === orientation) &&
+      dimensionsMatchUnordered(
+        stock.widthMm,
+        stock.heightMm,
+        dimensions.widthMm,
+        dimensions.heightMm,
+      ) &&
+      dimensionsMatchUnordered(
+        profileDimensions?.widthMm ?? null,
+        profileDimensions?.heightMm ?? null,
+        dimensions.widthMm,
+        dimensions.heightMm,
+      )
+    );
   }
   if (document.media.kind === "continuous")
     return (
-      ["roll", "continuous"].includes(stock.kind) &&
-      numberMatches(stock.widthMm, document.media.width_mm)
+      ["roll", "continuous", "receipt"].includes(stock.kind) &&
+      numberMatches(stock.widthMm, document.media.width_mm) &&
+      numberMatches(profileDimensions?.widthMm ?? null, document.media.width_mm)
     );
-  return (
-    stock.kind === "label" &&
-    numberMatches(stock.widthMm, document.media.width_mm) &&
-    numberMatches(stock.heightMm, document.media.height_mm)
-  );
+  if (!["label", "roll_label"].includes(stock.kind)) return false;
+  const ordered =
+    dimensionsMatchOrdered(
+      stock.widthMm,
+      stock.heightMm,
+      document.media.width_mm,
+      document.media.height_mm,
+    ) &&
+    dimensionsMatchOrdered(
+      profileDimensions?.widthMm ?? null,
+      profileDimensions?.heightMm ?? null,
+      document.media.width_mm,
+      document.media.height_mm,
+    );
+  const rotated =
+    stock.rotatable &&
+    dimensionsMatchUnordered(
+      stock.widthMm,
+      stock.heightMm,
+      document.media.width_mm,
+      document.media.height_mm,
+    ) &&
+    dimensionsMatchUnordered(
+      profileDimensions?.widthMm ?? null,
+      profileDimensions?.heightMm ?? null,
+      document.media.width_mm,
+      document.media.height_mm,
+    );
+  return ordered || rotated;
 }
 
 function pagedDimensions(
@@ -83,16 +171,26 @@ function pagedDimensions(
     : portrait;
 }
 
-function dimensionsMatch(
-  stock: NonNullable<ShopifyPrintTarget["stock"]>,
+function dimensionsMatchUnordered(
+  actualWidth: number | null,
+  actualHeight: number | null,
   widthMm: number,
   heightMm: number,
 ) {
   return (
-    (numberMatches(stock.widthMm, widthMm) &&
-      numberMatches(stock.heightMm, heightMm)) ||
-    (numberMatches(stock.widthMm, heightMm) &&
-      numberMatches(stock.heightMm, widthMm))
+    dimensionsMatchOrdered(actualWidth, actualHeight, widthMm, heightMm) ||
+    dimensionsMatchOrdered(actualWidth, actualHeight, heightMm, widthMm)
+  );
+}
+
+function dimensionsMatchOrdered(
+  actualWidth: number | null,
+  actualHeight: number | null,
+  widthMm: number,
+  heightMm: number,
+) {
+  return (
+    numberMatches(actualWidth, widthMm) && numberMatches(actualHeight, heightMm)
   );
 }
 

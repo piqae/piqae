@@ -61,6 +61,22 @@ describe("PrintPacket model", () => {
     expect(() => validatePrintPacket(document)).toThrow("12 levels");
   });
 
+  it("rejects missing media and malformed page regions before traversal", () => {
+    const invoice = structuredClone(starterTemplates[0]!.specification);
+    expect(() =>
+      validatePrintPacket({ ...invoice, media: undefined } as never),
+    ).toThrow("Document media is invalid");
+    expect(() =>
+      validatePrintPacket({
+        ...invoice,
+        header: { default: "not-an-array" },
+      } as never),
+    ).toThrow("Document page region is invalid");
+    expect(() =>
+      validatePrintPacket({ ...invoice, body: [null] } as never),
+    ).toThrow("Document block is invalid");
+  });
+
   it("rejects page breaks recursively in every continuous-media region", () => {
     const receipt = structuredClone(
       starterTemplates.find(({ id }) => id === "receipt")!.specification,
@@ -74,17 +90,63 @@ describe("PrintPacket model", () => {
     const label = structuredClone(
       starterTemplates.find(({ id }) => id === "product-label")!.specification,
     );
-    label.footer = {
+    label.header = {
       last: [
         {
           type: "conditional",
           condition: { type: "path", path: ["order", "id"] },
-          then: [{ type: "page_break" }],
+          then: [{ type: "section", children: [{ type: "page_break" }] }],
         },
       ],
     };
     expect(documentHasPageBreak(label)).toBe(true);
-    expect(() => validatePrintPacket(label)).not.toThrow();
+    expect(() => validatePrintPacket(label)).toThrow(
+      "not supported on label media",
+    );
+
+    const footerFirst = structuredClone(label);
+    footerFirst.header = {};
+    footerFirst.footer = { first: [{ type: "page_break" }] };
+    expect(() => validatePrintPacket(footerFirst)).toThrow(
+      "not supported on label media",
+    );
+  });
+
+  it.each([
+    ["header", "first"],
+    ["header", "default"],
+    ["header", "last"],
+    ["footer", "first"],
+    ["footer", "default"],
+    ["footer", "last"],
+  ] as const)("scans the %s.%s page region", (region, variant) => {
+    const label = structuredClone(
+      starterTemplates.find(({ id }) => id === "product-label")!.specification,
+    );
+    const nestedBreak = [
+      {
+        type: "conditional" as const,
+        condition: { type: "path" as const, path: ["order", "id"] },
+        then: [
+          {
+            type: "section" as const,
+            children: [{ type: "page_break" as const }],
+          },
+        ],
+      },
+    ];
+    const variants =
+      variant === "first"
+        ? { first: nestedBreak }
+        : variant === "default"
+          ? { default: nestedBreak }
+          : { last: nestedBreak };
+    if (region === "header") label.header = variants;
+    else label.footer = variants;
+    expect(documentHasPageBreak(label)).toBe(true);
+    expect(() => validatePrintPacket(label)).toThrow(
+      "not supported on label media",
+    );
   });
 
   it.each([0, 1, 50, 200])(

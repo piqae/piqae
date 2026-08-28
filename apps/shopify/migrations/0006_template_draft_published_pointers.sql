@@ -2,7 +2,11 @@ ALTER TABLE shopify_workflow_template_revisions
   ADD COLUMN IF NOT EXISTS media jsonb;
 
 UPDATE shopify_workflow_template_revisions
-SET media = COALESCE(source::jsonb #> '{document,media}', '{}'::jsonb)
+SET media = CASE
+  WHEN pg_input_is_valid(source, 'jsonb')
+    THEN COALESCE(source::jsonb #> '{document,media}', '{"kind":"paged","size":"a4"}'::jsonb)
+  ELSE '{"kind":"paged","size":"a4"}'::jsonb
+END
 WHERE media IS NULL;
 
 ALTER TABLE shopify_workflow_template_revisions
@@ -38,7 +42,7 @@ BEGIN
     EXECUTE $migration$
       UPDATE shopify_workflow_templates
       SET draft_source = source,
-          draft_revision = revision
+          draft_revision = GREATEST(COALESCE(revision, 1), 1)
       WHERE draft_source IS NULL OR draft_revision IS NULL
     $migration$;
     EXECUTE $migration$
@@ -49,7 +53,11 @@ BEGIN
       SELECT
         id,shop,revision,name,kind,page_size,source,
         design_target_id,design_specification_revision,
-        COALESCE(source::jsonb #> '{document,media}', '{}'::jsonb)
+        CASE
+          WHEN pg_input_is_valid(source, 'jsonb')
+            THEN COALESCE(source::jsonb #> '{document,media}', '{"kind":"paged","size":"a4"}'::jsonb)
+          ELSE '{"kind":"paged","size":"a4"}'::jsonb
+        END
       FROM shopify_workflow_templates
       WHERE state = 'published'
       ON CONFLICT(template_id,shop,revision) DO NOTHING
@@ -80,8 +88,3 @@ ALTER TABLE shopify_workflow_templates
     FOREIGN KEY(id,shop,published_revision)
     REFERENCES shopify_workflow_template_revisions(template_id,shop,revision)
     DEFERRABLE INITIALLY DEFERRED;
-
-ALTER TABLE shopify_workflow_templates
-  DROP COLUMN IF EXISTS state,
-  DROP COLUMN IF EXISTS source,
-  DROP COLUMN IF EXISTS revision;

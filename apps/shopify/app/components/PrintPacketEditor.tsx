@@ -666,6 +666,29 @@ export function canvasStyle(value: PrintPacket): CSSProperties {
   } as CSSProperties;
 }
 
+/**
+ * Mirrors the fixed-media CSS rule at a concrete browser width. Keeping this
+ * calculation explicit lets narrow-width tests prove that responsive scaling
+ * preserves the physical aspect ratio without treating CSS pixels as mm.
+ */
+export function responsiveCanvasGeometry(
+  value: PrintPacket,
+  containerWidthPx: number,
+  pixelsPerMm = 96 / 25.4,
+): { widthPx: number; heightPx: number | null } {
+  if (!Number.isFinite(containerWidthPx) || containerWidthPx < 0)
+    throw new Error("Canvas container width is invalid");
+  const { widthMm, heightMm } = canvasGeometry(value);
+  const widthPx = Math.min(
+    widthMm * pixelsPerMm,
+    Math.max(0, containerWidthPx - 32),
+  );
+  return {
+    widthPx,
+    heightPx: heightMm === null ? null : widthPx * (heightMm / widthMm),
+  };
+}
+
 export function safeAreaStyle(
   value: PrintPacket,
   safe: NonNullable<NonNullable<DesignStock>["safeAreaMm"]>,
