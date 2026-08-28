@@ -2,7 +2,7 @@ import { canonicalToLiquid } from "./liquid-document-adapter";
 import {
   serializeTemplateEnvelope,
   type Block,
-  type BusinessDocument,
+  type PrintPacket,
   type Inline,
 } from "./template-model";
 const path = (...parts: string[]) => ({ type: "path" as const, path: parts });
@@ -69,8 +69,8 @@ const region = () => ({
   default: [] as Block[],
   last: [] as Block[],
 });
-const base = (body: Block[], continuous = false): BusinessDocument => ({
-  format: "piqae.business-document/v1",
+const base = (body: Block[], continuous = false): PrintPacket => ({
+  format: "printpacket/v1",
   media: continuous
     ? {
         kind: "continuous",
@@ -217,7 +217,7 @@ export type StarterTemplate = {
   name: string;
   details: string;
   status: "Published";
-  specification: BusinessDocument;
+  specification: PrintPacket;
   kind: "invoice" | "packing_slip" | "receipt" | "credit_note";
   pageSize: "A4" | "80mm";
   source: string;
@@ -239,7 +239,7 @@ export const starterTemplates: readonly StarterTemplate[] = Object.entries(
     kind,
     pageSize: specification.media.kind === "continuous" ? "80mm" : "A4",
     source: serializeTemplateEnvelope({
-      schema: "piqae.shopify-business-template/v1",
+      schema: "piqae.shopify-printpacket-template/v1",
       document: specification,
       editor: {
         mode: "visual",

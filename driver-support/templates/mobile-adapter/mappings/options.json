@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "platform": "ios_external_accessory",
+      "native_capability_key": "replace-with-display-safe-key",
+      "semantic_facet": "media.sensing",
+      "choices": {
+        "replace-with-native-choice": "gap"
+      }
+    }
+  ]
+}

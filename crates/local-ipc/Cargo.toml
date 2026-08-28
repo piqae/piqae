@@ -7,16 +7,35 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+test-peer-identity = []
+
 [dependencies]
 base64.workspace = true
+hex.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 piqae-domain.workspace = true
+piqae-protocol.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59.0", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Cryptography",
+  "Win32_Security_Cryptography_Catalog",
+  "Win32_Security_Cryptography_Sip",
+  "Win32_Security_WinTrust",
+  "Win32_Storage_Packaging_Appx",
+  "Win32_System_Pipes",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3.20.0"

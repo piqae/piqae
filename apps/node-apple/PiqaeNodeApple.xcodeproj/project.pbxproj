@@ -1,0 +1,508 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		02069BBD1DC7DCF4970E8FF9 /* StandaloneNodeModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52D22C1B8B028B2EFB5FA263 /* StandaloneNodeModel.swift */; };
+		05B773EE0A63AFBCD516C48D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AB63F15EEFD493444A3C00DD /* Assets.xcassets */; };
+		09A2E2AFF4C285A0580272A5 /* PiqaeNodeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5B964F9B9136F28843B0326 /* PiqaeNodeApp.swift */; };
+		4610A3B338DA88C0CD0A5506 /* PiqaeNodeKitTesting in Frameworks */ = {isa = PBXBuildFile; productRef = 6FA3ED4B5559D0C2BDB3FADE /* PiqaeNodeKitTesting */; };
+		57A15054D28F549B73464F4A /* PiqaeNodeKitAirPrint in Frameworks */ = {isa = PBXBuildFile; productRef = 25F2B996E37AED23F3AA4B99 /* PiqaeNodeKitAirPrint */; };
+		5D97940C907748EF6C46DF76 /* StandaloneNodeStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B95005445772BA88DB993AC7 /* StandaloneNodeStoreTests.swift */; };
+		615CE417E6509E8FA5899C79 /* PiqaeNodeKitUI in Frameworks */ = {isa = PBXBuildFile; productRef = 525252F74C7FD19873AD7BD0 /* PiqaeNodeKitUI */; };
+		7C7A18221614DA113ED0C752 /* PiqaeNodeKit in Frameworks */ = {isa = PBXBuildFile; productRef = CC195A98440174CDD51BDD40 /* PiqaeNodeKit */; };
+		896FA4426DB69860C0D457D3 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 1AEF826806578B03D8A70C77 /* PrivacyInfo.xcprivacy */; };
+		A09355794C9E43C48E04397B /* StandaloneNodeStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58220C6EB927FFE17D4E72F7 /* StandaloneNodeStore.swift */; };
+		C19E42779F3046347C859327 /* StandaloneNodeRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 568A4E7BA3927AE74930D2BF /* StandaloneNodeRootView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		3531F2BC65F305294B98FC63 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = E668062496A8394E975D45F0 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = EA1FCBD6AA36EB0B998FCF9F;
+			remoteInfo = PiqaeNode;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		1AEF826806578B03D8A70C77 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		52D22C1B8B028B2EFB5FA263 /* StandaloneNodeModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StandaloneNodeModel.swift; sourceTree = "<group>"; };
+		568A4E7BA3927AE74930D2BF /* StandaloneNodeRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StandaloneNodeRootView.swift; sourceTree = "<group>"; };
+		58220C6EB927FFE17D4E72F7 /* StandaloneNodeStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StandaloneNodeStore.swift; sourceTree = "<group>"; };
+		911CE9B0F27E94D1D2071917 /* PiqaeNodeTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PiqaeNodeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		AB63F15EEFD493444A3C00DD /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		B5B964F9B9136F28843B0326 /* PiqaeNodeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PiqaeNodeApp.swift; sourceTree = "<group>"; };
+		B95005445772BA88DB993AC7 /* StandaloneNodeStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StandaloneNodeStoreTests.swift; sourceTree = "<group>"; };
+		C29A56D58A3266085B678B7C /* apple */ = {isa = PBXFileReference; lastKnownFileType = folder; name = apple; path = ../../sdk/apple; sourceTree = SOURCE_ROOT; };
+		D8948F2E2B6C9B9F79FE645E /* PiqaeNode.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = PiqaeNode.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		2FAC2E8C05EB75C9922424D4 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4610A3B338DA88C0CD0A5506 /* PiqaeNodeKitTesting in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		ACBB056F295785F04A851CFB /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7C7A18221614DA113ED0C752 /* PiqaeNodeKit in Frameworks */,
+				57A15054D28F549B73464F4A /* PiqaeNodeKitAirPrint in Frameworks */,
+				615CE417E6509E8FA5899C79 /* PiqaeNodeKitUI in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		0C353C8341D1F23DDBF4DE88 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				D8948F2E2B6C9B9F79FE645E /* PiqaeNode.app */,
+				911CE9B0F27E94D1D2071917 /* PiqaeNodeTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		11E991E36AC80B8C7206D0B3 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				AB63F15EEFD493444A3C00DD /* Assets.xcassets */,
+				1AEF826806578B03D8A70C77 /* PrivacyInfo.xcprivacy */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		5E2C1C0A27C3D1E33C1E32F9 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				B95005445772BA88DB993AC7 /* StandaloneNodeStoreTests.swift */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		C3224BC43996B578F093B89E = {
+			isa = PBXGroup;
+			children = (
+				E36F2207EDB8DE6E483EDD39 /* Packages */,
+				11E991E36AC80B8C7206D0B3 /* Resources */,
+				FC5665153CBDDB18C9173AE5 /* Sources */,
+				5E2C1C0A27C3D1E33C1E32F9 /* Tests */,
+				0C353C8341D1F23DDBF4DE88 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		E36F2207EDB8DE6E483EDD39 /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				C29A56D58A3266085B678B7C /* apple */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
+		FC5665153CBDDB18C9173AE5 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				B5B964F9B9136F28843B0326 /* PiqaeNodeApp.swift */,
+				52D22C1B8B028B2EFB5FA263 /* StandaloneNodeModel.swift */,
+				568A4E7BA3927AE74930D2BF /* StandaloneNodeRootView.swift */,
+				58220C6EB927FFE17D4E72F7 /* StandaloneNodeStore.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		C9DF0AAC1DAADA526370B2E5 /* PiqaeNodeTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E59A243713D3F855E8BB6F12 /* Build configuration list for PBXNativeTarget "PiqaeNodeTests" */;
+			buildPhases = (
+				74918FD25B3082CA89329A57 /* Sources */,
+				2FAC2E8C05EB75C9922424D4 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E7843843B26FBD4B387ECB8E /* PBXTargetDependency */,
+			);
+			name = PiqaeNodeTests;
+			packageProductDependencies = (
+				6FA3ED4B5559D0C2BDB3FADE /* PiqaeNodeKitTesting */,
+			);
+			productName = PiqaeNodeTests;
+			productReference = 911CE9B0F27E94D1D2071917 /* PiqaeNodeTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		EA1FCBD6AA36EB0B998FCF9F /* PiqaeNode */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 75840CCC665056914BE4FA2D /* Build configuration list for PBXNativeTarget "PiqaeNode" */;
+			buildPhases = (
+				DAC54E1ADBC005B3E5DEB37D /* Sources */,
+				1ADCCEF3DFE7A9673863228D /* Resources */,
+				ACBB056F295785F04A851CFB /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = PiqaeNode;
+			packageProductDependencies = (
+				CC195A98440174CDD51BDD40 /* PiqaeNodeKit */,
+				25F2B996E37AED23F3AA4B99 /* PiqaeNodeKitAirPrint */,
+				525252F74C7FD19873AD7BD0 /* PiqaeNodeKitUI */,
+			);
+			productName = PiqaeNode;
+			productReference = D8948F2E2B6C9B9F79FE645E /* PiqaeNode.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		E668062496A8394E975D45F0 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					C9DF0AAC1DAADA526370B2E5 = {
+						ProvisioningStyle = Automatic;
+					};
+					EA1FCBD6AA36EB0B998FCF9F = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = ECA94B9C40F70B4156282455 /* Build configuration list for PBXProject "PiqaeNodeApple" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = C3224BC43996B578F093B89E;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				015C48EC98B8A1C563504097 /* XCLocalSwiftPackageReference "../../sdk/apple" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 0C353C8341D1F23DDBF4DE88 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				EA1FCBD6AA36EB0B998FCF9F /* PiqaeNode */,
+				C9DF0AAC1DAADA526370B2E5 /* PiqaeNodeTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		1ADCCEF3DFE7A9673863228D /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				05B773EE0A63AFBCD516C48D /* Assets.xcassets in Resources */,
+				896FA4426DB69860C0D457D3 /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		74918FD25B3082CA89329A57 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5D97940C907748EF6C46DF76 /* StandaloneNodeStoreTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DAC54E1ADBC005B3E5DEB37D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				09A2E2AFF4C285A0580272A5 /* PiqaeNodeApp.swift in Sources */,
+				02069BBD1DC7DCF4970E8FF9 /* StandaloneNodeModel.swift in Sources */,
+				C19E42779F3046347C859327 /* StandaloneNodeRootView.swift in Sources */,
+				A09355794C9E43C48E04397B /* StandaloneNodeStore.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		E7843843B26FBD4B387ECB8E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = EA1FCBD6AA36EB0B998FCF9F /* PiqaeNode */;
+			targetProxy = 3531F2BC65F305294B98FC63 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		053A02ED6F60E7F54C4AF64F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CODE_SIGN_ENTITLEMENTS = Config/PiqaeNode.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				INFOPLIST_FILE = Config/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.piqae.node;
+				PRODUCT_NAME = PiqaeNode;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		7147C614AAB90CE034053468 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PiqaeNode.app/PiqaeNode";
+			};
+			name = Debug;
+		};
+		7E87101C2D56025B130ABB52 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CODE_SIGN_ENTITLEMENTS = Config/PiqaeNode.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				INFOPLIST_FILE = Config/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.piqae.node;
+				PRODUCT_NAME = PiqaeNode;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		892AFF6AAA98562D2519B9E1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MARKETING_VERSION = 0.1.22;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		A74D91C6DC3D925C3559E45E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MARKETING_VERSION = 0.1.22;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		B1719FE5C5D18DE70471557F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PiqaeNode.app/PiqaeNode";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		75840CCC665056914BE4FA2D /* Build configuration list for PBXNativeTarget "PiqaeNode" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7E87101C2D56025B130ABB52 /* Debug */,
+				053A02ED6F60E7F54C4AF64F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E59A243713D3F855E8BB6F12 /* Build configuration list for PBXNativeTarget "PiqaeNodeTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7147C614AAB90CE034053468 /* Debug */,
+				B1719FE5C5D18DE70471557F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		ECA94B9C40F70B4156282455 /* Build configuration list for PBXProject "PiqaeNodeApple" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A74D91C6DC3D925C3559E45E /* Debug */,
+				892AFF6AAA98562D2519B9E1 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		015C48EC98B8A1C563504097 /* XCLocalSwiftPackageReference "../../sdk/apple" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../sdk/apple;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		25F2B996E37AED23F3AA4B99 /* PiqaeNodeKitAirPrint */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PiqaeNodeKitAirPrint;
+		};
+		525252F74C7FD19873AD7BD0 /* PiqaeNodeKitUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PiqaeNodeKitUI;
+		};
+		6FA3ED4B5559D0C2BDB3FADE /* PiqaeNodeKitTesting */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PiqaeNodeKitTesting;
+		};
+		CC195A98440174CDD51BDD40 /* PiqaeNodeKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PiqaeNodeKit;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = E668062496A8394E975D45F0 /* Project object */;
+}

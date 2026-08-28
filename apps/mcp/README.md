@@ -5,8 +5,8 @@ Piqae's checked-in API and operational knowledge. It is a thin adapter over the
 public Piqae API and TypeScript SDK: it does not connect to PostgreSQL, invent a
 second authorization model, or bypass tenant and scope checks.
 
-The `piqae_business_documents` tool validates and operates bounded
-`piqae.business-document/v1` templates. It does not return template inputs or document
+The `piqae_print_packets` tool validates and operates bounded
+`printpacket/v1` templates. It does not return template inputs or document
 content, accept credentials as tool arguments, or bypass the existing explicit
 authorization context. Printing a completed render remains behind the normal
 job-submission policy and exact destination confirmation.

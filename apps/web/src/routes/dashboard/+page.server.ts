@@ -9,6 +9,7 @@ import {
 } from '$lib/server/dashboard-data';
 import { isOperationalView, resolveStateFilter } from '$lib/dashboard-navigation';
 import type { DashboardApi } from '$lib/api';
+import { printerNeedsAttention } from '$lib/operations-health';
 import type {
   DashboardAccount,
   DashboardAgent,
@@ -17,6 +18,8 @@ import type {
   DashboardJob,
   DashboardJobEvent,
   DashboardNodeDiagnostic,
+  DashboardNodeRuntimeObservation,
+  DashboardNodeWakeHint,
   DashboardOverview,
   DashboardPrinter,
   DashboardPrinterRoute,
@@ -60,6 +63,11 @@ export type OperationalDetail =
       kind: 'node';
       node: DashboardAgent;
       printers: DashboardPrinter[];
+      runtime: DashboardNodeRuntimeObservation | null;
+      wakeHints: Promise<{
+        hints: DashboardNodeWakeHint[];
+        dataError: ReturnType<typeof presentDashboardError> | null;
+      }>;
       diagnostics: Promise<{
         reports: DashboardNodeDiagnostic[];
         dataError: ReturnType<typeof presentDashboardError> | null;
@@ -76,6 +84,7 @@ type LoadedLists = {
   destinations: DashboardDestination[];
   routes: DashboardPrinterRoute[];
   routeObservations: DashboardRouteObservation[];
+  runtimeObservations: DashboardNodeRuntimeObservation[];
 };
 
 type OperationsScope = 'customers' | 'own';
@@ -100,7 +109,7 @@ function overviewFor(lists: Pick<LoadedLists, 'jobs' | 'printers' | 'agents'>): 
     printers: {
       total: lists.printers.length,
       online: lists.printers.filter((printer) => printer.state === 'online').length,
-      attention: lists.printers.filter((printer) => printer.state !== 'online').length
+      attention: lists.printers.filter((printer) => printerNeedsAttention(printer.state)).length
     },
     jobs: {
       recent: lists.jobs.length,
@@ -143,8 +152,24 @@ async function loadCustomerOperations(api: DashboardApi) {
     agents: loaded.flatMap((entry) => entry.agents),
     destinations: loaded.flatMap((entry) => entry.destinations),
     routes: loaded.flatMap((entry) => entry.routes),
-    routeObservations: loaded.flatMap((entry) => entry.routeObservations)
+    routeObservations: loaded.flatMap((entry) => entry.routeObservations),
+    runtimeObservations: loaded.flatMap((entry) => entry.runtimeObservations ?? [])
   };
+}
+
+async function loadRuntimeObservations(api: DashboardApi) {
+  if (typeof api.nodeRuntimeObservations !== 'function') {
+    return { data: [] as DashboardNodeRuntimeObservation[], dataError: null };
+  }
+  try {
+    const result = await api.nodeRuntimeObservations();
+    return { data: result.data, dataError: null };
+  } catch (error) {
+    return {
+      data: [] as DashboardNodeRuntimeObservation[],
+      dataError: presentDashboardError(error)
+    };
+  }
 }
 
 export const load: PageServerLoad = async (event) => {
@@ -188,13 +213,14 @@ export const load: PageServerLoad = async (event) => {
       !managedAccount && effectiveMeta.platform.accounts && requestedScope !== 'own'
         ? 'customers'
         : 'own';
-    const [ownOverview, ownJobs, ownPrinters, ownAgents, ownDestinations, ownRoutes] = await Promise.all([
+    const [ownOverview, ownJobs, ownPrinters, ownAgents, ownDestinations, ownRoutes, ownRuntimes] = await Promise.all([
       operationalApi.overview(),
       operationalApi.jobs(),
       operationalApi.printers(),
       operationalApi.agents(),
       operationalApi.destinations(),
-      operationalApi.routes()
+      operationalApi.routes(),
+      loadRuntimeObservations(operationalApi)
     ]);
     const ownHasResources = ownAgents.data.length > 0 || ownPrinters.data.length > 0 || ownJobs.data.length > 0;
     const customerOperations =
@@ -216,7 +242,10 @@ export const load: PageServerLoad = async (event) => {
       routes: routes.data,
       routeObservations: customerOperations
         ? customerOperations.routeObservations
-        : routes.data.flatMap((route) => route.latestObservation ? [route.latestObservation] : [])
+        : routes.data.flatMap((route) => route.latestObservation ? [route.latestObservation] : []),
+      runtimeObservations: customerOperations
+        ? customerOperations.runtimeObservations
+        : ownRuntimes.data
     };
 
     const overview = customerOperations ? overviewFor(lists) : ownOverview;
@@ -230,6 +259,7 @@ export const load: PageServerLoad = async (event) => {
       ownHasResources,
       overview,
       ...lists,
+      runtimeDataError: customerOperations ? null : ownRuntimes.dataError,
       detail: await loadDetail(event, operationalApi, lists),
       dataError: null
     };
@@ -249,6 +279,8 @@ export const load: PageServerLoad = async (event) => {
       destinations: [],
       routes: [],
       routeObservations: [],
+      runtimeObservations: [],
+      runtimeDataError: null,
       detail: null,
       dataError: presentDashboardError(error)
     };
@@ -341,6 +373,8 @@ async function loadDetail(
       kind: 'node',
       node,
       printers: loaded.printers.filter((printer) => sameResourceId(printer.agentId, node.id)),
+      runtime: loaded.runtimeObservations.find((runtime) => sameResourceId(runtime.nodeId, node.id)) ?? null,
+      wakeHints: nodeWakeHints(api, node.id),
       // Streamed: a diagnostics outage must never block the node drawer.
       diagnostics: nodeDiagnostics(api, node.id)
     };
@@ -364,7 +398,140 @@ async function nodeDiagnostics(api: DashboardApi, nodeId: string) {
   }
 }
 
+async function nodeWakeHints(api: DashboardApi, nodeId: string) {
+  try {
+    return { hints: await api.nodeWakeHints(nodeId), dataError: null };
+  } catch (error) {
+    return { hints: [], dataError: presentDashboardError(error) };
+  }
+}
+
 export const actions: Actions = {
+  updateNodeDetails: async (event) => {
+    if (dashboardMode() !== 'live') {
+      return fail(400, {
+        mutation: 'updateNodeDetails',
+        error: { message: 'Node details cannot be changed while demo data is active.' }
+      });
+    }
+    const data = await event.request.formData();
+    const nodeId = String(data.get('node_id') ?? '').trim();
+    const name = String(data.get('name') ?? '').trim();
+    const site = String(data.get('site') ?? '').trim();
+    const location = String(data.get('location') ?? '').trim();
+    const labels = String(data.get('labels') ?? '')
+      .split(',')
+      .map((label) => label.trim())
+      .filter(Boolean);
+    if (!nodeId || !name || name.length > 120 || site.length > 120 || location.length > 120) {
+      return fail(400, {
+        mutation: 'updateNodeDetails',
+        error: { message: 'Use a node name and keep node, site, and location labels within 120 characters.' }
+      });
+    }
+    if (labels.length > 16 || labels.some((label) => label.length > 64) || new Set(labels).size !== labels.length) {
+      return fail(400, {
+        mutation: 'updateNodeDetails',
+        error: { message: 'Use at most 16 unique labels, each no longer than 64 characters.' }
+      });
+    }
+    try {
+      const managed = await managedSelection(event, data);
+      const node = await (managed?.api ?? dashboardSource(event).api).updateNodeDetails(nodeId, {
+        name,
+        site: site || null,
+        location: location || null,
+        labels
+      });
+      return { mutation: 'updateNodeDetails', node };
+    } catch (error) {
+      return fail(502, {
+        mutation: 'updateNodeDetails',
+        error: { message: presentDashboardError(error).message }
+      });
+    }
+  },
+
+  removeNode: async (event) => {
+    if (dashboardMode() !== 'live') {
+      return fail(400, {
+        mutation: 'removeNode',
+        error: { message: 'Node removal is disabled while demo data is active.' }
+      });
+    }
+    const data = await event.request.formData();
+    const nodeId = String(data.get('node_id') ?? '').trim();
+    const confirmation = String(data.get('confirmation') ?? '').trim();
+    if (!nodeId || !confirmation) {
+      return fail(400, {
+        mutation: 'removeNode',
+        error: { message: 'Type the node name to confirm removal.' }
+      });
+    }
+    try {
+      const managed = await managedSelection(event, data);
+      const scopedApi = managed?.api ?? dashboardSource(event).api;
+      const nodes = await scopedApi.agents();
+      const node = nodes.data.find((candidate) => sameResourceId(candidate.id, nodeId));
+      if (!node) {
+        return fail(404, {
+          mutation: 'removeNode',
+          error: { message: 'That node is not present in the selected workspace.' }
+        });
+      }
+      if (confirmation !== node.name) {
+        return fail(400, {
+          mutation: 'removeNode',
+          error: { message: `Type “${node.name}” exactly to confirm removal.` }
+        });
+      }
+      const result = await scopedApi.removeNode(nodeId);
+      return {
+        mutation: 'removeNode',
+        removedNodeId: nodeId,
+        alreadyRemoved: result.alreadyRemoved
+      };
+    } catch (error) {
+      return fail(502, {
+        mutation: 'removeNode',
+        error: { message: presentDashboardError(error).message }
+      });
+    }
+  },
+
+  requestNodeRefresh: async (event) => {
+    if (dashboardMode() !== 'live') {
+      return fail(400, {
+        mutation: 'requestNodeRefresh',
+        error: { message: 'Node refresh requests are disabled while demo data is active.' }
+      });
+    }
+    const data = await event.request.formData();
+    const nodeId = String(data.get('node_id') ?? '').trim();
+    if (!nodeId) {
+      return fail(400, {
+        mutation: 'requestNodeRefresh',
+        error: { message: 'Select a node before requesting a refresh.' }
+      });
+    }
+    try {
+      const managed = await managedSelection(event, data);
+      const hint = await (managed?.api ?? dashboardSource(event).api).requestNodeRefresh(
+        nodeId,
+        `dashboard-refresh-${crypto.randomUUID()}`
+      );
+      return {
+        mutation: 'requestNodeRefresh',
+        nodeRefreshHint: hint
+      };
+    } catch (error) {
+      return fail(502, {
+        mutation: 'requestNodeRefresh',
+        error: { message: presentDashboardError(error).message }
+      });
+    }
+  },
+
   collectNodeDiagnostics: async (event) => {
     if (dashboardMode() !== 'live') {
       return fail(400, {

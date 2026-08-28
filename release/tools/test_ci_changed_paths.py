@@ -73,6 +73,15 @@ class CiChangedPathsTests(unittest.TestCase):
         self.assertTrue(selected["macos_rust"])
         self.assertTrue(selected["windows_rust"])
 
+    def test_printpacket_core_checks_native_and_sdk_consumers(self) -> None:
+        crate = classify(["crates/printpacket/src/lib.rs"])
+        self.assertTrue(crate["rust_shared"])
+        self.assertTrue(crate["macos_rust"] and crate["windows_rust"])
+
+        standard = classify(["standards/printpacket/schema/printpacket-v1.schema.json"])
+        self.assertTrue(standard["sdk"] and standard["web"])
+        self.assertTrue(standard["mcp"] and standard["shopify"])
+
     def test_server_migration_does_not_build_native_apps(self) -> None:
         selected = classify(["migrations/0024_example.sql"])
         self.assertTrue(selected["rust_server"])
@@ -86,6 +95,32 @@ class CiChangedPathsTests(unittest.TestCase):
         self.assertTrue(windows["windows_installer"])
         self.assertFalse(windows["macos_packaging"])
 
+    def test_apple_node_sdk_selects_strict_swift_validation(self) -> None:
+        for path in (
+            "sdk/apple/Sources/PiqaeNodeKit/PiqaeNode.swift",
+            "release/tools/test_apple_node_sdk.sh",
+            "release/tools/test_apple_node_sdk_linked.sh",
+        ):
+            with self.subTest(path=path):
+                selected = classify([path])
+                self.assertTrue(selected["macos_shell"])
+                self.assertFalse(selected["windows_shell"] or selected["windows_installer"])
+        self.assertTrue(
+            classify(["sdk/apple/Sources/PiqaeNodeKit/PiqaeNode.swift"])["sdk"]
+        )
+
+    def test_standalone_apple_app_selects_linked_apple_validation(self) -> None:
+        for path in (
+            "apps/node-apple/project.yml",
+            "apps/node-apple/Sources/StandaloneNodeStore.swift",
+            "apps/node-apple/Tests/StandaloneNodeStoreTests.swift",
+            "release/tools/test_apple_node_app.sh",
+        ):
+            with self.subTest(path=path):
+                selected = classify([path])
+                self.assertTrue(selected["macos_shell"])
+                self.assertFalse(selected["windows_shell"] or selected["windows_installer"])
+
     def test_release_workflow_change_does_not_select_every_platform(self) -> None:
         selected = classify([".github/workflows/macos-promotion.yml"])
         self.assertTrue(selected["release_tooling"] and selected["macos_packaging"])
@@ -95,7 +130,8 @@ class CiChangedPathsTests(unittest.TestCase):
         selected = classify([".github/workflows/release.yml"])
         self.assertTrue(selected["release_tooling"])
         self.assertTrue(selected["macos_packaging"] and selected["windows_installer"])
-        self.assertFalse(selected["sdk"] or selected["web"] or selected["terraform"])
+        self.assertTrue(selected["sdk"])
+        self.assertFalse(selected["web"] or selected["terraform"])
 
     def test_ci_classifier_change_exercises_all_scopes(self) -> None:
         self.assertEqual(

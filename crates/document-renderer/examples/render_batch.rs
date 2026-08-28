@@ -1,6 +1,4 @@
-use piqae_document_renderer::{
-    BusinessDocumentV1, RenderLimits, ResolvedResources, render_with_metrics,
-};
+use printpacket_renderer::{PrintPacketV1, RenderLimits, ResolvedResources, render_with_metrics};
 use serde_json::{Value, json};
 use std::time::Instant;
 
@@ -17,7 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or("20")
         .parse::<usize>()?
         .clamp(1, 1_000);
-    let specification: BusinessDocumentV1 = serde_json::from_value(specification())?;
+    let specification: PrintPacketV1 = serde_json::from_value(specification())?;
     let input = input(order_count);
     let input_bytes = serde_json::to_vec(&input)?.len();
     let mut samples = Vec::with_capacity(iterations);
@@ -76,7 +74,7 @@ fn input(order_count: usize) -> Value {
 fn specification() -> Value {
     let style = json!({});
     json!({
-        "format": "piqae.business-document/v1",
+        "format": "printpacket/v1",
         "media": {
             "kind": "paged",
             "size": "a4",

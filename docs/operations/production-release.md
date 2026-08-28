@@ -60,8 +60,10 @@ component order. A Shopify release that consumes a new API contract cannot be
 promoted independently: migrations and the compatible control plane go first,
 then workers and web, then Shopify, and finally a desktop-node canary. Every
 component records the same source commit and immutable artifact/deployment ID
-in the release evidence. Rollback restores application digests; database
-migrations are forward-only and must remain compatible with N and N-1.
+in the release evidence. v0.1.22 is a documented fresh-database pre-release
+baseline and refuses v0.1.21 in-place upgrades. After that baseline, rollback
+restores application digests and forward-only migrations must remain compatible
+with N and N-1.
 
 1. Build and attest the web and server candidate from one reviewed commit.
 2. Deploy that commit to the isolated Railway `staging` environment.
@@ -133,10 +135,13 @@ remain compatible with both application versions.
 ## Rollback and database rules
 
 Application rollback restores the previous immutable digest and traffic split.
-It must not run down-migrations automatically. Every migration must remain
-compatible with N and N-1 server versions throughout the rollout. If a schema
-change cannot be expanded and contracted safely, stop the release and schedule
-a separately rehearsed maintenance operation.
+It must not run down-migrations automatically. The one-time v0.1.22 fresh
+baseline follows the explicit reset/re-enrol runbook in
+[`upgrades.md`](upgrades.md#v0122-fresh-postgresql-baseline) and has no rolling
+database window. Every later migration must remain compatible with N and N-1
+server versions throughout the rollout. If a schema change cannot be expanded
+and contracted safely, stop the release and schedule a separately rehearsed
+maintenance operation.
 
 When a release adds destination-route reservations, older nodes may continue
 to report presence and inventory but must not receive new handoffs until they

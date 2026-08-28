@@ -240,7 +240,8 @@ CREATE TABLE IF NOT EXISTS content_files (
   sha256 TEXT PRIMARY KEY,
   path TEXT NOT NULL,
   reference_count INTEGER NOT NULL CHECK (reference_count >= 0),
-  verified_unix_ms INTEGER NOT NULL
+  verified_unix_ms INTEGER NOT NULL,
+  reclaiming INTEGER NOT NULL DEFAULT 0 CHECK (reclaiming IN (0, 1))
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -272,6 +273,12 @@ CREATE TABLE IF NOT EXISTS jobs (
   loaded_media_snapshot_json TEXT CHECK (
     loaded_media_snapshot_json IS NULL OR json_valid(loaded_media_snapshot_json)
   ),
+  profile_snapshot_json TEXT CHECK (
+    profile_snapshot_json IS NULL OR json_valid(profile_snapshot_json)
+  ),
+  printer_native_binding_json TEXT CHECK (
+    printer_native_binding_json IS NULL OR json_valid(printer_native_binding_json)
+  ),
   UNIQUE (printer_id, printer_sequence)
 );
 
@@ -294,7 +301,20 @@ CREATE TABLE IF NOT EXISTS cloud_accept_intents (
   lease_expires_unix_ms INTEGER NOT NULL,
   content_sha256 TEXT NOT NULL,
   local_sequence INTEGER NOT NULL CHECK (local_sequence > 0),
+  route_reservation_id TEXT,
+  route_generation INTEGER,
+  route_fencing_token TEXT,
+  acceptance_state TEXT NOT NULL DEFAULT 'prepared'
+    CHECK (acceptance_state IN ('prepared', 'remote_accept_confirmed')),
   prepared_unix_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cloud_release_cleanups (
+  job_id TEXT PRIMARY KEY REFERENCES jobs(job_id) ON DELETE CASCADE,
+  lease_id TEXT NOT NULL,
+  lease_token TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  quarantined_unix_ms INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS job_submissions (

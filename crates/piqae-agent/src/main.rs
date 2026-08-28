@@ -1,9 +1,9 @@
-mod connector_runtime;
 mod content_key_store;
-mod route_coordinator;
 mod uri_fetch;
 #[cfg(windows)]
 mod windows_acl;
+#[cfg(windows)]
+mod windows_power;
 
 use aes_gcm::{
     Aes256Gcm, KeyInit as _,
@@ -20,10 +20,10 @@ use clap::{Parser, ValueEnum};
 use futures::TryStreamExt;
 use hkdf::Hkdf;
 use p256::{PublicKey, SecretKey, ecdh::diffie_hellman, pkcs8::EncodePublicKey as _};
-use piqae_agent_client::{AgentClient, ClientError, DeviceIdentity};
+use piqae_agent_client::{AgentClient, ClientError, DeviceIdentity, DeviceRequestSigner};
 use piqae_agent_core::{
-    AgentEngine, ContentStore, Executor, ExecutorFailure, FakeExecutor, LocalSubmission,
-    NativeAcceptance, NativeJobReference, SystemClock,
+    AgentEngine, ContentStore, DurableProfileSnapshot, Executor, ExecutorFailure, FakeExecutor,
+    LocalSubmission, NativeAcceptance, NativeJobReference, SystemClock,
     document_render::{
         NodeDocumentCapabilities, NodeRenderRequirement, NodeRenderResult, RENDERER_ABI,
         render_with_resources_or_fallback,
@@ -31,8 +31,9 @@ use piqae_agent_core::{
     document_resources::{DocumentResourceCache, NodeResourceDescriptor, RESOURCE_ABI},
 };
 use piqae_agent_storage::{
-    AcceptedJob, AgentStore, CloudAcceptIntent, NativeProfileCapture, PendingEvent, QueueCounts,
-    StorageError, StoredLoadedMedia, StoredNamedProfile, StoredPrinter,
+    AcceptedJob, AgentStore, CloudAcceptIntent, CloudRouteProof, JobPersistenceFacts,
+    NativeProfileCapture, PendingEvent, PrinterNativeBindingPin, QueueCounts, StorageError,
+    StoredLoadedMedia, StoredNamedProfile, StoredPrinter,
 };
 use piqae_domain::{
     AgentId, ContentKind, EventId, JobEvent, JobFailureReason, JobId, JobState, NativeProfileKind,
@@ -50,12 +51,24 @@ use piqae_local_ipc::{
     NativeProfileSeed, ProfileCaptureAuthorized, ProfileValidationResult, SessionAuthenticator,
     capture_token_digest, generate_capture_token,
 };
+use piqae_node_runtime::{
+    AgentClientAuthority, AvailabilityClass, BrokerConsentHandle, BrokerRegistry,
+    BrokerServerState, CloudCommandApplication, CloudCommandApplier, CloudConnectorWorker,
+    CloudWorkerError, CommandRecoveryLedger, ContentMaterializer, DurableOfferAcceptor,
+    EventAcknowledger, HostCapabilities, HostConfiguration, HostConfigurationStore, HostKind,
+    InventorySnapshotProvider, LifecycleEvent, NodeIdentity, NodeRuntime, NodeRuntimeMode,
+    PendingCloudAcceptance, PendingCloudRelease, PrinterTransport, RuntimeConfiguration,
+    WakeReconciler,
+    command::{ConnectorInvitationRequest, ConnectorInvitationResult},
+    connector_disconnect_requires_authority_upgrade, connector_registry as connector_runtime,
+    route_coordinator,
+};
 use piqae_protocol::{
     CURRENT_PROTOCOL_VERSION,
     agent::{
         AgentAcceptJobRequest, AgentCommand, AgentHealth, AgentReleaseLeaseRequest,
-        AgentRenewLeaseRequest, AgentSyncRequest, AgentSyncResponse, ContentDescriptor,
-        CreateDeviceAuthorizationRequest, EnrolRequest, InstallationMode, JobOffer, PrinterGrant,
+        AgentSyncRequest, ContentDescriptor, CreateDeviceAuthorizationRequest, EnrolRequest,
+        InstallationMode, InventoryProjectionAcknowledgement, JobOffer, PrinterGrant,
         PrinterProfileSnapshot, PrinterSnapshot, QueueSnapshot,
     },
     executor::{DiscoveredPrinter, ExecutorOperation, ExecutorResult, NativeJobObservation},
@@ -70,7 +83,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -81,8 +94,6 @@ use tracing_subscriber::EnvFilter;
 use uri_fetch::UriFetcher;
 use url::Url;
 
-const LEASE_RENEWAL_INTERVAL: Duration = Duration::from_secs(10);
-const LEASE_RENEWAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const PROFILE_CAPTURE_LIFETIME: Duration = Duration::from_secs(5 * 60);
 const LOCAL_PROFILE_HOST_ID: &str = "authenticated-loopback-profile-host";
 const DOCUMENT_RESOURCE_CACHE_BYTES: u64 = 512 * 1024 * 1024;
@@ -195,10 +206,10 @@ struct Arguments {
     enrolment_name: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct CloudConfiguration {
     client: AgentClient,
-    identity: DeviceIdentity,
+    identity: Arc<dyn DeviceRequestSigner>,
     agent_id: AgentId,
     content_encryption_keys: Arc<content_key_store::ContentKeyring>,
     allowed_printer_ids: Option<std::collections::BTreeSet<String>>,
@@ -266,6 +277,7 @@ struct SharedRuntimeExecutor {
     runtime: Arc<Mutex<RuntimeExecutor>>,
     coordinator: Arc<Mutex<route_coordinator::RouteCoordinator>>,
     observation_cache: Arc<Mutex<RouteObservationCache>>,
+    native_binding_session: Arc<PrinterNativeBindingSession>,
     connector_id: String,
 }
 
@@ -298,6 +310,10 @@ impl StopSignal {
 }
 
 enum ConnectorSupervisorCommand {
+    Connect {
+        request: Box<ConnectorInvitationRequest>,
+        respond_to: oneshot::Sender<Result<ConnectorInvitationResult, ControlFailure>>,
+    },
     Reload {
         respond_to: oneshot::Sender<Result<(), ControlFailure>>,
     },
@@ -307,6 +323,10 @@ enum ConnectorSupervisorCommand {
     },
     Details {
         respond_to: oneshot::Sender<Result<Vec<LocalConnectorDetail>, ControlFailure>>,
+    },
+    UpdateIdentity {
+        identity: NodeIdentity,
+        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
     },
     RefreshPrinters,
 }
@@ -319,6 +339,19 @@ fn reject_connector_supervisor_command(
         mpsc::error::TrySendError::Closed(command) => (false, command),
     };
     match command {
+        ConnectorSupervisorCommand::Connect { respond_to, .. } => {
+            let _ = respond_to.send(Err(if is_full {
+                control_failure(
+                    "connector_connect_deferred",
+                    "connector supervisor is busy; retry the invitation exchange",
+                )
+            } else {
+                control_failure(
+                    "connector_supervisor_unavailable",
+                    "connector supervisor is unavailable",
+                )
+            }));
+        }
         ConnectorSupervisorCommand::Reload { respond_to } => {
             let failure = if is_full {
                 control_failure(
@@ -354,6 +387,16 @@ fn reject_connector_supervisor_command(
                     "connector supervisor is busy"
                 } else {
                     "connector supervisor is unavailable"
+                },
+            )));
+        }
+        ConnectorSupervisorCommand::UpdateIdentity { respond_to, .. } => {
+            let _ = respond_to.send(Err(control_failure(
+                "connector_identity_sync_deferred",
+                if is_full {
+                    "connector supervisor is busy; periodic recovery will retry"
+                } else {
+                    "connector supervisor is unavailable; restart will retry"
                 },
             )));
         }
@@ -460,6 +503,7 @@ impl SharedRuntimeExecutor {
             runtime: Arc::clone(&self.runtime),
             coordinator: Arc::clone(&self.coordinator),
             observation_cache: Arc::clone(&self.observation_cache),
+            native_binding_session: Arc::clone(&self.native_binding_session),
             connector_id: connector_id.into(),
         }
     }
@@ -486,6 +530,31 @@ impl Executor for SharedRuntimeExecutor {
         &mut self,
         mut submission: LocalSubmission,
     ) -> Result<NativeAcceptance, ExecutorFailure> {
+        // Serialize binding refresh with the complete RAW handoff. The pin is
+        // process/session scoped, so restart or any inventory generation
+        // change fails before route reservation or spooler contact.
+        let _native_binding_guard = if submission.content_kind == "raw" {
+            let guard = self.native_binding_session.refresh_lock.lock().await;
+            let valid = submission
+                .printer_native_binding
+                .as_ref()
+                .is_some_and(|pin| {
+                    pin.printer_id == submission.printer_id
+                        && self.native_binding_session.matches_pin(pin)
+                });
+            if !valid {
+                return Err(ExecutorFailure {
+                    code: "printer_native_binding_stale".into(),
+                    message: "the durable printer-native binding is no longer current".into(),
+                    retryable: false,
+                    handoff_may_have_succeeded: false,
+                    native_code: None,
+                });
+            }
+            Some(guard)
+        } else {
+            None
+        };
         let now = Utc::now();
         let reservation = self
             .coordinator
@@ -579,6 +648,8 @@ enum PrinterDiscovery {
     Disabled,
     Fake,
     Process(SupervisedExecutor),
+    #[cfg(test)]
+    Failing,
 }
 
 impl RuntimeExecutor {
@@ -646,6 +717,8 @@ impl PrinterDiscovery {
         match self {
             Self::Disabled => Ok(piqae_domain::PrinterState::Unknown),
             Self::Fake => Ok(piqae_domain::PrinterState::Online),
+            #[cfg(test)]
+            Self::Failing => anyhow::bail!("fixture printer discovery failed"),
             Self::Process(executor) => match executor
                 .execute_operation(
                     ExecutorOperation::GetPrinterState {
@@ -668,6 +741,8 @@ impl PrinterDiscovery {
     ) -> Result<Vec<piqae_protocol::executor::NativeQueueJob>> {
         match self {
             Self::Disabled | Self::Fake => Ok(Vec::new()),
+            #[cfg(test)]
+            Self::Failing => anyhow::bail!("fixture printer discovery failed"),
             Self::Process(executor) => match executor
                 .execute_operation(
                     ExecutorOperation::ListJobs {
@@ -774,11 +849,42 @@ async fn main() -> Result<()> {
         .with_context(|| format!("create {}", arguments.data_dir.display()))?;
     // Loading is intentionally fail-closed: a corrupt or unsupported
     // multi-connector registry must not silently fall back to another tenant's
-    // legacy identity. An absent registry preserves single-connector behavior.
+    // legacy identity. Approved connectors make even the otherwise local
+    // launch mode cloud-capable.
     let connector_registry = connector_runtime::ConnectorRegistry::load(&arguments.data_dir)?;
     let configured_connectors = connector_registry.enabled().count();
+    let printer_transports = match arguments.executor {
+        ExecutorMode::Disabled => std::collections::BTreeSet::new(),
+        ExecutorMode::Fake => std::iter::once(PrinterTransport::Fake).collect(),
+        ExecutorMode::Process => {
+            std::iter::once(PrinterTransport::OperatingSystemDriver).collect()
+        }
+    };
+    let node_runtime = Arc::new(NodeRuntime::start(RuntimeConfiguration {
+        data_directory: arguments.data_dir.clone(),
+        mode: runtime_mode(arguments.mode, configured_connectors),
+        host: HostCapabilities {
+            host_kind: HostKind::UserAgent,
+            availability: AvailabilityClass::ContinuousWhileAwake,
+            secure_storage: true,
+            local_ipc_broker: cfg!(any(unix, windows)),
+            can_prevent_idle_sleep_during_handoff: false,
+            can_receive_remote_wake_hint: false,
+            printer_transports,
+        },
+    })?);
+    let host_configuration = HostConfigurationStore::open_or_create(
+        &arguments.data_dir,
+        HostConfiguration::standalone(NodeIdentity::new(
+            installation_hostname(),
+            None,
+            None,
+            Vec::new(),
+        )?),
+    )?;
+    let _ = node_runtime.apply_lifecycle(LifecycleEvent::Started);
     let database_path = arguments.data_dir.join("agent.sqlite3");
-    let store = AgentStore::open(&database_path)
+    let mut store = AgentStore::open(&database_path)
         .with_context(|| format!("open {}", database_path.display()))?;
     if !store.integrity_check()? {
         anyhow::bail!("agent database integrity check failed");
@@ -799,6 +905,17 @@ async fn main() -> Result<()> {
         pinned_digest_hex: arguments.support_pack_digests.clone(),
         ed25519_public_key_hex: arguments.support_pack_trust_keys.clone(),
     }).context("load trusted driver support packs")?);
+    let native_binding_session = Arc::new(PrinterNativeBindingSession::new());
+    if let Err(error) = persist_printer_native_binding_envelope(
+        &mut store,
+        &native_binding_session,
+        native_binding_session.current_generation(),
+        &[],
+    ) {
+        // The in-memory process-session mismatch still quarantines any prior
+        // envelope. A binding-specific write fault must not disable PDF sync.
+        warn!(%error, "prior printer-native binding evidence could not be quarantined on startup");
+    }
 
     let challenge = load_or_create_private_token(&arguments.data_dir.join("local.token"))?;
     let content_store = ContentStore::open(arguments.data_dir.join("content")).await?;
@@ -831,6 +948,7 @@ async fn main() -> Result<()> {
         runtime: Arc::new(Mutex::new(executor)),
         coordinator: Arc::new(Mutex::new(route_coordinator)),
         observation_cache: Arc::new(Mutex::new(RouteObservationCache::default())),
+        native_binding_session,
         connector_id: "local".into(),
     };
     let engine = AgentEngine::new(store, executor.clone(), SystemClock);
@@ -842,9 +960,19 @@ async fn main() -> Result<()> {
     }));
     let paused = Arc::new(AtomicBool::new(initially_paused));
     let cloud_sync_wakeup = Arc::new(Notify::new());
+    #[cfg(windows)]
+    let _power_lifecycle = windows_power::PowerLifecycleRegistration::register(
+        Arc::clone(&node_runtime),
+        Arc::clone(&cloud_sync_wakeup),
+    )?;
     let printer_inventory_dirty = Arc::new(AtomicBool::new(true));
     let (control_tx, control_rx) = mpsc::channel(32);
     let (connector_supervisor_tx, connector_supervisor_rx) = mpsc::channel(32);
+    let broker_registry = BrokerRegistry::load(&arguments.data_dir)
+        .context("open local application broker registry")?;
+    let broker_state = BrokerServerState::new(broker_registry, control_tx.clone());
+    let broker_consent = broker_state.consent_handle();
+    let initial_host_identity = host_configuration.configuration().identity.clone();
     let mut control_task = tokio::spawn(control_loop(
         control_rx,
         engine,
@@ -857,6 +985,9 @@ async fn main() -> Result<()> {
         Arc::clone(&cloud_sync_wakeup),
         Arc::clone(&printer_inventory_dirty),
         connector_supervisor_tx,
+        broker_consent,
+        Arc::clone(&node_runtime),
+        host_configuration,
     ));
 
     // A populated registry supersedes the legacy cloud identity. Running both
@@ -874,6 +1005,7 @@ async fn main() -> Result<()> {
             printer_discovery.clone(),
             Arc::clone(&executor.coordinator),
             Arc::clone(&executor.observation_cache),
+            Arc::clone(&executor.native_binding_session),
             Arc::clone(&support_packs),
             Arc::clone(&connection),
             Arc::clone(&paused),
@@ -881,6 +1013,7 @@ async fn main() -> Result<()> {
             Arc::clone(&printer_inventory_dirty),
             Arc::new(RwLock::new(None)),
             stop.clone(),
+            Arc::clone(&node_runtime),
         ));
         Some(LegacyCloudWorker { stop, task })
     } else {
@@ -901,6 +1034,8 @@ async fn main() -> Result<()> {
         support_packs,
         legacy_cloud_worker,
         connector_connections,
+        Arc::clone(&node_runtime),
+        initial_host_identity,
     ));
 
     info!(
@@ -910,6 +1045,10 @@ async fn main() -> Result<()> {
         bind = %arguments.local_bind,
         "Piqae node started"
     );
+    let mut broker_task = tokio::spawn(run_local_broker(
+        piqae_local_ipc::broker_endpoint_for_data_directory(&arguments.data_dir),
+        broker_state,
+    ));
     let local_api = piqae_local_api::serve(
         arguments.local_bind,
         LocalApiState::new(&challenge, control_tx),
@@ -921,9 +1060,11 @@ async fn main() -> Result<()> {
         result = &mut connector_supervisor_task => {
             Err(unexpected_task_exit("connector supervisor", result))
         }
+        result = &mut broker_task => Err(unexpected_task_exit("local node broker", result)),
     };
     control_task.abort();
     connector_supervisor_task.abort();
+    broker_task.abort();
     result
     }
     .await;
@@ -931,6 +1072,17 @@ async fn main() -> Result<()> {
         error!(error = %error, "Piqae agent stopped unexpectedly");
     }
     outcome
+}
+
+async fn run_local_broker(endpoint: String, state: BrokerServerState) {
+    #[cfg(unix)]
+    if let Err(error) = piqae_node_runtime::broker::serve_unix_broker(endpoint, state).await {
+        error!(error = %error, "local node broker stopped");
+    }
+    #[cfg(windows)]
+    if let Err(error) = piqae_node_runtime::broker::serve_windows_broker(&endpoint, state).await {
+        error!(error = %error, "local node broker stopped");
+    }
 }
 
 fn unexpected_task_exit(
@@ -1182,18 +1334,20 @@ async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) ->
         &allowed_printer_ids,
     );
     let installation_proof = installation_identity.sign_base64(&proof_message);
+    let hostname = installation_hostname();
     let enrolled = AgentClient::new(base_url.clone())?
         .enrol(&EnrolRequest {
             token,
             public_key: connector_public_key,
-            name: installation_hostname(),
-            hostname: installation_hostname(),
+            name: hostname.clone(),
+            hostname,
             platform: std::env::consts::OS.to_owned(),
             architecture: std::env::consts::ARCH.to_owned(),
             installation_mode: InstallationMode::User,
             agent_version: env!("CARGO_PKG_VERSION").to_owned(),
             protocol_version: CURRENT_PROTOCOL_VERSION,
             installation_id: Some(installation.installation_id),
+            installation_public_key: Some(installation_identity.public_key_base64()),
             printer_grant,
             allowed_printer_ids: allowed_printer_ids.clone(),
             installation_proof: Some(installation_proof),
@@ -1217,10 +1371,15 @@ async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) ->
         environment_id: Some(preview.environment_id),
         requesting_service_account_id: preview.requesting_service_account_id,
         manage_url: preview.return_url.and_then(|value| value.parse().ok()),
-        device_key_file: relative_key,
+        device_key_file: Some(relative_key),
+        secure_key_handle: None,
         enabled: true,
         printer_grant,
         allowed_printer_ids,
+        node_identity_revision: None,
+        node_identity_applied_local_revision: None,
+        node_identity_conflict_revision: None,
+        node_identity_conflict_local_revision: None,
     };
     if registry.contains(&connector_id) {
         registry.replace(record)?;
@@ -1236,6 +1395,248 @@ async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) ->
     }
     print_connector_connected(&enrolled.agent_id);
     Ok(())
+}
+
+/// Node-owned attached-app invitation exchange. The application supplies only
+/// the pinned origin, one-time capability, and local printer consent. Every
+/// ownership field in the durable connector record is sourced from the
+/// authenticated authority responses below.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the pinned preview, installation proof, exchange and durable activation remain one auditable invitation boundary"
+)]
+async fn connect_installed_invitation(
+    data_dir: &Path,
+    request: ConnectorInvitationRequest,
+) -> Result<ConnectorInvitationResult> {
+    let ConnectorInvitationRequest {
+        control_plane_url,
+        invitation_token,
+        printer_grant,
+        mut allowed_printer_ids,
+        node_name,
+        hostname,
+    } = request;
+    let base_url: Url = control_plane_url
+        .parse()
+        .context("connector authority URL is invalid")?;
+    validate_attached_invitation_input(
+        &base_url,
+        &invitation_token,
+        printer_grant,
+        &allowed_printer_ids,
+        &node_name,
+        &hostname,
+    )?;
+    allowed_printer_ids.sort();
+    allowed_printer_ids.dedup();
+    let client = AgentClient::new(base_url.clone())?;
+    let preview = client
+        .preview_connect_session(&invitation_token)
+        .await
+        .context("preview attached connector invitation")?;
+    anyhow::ensure!(
+        preview.expires_at > Utc::now(),
+        "connector invitation expired"
+    );
+    validate_attached_preview_grant(&preview.printer_grant, printer_grant)?;
+
+    let (installation, installation_key_path) = installed_identity_from_data_dir(data_dir)?;
+    let installation_identity =
+        read_device_identity(&installation.agent_id, &installation_key_path)
+            .context("read stable installation signing identity")?;
+    let fingerprint = hex::encode(Sha256::digest(invitation_token.as_bytes()));
+    let relative_key = PathBuf::from("connectors")
+        .join("keys")
+        .join(format!("{fingerprint}.key"));
+    let connector_key_path = data_dir.join(&relative_key);
+    let created_key = !connector_key_path.exists();
+    let connector_identity = if created_key {
+        let identity = DeviceIdentity::generate(AgentId::new());
+        write_new_device_key(&connector_key_path, &identity.secret_bytes())?;
+        identity
+    } else {
+        read_device_identity(&AgentId::new().to_string(), &connector_key_path)
+            .context("read pending attached connector identity")?
+    };
+    let connector_public_key = connector_identity.public_key_base64();
+    let proof_message = connector_installation_proof_message(
+        &invitation_token,
+        &installation.installation_id,
+        &connector_public_key,
+        printer_grant,
+        &allowed_printer_ids,
+    );
+    let enrolment = client
+        .enrol(&EnrolRequest {
+            token: invitation_token,
+            public_key: connector_public_key,
+            name: node_name,
+            hostname,
+            platform: std::env::consts::OS.to_owned(),
+            architecture: std::env::consts::ARCH.to_owned(),
+            installation_mode: InstallationMode::User,
+            agent_version: env!("CARGO_PKG_VERSION").to_owned(),
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            installation_id: Some(installation.installation_id),
+            installation_public_key: Some(installation_identity.public_key_base64()),
+            printer_grant,
+            allowed_printer_ids: allowed_printer_ids.clone(),
+            installation_proof: Some(installation_identity.sign_base64(&proof_message)),
+        })
+        .await;
+    let enrolled = match enrolment {
+        Ok(enrolled) => enrolled,
+        Err(error) => {
+            if created_key {
+                let _ = std::fs::remove_file(&connector_key_path);
+            }
+            return Err(error).context("exchange attached connector invitation");
+        }
+    };
+    let connector_id = enrolled
+        .connector_id
+        .context("authority response omitted connector id")?;
+    let record = connector_runtime::ConnectorRecord {
+        connector_id: connector_id.clone(),
+        agent_id: enrolled.agent_id.to_string(),
+        control_plane_url: base_url,
+        display_name: preview
+            .requesting_service_name
+            .or_else(|| Some(preview.workspace_name.clone())),
+        workspace_name: Some(preview.workspace_name),
+        authorization_type: Some(preview.authorization_type),
+        workspace_id: Some(preview.workspace_id),
+        environment_id: Some(preview.environment_id),
+        requesting_service_account_id: preview.requesting_service_account_id,
+        manage_url: preview.return_url.and_then(|value| value.parse().ok()),
+        device_key_file: Some(relative_key),
+        secure_key_handle: None,
+        enabled: true,
+        printer_grant,
+        allowed_printer_ids,
+        node_identity_revision: None,
+        node_identity_applied_local_revision: None,
+        node_identity_conflict_revision: None,
+        node_identity_conflict_local_revision: None,
+    };
+    let result = ConnectorInvitationResult {
+        connector_id,
+        agent_id: record.agent_id.clone(),
+        display_name: record.display_name.clone(),
+        workspace_name: record.workspace_name.clone(),
+        manage_url: record.manage_url.as_ref().map(ToString::to_string),
+    };
+    let mut registry = connector_runtime::ConnectorRegistry::load(data_dir)?;
+    let persist = if registry.contains(&record.connector_id) {
+        registry.replace(record).map(|_| ())
+    } else {
+        registry.add(record)
+    };
+    if let Err(error) = persist {
+        // The authority accepts an exact retry of the same short-lived
+        // invitation, installation identity, public key and grant. Preserve
+        // the deterministic pending key after remote success so a process
+        // restart can safely replay enrolment and durably activate the same
+        // connector instead of orphaning a live remote grant.
+        return Err(error).context("persist authenticated attached connector");
+    }
+    Ok(result)
+}
+
+fn validate_attached_invitation_input(
+    origin: &Url,
+    token: &str,
+    grant: PrinterGrant,
+    allowed_printer_ids: &[String],
+    node_name: &str,
+    hostname: &str,
+) -> Result<()> {
+    let loopback_http = origin.scheme() == "http"
+        && origin
+            .host_str()
+            .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "::1"));
+    anyhow::ensure!(
+        (origin.scheme() == "https" || loopback_http)
+            && origin.username().is_empty()
+            && origin.password().is_none()
+            && origin.fragment().is_none(),
+        "connector authority origin is not permitted"
+    );
+    anyhow::ensure!(
+        !token.is_empty() && token.len() <= 4096,
+        "connector invitation is outside supported bounds"
+    );
+    anyhow::ensure!(
+        !node_name.trim().is_empty()
+            && node_name.len() <= 256
+            && !hostname.trim().is_empty()
+            && hostname.len() <= 256
+            && allowed_printer_ids.len() <= 128,
+        "connector invitation metadata is outside supported bounds"
+    );
+    match grant {
+        PrinterGrant::AllLocalPrinters => anyhow::ensure!(
+            allowed_printer_ids.is_empty(),
+            "all-printer consent cannot include selected printers"
+        ),
+        PrinterGrant::SelectedPrinters => anyhow::ensure!(
+            !allowed_printer_ids.is_empty(),
+            "selected-printer consent requires at least one printer"
+        ),
+    }
+    Ok(())
+}
+
+fn validate_attached_preview_grant(preview: &str, grant: PrinterGrant) -> Result<()> {
+    let matches = match grant {
+        PrinterGrant::AllLocalPrinters => matches!(preview, "all_local_printers" | "all_printers"),
+        PrinterGrant::SelectedPrinters => matches!(preview, "selected_printers" | "selected"),
+    };
+    anyhow::ensure!(matches, "local printer consent does not match invitation");
+    Ok(())
+}
+
+fn installed_identity_from_data_dir(data_dir: &Path) -> Result<(ExistingInstallation, PathBuf)> {
+    let config_path = data_dir.join("agent-config.json");
+    if config_path.exists() {
+        let installation = existing_installation(&config_path)?;
+        let body: serde_json::Value = serde_json::from_slice(&std::fs::read(&config_path)?)?;
+        let key_path = body
+            .get("device_key_file")
+            .and_then(serde_json::Value::as_str)
+            .map(PathBuf::from)
+            .context("installed configuration has no device key path")?;
+        return Ok((installation, key_path));
+    }
+    let agent_id = std::fs::read_to_string(data_dir.join("agent-id"))?
+        .trim()
+        .to_owned();
+    anyhow::ensure!(
+        !agent_id.is_empty(),
+        "local installation has no durable identity"
+    );
+    Ok((
+        ExistingInstallation {
+            installation_id: agent_id.clone(),
+            agent_id,
+        },
+        data_dir.join("device.key"),
+    ))
+}
+
+fn read_device_identity(agent_id: &str, key_path: &Path) -> Result<DeviceIdentity> {
+    let encoded = std::fs::read_to_string(key_path)
+        .with_context(|| format!("read {}", key_path.display()))?;
+    let secret: [u8; 32] = hex::decode(encoded.trim())?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("device signing key is invalid"))?;
+    let agent_id = agent_id
+        .strip_prefix("agt_")
+        .unwrap_or(agent_id)
+        .parse()
+        .context("installed agent id is invalid")?;
+    Ok(DeviceIdentity::from_secret_bytes(agent_id, &secret))
 }
 
 fn print_connector_connected(agent_id: &AgentId) {
@@ -1346,6 +1747,7 @@ async fn enrol_installation(arguments: &Arguments, token: &str) -> Result<()> {
             agent_version: env!("CARGO_PKG_VERSION").to_owned(),
             protocol_version: CURRENT_PROTOCOL_VERSION,
             installation_id: None,
+            installation_public_key: None,
             printer_grant: PrinterGrant::SelectedPrinters,
             allowed_printer_ids: Vec::new(),
             installation_proof: None,
@@ -1609,11 +2011,35 @@ fn open_verification_url(url: &Url) {
 }
 
 fn installation_hostname() -> String {
+    #[cfg(target_os = "macos")]
+    if let Ok(output) = std::process::Command::new("/usr/sbin/scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+        && output.status.success()
+        && let Some(name) = privacy_safe_computer_name(&output.stdout)
+    {
+        return name;
+    }
     ["COMPUTERNAME", "HOSTNAME"]
         .into_iter()
         .find_map(|name| std::env::var(name).ok())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "Piqae node".into())
+        .and_then(|value| privacy_safe_computer_name(value.as_bytes()))
+        .unwrap_or_else(|| {
+            piqae_node_runtime::default_device_display_name(None, std::env::consts::OS)
+        })
+}
+
+fn privacy_safe_computer_name(raw: &[u8]) -> Option<String> {
+    let value = std::str::from_utf8(raw).ok()?.trim();
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return None;
+    }
+    let end = value
+        .char_indices()
+        .map(|(start, character)| start + character.len_utf8())
+        .take_while(|end| *end <= 120)
+        .last()?;
+    Some(value[..end].to_owned())
 }
 
 fn write_new_device_key(path: &Path, secret: &[u8; 32]) -> Result<()> {
@@ -1729,6 +2155,9 @@ async fn control_loop(
     cloud_sync_wakeup: Arc<Notify>,
     printer_inventory_dirty: Arc<AtomicBool>,
     connector_supervisor: mpsc::Sender<ConnectorSupervisorCommand>,
+    broker_consent: BrokerConsentHandle,
+    node_runtime: Arc<NodeRuntime>,
+    mut host_configuration: HostConfigurationStore,
 ) {
     let mut scheduler = tokio::time::interval(Duration::from_millis(250));
     scheduler.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1748,7 +2177,12 @@ async fn control_loop(
                         | ControlRequest::ConfirmLoadedMedia { .. }
                 );
                 let sync_relevant = inventory_changed
-                    || matches!(&request, ControlRequest::Pause { .. } | ControlRequest::Resume { .. });
+                    || matches!(
+                        &request,
+                        ControlRequest::Pause { .. }
+                            | ControlRequest::Resume { .. }
+                            | ControlRequest::ApplyHostLifecycle { .. }
+                    );
                 if inventory_changed {
                     printer_inventory_dirty.store(true, Ordering::Release);
                 }
@@ -1762,6 +2196,9 @@ async fn control_loop(
                     &connection,
                     &paused,
                     &connector_supervisor,
+                    &broker_consent,
+                    &node_runtime,
+                    &mut host_configuration,
                 ).await;
                 if sync_relevant {
                     cloud_sync_wakeup.notify_one();
@@ -1832,8 +2269,11 @@ async fn connector_supervisor_loop(
     support_packs: Arc<SupportPackRegistry>,
     mut legacy_cloud_worker: Option<LegacyCloudWorker>,
     connections: ConnectorConnectionTracker,
+    node_runtime: Arc<NodeRuntime>,
+    mut host_identity: NodeIdentity,
 ) {
     let mut workers = std::collections::BTreeMap::<String, ConnectorWorker>::new();
+    retry_installed_revocations(&data_dir).await;
     if let Err(error) =
         retire_legacy_cloud_worker_if_needed(&data_dir, &mut legacy_cloud_worker).await
     {
@@ -1847,10 +2287,14 @@ async fn connector_supervisor_loop(
         &printer_discovery,
         &support_packs,
         &connections,
+        &node_runtime,
     )
     .await
     {
         error!(%error, "initial connector worker load failed");
+    }
+    if let Err(error) = stage_connector_identity(&data_dir, &host_identity) {
+        warn!(%error, "initial connector identity projection deferred");
     }
     let mut recovery = tokio::time::interval(Duration::from_secs(30));
     recovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1876,6 +2320,7 @@ async fn connector_supervisor_loop(
                         &printer_discovery,
                         &support_packs,
                         &connections,
+                        &node_runtime,
                     ).await
                 {
                     warn!(%error, "connector worker liveness recovery deferred");
@@ -1883,6 +2328,18 @@ async fn connector_supervisor_loop(
                 continue;
             }
             _ = recovery.tick() => {
+                retry_installed_revocations(&data_dir).await;
+                match HostConfigurationStore::open(&data_dir) {
+                    Ok(configuration) => {
+                        host_identity = configuration.configuration().identity.clone();
+                    }
+                    Err(error) => {
+                        warn!(%error, "durable host identity reload deferred");
+                    }
+                }
+                if let Err(error) = stage_connector_identity(&data_dir, &host_identity) {
+                    warn!(%error, "periodic connector identity projection deferred");
+                }
                 if let Err(error) = retire_legacy_cloud_worker_if_needed(&data_dir, &mut legacy_cloud_worker).await {
                     warn!(%error, "periodic legacy cloud worker retirement deferred");
                     continue;
@@ -1895,6 +2352,7 @@ async fn connector_supervisor_loop(
                     &printer_discovery,
                     &support_packs,
                     &connections,
+                    &node_runtime,
                 ).await {
                     warn!(%error, "periodic connector recovery deferred");
                 }
@@ -1905,6 +2363,33 @@ async fn connector_supervisor_loop(
             break;
         };
         match command {
+            ConnectorSupervisorCommand::Connect {
+                request,
+                respond_to,
+            } => {
+                let result = async {
+                    let connected = connect_installed_invitation(&data_dir, *request).await?;
+                    retire_legacy_cloud_worker_if_needed(&data_dir, &mut legacy_cloud_worker)
+                        .await?;
+                    reload_connector_workers(
+                        &data_dir,
+                        &mut workers,
+                        &executor,
+                        &uri_fetcher,
+                        &printer_discovery,
+                        &support_packs,
+                        &connections,
+                        &node_runtime,
+                    )
+                    .await?;
+                    Ok(connected)
+                }
+                .await
+                .map_err(|error: anyhow::Error| {
+                    control_failure("connector_connect_failed", &error.to_string())
+                });
+                let _ = respond_to.send(result);
+            }
             ConnectorSupervisorCommand::Reload { respond_to } => {
                 let result =
                     match retire_legacy_cloud_worker_if_needed(&data_dir, &mut legacy_cloud_worker)
@@ -1919,6 +2404,7 @@ async fn connector_supervisor_loop(
                                 &printer_discovery,
                                 &support_packs,
                                 &connections,
+                                &node_runtime,
                             )
                             .await
                         }
@@ -1935,10 +2421,28 @@ async fn connector_supervisor_loop(
             } => {
                 let result = async {
                     let mut registry = connector_runtime::ConnectorRegistry::load(&data_dir)?;
-                    if !registry.revoke(&connector_id)? {
-                        anyhow::bail!("connector was not active");
+                    let record = registry
+                        .records()
+                        .find(|record| record.connector_id == connector_id)
+                        .cloned()
+                        .context("connector was not found")?;
+                    let authority_confirmed = registry
+                        .remotely_revoked()
+                        .any(|record| record.connector_id == connector_id);
+                    if record.enabled {
+                        registry.revoke(&connector_id)?;
                     }
+                    drop(registry);
                     stop_connector_worker(&mut workers, &connector_id, &connections).await?;
+                    if authority_confirmed {
+                        let relative_key = record
+                            .device_key_file
+                            .as_ref()
+                            .context("installed connector has no device key")?;
+                        remove_connector_file_key(&data_dir.join(relative_key))?;
+                    } else {
+                        revoke_installed_authority(&record, &data_dir).await?;
+                    }
                     Ok(())
                 }
                 .await
@@ -2019,6 +2523,39 @@ async fn connector_supervisor_loop(
                                     .flatten()
                                     .and_then(|revision| revision.parse::<u64>().ok())
                                     .unwrap_or(0);
+                            let (
+                                identity_pending,
+                                identity_server_revision,
+                                identity_conflict_revision,
+                            ) = connector_runtime::ConnectorRegistry::load(&data_dir)
+                                .ok()
+                                .and_then(|registry| registry.paths(&record.connector_id).ok())
+                                .and_then(|paths| AgentStore::open(paths.database).ok())
+                                .map_or((false, None, None), |store| {
+                                    let pending = store
+                                        .setting(NODE_IDENTITY_DESIRED_SETTING)
+                                        .ok()
+                                        .flatten()
+                                        .is_some_and(|value| !value.is_empty());
+                                    let server = store
+                                        .setting(NODE_IDENTITY_SERVER_REVISION_SETTING)
+                                        .ok()
+                                        .flatten()
+                                        .and_then(|value| value.parse::<u64>().ok());
+                                    let conflict = store
+                                        .setting(NODE_IDENTITY_CONFLICT_REVISION_SETTING)
+                                        .ok()
+                                        .flatten()
+                                        .and_then(|value| value.parse::<u64>().ok());
+                                    (pending, server, conflict)
+                                });
+                            let identity_sync_status = if identity_conflict_revision.is_some() {
+                                "conflict"
+                            } else if identity_pending {
+                                "pending"
+                            } else {
+                                "current"
+                            };
                             let cross_authority_route_warning =
                                 cross_authority_connectors.contains(&record.connector_id);
                             details.push(LocalConnectorDetail {
@@ -2041,6 +2578,9 @@ async fn connector_supervisor_loop(
                                 eligible_printer_count,
                                 inventory_revision,
                                 inventory_refresh_pending,
+                                identity_sync_status: identity_sync_status.to_owned(),
+                                identity_server_revision,
+                                identity_conflict_revision,
                                 cross_authority_route_warning,
                                 manage_url: record.manage_url.map(|url| url.to_string()),
                             });
@@ -2050,6 +2590,24 @@ async fn connector_supervisor_loop(
                     Err(failure) => Err(failure),
                 };
                 let _ = respond_to.send(details);
+            }
+            ConnectorSupervisorCommand::UpdateIdentity {
+                identity,
+                respond_to,
+            } => {
+                host_identity = identity;
+                let result = stage_connector_identity(&data_dir, &host_identity)
+                    .map(|connector_ids| {
+                        for connector_id in connector_ids {
+                            if let Some(worker) = workers.get(&connector_id) {
+                                worker.wakeup.notify_one();
+                            }
+                        }
+                    })
+                    .map_err(|error| {
+                        control_failure("connector_identity_sync_deferred", &error.to_string())
+                    });
+                let _ = respond_to.send(result);
             }
             ConnectorSupervisorCommand::RefreshPrinters => {
                 for worker in workers.values() {
@@ -2068,6 +2626,143 @@ async fn connector_supervisor_loop(
         if let Err(error) = stop_connector_worker(&mut workers, &id, &connections).await {
             warn!(connector_id = %id, %error, "connector worker shutdown was forced");
         }
+    }
+}
+
+const NODE_IDENTITY_DESIRED_SETTING: &str = "node_identity_desired_v1";
+const NODE_IDENTITY_APPLIED_SETTING: &str = "node_identity_applied_v1";
+const NODE_IDENTITY_SERVER_REVISION_SETTING: &str = "node_identity_server_revision_v1";
+const NODE_IDENTITY_CONFLICT_REVISION_SETTING: &str = "node_identity_conflict_revision_v1";
+
+fn stage_connector_identity(data_dir: &Path, identity: &NodeIdentity) -> Result<Vec<String>> {
+    let registry = connector_runtime::ConnectorRegistry::load(data_dir)?;
+    let desired = serde_json::to_string(&piqae_protocol::agent::NodeDisplayIdentity {
+        display_name: identity.display_name.clone(),
+        site: identity.site.clone(),
+        location: identity.location.clone(),
+        labels: identity.labels.clone(),
+    })?;
+    let mut staged = Vec::new();
+    for record in registry.enabled() {
+        let paths = registry.paths(&record.connector_id)?;
+        if let Some(parent) = paths.database.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut store = AgentStore::open(paths.database)?;
+        let pending = store.setting(NODE_IDENTITY_DESIRED_SETTING)?;
+        let applied = store.setting(NODE_IDENTITY_APPLIED_SETTING)?;
+        if pending.as_deref() != Some(&desired) && applied.as_deref() != Some(&desired) {
+            if let Some(conflict_revision) = store
+                .setting(NODE_IDENTITY_CONFLICT_REVISION_SETTING)?
+                .filter(|revision| !revision.is_empty())
+            {
+                store.set_setting(NODE_IDENTITY_SERVER_REVISION_SETTING, &conflict_revision)?;
+            }
+            store.set_setting(NODE_IDENTITY_DESIRED_SETTING, &desired)?;
+            store.set_setting(NODE_IDENTITY_CONFLICT_REVISION_SETTING, "")?;
+        }
+        staged.push(record.connector_id.clone());
+    }
+    Ok(staged)
+}
+
+async fn revoke_installed_authority(
+    record: &connector_runtime::ConnectorRecord,
+    data_dir: &Path,
+) -> Result<()> {
+    let relative_key = record
+        .device_key_file
+        .as_ref()
+        .context("installed connector has no device key")?;
+    let key_path = data_dir.join(relative_key);
+    let identity = read_device_identity(&record.agent_id, &key_path)
+        .context("read connector identity for remote revocation")?;
+    let client = AgentClient::new(record.control_plane_url.clone())?;
+    let mut registry = connector_runtime::ConnectorRegistry::load(data_dir)?;
+    let paths = registry.paths(&record.connector_id)?;
+    let mut queue = AgentStore::open(paths.database)?;
+    queue.quarantine_invalid_cloud_accepts(Utc::now().timestamp_millis())?;
+    let mut abandon_after_revoke = Vec::new();
+    for intent in queue.pending_cloud_accepts()? {
+        let pending = pending_cloud_acceptance(intent)?;
+        let abandon = client
+            .abandon_acceptance(&identity, pending.job_id, &pending.request)
+            .await;
+        if !matches!(&abandon, Ok(true)) {
+            let reconciliation = match client
+                .reconcile_acceptance(&identity, pending.job_id, &pending.request)
+                .await
+            {
+                Ok(reconciliation) => reconciliation,
+                Err(error)
+                    if connector_disconnect_requires_authority_upgrade(
+                        true,
+                        abandon.as_ref().err(),
+                        Some(&error),
+                    ) =>
+                {
+                    anyhow::bail!("connector_authority_upgrade_required");
+                }
+                Err(error) => {
+                    return Err(error)
+                        .context("reconcile pending connector acceptance during revocation");
+                }
+            };
+            if reconciliation.accepted && !reconciliation.fenced {
+                abandon.context("compensate pending connector acceptance")?;
+                anyhow::bail!("pending connector acceptance was not compensated");
+            }
+            if !reconciliation.connector_revoked && !reconciliation.fenced {
+                abandon_after_revoke.push(pending.job_id);
+                continue;
+            }
+        }
+        queue.abandon_cloud_accept(&pending.job_id.to_string(), Utc::now().timestamp_millis())?;
+    }
+    client
+        .revoke_connector(&identity, &record.connector_id)
+        .await
+        .context("revoke connector authority grant")?;
+    for job_id in abandon_after_revoke {
+        queue.abandon_cloud_accept(&job_id.to_string(), Utc::now().timestamp_millis())?;
+    }
+    queue.complete_all_cloud_release_cleanups()?;
+    registry.confirm_remote_revocation(&record.connector_id)?;
+    remove_connector_file_key(&key_path)?;
+    Ok(())
+}
+
+async fn retry_installed_revocations(data_dir: &Path) {
+    let Ok(registry) = connector_runtime::ConnectorRegistry::load(data_dir) else {
+        return;
+    };
+    let pending = registry
+        .pending_remote_revocations()
+        .filter(|record| record.device_key_file.is_some())
+        .cloned()
+        .collect::<Vec<_>>();
+    let remotely_revoked = registry
+        .remotely_revoked()
+        .filter_map(|record| record.device_key_file.clone())
+        .collect::<Vec<_>>();
+    drop(registry);
+    for record in pending {
+        if let Err(error) = revoke_installed_authority(&record, data_dir).await {
+            warn!(connector.id = %record.connector_id, %error, "connector authority revocation remains pending");
+        }
+    }
+    for relative_key in remotely_revoked {
+        if let Err(error) = remove_connector_file_key(&data_dir.join(relative_key)) {
+            warn!(%error, "remotely revoked connector key cleanup remains pending");
+        }
+    }
+}
+
+fn remove_connector_file_key(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("delete {}", path.display())),
     }
 }
 
@@ -2106,6 +2801,7 @@ async fn stop_legacy_cloud_worker(worker: LegacyCloudWorker) {
 #[allow(
     clippy::cognitive_complexity,
     clippy::needless_collect,
+    clippy::too_many_arguments,
     reason = "reload independently reconciles removals, grant changes, paths, and starts while aggregating per-connector failures"
 )]
 async fn reload_connector_workers(
@@ -2116,42 +2812,38 @@ async fn reload_connector_workers(
     printer_discovery: &PrinterDiscovery,
     support_packs: &Arc<SupportPackRegistry>,
     connections: &ConnectorConnectionTracker,
+    node_runtime: &Arc<NodeRuntime>,
 ) -> Result<()> {
     let registry = connector_runtime::ConnectorRegistry::load(data_dir)?;
-    let enabled = registry
-        .enabled()
-        .map(|r| (r.connector_id.clone(), r.clone()))
+    let observations = workers
+        .iter()
+        .map(|(id, worker)| {
+            (
+                id.clone(),
+                piqae_node_runtime::WorkerObservation {
+                    record: &worker.record,
+                    running: !connector_worker_has_exited(worker),
+                },
+            )
+        })
         .collect::<std::collections::BTreeMap<_, _>>();
+    let plan = piqae_node_runtime::plan_connector_reconciliation(&registry, &observations);
     let mut failures = Vec::new();
-    for id in workers
-        .keys()
-        .filter(|id| !enabled.contains_key(*id))
-        .cloned()
-        .collect::<Vec<_>>()
-    {
-        if let Err(error) = stop_connector_worker(workers, &id, connections).await {
-            warn!(connector_id = %id, %error, "removed connector worker shutdown was forced");
-            failures.push(format!("{id}: {error}"));
-        }
-    }
-    for (id, record) in enabled {
-        let worker_exited = workers.get(&id).is_some_and(connector_worker_has_exited);
-        if worker_exited {
+    for id in plan.stop {
+        if workers.get(&id).is_some_and(connector_worker_has_exited) {
             connections.update(&id, ConnectionState::Degraded).await;
             error!(connector_id = %id, "connector worker task exited unexpectedly; restarting connector runtime");
         }
-        if workers
-            .get(&id)
-            .is_some_and(|worker| connector_worker_matches(worker, &record))
-        {
-            continue;
+        if let Err(error) = stop_connector_worker(workers, &id, connections).await {
+            warn!(connector_id = %id, %error, "connector worker shutdown was forced");
+            failures.push(format!("{id}: {error}"));
         }
+    }
+    for record in plan.start {
+        let id = record.connector_id.clone();
         if workers.contains_key(&id) {
-            if let Err(error) = stop_connector_worker(workers, &id, connections).await {
-                warn!(connector_id = %id, %error, "changed connector worker shutdown was forced");
-                failures.push(format!("{id}: {error}"));
-                continue;
-            }
+            failures.push(format!("{id}: prior worker did not stop"));
+            continue;
         }
         let paths = match registry.paths(&id) {
             Ok(paths) => paths,
@@ -2170,6 +2862,7 @@ async fn reload_connector_workers(
             printer_discovery.clone(),
             Arc::clone(support_packs),
             connections.clone(),
+            Arc::clone(node_runtime),
         )
         .await
         {
@@ -2195,13 +2888,6 @@ fn connector_worker_has_exited(worker: &ConnectorWorker) -> bool {
         || worker.connection_watch.is_finished()
 }
 
-fn connector_worker_matches(
-    worker: &ConnectorWorker,
-    record: &connector_runtime::ConnectorRecord,
-) -> bool {
-    worker.record == *record && !connector_worker_has_exited(worker)
-}
-
 #[allow(
     clippy::too_many_arguments,
     reason = "connector workers receive explicit isolated runtime capabilities"
@@ -2215,6 +2901,7 @@ async fn start_connector_worker(
     printer_discovery: PrinterDiscovery,
     support_packs: Arc<SupportPackRegistry>,
     connections: ConnectorConnectionTracker,
+    node_runtime: Arc<NodeRuntime>,
 ) -> Result<ConnectorWorker> {
     let parent = paths
         .database
@@ -2235,11 +2922,16 @@ async fn start_connector_worker(
     let scheduler_stop = StopSignal::default();
     // Resolve every fallible runtime dependency before spawning either half;
     // a failed key/content setup must not leave an orphan scheduler behind.
-    let cloud = cloud_configuration_from_connector(&record, &paths.device_key)?;
+    let device_key = paths
+        .device_key
+        .as_ref()
+        .context("installed connector has no file-backed signing key")?;
+    let cloud = cloud_configuration_from_connector(&record, device_key)?;
     let content = ContentStore::open(paths.content).await?;
     let connector_executor = executor.for_connector(record.connector_id.clone());
     let route_coordinator = Arc::clone(&executor.coordinator);
     let observation_cache = Arc::clone(&executor.observation_cache);
+    let native_binding_session = Arc::clone(&executor.native_binding_session);
     let scheduler = tokio::spawn(connector_scheduler_loop(
         record.connector_id.clone(),
         AgentEngine::new(store, connector_executor, SystemClock),
@@ -2260,6 +2952,7 @@ async fn start_connector_worker(
         printer_discovery,
         route_coordinator,
         observation_cache,
+        native_binding_session,
         support_packs,
         Arc::clone(&connector_connection),
         paused,
@@ -2267,6 +2960,7 @@ async fn start_connector_worker(
         Arc::clone(&printer_inventory_dirty),
         Arc::clone(&last_sync_error_code),
         sync_stop.clone(),
+        node_runtime,
     ));
     let connection_stop = StopSignal::default();
     let connection_watch = tokio::spawn(watch_connector_connection(
@@ -2379,8 +3073,35 @@ async fn handle_control_request(
     connection: &RwLock<ConnectionState>,
     paused: &AtomicBool,
     connector_supervisor: &mpsc::Sender<ConnectorSupervisorCommand>,
+    broker_consent: &BrokerConsentHandle,
+    node_runtime: &NodeRuntime,
+    host_configuration: &mut HostConfigurationStore,
 ) {
     match request {
+        ControlRequest::ConnectInvitation {
+            request,
+            respond_to,
+        } => {
+            if let Err(error) = connector_supervisor.try_send(ConnectorSupervisorCommand::Connect {
+                request,
+                respond_to,
+            }) {
+                reject_connector_supervisor_command(error);
+            }
+        }
+        ControlRequest::ApplyHostLifecycle { event, respond_to } => {
+            let _ = respond_to.send(node_runtime.apply_lifecycle(event));
+        }
+        ControlRequest::PendingBrokerAuthorizations { respond_to } => {
+            let _ = respond_to.send(broker_consent.pending().await);
+        }
+        ControlRequest::DecideBrokerAuthorization {
+            authorization_id,
+            decision,
+            respond_to,
+        } => {
+            let _ = respond_to.send(broker_consent.decide(authorization_id, decision).await);
+        }
         ControlRequest::Status { respond_to } => {
             let current_connection = *connection.read().await;
             let _ = respond_to.send(local_status(
@@ -2389,22 +3110,84 @@ async fn handle_control_request(
                 version,
                 current_connection,
                 paused,
+                host_configuration,
             ));
         }
-        ControlRequest::Printers { respond_to } => match refresh_local_printers(engine).await {
-            Ok(printers) => {
-                if let Err(error) =
-                    connector_supervisor.try_send(ConnectorSupervisorCommand::RefreshPrinters)
-                {
+        ControlRequest::UpdateNodeIdentity {
+            request,
+            respond_to,
+        } => {
+            let result = if request.expected_revision == host_configuration.revision() {
+                NodeIdentity::new(
+                    request.display_name,
+                    request.site,
+                    request.location,
+                    request.labels,
+                )
+                .map_err(|error| control_failure("invalid_node_identity", &error.to_string()))
+                .and_then(|identity| {
+                    host_configuration
+                        .update_identity(request.expected_revision, identity)
+                        .map_err(|error| {
+                            control_failure("node_identity_update_failed", &error.to_string())
+                        })
+                })
+                .map(
+                    |revision| piqae_node_runtime::command::NodeIdentityUpdated {
+                        revision,
+                        identity: local_node_identity(host_configuration.configuration()),
+                    },
+                )
+            } else {
+                Err(ControlFailure {
+                    code: "node_identity_revision_conflict".into(),
+                    message: "the node identity changed; refresh before saving".into(),
+                    current_revision: Some(host_configuration.revision()),
+                })
+            };
+            if result.is_ok() {
+                let (staged_send, staged_receive) = oneshot::channel();
+                let staged =
+                    connector_supervisor.try_send(ConnectorSupervisorCommand::UpdateIdentity {
+                        identity: host_configuration.configuration().identity.clone(),
+                        respond_to: staged_send,
+                    });
+                if let Err(error) = staged {
                     reject_connector_supervisor_command(error);
                 }
-                let _ = respond_to.send(printers);
+                let staged = tokio::time::timeout(Duration::from_secs(2), staged_receive).await;
+                if !matches!(staged, Ok(Ok(Ok(())))) {
+                    warn!(
+                        "node identity is durable locally; connector projection will retry on restart"
+                    );
+                }
             }
-            Err(error) => {
-                warn!(code = %error.code, message = %error.message, "printer discovery failed");
-                let _ = respond_to.send(Vec::new());
+            let _ = respond_to.send(result);
+        }
+        ControlRequest::Printers { respond_to } => {
+            let native_binding_session = Arc::clone(&engine.executor_mut().native_binding_session);
+            let _native_binding_refresh = native_binding_session.refresh_lock.lock().await;
+            let generation = native_binding_session.begin_refresh();
+            withdraw_printer_native_bindings(
+                engine.store_mut(),
+                &native_binding_session,
+                generation,
+            );
+            match refresh_local_printers(engine).await {
+                Ok(printers) => {
+                    if let Err(error) =
+                        connector_supervisor.try_send(ConnectorSupervisorCommand::RefreshPrinters)
+                    {
+                        reject_connector_supervisor_command(error);
+                    }
+                    let _ = respond_to.send(printers);
+                }
+                Err(error) => {
+                    warn!(code = %error.code, message = %error.message, "printer discovery failed");
+                    let _ = respond_to.send(Vec::new());
+                }
             }
-        },
+        }
         ControlRequest::SetPrinterExposure {
             printer_id,
             exposed,
@@ -2618,6 +3401,7 @@ fn local_status(
     version: &str,
     connection: ConnectionState,
     paused: &AtomicBool,
+    host_configuration: &HostConfigurationStore,
 ) -> LocalStatus {
     let counts = match store.queue_counts() {
         Ok(counts) => counts,
@@ -2642,6 +3426,17 @@ fn local_status(
         active_jobs: counts.active,
         printer_warnings,
         paused: paused.load(Ordering::Relaxed),
+        node_identity: Some(local_node_identity(host_configuration.configuration())),
+        node_identity_revision: Some(host_configuration.revision()),
+    }
+}
+
+fn local_node_identity(configuration: &HostConfiguration) -> piqae_local_ipc::LocalNodeIdentity {
+    piqae_local_ipc::LocalNodeIdentity {
+        display_name: configuration.identity.display_name.clone(),
+        site: configuration.identity.site.clone(),
+        location: configuration.identity.location.clone(),
+        labels: configuration.identity.labels.clone(),
     }
 }
 
@@ -2668,6 +3463,32 @@ async fn submit_local_job(
         ));
     }
     validate_options(&printer, &request.options)?;
+    let profile_pin = if let Some(profile_id) = request.profile_id.as_deref() {
+        let profile = engine
+            .store()
+            .named_profile(&request.printer_id, profile_id)
+            .map_err(storage_control_failure)?
+            .ok_or_else(|| control_failure("profile_not_found", "print profile was not found"))?;
+        Some((profile.profile_id, profile.revision))
+    } else {
+        None
+    };
+    let printer_native_binding = if request.content_kind == ContentKind::Raw {
+        let session = Arc::clone(&engine.executor_mut().native_binding_session);
+        let matches = current_printer_native_bindings(engine.store(), &session)
+            .into_iter()
+            .filter(|binding| binding.printer_id == request.printer_id)
+            .collect::<Vec<_>>();
+        let [binding] = matches.as_slice() else {
+            return Err(control_failure(
+                "printer_native_binding_ambiguous",
+                "RAW local printing requires exactly one current printer-native language binding",
+            ));
+        };
+        Some(binding_pin(&session, binding))
+    } else {
+        None
+    };
     let mut request = request;
     request.printer_native_id = Some(printer.native_id);
     let input: Box<dyn tokio::io::AsyncRead + Unpin + Send> = match &request.content {
@@ -2682,14 +3503,21 @@ async fn submit_local_job(
                 .fetch_to_store(content_store, uri, None, None)
                 .await
                 .map_err(|error| control_failure("content_unavailable", &error.to_string()))?;
-            return accept_stored_local_job(engine, request, stored, None).await;
+            return accept_stored_local_job(
+                engine,
+                request,
+                stored,
+                profile_pin,
+                printer_native_binding,
+            )
+            .await;
         }
     };
     let stored = content_store
         .put(input)
         .await
         .map_err(|error| control_failure("content_store_failed", &error.to_string()))?;
-    accept_stored_local_job(engine, request, stored, None).await
+    accept_stored_local_job(engine, request, stored, profile_pin, printer_native_binding).await
 }
 
 async fn refresh_local_printers(
@@ -3336,6 +4164,16 @@ fn reprint_local_job(
         ));
     }
     let (job_id, digest) = reprint_job_identity(original_job_id, idempotency_key);
+    let facts = JobPersistenceFacts {
+        target_id: original.target_id.clone(),
+        binding_id: original.binding_id.clone(),
+        profile_id: original.profile_id.clone(),
+        profile_revision: original.profile_revision,
+        stock_id: original.stock_id.clone(),
+        loaded_media_snapshot_json: original.loaded_media_snapshot_json.clone(),
+        profile_snapshot_json: original.profile_snapshot_json.clone(),
+        printer_native_binding: original.printer_native_binding.clone(),
+    };
     let accepted = piqae_agent_storage::AcceptedJob {
         job_id,
         submission_id: format!("reprint:{original_job_id}:{digest}"),
@@ -3354,7 +4192,7 @@ fn reprint_local_job(
         cloud_managed: false,
     };
     let job = engine
-        .accept(&accepted)
+        .accept_with_facts(&accepted, &facts)
         .map_err(|error| control_failure("reprint_failed", &error.to_string()))?;
     Ok(LocalJobAccepted {
         job_id: job.job_id,
@@ -3369,6 +4207,7 @@ fn reprint_job_identity(original_job_id: &str, idempotency_key: &str) -> (String
     (format!("job_reprint_{}", &digest[..32]), digest)
 }
 
+#[allow(clippy::too_many_lines)]
 async fn submit_test_page(
     engine: &mut AgentEngine<SharedRuntimeExecutor>,
     content_store: &ContentStore,
@@ -3451,6 +4290,8 @@ async fn submit_test_page(
             printer_id: printer_id.to_owned(),
             printer_native_id: Some(printer.native_id),
             title: "Piqae A4 diagnostic".into(),
+            idempotency_key: None,
+            profile_id: Some(profile.profile_id.clone()),
             content_kind: ContentKind::Pdf,
             content: LocalContent::Base64 {
                 data: String::new(),
@@ -3460,6 +4301,7 @@ async fn submit_test_page(
         },
         stored,
         Some((profile.profile_id.clone(), profile.revision)),
+        None,
     )
     .await?;
     engine
@@ -3576,41 +4418,69 @@ async fn accept_stored_local_job(
     request: LocalCreateJob,
     stored: piqae_agent_core::StoredContent,
     profile_pin: Option<(String, u64)>,
+    printer_native_binding: Option<PrinterNativeBindingPin>,
 ) -> Result<LocalJobAccepted, ControlFailure> {
-    let job_id = JobId::new().to_string();
+    let (job_id, submission_id) = request.idempotency_key.as_deref().map_or_else(
+        || {
+            (
+                JobId::new().to_string(),
+                format!("sub_{}", uuid::Uuid::new_v4()),
+            )
+        },
+        local_job_identity,
+    );
     let options_json = serde_json::to_string(&request.options)
         .map_err(|_| control_failure("invalid_options", "print options are invalid"))?;
+    let facts = JobPersistenceFacts {
+        profile_id: profile_pin
+            .as_ref()
+            .map(|(profile_id, _)| profile_id.clone()),
+        profile_revision: profile_pin.as_ref().map(|(_, revision)| *revision),
+        printer_native_binding,
+        ..JobPersistenceFacts::default()
+    };
+    let native_binding_session = Arc::clone(&engine.executor_mut().native_binding_session);
+    let native_binding_guard = if let Some(pin) = facts.printer_native_binding.as_ref() {
+        let guard = native_binding_session.refresh_lock.lock().await;
+        if !native_binding_session.matches_pin(pin) {
+            return Err(control_failure(
+                "printer_native_binding_stale",
+                "the selected printer-native language binding changed before local acceptance",
+            ));
+        }
+        Some(guard)
+    } else {
+        None
+    };
     engine
-        .accept(&AcceptedJob {
-            job_id: job_id.clone(),
-            submission_id: format!("sub_{}", uuid::Uuid::new_v4()),
-            printer_id: request.printer_id,
-            printer_native_id: request.printer_native_id.ok_or_else(|| {
-                control_failure(
-                    "printer_not_resolved",
-                    "the logical printer has no resolved native queue",
-                )
-            })?,
-            title: request.title,
-            content_sha256: stored.sha256,
-            content_path: stored.path.to_string_lossy().into_owned(),
-            content_kind: match request.content_kind {
-                ContentKind::Pdf => "pdf",
-                ContentKind::Raw => "raw",
-            }
-            .into(),
-            options_json,
-            expires_unix_ms: request.expires_unix_ms,
-            accepted_unix_ms: Utc::now().timestamp_millis(),
-            cloud_managed: false,
-        })
+        .accept_with_facts(
+            &AcceptedJob {
+                job_id: job_id.clone(),
+                submission_id,
+                printer_id: request.printer_id,
+                printer_native_id: request.printer_native_id.ok_or_else(|| {
+                    control_failure(
+                        "printer_not_resolved",
+                        "the logical printer has no resolved native queue",
+                    )
+                })?,
+                title: request.title,
+                content_sha256: stored.sha256,
+                content_path: stored.path.to_string_lossy().into_owned(),
+                content_kind: match request.content_kind {
+                    ContentKind::Pdf => "pdf",
+                    ContentKind::Raw => "raw",
+                }
+                .into(),
+                options_json,
+                expires_unix_ms: request.expires_unix_ms,
+                accepted_unix_ms: Utc::now().timestamp_millis(),
+                cloud_managed: false,
+            },
+            &facts,
+        )
         .map_err(|error| control_failure("local_accept_failed", &error.to_string()))?;
-    if let Some((profile_id, revision)) = &profile_pin {
-        engine
-            .store_mut()
-            .pin_job_profile(&job_id, None, None, profile_id, *revision, None, None)
-            .map_err(storage_control_failure)?;
-    }
+    drop(native_binding_guard);
     engine
         .run_once()
         .await
@@ -3623,10 +4493,21 @@ async fn accept_stored_local_job(
     Ok(LocalJobAccepted { job_id, state })
 }
 
+fn local_job_identity(idempotency_key: &str) -> (String, String) {
+    let digest = hex::encode(Sha256::digest(
+        format!("local-submit\0{idempotency_key}").as_bytes(),
+    ));
+    (
+        format!("job_local_{}", &digest[..32]),
+        format!("local:{digest}"),
+    )
+}
+
 fn control_failure(code: &str, message: &str) -> ControlFailure {
     ControlFailure {
         code: code.to_owned(),
         message: message.to_owned(),
+        current_revision: None,
     }
 }
 
@@ -3660,7 +4541,7 @@ fn cloud_configuration(arguments: &Arguments) -> Result<CloudConfiguration> {
     )?;
     Ok(CloudConfiguration {
         client: AgentClient::new(base_url)?,
-        identity: DeviceIdentity::from_secret_bytes(agent_id, &secret),
+        identity: Arc::new(DeviceIdentity::from_secret_bytes(agent_id, &secret)),
         agent_id,
         content_encryption_keys: Arc::new(content_encryption_keys),
         allowed_printer_ids: None,
@@ -3694,7 +4575,7 @@ fn cloud_configuration_from_connector(
         content_key_store::load_or_create(&encryption_path, &record.agent_id)?;
     Ok(CloudConfiguration {
         client: AgentClient::new(record.control_plane_url.clone())?,
-        identity: DeviceIdentity::from_secret_bytes(agent_id, &secret),
+        identity: Arc::new(DeviceIdentity::from_secret_bytes(agent_id, &secret)),
         agent_id,
         content_encryption_keys: Arc::new(content_encryption_keys),
         allowed_printer_ids: connector_allowed_printers(record),
@@ -3723,6 +4604,664 @@ fn inventory_projection_confirmed(
     })
 }
 
+#[derive(Debug)]
+struct InstalledConnectorStores {
+    queue: AgentStore,
+    inventory: AgentStore,
+    native_binding_session: Arc<PrinterNativeBindingSession>,
+}
+
+#[derive(Clone)]
+struct InstalledInventoryAdapter {
+    stores: Arc<Mutex<InstalledConnectorStores>>,
+    printer_discovery: PrinterDiscovery,
+    route_coordinator: Arc<Mutex<route_coordinator::RouteCoordinator>>,
+    observation_cache: Arc<Mutex<RouteObservationCache>>,
+    support_packs: Arc<SupportPackRegistry>,
+    connector_id: String,
+    agent_id: AgentId,
+    started_at: chrono::DateTime<Utc>,
+    paused: Arc<AtomicBool>,
+    allowed_printer_ids: Option<std::collections::BTreeSet<String>>,
+    node_runtime: Arc<NodeRuntime>,
+    inventory_dirty: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for InstalledInventoryAdapter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InstalledInventoryAdapter([connector-isolated])")
+    }
+}
+
+#[async_trait]
+impl InventorySnapshotProvider for InstalledInventoryAdapter {
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "both connector stores must remain exclusively paired across asynchronous inventory discovery"
+    )]
+    async fn snapshot(&mut self, refresh: bool) -> Result<AgentSyncRequest, CloudWorkerError> {
+        let refresh = refresh || self.inventory_dirty.swap(false, Ordering::AcqRel);
+        let mut stores = self.stores.lock().await;
+        let InstalledConnectorStores {
+            queue,
+            inventory,
+            native_binding_session,
+        } = &mut *stores;
+        prepare_sync_request(
+            queue,
+            inventory,
+            &self.printer_discovery,
+            &self.route_coordinator,
+            &self.observation_cache,
+            &self.support_packs,
+            &self.connector_id,
+            self.agent_id,
+            self.started_at,
+            self.paused.load(Ordering::Relaxed),
+            refresh,
+            self.allowed_printer_ids.as_ref(),
+            &self.node_runtime,
+            native_binding_session,
+        )
+        .await
+        .map_err(|_| CloudWorkerError::new("inventory_snapshot_failed"))
+    }
+
+    async fn projection_acknowledged(
+        &mut self,
+        submitted_revision: u64,
+        supported: bool,
+        acknowledgement: Option<&InventoryProjectionAcknowledgement>,
+    ) -> Result<(), CloudWorkerError> {
+        if !inventory_projection_confirmed(supported, acknowledgement, submitted_revision) {
+            self.inventory_dirty.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct InstalledEventAdapter {
+    stores: Arc<Mutex<InstalledConnectorStores>>,
+    route_coordinator: Arc<Mutex<route_coordinator::RouteCoordinator>>,
+    connector_id: String,
+}
+
+impl std::fmt::Debug for InstalledEventAdapter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InstalledEventAdapter([connector-isolated])")
+    }
+}
+
+#[async_trait]
+impl EventAcknowledger for InstalledEventAdapter {
+    async fn acknowledge(
+        &mut self,
+        event_cursor: Option<EventId>,
+        handoff_sequence: Option<u64>,
+        diagnostics: &[String],
+    ) -> Result<(), CloudWorkerError> {
+        {
+            let mut stores = self.stores.lock().await;
+            if let Some(cursor) = event_cursor {
+                stores
+                    .queue
+                    .acknowledge_cloud_event(&cursor.to_string(), Utc::now().timestamp_millis())
+                    .map_err(|_| CloudWorkerError::new("event_ack_failed"))?;
+            }
+            acknowledge_diagnostics(&mut stores.queue, diagnostics);
+        }
+        if let Some(sequence) = handoff_sequence {
+            self.route_coordinator
+                .lock()
+                .await
+                .acknowledge_handoffs(&self.connector_id, sequence)
+                .map_err(|_| CloudWorkerError::new("handoff_ack_failed"))?;
+            self.stores
+                .lock()
+                .await
+                .queue
+                .set_setting("acknowledged_handoff_sequence", &sequence.to_string())
+                .map_err(|_| CloudWorkerError::new("handoff_cursor_failed"))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct InstalledCommandAdapter {
+    stores: Arc<Mutex<InstalledConnectorStores>>,
+    paused: Arc<AtomicBool>,
+    route_coordinator: Arc<Mutex<route_coordinator::RouteCoordinator>>,
+    connector_id: String,
+}
+
+impl std::fmt::Debug for InstalledCommandAdapter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InstalledCommandAdapter([connector-isolated])")
+    }
+}
+
+#[async_trait]
+impl CloudCommandApplier for InstalledCommandAdapter {
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "the connector queue remains exclusively owned while ordered commands are durably applied"
+    )]
+    async fn apply(
+        &mut self,
+        command_cursor: Option<&str>,
+        commands: Vec<AgentCommand>,
+    ) -> Result<CloudCommandApplication, CloudWorkerError> {
+        let mut stores = self.stores.lock().await;
+        apply_commands(
+            &mut stores.queue,
+            &self.paused,
+            &self.route_coordinator,
+            &self.connector_id,
+            commands,
+            command_cursor.map(ToOwned::to_owned),
+        )
+        .await
+    }
+}
+
+#[derive(Debug)]
+struct InstalledMaterializedOffer {
+    stored: piqae_agent_core::StoredContent,
+    printer: StoredPrinter,
+    profile_pin: Option<ProfilePinMetadata>,
+    profile_snapshot_json: Option<String>,
+    printer_native_binding: Option<PrinterNativeBindingPin>,
+}
+
+#[derive(Clone)]
+struct InstalledMaterializer {
+    cloud: CloudConfiguration,
+    stores: Arc<Mutex<InstalledConnectorStores>>,
+    content_store: ContentStore,
+    uri_fetcher: UriFetcher,
+}
+
+impl std::fmt::Debug for InstalledMaterializer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InstalledMaterializer([redacted connector content])")
+    }
+}
+
+#[async_trait]
+impl ContentMaterializer for InstalledMaterializer {
+    type Materialized = InstalledMaterializedOffer;
+
+    async fn materialize(
+        &mut self,
+        offer: &JobOffer,
+    ) -> Result<Self::Materialized, CloudWorkerError> {
+        materialize_installed_offer(
+            &self.cloud,
+            &self.stores,
+            &self.content_store,
+            &self.uri_fetcher,
+            offer,
+        )
+        .await
+    }
+}
+
+#[derive(Clone)]
+struct InstalledOfferAcceptor {
+    stores: Arc<Mutex<InstalledConnectorStores>>,
+    route_coordinator: Arc<Mutex<route_coordinator::RouteCoordinator>>,
+    connector_id: String,
+    admission: StopSignal,
+}
+
+impl std::fmt::Debug for InstalledOfferAcceptor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InstalledOfferAcceptor([connector-isolated])")
+    }
+}
+
+#[async_trait]
+impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor {
+    async fn admission_valid(&mut self) -> Result<bool, CloudWorkerError> {
+        Ok(!self.admission.is_stopped())
+    }
+
+    async fn pending(&mut self) -> Result<Vec<PendingCloudAcceptance>, CloudWorkerError> {
+        let intents = self
+            .stores
+            .lock()
+            .await
+            .queue
+            .pending_cloud_accepts()
+            .map_err(|_| CloudWorkerError::new("pending_accept_read_failed"))?;
+        let mut pending = Vec::with_capacity(intents.len());
+        for intent in intents {
+            if intent.route_proof().is_some() {
+                pending.push(pending_cloud_acceptance(intent)?);
+            }
+        }
+        Ok(pending)
+    }
+
+    async fn invalid_pending(&mut self) -> Result<Vec<PendingCloudRelease>, CloudWorkerError> {
+        let observed_unix_ms = Utc::now().timestamp_millis();
+        let intents = {
+            let mut stores = self.stores.lock().await;
+            stores
+                .queue
+                .quarantine_invalid_cloud_accepts(observed_unix_ms)
+                .map_err(|_| CloudWorkerError::new("pending_accept_quarantine_failed"))?;
+            let native_binding_session = Arc::clone(&stores.native_binding_session);
+            let _binding_guard = native_binding_session.refresh_lock.lock().await;
+            let pending = stores
+                .queue
+                .pending_cloud_accepts()
+                .map_err(|_| CloudWorkerError::new("pending_accept_read_failed"))?;
+            for intent in pending {
+                if intent.remote_accept_confirmed {
+                    continue;
+                }
+                let job = stores
+                    .queue
+                    .get_job(&intent.job_id)
+                    .map_err(|_| CloudWorkerError::new("pending_accept_read_failed"))?
+                    .ok_or_else(|| CloudWorkerError::new("pending_accept_invalid"))?;
+                let reason = if job.content_kind == "raw"
+                    && !job
+                        .printer_native_binding
+                        .as_ref()
+                        .is_some_and(|pin| native_binding_session.matches_pin(pin))
+                {
+                    Some("printer_native_binding_stale")
+                } else if job.profile_id.is_some() && job.profile_snapshot_json.is_none() {
+                    Some("profile_snapshot_required")
+                } else {
+                    None
+                };
+                if let Some(reason) = reason {
+                    stores
+                        .queue
+                        .quarantine_prepared_cloud_accept(&intent.job_id, reason, observed_unix_ms)
+                        .map_err(|_| CloudWorkerError::new("pending_accept_quarantine_failed"))?;
+                }
+            }
+            stores
+                .queue
+                .pending_cloud_release_cleanups()
+                .map_err(|_| CloudWorkerError::new("pending_accept_quarantine_failed"))?
+        };
+        let mut releases = Vec::new();
+        for intent in intents {
+            let job_id = intent
+                .job_id
+                .parse()
+                .map_err(|_| CloudWorkerError::new("pending_accept_invalid"))?;
+            let lease_id = intent
+                .lease_id
+                .parse()
+                .map_err(|_| CloudWorkerError::new("pending_accept_invalid"))?;
+            releases.push(PendingCloudRelease {
+                job_id,
+                request: AgentReleaseLeaseRequest {
+                    lease_id,
+                    lease_token: intent.lease_token,
+                    reason: intent.reason,
+                },
+            });
+        }
+        Ok(releases)
+    }
+
+    async fn complete_release_cleanup(&mut self, job_id: JobId) -> Result<(), CloudWorkerError> {
+        self.stores
+            .lock()
+            .await
+            .queue
+            .complete_cloud_release_cleanup(&job_id.to_string())
+            .map_err(|_| CloudWorkerError::new("release_cleanup_complete_failed"))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn prepare(
+        &mut self,
+        offer: &JobOffer,
+        materialized: InstalledMaterializedOffer,
+    ) -> Result<PendingCloudAcceptance, CloudWorkerError> {
+        let job_id = offer.job.id;
+        let reservation = offer
+            .route_reservation
+            .as_ref()
+            .ok_or_else(|| CloudWorkerError::new("route_reservation_required"))?;
+        self.route_coordinator
+            .lock()
+            .await
+            .register_authoritative(
+                &self.connector_id,
+                &materialized.printer.native_id,
+                &job_id.to_string(),
+                reservation,
+                Utc::now(),
+            )
+            .map_err(|_| CloudWorkerError::new("route_reservation_failed"))?;
+        let route_proof = CloudRouteProof {
+            reservation_id: reservation.reservation_id.to_string(),
+            generation: reservation.generation,
+            fencing_token: reservation.fencing_token.clone(),
+        };
+        let mut stores = self.stores.lock().await;
+        let native_binding_session = Arc::clone(&stores.native_binding_session);
+        let native_binding_guard = native_binding_session.refresh_lock.lock().await;
+        if offer.job.content_kind == ContentKind::Raw
+            && !materialized
+                .printer_native_binding
+                .as_ref()
+                .is_some_and(|pin| native_binding_session.matches_pin(pin))
+        {
+            return Err(CloudWorkerError::new("printer_native_binding_stale"));
+        }
+        let facts = JobPersistenceFacts {
+            target_id: materialized
+                .profile_pin
+                .as_ref()
+                .and_then(|pin| pin.target_id.clone()),
+            binding_id: materialized
+                .profile_pin
+                .as_ref()
+                .and_then(|pin| pin.binding_id.clone()),
+            profile_id: materialized
+                .profile_pin
+                .as_ref()
+                .map(|pin| pin.profile_id.clone()),
+            profile_revision: materialized
+                .profile_pin
+                .as_ref()
+                .map(|pin| pin.profile_revision),
+            stock_id: materialized
+                .profile_pin
+                .as_ref()
+                .and_then(|pin| pin.stock_id.clone()),
+            loaded_media_snapshot_json: materialized
+                .profile_pin
+                .as_ref()
+                .and_then(|pin| pin.loaded_media_snapshot_json.clone()),
+            profile_snapshot_json: materialized.profile_snapshot_json,
+            printer_native_binding: materialized.printer_native_binding,
+        };
+        let local = stores
+            .queue
+            .prepare_cloud_job_with_facts(
+                &AcceptedJob {
+                    job_id: job_id.to_string(),
+                    submission_id: format!("sub_{job_id}"),
+                    printer_id: offer.job.printer_id.to_string(),
+                    printer_native_id: materialized.printer.native_id.clone(),
+                    title: offer.job.title.clone(),
+                    content_sha256: materialized.stored.sha256.clone(),
+                    content_path: materialized.stored.path.to_string_lossy().into_owned(),
+                    content_kind: match offer.job.content_kind {
+                        ContentKind::Pdf => "pdf",
+                        ContentKind::Raw => "raw",
+                    }
+                    .into(),
+                    options_json: serde_json::to_string(&offer.job.options)
+                        .map_err(|_| CloudWorkerError::new("job_options_invalid"))?,
+                    expires_unix_ms: Some(offer.job.expires_at.timestamp_millis()),
+                    accepted_unix_ms: Utc::now().timestamp_millis(),
+                    cloud_managed: true,
+                },
+                &offer.lease_id.to_string(),
+                &offer.lease_token,
+                offer.lease_expires_at.timestamp_millis(),
+                &route_proof,
+                &facts,
+            )
+            .map_err(|_| CloudWorkerError::new("durable_accept_prepare_failed"))?;
+        let intent = CloudAcceptIntent {
+            job_id: job_id.to_string(),
+            lease_id: offer.lease_id.to_string(),
+            lease_token: offer.lease_token.clone(),
+            lease_expires_unix_ms: offer.lease_expires_at.timestamp_millis(),
+            content_sha256: materialized.stored.sha256,
+            local_sequence: u64::try_from(local.printer_sequence).unwrap_or(u64::MAX),
+            route_reservation_id: Some(route_proof.reservation_id),
+            route_generation: Some(route_proof.generation),
+            route_fencing_token: Some(route_proof.fencing_token),
+            remote_accept_confirmed: false,
+        };
+        drop(native_binding_guard);
+        drop(stores);
+        pending_cloud_acceptance(intent)
+    }
+
+    async fn activate(&mut self, job_id: JobId) -> Result<(), CloudWorkerError> {
+        self.stores
+            .lock()
+            .await
+            .queue
+            .activate_cloud_job(&job_id.to_string(), Utc::now().timestamp_millis())
+            .map(|_| ())
+            .map_err(|_| CloudWorkerError::new("durable_accept_activate_failed"))
+    }
+
+    async fn confirm_remote_accept(&mut self, job_id: JobId) -> Result<(), CloudWorkerError> {
+        self.stores
+            .lock()
+            .await
+            .queue
+            .confirm_cloud_accept(&job_id.to_string(), Utc::now().timestamp_millis())
+            .map_err(|_| CloudWorkerError::new("durable_accept_confirm_failed"))
+    }
+
+    async fn abandon(&mut self, job_id: JobId) -> Result<(), CloudWorkerError> {
+        self.stores
+            .lock()
+            .await
+            .queue
+            .abandon_cloud_accept(&job_id.to_string(), Utc::now().timestamp_millis())
+            .map_err(|_| CloudWorkerError::new("durable_accept_abandon_failed"))
+    }
+
+    async fn has_durable_intent(&mut self, job_id: JobId) -> Result<bool, CloudWorkerError> {
+        Ok(self
+            .stores
+            .lock()
+            .await
+            .queue
+            .pending_cloud_accepts()
+            .map_err(|_| CloudWorkerError::new("pending_accept_read_failed"))?
+            .iter()
+            .any(|intent| intent.job_id == job_id.to_string()))
+    }
+}
+
+#[derive(Clone)]
+struct InstalledWakeAdapter {
+    inventory_dirty: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for InstalledWakeAdapter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InstalledWakeAdapter")
+    }
+}
+
+#[async_trait]
+impl WakeReconciler for InstalledWakeAdapter {
+    async fn reconcile(&mut self) -> Result<(), CloudWorkerError> {
+        self.inventory_dirty.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
+fn pending_cloud_acceptance(
+    intent: CloudAcceptIntent,
+) -> Result<PendingCloudAcceptance, CloudWorkerError> {
+    let job_id = intent
+        .job_id
+        .parse::<JobId>()
+        .map_err(|_| CloudWorkerError::new("pending_accept_invalid"))?;
+    let lease_id = intent
+        .lease_id
+        .parse()
+        .map_err(|_| CloudWorkerError::new("pending_accept_invalid"))?;
+    let route_proof = intent
+        .route_proof()
+        .ok_or_else(|| CloudWorkerError::new("route_reservation_missing"))?;
+    Ok(PendingCloudAcceptance {
+        job_id,
+        remote_accept_confirmed: intent.remote_accept_confirmed,
+        request: AgentAcceptJobRequest {
+            lease_id,
+            lease_token: intent.lease_token,
+            content_sha256: intent.content_sha256,
+            local_sequence: intent.local_sequence,
+            route_reservation_id: Some(
+                route_proof
+                    .reservation_id
+                    .parse()
+                    .map_err(|_| CloudWorkerError::new("route_reservation_invalid"))?,
+            ),
+            route_generation: Some(route_proof.generation),
+            route_fencing_token: Some(route_proof.fencing_token),
+        },
+    })
+}
+
+#[allow(
+    clippy::significant_drop_tightening,
+    reason = "printer identity and its exact profile revision are validated under one inventory snapshot"
+)]
+async fn materialize_installed_offer(
+    cloud: &CloudConfiguration,
+    stores: &Arc<Mutex<InstalledConnectorStores>>,
+    content_store: &ContentStore,
+    uri_fetcher: &UriFetcher,
+    offer: &JobOffer,
+) -> Result<InstalledMaterializedOffer, CloudWorkerError> {
+    let logical_printer_id = offer.job.printer_id.to_string();
+    if !printer_is_allowed(cloud.allowed_printer_ids.as_ref(), &logical_printer_id) {
+        return Err(CloudWorkerError::new("printer_not_granted"));
+    }
+    let profile_pin = profile_pin_metadata(&offer.job.metadata)
+        .map_err(|_| CloudWorkerError::new("profile_pin_invalid"))?;
+    if matches!(&offer.content, ContentDescriptor::EncryptedDownload { .. })
+        && profile_pin.is_none()
+    {
+        return Err(CloudWorkerError::new("encrypted_profile_pin_required"));
+    }
+    let (printer, profile_snapshot_json, printer_native_binding) = {
+        let stores = stores.lock().await;
+        let printer = resolve_cloud_offer_printer(&stores.inventory, &logical_printer_id)
+            .map_err(|_| CloudWorkerError::new("printer_not_found"))?;
+        if !printer.present {
+            return Err(CloudWorkerError::new("printer_not_present"));
+        }
+        let printer_native_binding = validate_current_printer_native_offer(
+            offer.job.content_kind,
+            &stores.inventory,
+            &stores.native_binding_session,
+            &offer.job.metadata,
+            &logical_printer_id,
+        )?;
+        let mut profile_snapshot_json = None;
+        if let Some(pin) = &profile_pin {
+            let profile = stores
+                .inventory
+                .named_profile_revision(&printer.printer_id, &pin.profile_id, pin.profile_revision)
+                .map_err(|_| CloudWorkerError::new("profile_read_failed"))?
+                .ok_or_else(|| CloudWorkerError::new("profile_not_found"))?;
+            let status: ProfileStatus =
+                serde_json::from_value(serde_json::Value::String(profile.status.clone()))
+                    .map_err(|_| CloudWorkerError::new("profile_invalid"))?;
+            if !status.permits_jobs() {
+                return Err(CloudWorkerError::new("profile_not_ready"));
+            }
+            profile_snapshot_json = Some(durable_profile_snapshot(&stores.inventory, &profile)?);
+            if let ContentDescriptor::EncryptedDownload { manifest, .. } = &offer.content {
+                let expected = format!("{}:{}", pin.profile_id, pin.profile_revision);
+                if manifest.binding.profile_revision != expected
+                    || pin.target_id.as_deref() != Some(manifest.binding.target_id.as_str())
+                    || manifest.binding.content_type != offer.job.content_kind
+                    || manifest.binding.printer_id != logical_printer_id
+                    || manifest.binding.options != offer.job.options
+                    || manifest.binding.deliveries != offer.job.deliveries
+                    || manifest.binding.raw_authorized
+                        != (offer.job.content_kind == ContentKind::Raw)
+                    || manifest.version != piqae_domain::ENCRYPTED_JOB_V3_VERSION
+                    || manifest.suite != piqae_domain::ENCRYPTED_JOB_V3_SUITE
+                {
+                    return Err(CloudWorkerError::new("encrypted_binding_mismatch"));
+                }
+            }
+        }
+        validate_options(&printer, &offer.job.options)
+            .map_err(|_| CloudWorkerError::new("unsupported_profile_option"))?;
+        (printer, profile_snapshot_json, printer_native_binding)
+    };
+    let stored_content = materialize_descriptor(
+        cloud,
+        content_store,
+        uri_fetcher,
+        offer.job.id,
+        offer.lease_id,
+        &offer.lease_token,
+        offer.content.clone(),
+    )
+    .await
+    .map_err(|_| CloudWorkerError::new("content_materialization_failed"))?;
+    Ok(InstalledMaterializedOffer {
+        stored: stored_content,
+        printer,
+        profile_pin,
+        profile_snapshot_json,
+        printer_native_binding,
+    })
+}
+
+fn durable_profile_snapshot(
+    store: &AgentStore,
+    profile: &StoredNamedProfile,
+) -> Result<String, CloudWorkerError> {
+    let kind = serde_json::from_value::<NativeProfileKind>(serde_json::Value::String(
+        profile.native_kind.clone(),
+    ))
+    .map_err(|_| CloudWorkerError::new("profile_invalid"))?;
+    let snapshot = if kind == NativeProfileKind::PortableOptions {
+        DurableProfileSnapshot::Portable {
+            profile_id: profile.profile_id.clone(),
+            revision: profile.revision,
+        }
+    } else {
+        let native = store
+            .native_profile_blob(&profile.profile_id, profile.revision)
+            .map_err(|_| CloudWorkerError::new("profile_read_failed"))?
+            .ok_or_else(|| CloudWorkerError::new("profile_native_payload_missing"))?;
+        if profile.native_blob_id.as_deref() != Some(native.blob_id.as_str())
+            || profile.native_digest.as_deref() != Some(native.digest.as_str())
+            || profile.native_kind != native.native_kind
+        {
+            return Err(CloudWorkerError::new("profile_native_payload_mismatch"));
+        }
+        DurableProfileSnapshot::Native {
+            payload: Box::new(piqae_protocol::executor::NativeProfilePayload {
+                profile_id: profile.profile_id.clone(),
+                revision: profile.revision,
+                kind,
+                schema_version: native.schema_version,
+                digest: native.digest,
+                blob: native.native_blob,
+                safe_overrides: serde_json::from_str(&profile.safe_overrides_json)
+                    .map_err(|_| CloudWorkerError::new("profile_invalid"))?,
+                driver_fingerprint: serde_json::from_str(&profile.driver_fingerprint_json)
+                    .map_err(|_| CloudWorkerError::new("profile_invalid"))?,
+            }),
+        }
+    };
+    serde_json::to_string(&snapshot).map_err(|_| CloudWorkerError::new("profile_invalid"))
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "cloud synchronization dependencies are explicit process-boundary capabilities"
@@ -3736,6 +5275,7 @@ async fn cloud_sync_loop(
     printer_discovery: PrinterDiscovery,
     route_coordinator: Arc<Mutex<route_coordinator::RouteCoordinator>>,
     observation_cache: Arc<Mutex<RouteObservationCache>>,
+    native_binding_session: Arc<PrinterNativeBindingSession>,
     support_packs: Arc<SupportPackRegistry>,
     connection: Arc<RwLock<ConnectionState>>,
     paused: Arc<AtomicBool>,
@@ -3743,6 +5283,7 @@ async fn cloud_sync_loop(
     printer_inventory_dirty: Arc<AtomicBool>,
     last_sync_error_code: Arc<RwLock<Option<String>>>,
     stop: StopSignal,
+    node_runtime: Arc<NodeRuntime>,
 ) {
     let store = match AgentStore::open(&database_path) {
         Ok(store) => store,
@@ -3775,6 +5316,7 @@ async fn cloud_sync_loop(
         printer_discovery,
         route_coordinator,
         observation_cache,
+        native_binding_session,
         support_packs,
         connection,
         paused,
@@ -3782,6 +5324,7 @@ async fn cloud_sync_loop(
         printer_inventory_dirty,
         last_sync_error_code,
         stop,
+        node_runtime,
     ))
     .await;
 }
@@ -3794,13 +5337,14 @@ async fn cloud_sync_loop(
 )]
 async fn run_cloud_sync_loop(
     cloud: CloudConfiguration,
-    mut store: AgentStore,
-    mut inventory_store: AgentStore,
+    store: AgentStore,
+    inventory_store: AgentStore,
     content_store: ContentStore,
     uri_fetcher: UriFetcher,
     printer_discovery: PrinterDiscovery,
     route_coordinator: Arc<Mutex<route_coordinator::RouteCoordinator>>,
     observation_cache: Arc<Mutex<RouteObservationCache>>,
+    native_binding_session: Arc<PrinterNativeBindingSession>,
     support_packs: Arc<SupportPackRegistry>,
     connection: Arc<RwLock<ConnectionState>>,
     paused: Arc<AtomicBool>,
@@ -3808,6 +5352,7 @@ async fn run_cloud_sync_loop(
     printer_inventory_dirty: Arc<AtomicBool>,
     last_sync_error_code: Arc<RwLock<Option<String>>>,
     stop: StopSignal,
+    node_runtime: Arc<NodeRuntime>,
 ) {
     let Some((active_content_key_id, active_content_key)) = cloud.content_encryption_keys.active()
     else {
@@ -3827,7 +5372,7 @@ async fn run_cloud_sync_loop(
         match cloud
             .client
             .register_content_encryption_key(
-                &cloud.identity,
+                cloud.identity.as_ref(),
                 active_content_key_id,
                 &public_key_spki,
             )
@@ -3845,88 +5390,116 @@ async fn run_cloud_sync_loop(
             }
         }
     }
+    let stores = Arc::new(Mutex::new(InstalledConnectorStores {
+        queue: store,
+        inventory: inventory_store,
+        native_binding_session,
+    }));
     let started_at = Utc::now();
+    let authority = AgentClientAuthority::new(cloud.client.clone(), Arc::clone(&cloud.identity));
+    let inventory = InstalledInventoryAdapter {
+        stores: Arc::clone(&stores),
+        printer_discovery,
+        route_coordinator: Arc::clone(&route_coordinator),
+        observation_cache,
+        support_packs,
+        connector_id: cloud.connector_id.clone(),
+        agent_id: cloud.agent_id,
+        started_at,
+        paused: Arc::clone(&paused),
+        allowed_printer_ids: cloud.allowed_printer_ids.clone(),
+        node_runtime: Arc::clone(&node_runtime),
+        inventory_dirty: Arc::clone(&printer_inventory_dirty),
+    };
+    let events = InstalledEventAdapter {
+        stores: Arc::clone(&stores),
+        route_coordinator: Arc::clone(&route_coordinator),
+        connector_id: cloud.connector_id.clone(),
+    };
+    let commands = InstalledCommandAdapter {
+        stores: Arc::clone(&stores),
+        paused,
+        route_coordinator: Arc::clone(&route_coordinator),
+        connector_id: cloud.connector_id.clone(),
+    };
+    let materializer = InstalledMaterializer {
+        cloud: cloud.clone(),
+        stores: Arc::clone(&stores),
+        content_store,
+        uri_fetcher,
+    };
+    let acceptor = InstalledOfferAcceptor {
+        stores: Arc::clone(&stores),
+        route_coordinator,
+        connector_id: cloud.connector_id.clone(),
+        admission: stop.clone(),
+    };
+    let wake = InstalledWakeAdapter {
+        inventory_dirty: Arc::clone(&printer_inventory_dirty),
+    };
+    let mut worker = CloudConnectorWorker::new(
+        authority,
+        inventory,
+        events,
+        commands,
+        materializer,
+        acceptor,
+        wake,
+        node_runtime,
+    );
     let mut failures = 0_u32;
     let mut last_printer_refresh: Option<tokio::time::Instant> = None;
     loop {
         if stop.is_stopped() {
             break;
         }
-        sweep_confidential_files(&store);
-        resume_pending_cloud_accepts(&cloud, &mut store, &route_coordinator).await;
-        let refresh_printers = printer_inventory_dirty.swap(false, Ordering::AcqRel)
-            || last_printer_refresh.is_none_or(|last| last.elapsed() >= Duration::from_secs(60));
-        let request = match prepare_sync_request(
-            &mut store,
-            &mut inventory_store,
-            &printer_discovery,
-            &route_coordinator,
-            &observation_cache,
-            &support_packs,
-            &cloud.connector_id,
-            cloud.agent_id,
-            started_at,
-            paused.load(Ordering::Relaxed),
-            refresh_printers,
-            cloud.allowed_printer_ids.as_ref(),
-        )
-        .await
-        {
-            Ok(request) => request,
-            Err(error) => {
-                error!(%error, "cloud sync cannot read queue health");
-                *connection.write().await = ConnectionState::Degraded;
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-        };
-        let submitted_printer_inventory = request.printers.is_some();
-        let submitted_printer_revision = request.printer_revision;
-        if !submitted_printer_inventory && refresh_printers {
+        if last_printer_refresh.is_none_or(|last| last.elapsed() >= Duration::from_secs(60)) {
             printer_inventory_dirty.store(true, Ordering::Release);
         }
-        let delay = match cloud.client.sync(&cloud.identity, &request).await {
-            Ok(response) => {
-                let projection_acknowledged = inventory_projection_confirmed(
-                    response.inventory_projection_acknowledgement_supported,
-                    response.inventory_projection.as_ref(),
-                    submitted_printer_revision,
-                );
-                if submitted_printer_inventory && projection_acknowledged {
+        {
+            let stores = stores.lock().await;
+            sweep_confidential_files(&stores.queue);
+        }
+        let identity_error_code = reconcile_connector_identity(&cloud, &stores).await;
+        let delay = match worker.reconcile_once().await {
+            Ok(outcome) => {
+                if outcome.inventory_submitted {
                     last_printer_refresh = Some(tokio::time::Instant::now());
-                } else if submitted_printer_inventory {
-                    // A normal heartbeat response does not prove that printer
-                    // rows were committed. Keep retrying the exact connector
-                    // projection until the server acknowledges its revision.
-                    printer_inventory_dirty.store(true, Ordering::Release);
                 }
-                *last_sync_error_code.write().await = None;
-                sync_succeeded(
-                    response,
-                    SyncContext {
-                        cloud: &cloud,
-                        store: &mut store,
-                        inventory_store: &mut inventory_store,
-                        content_store: &content_store,
-                        uri_fetcher: &uri_fetcher,
-                        paused: &paused,
-                        failures: &mut failures,
-                        connection: &connection,
-                        stop: &stop,
-                        route_coordinator: &route_coordinator,
-                    },
-                )
-                .await
+                failures = 0;
+                if outcome.command_retry_after.is_some() {
+                    *connection.write().await = ConnectionState::Degraded;
+                    *last_sync_error_code.write().await = Some("command_deferred".into());
+                    if outcome.command_failure_recorded {
+                        warn!("a cloud command was deferred; live sync remains active");
+                    }
+                } else {
+                    *connection.write().await = ConnectionState::Connected;
+                    *last_sync_error_code.write().await = identity_error_code.map(str::to_owned);
+                }
+                outcome.next_poll_after
             }
             Err(error) => {
-                if submitted_printer_inventory {
-                    // A heartbeat succeeding after an inventory projection
-                    // failure must not mask missing printers for fifteen
-                    // minutes. Retry the same current inventory next cycle.
-                    printer_inventory_dirty.store(true, Ordering::Release);
-                }
-                *last_sync_error_code.write().await = redacted_sync_error_code(&error);
-                sync_failed(&error, &mut failures, &connection).await
+                failures = failures.saturating_add(1);
+                *last_sync_error_code.write().await = Some(error.code.into());
+                let state = match error.code {
+                    "unauthorized" => ConnectionState::Unauthorized,
+                    "transport_failed" => ConnectionState::Offline,
+                    _ => ConnectionState::Degraded,
+                };
+                *connection.write().await = state;
+                let exponent = failures.min(5);
+                let seconds = if state == ConnectionState::Unauthorized {
+                    UNAUTHORIZED_RETRY_SECONDS
+                } else {
+                    1_u64.checked_shl(exponent).unwrap_or(30).min(30)
+                };
+                warn!(
+                    code = error.code,
+                    retry_seconds = seconds,
+                    "cloud worker reconcile failed"
+                );
+                Duration::from_secs(seconds)
             }
         };
         tokio::select! {
@@ -3934,6 +5507,92 @@ async fn run_cloud_sync_loop(
             () = cloud_sync_wakeup.notified() => {}
             () = stop.cancelled() => break,
         }
+    }
+}
+
+async fn reconcile_connector_identity(
+    cloud: &CloudConfiguration,
+    stores: &Arc<Mutex<InstalledConnectorStores>>,
+) -> Option<&'static str> {
+    let (desired, expected_revision) = {
+        let stores = stores.lock().await;
+        let desired = stores
+            .queue
+            .setting(NODE_IDENTITY_DESIRED_SETTING)
+            .ok()
+            .flatten()
+            .filter(|value| !value.is_empty())?;
+        if stores
+            .queue
+            .setting(NODE_IDENTITY_CONFLICT_REVISION_SETTING)
+            .ok()
+            .flatten()
+            .is_some_and(|value| !value.is_empty())
+        {
+            return Some("node_identity_revision_conflict");
+        }
+        let expected_revision = stores
+            .queue
+            .setting(NODE_IDENTITY_SERVER_REVISION_SETTING)
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(1);
+        drop(stores);
+        (desired, expected_revision)
+    };
+    let Ok(identity) = serde_json::from_str::<piqae_protocol::agent::NodeDisplayIdentity>(&desired)
+    else {
+        return Some("node_identity_projection_invalid");
+    };
+    let request = piqae_protocol::agent::AgentIdentityUpdateRequest {
+        expected_revision,
+        display_name: identity.display_name,
+        site: identity.site,
+        location: identity.location,
+        labels: identity.labels,
+    };
+    match cloud
+        .client
+        .update_node_identity(cloud.identity.as_ref(), &request)
+        .await
+    {
+        Ok(updated) => {
+            let mut stores = stores.lock().await;
+            if stores
+                .queue
+                .set_setting(
+                    NODE_IDENTITY_SERVER_REVISION_SETTING,
+                    &updated.revision.to_string(),
+                )
+                .and_then(|()| {
+                    stores
+                        .queue
+                        .set_setting(NODE_IDENTITY_APPLIED_SETTING, &desired)
+                })
+                .and_then(|()| stores.queue.set_setting(NODE_IDENTITY_DESIRED_SETTING, ""))
+                .and_then(|()| {
+                    stores
+                        .queue
+                        .set_setting(NODE_IDENTITY_CONFLICT_REVISION_SETTING, "")
+                })
+                .is_err()
+            {
+                return Some("node_identity_sync_commit_deferred");
+            }
+            drop(stores);
+            None
+        }
+        Err(ClientError::NodeIdentityRevisionConflict { current_revision }) => {
+            let mut stores = stores.lock().await;
+            let _ = stores.queue.set_setting(
+                NODE_IDENTITY_CONFLICT_REVISION_SETTING,
+                &current_revision.to_string(),
+            );
+            drop(stores);
+            Some("node_identity_revision_conflict")
+        }
+        Err(_) => Some("node_identity_sync_deferred"),
     }
 }
 
@@ -3966,6 +5625,73 @@ fn sweep_confidential_files(store: &AgentStore) {
 
 #[allow(
     clippy::too_many_arguments,
+    reason = "native binding publication spans the connector revision and shared node inventory stores"
+)]
+async fn refresh_cloud_printer_inventory(
+    store: &mut AgentStore,
+    inventory_store: &mut AgentStore,
+    printer_discovery: &PrinterDiscovery,
+    route_coordinator: &Arc<Mutex<route_coordinator::RouteCoordinator>>,
+    support_packs: &SupportPackRegistry,
+    inventory_revision: &mut u64,
+    allowed_printer_ids: Option<&std::collections::BTreeSet<String>>,
+    native_binding_session: &PrinterNativeBindingSession,
+) -> Result<Option<Vec<PrinterSnapshot>>> {
+    let _native_binding_refresh = native_binding_session.refresh_lock.lock().await;
+    let next = inventory_revision.saturating_add(1);
+    // Advancing before discovery immediately invalidates the prior envelope,
+    // including when the withdrawal write itself fails.
+    let native_binding_generation = native_binding_session.begin_refresh();
+    let discovery = discover_cloud_printers(
+        inventory_store,
+        printer_discovery,
+        route_coordinator,
+        support_packs,
+        next,
+    )
+    .await;
+    let (mut printers, native_bindings) = match discovery {
+        Ok(discovery) => discovery,
+        Err(error) => {
+            warn!(%error, "native printer inventory refresh failed");
+            withdraw_printer_native_bindings(
+                inventory_store,
+                native_binding_session,
+                native_binding_generation,
+            );
+            return Ok(None);
+        }
+    };
+    printers.retain(|printer| printer_is_allowed(allowed_printer_ids, &printer.id.to_string()));
+    if let Err(error) = store.set_setting("printer_inventory_revision", &next.to_string()) {
+        withdraw_printer_native_bindings(
+            inventory_store,
+            native_binding_session,
+            native_binding_generation,
+        );
+        return Err(error.into());
+    }
+    *inventory_revision = next;
+    if let Err(error) = persist_printer_native_binding_envelope(
+        inventory_store,
+        native_binding_session,
+        native_binding_generation,
+        &native_bindings,
+    ) {
+        // Printer inventory/PDF operation remains usable. Native output stays
+        // withdrawn until a later complete refresh.
+        warn!(%error, "fresh printer-native binding evidence could not be persisted");
+        withdraw_printer_native_bindings(
+            inventory_store,
+            native_binding_session,
+            native_binding_generation,
+        );
+    }
+    Ok(Some(printers))
+}
+
+#[allow(
+    clippy::too_many_arguments,
     reason = "queue and node-inventory stores are separate connector security boundaries"
 )]
 async fn prepare_sync_request(
@@ -3981,35 +5707,25 @@ async fn prepare_sync_request(
     paused: bool,
     refresh_printers: bool,
     allowed_printer_ids: Option<&std::collections::BTreeSet<String>>,
+    node_runtime: &NodeRuntime,
+    native_binding_session: &PrinterNativeBindingSession,
 ) -> Result<AgentSyncRequest> {
     let mut inventory_revision = store
         .setting("printer_inventory_revision")?
         .and_then(|revision| revision.parse::<u64>().ok())
         .unwrap_or(0);
     let printers = if refresh_printers {
-        let next = inventory_revision.saturating_add(1);
-        match discover_cloud_printers(
+        refresh_cloud_printer_inventory(
+            store,
             inventory_store,
             printer_discovery,
             route_coordinator,
             support_packs,
-            next,
+            &mut inventory_revision,
+            allowed_printer_ids,
+            native_binding_session,
         )
-        .await
-        {
-            Ok(mut printers) => {
-                printers.retain(|printer| {
-                    printer_is_allowed(allowed_printer_ids, &printer.id.to_string())
-                });
-                store.set_setting("printer_inventory_revision", &next.to_string())?;
-                inventory_revision = next;
-                Some(printers)
-            }
-            Err(error) => {
-                warn!(%error, "native printer inventory refresh failed");
-                None
-            }
-        }
+        .await?
     } else {
         None
     };
@@ -4022,8 +5738,8 @@ async fn prepare_sync_request(
         inventory_revision,
     )
     .await;
-    let (topology_changes, native_handoffs) = {
-        let coordinator = route_coordinator.lock().await;
+    let (topology_changes, native_handoffs, runtime_sequence) = {
+        let mut coordinator = route_coordinator.lock().await;
         let acknowledged_handoff = store
             .setting("acknowledged_handoff_sequence")?
             .and_then(|sequence| sequence.parse::<u64>().ok())
@@ -4031,86 +5747,37 @@ async fn prepare_sync_request(
         (
             coordinator.topology_changes(),
             coordinator.handoffs_for_connector(connector_id, acknowledged_handoff),
+            coordinator
+                .allocate_observation_sequences(1)?
+                .into_iter()
+                .next()
+                .context("runtime observation sequence was not allocated")?,
         )
     };
     let mut request = sync_request(store, agent_id, started_at, paused, printers)?;
+    let native_bindings = current_printer_native_bindings(inventory_store, native_binding_session)
+        .into_iter()
+        .filter(|binding| printer_is_allowed(allowed_printer_ids, &binding.printer_id))
+        .collect::<Vec<_>>();
+    apply_printer_native_bindings(&mut request, &native_bindings);
     request.route_observations = route_observations;
     request.topology_changes = topology_changes;
     request.native_handoffs = native_handoffs;
+    request.runtime =
+        Some(node_runtime.observation(runtime_sequence, Utc::now(), Duration::from_secs(90)));
+    request.capabilities.features.extend([
+        piqae_protocol::agent::AgentFeature::EmbeddedHostV1,
+        piqae_protocol::agent::AgentFeature::RuntimeAvailabilityV1,
+        piqae_protocol::agent::AgentFeature::WakeHintsV1,
+    ]);
     Ok(request)
 }
 
-struct SyncContext<'a> {
-    cloud: &'a CloudConfiguration,
-    store: &'a mut AgentStore,
-    inventory_store: &'a mut AgentStore,
-    content_store: &'a ContentStore,
-    uri_fetcher: &'a UriFetcher,
-    paused: &'a AtomicBool,
-    failures: &'a mut u32,
-    connection: &'a RwLock<ConnectionState>,
-    stop: &'a StopSignal,
-    route_coordinator: &'a Arc<Mutex<route_coordinator::RouteCoordinator>>,
-}
-
-async fn sync_succeeded(response: AgentSyncResponse, context: SyncContext<'_>) -> Duration {
-    let AgentSyncResponse {
-        acknowledged_event_cursor,
-        acknowledged_diagnostics,
-        acknowledged_handoff_sequence,
-        command_cursor,
-        commands,
-        candidate_jobs,
-        next_poll_after_ms,
-        ..
-    } = response;
-    *context.failures = 0;
-    *context.connection.write().await = ConnectionState::Connected;
-    apply_event_acknowledgement(context.store, acknowledged_event_cursor);
-    acknowledge_diagnostics(context.store, &acknowledged_diagnostics);
-    if let Some(sequence) = acknowledged_handoff_sequence
-        && let Err(error) = context
-            .store
-            .set_setting("acknowledged_handoff_sequence", &sequence.to_string())
-    {
-        warn!(%error, "native handoff acknowledgement could not be persisted");
-    }
-    apply_commands(
-        context.store,
-        context.paused,
-        context.route_coordinator,
-        &context.cloud.connector_id,
-        commands,
-        command_cursor,
-    )
-    .await;
-    for offer in candidate_jobs {
-        if let Err(error) = accept_offer(
-            context.cloud,
-            context.store,
-            context.inventory_store,
-            context.content_store,
-            context.uri_fetcher,
-            context.route_coordinator,
-            offer,
-            context.stop,
-        )
-        .await
-        {
-            warn!(%error, "job offer could not be durably accepted");
-        }
-    }
-    Duration::from_millis(next_poll_after_ms.clamp(250, 60_000))
-}
-
-fn apply_event_acknowledgement(store: &mut AgentStore, cursor: Option<EventId>) {
-    let Some(cursor) = cursor else {
-        return;
-    };
-    if let Err(error) =
-        store.acknowledge_cloud_event(&cursor.to_string(), Utc::now().timestamp_millis())
-    {
-        warn!(%error, "server event acknowledgement could not be applied");
+const fn runtime_mode(mode: AgentMode, configured_connectors: usize) -> NodeRuntimeMode {
+    if matches!(mode, AgentMode::Local) && configured_connectors == 0 {
+        NodeRuntimeMode::LocalOnly
+    } else {
+        NodeRuntimeMode::CloudCapable
     }
 }
 
@@ -4121,8 +5788,20 @@ async fn apply_commands(
     connector_id: &str,
     commands: Vec<AgentCommand>,
     command_cursor: Option<String>,
-) {
+) -> Result<CloudCommandApplication, CloudWorkerError> {
+    let now = Utc::now().timestamp_millis();
+    let mut ledger = CommandRecoveryLedger::load(store)
+        .map_err(|_| CloudWorkerError::new("command_recovery_load_failed"))?;
+    ledger
+        .retain_batch(&commands)
+        .map_err(|_| CloudWorkerError::new("command_recovery_batch_failed"))?;
+    let mut attempted_failure = false;
     for command in commands {
+        let key = CommandRecoveryLedger::key(&command)
+            .map_err(|_| CloudWorkerError::new("command_recovery_key_failed"))?;
+        if ledger.is_applied(&key) || !ledger.is_due(&key, now) {
+            continue;
+        }
         let result = match command {
             AgentCommand::ResolveAmbiguousHandoff {
                 job_id,
@@ -4140,17 +5819,44 @@ async fn apply_commands(
             ),
             command => apply_command(store, paused, command).map_err(anyhow::Error::from),
         };
-        if let Err(error) = result {
-            warn!(%error, "cloud command could not be applied durably");
-            return;
+        match result {
+            Ok(()) => ledger.record_applied(key),
+            Err(error) => {
+                let code = if error
+                    .downcast_ref::<StorageError>()
+                    .is_some_and(|error| matches!(error, StorageError::JobNotFound(_)))
+                {
+                    "local_job_absent_unproved"
+                } else {
+                    "command_apply_retry"
+                };
+                ledger.record_retry(key, now, code);
+                attempted_failure = true;
+                warn!(
+                    error_code = code,
+                    "cloud command deferred for durable reconciliation"
+                );
+            }
         }
+        ledger
+            .persist(store)
+            .map_err(|_| CloudWorkerError::new("command_recovery_persist_failed"))?;
     }
-    let Some(cursor) = command_cursor else {
-        return;
-    };
-    if let Err(error) = store.set_setting("command_cursor", &cursor) {
-        warn!(%error, "command cursor could not be persisted");
+    if ledger.complete() {
+        if let Some(cursor) = command_cursor {
+            store
+                .set_setting("command_cursor", &cursor)
+                .map_err(|_| CloudWorkerError::new("command_cursor_failed"))?;
+        }
+        ledger
+            .clear(store)
+            .map_err(|_| CloudWorkerError::new("command_recovery_clear_failed"))?;
+        return Ok(CloudCommandApplication::complete());
     }
+    Ok(CloudCommandApplication {
+        retry_after: ledger.retry_after(now),
+        attempted_failure,
+    })
 }
 
 fn apply_command(
@@ -4255,295 +5961,11 @@ fn acknowledge_diagnostics(store: &mut AgentStore, acknowledged: &[String]) {
     }
 }
 
-#[allow(
-    clippy::needless_pass_by_ref_mut,
-    reason = "exclusive inventory access keeps the spawned sync future Send across awaits"
-)]
-#[allow(
-    clippy::too_many_arguments,
-    reason = "offer acceptance crosses explicit queue, content, route, and shutdown boundaries"
-)]
-async fn accept_offer(
-    cloud: &CloudConfiguration,
-    store: &mut AgentStore,
-    inventory_store: &mut AgentStore,
-    content_store: &ContentStore,
-    uri_fetcher: &UriFetcher,
-    route_coordinator: &Arc<Mutex<route_coordinator::RouteCoordinator>>,
-    offer: JobOffer,
-    stop: &StopSignal,
-) -> Result<()> {
-    if !printer_is_allowed(
-        cloud.allowed_printer_ids.as_ref(),
-        &offer.job.printer_id.to_string(),
-    ) {
-        cloud
-            .client
-            .release_lease(
-                &cloud.identity,
-                offer.job.id,
-                &AgentReleaseLeaseRequest {
-                    lease_id: offer.lease_id,
-                    lease_token: offer.lease_token.clone(),
-                    reason: "printer_not_granted".into(),
-                },
-            )
-            .await
-            .context("release lease for printer outside connector grant")?;
-        anyhow::bail!("cloud offered a job outside this connector's printer grant");
-    }
-    let lease_id = offer.lease_id;
-    let lease_token = offer.lease_token.clone();
-    let job_id = offer.job.id;
-    let route_reservation = offer.route_reservation.clone();
-    let result = tokio::select! {
-      result = maintain_lease(
-        offer.lease_expires_at,
-        LEASE_RENEWAL_INTERVAL,
-        accept_offer_under_lease(
-            cloud,
-            store,
-            inventory_store,
-            content_store,
-            uri_fetcher,
-            route_coordinator,
-            offer,
-        ),
-        || async {
-            tokio::time::timeout(
-                LEASE_RENEWAL_REQUEST_TIMEOUT,
-                cloud.client.renew_lease(
-                    &cloud.identity,
-                    job_id,
-                    &AgentRenewLeaseRequest {
-                        lease_id,
-                        lease_token: lease_token.clone(),
-                        route_reservation_id: route_reservation
-                            .as_ref()
-                            .map(|reservation| reservation.reservation_id),
-                        route_generation: route_reservation
-                            .as_ref()
-                            .map(|reservation| reservation.generation),
-                        route_fencing_token: route_reservation
-                            .as_ref()
-                            .map(|reservation| reservation.fencing_token.clone()),
-                    },
-                ),
-            )
-            .await
-            .map_err(|_| anyhow::anyhow!("job lease renewal failed"))?
-            .map(|response| response.lease_expires_at)
-            .map_err(|_| anyhow::anyhow!("job lease renewal failed"))
-        },
-      ) => result,
-      () = stop.cancelled() => Err(anyhow::anyhow!("connector revoked while job was leased")),
-    };
-    if let Err(error) = &result {
-        let has_durable_intent = match store.pending_cloud_accepts() {
-            Ok(intents) => intents
-                .iter()
-                .any(|intent| intent.job_id == job_id.to_string()),
-            Err(read_error) => {
-                warn!(
-                    %read_error,
-                    %job_id,
-                    "cloud acceptance intent could not be read; retaining the lease to prevent duplicate handoff"
-                );
-                true
-            }
-        };
-        if !has_durable_intent {
-            let _ = cloud
-                .client
-                .release_lease(
-                    &cloud.identity,
-                    job_id,
-                    &AgentReleaseLeaseRequest {
-                        lease_id,
-                        lease_token,
-                        reason: error
-                            .downcast_ref::<OfferRejection>()
-                            .map_or("acceptance_failed", |rejection| rejection.reason)
-                            .into(),
-                    },
-                )
-                .await;
-        }
-    }
-    result
-}
-
 fn printer_is_allowed(
     allowed: Option<&std::collections::BTreeSet<String>>,
     printer_id: &str,
 ) -> bool {
     allowed.is_none_or(|ids| ids.contains(printer_id))
-}
-
-#[allow(
-    clippy::too_many_lines,
-    clippy::needless_pass_by_ref_mut,
-    reason = "keeps the lease-fenced acceptance and durable-intent boundary auditable in one flow"
-)]
-async fn accept_offer_under_lease(
-    cloud: &CloudConfiguration,
-    store: &mut AgentStore,
-    inventory_store: &mut AgentStore,
-    content_store: &ContentStore,
-    uri_fetcher: &UriFetcher,
-    route_coordinator: &Arc<Mutex<route_coordinator::RouteCoordinator>>,
-    offer: JobOffer,
-) -> Result<()> {
-    let job_id = offer.job.id;
-    let route_reservation = offer.route_reservation.clone();
-    let logical_printer_id = offer.job.printer_id.to_string();
-    let profile_pin = profile_pin_metadata(&offer.job.metadata)?;
-    if matches!(&offer.content, ContentDescriptor::EncryptedDownload { .. })
-        && profile_pin.is_none()
-    {
-        return Err(OfferRejection::new(
-            "encrypted_profile_pin_required",
-            "encrypted content requires an exact local target/profile pin".into(),
-        )
-        .into());
-    }
-    // Connector stores intentionally contain only that connector's queue and
-    // cloud cursors. Printer identity, exposure, capabilities, and profiles
-    // are authoritative in the node-owned inventory store.
-    let printer = resolve_cloud_offer_printer(inventory_store, &logical_printer_id)?;
-    if !printer.present {
-        return Err(OfferRejection::new(
-            "printer_not_present",
-            format!("printer is not present: {logical_printer_id}"),
-        )
-        .into());
-    }
-    // Cloud access is authorized by the connector grant. `printer_exposure`
-    // predates multi-connector consent and remains a local compatibility
-    // preference; allowing it to veto a connector would make an approved
-    // all-printer grant publish printers that it then cannot use.
-    let mut uses_current_printer_defaults = false;
-    if let Some(pin) = &profile_pin {
-        let profile = inventory_store
-            .named_profile_revision(&printer.printer_id, &pin.profile_id, pin.profile_revision)?
-            .with_context(|| {
-                format!(
-                    "profile_not_found: {} revision {}",
-                    pin.profile_id, pin.profile_revision
-                )
-            })?;
-        let status: ProfileStatus =
-            serde_json::from_value(serde_json::Value::String(profile.status.clone()))
-                .context("profile status is invalid")?;
-        if !status.permits_jobs() {
-            return Err(OfferRejection::new(
-                "profile_not_ready",
-                format!(
-                    "profile {} revision {} is {}",
-                    pin.profile_id, pin.profile_revision, profile.status
-                ),
-            )
-            .into());
-        }
-        uses_current_printer_defaults = profile.uses_current_printer_defaults;
-        if let ContentDescriptor::EncryptedDownload { manifest, .. } = &offer.content {
-            let expected = format!("{}:{}", pin.profile_id, pin.profile_revision);
-            if manifest.binding.profile_revision != expected
-                || pin.target_id.as_deref() != Some(manifest.binding.target_id.as_str())
-                || manifest.binding.content_type != offer.job.content_kind
-                || manifest.binding.printer_id != offer.job.printer_id.to_string()
-                || manifest.binding.options != offer.job.options
-                || manifest.binding.deliveries != offer.job.deliveries
-                || manifest.binding.raw_authorized != (offer.job.content_kind == ContentKind::Raw)
-                || manifest.version != piqae_domain::ENCRYPTED_JOB_V3_VERSION
-                || manifest.suite != piqae_domain::ENCRYPTED_JOB_V3_SUITE
-            {
-                return Err(OfferRejection::new(
-                    "encrypted_binding_mismatch",
-                    "encrypted content is not bound to the locally pinned target/profile".into(),
-                )
-                .into());
-            }
-        }
-    }
-    validate_options(&printer, &offer.job.options).map_err(|failure| {
-        if failure.code == "unsupported_profile_option" {
-            anyhow::Error::new(OfferRejection::new(
-                "unsupported_profile_option",
-                failure.message,
-            ))
-        } else {
-            anyhow::anyhow!("{}: {}", failure.code, failure.message)
-        }
-    })?;
-    let stored = materialize_descriptor(
-        cloud,
-        content_store,
-        uri_fetcher,
-        job_id,
-        offer.lease_id,
-        &offer.lease_token,
-        offer.content,
-    )
-    .await?;
-    let accepted_unix_ms = Utc::now().timestamp_millis();
-    let local = store.prepare_cloud_job(
-        &AcceptedJob {
-            job_id: job_id.to_string(),
-            submission_id: format!("sub_{job_id}"),
-            printer_id: logical_printer_id,
-            printer_native_id: printer.native_id.clone(),
-            title: offer.job.title,
-            content_sha256: stored.sha256.clone(),
-            content_path: stored.path.to_string_lossy().into_owned(),
-            content_kind: match offer.job.content_kind {
-                ContentKind::Pdf => "pdf",
-                ContentKind::Raw => "raw",
-            }
-            .into(),
-            options_json: serde_json::to_string(&offer.job.options)?,
-            expires_unix_ms: Some(offer.job.expires_at.timestamp_millis()),
-            accepted_unix_ms,
-            cloud_managed: true,
-        },
-        &offer.lease_id.to_string(),
-        &offer.lease_token,
-        offer.lease_expires_at.timestamp_millis(),
-    )?;
-    if let Some(reservation) = &route_reservation {
-        route_coordinator.lock().await.register_authoritative(
-            &cloud.connector_id,
-            &printer.native_id,
-            &job_id.to_string(),
-            reservation,
-            Utc::now(),
-        )?;
-    }
-    if let Some(pin) = profile_pin.filter(|_| !uses_current_printer_defaults) {
-        store.pin_job_profile(
-            &job_id.to_string(),
-            pin.target_id.as_deref(),
-            pin.binding_id.as_deref(),
-            &pin.profile_id,
-            pin.profile_revision,
-            pin.stock_id.as_deref(),
-            pin.loaded_media_snapshot_json.as_deref(),
-        )?;
-    }
-    confirm_cloud_accept(
-        cloud,
-        store,
-        route_coordinator,
-        &CloudAcceptIntent {
-            job_id: job_id.to_string(),
-            lease_id: offer.lease_id.to_string(),
-            lease_token: offer.lease_token,
-            lease_expires_unix_ms: offer.lease_expires_at.timestamp_millis(),
-            content_sha256: stored.sha256,
-            local_sequence: u64::try_from(local.printer_sequence).unwrap_or(u64::MAX),
-        },
-    )
-    .await
 }
 
 fn resolve_cloud_offer_printer(
@@ -4554,26 +5976,6 @@ fn resolve_cloud_offer_printer(
         .printer(logical_printer_id)?
         .with_context(|| format!("printer_not_found: {logical_printer_id}"))
 }
-
-#[derive(Debug)]
-struct OfferRejection {
-    reason: &'static str,
-    message: String,
-}
-
-impl OfferRejection {
-    const fn new(reason: &'static str, message: String) -> Self {
-        Self { reason, message }
-    }
-}
-
-impl std::fmt::Display for OfferRejection {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for OfferRejection {}
 
 #[derive(Debug)]
 struct ProfilePinMetadata {
@@ -4616,100 +6018,6 @@ fn profile_pin_metadata(
         stock_id: value("stock_id").cloned(),
         loaded_media_snapshot_json,
     }))
-}
-
-async fn resume_pending_cloud_accepts(
-    cloud: &CloudConfiguration,
-    store: &mut AgentStore,
-    route_coordinator: &Arc<Mutex<route_coordinator::RouteCoordinator>>,
-) {
-    let intents = match store.pending_cloud_accepts() {
-        Ok(intents) => intents,
-        Err(error) => {
-            warn!(%error, "pending cloud accept intents could not be read");
-            return;
-        }
-    };
-    for intent in intents {
-        let job_id = intent.job_id.clone();
-        let result = tokio::time::timeout(
-            LEASE_RENEWAL_REQUEST_TIMEOUT,
-            confirm_cloud_accept(cloud, store, route_coordinator, &intent),
-        )
-        .await;
-        if !matches!(result, Ok(Ok(()))) {
-            warn!(%job_id, "pending cloud acceptance retry deferred");
-        }
-    }
-}
-
-async fn confirm_cloud_accept(
-    cloud: &CloudConfiguration,
-    store: &mut AgentStore,
-    route_coordinator: &Arc<Mutex<route_coordinator::RouteCoordinator>>,
-    intent: &CloudAcceptIntent,
-) -> Result<()> {
-    let job_id = intent.job_id.parse::<JobId>()?;
-    let route_proof = route_coordinator
-        .lock()
-        .await
-        .cloud_proof_for_job(&cloud.connector_id, &intent.job_id);
-    cloud
-        .client
-        .accept_job(
-            &cloud.identity,
-            job_id,
-            &AgentAcceptJobRequest {
-                lease_id: intent.lease_id.parse()?,
-                lease_token: intent.lease_token.clone(),
-                content_sha256: intent.content_sha256.clone(),
-                local_sequence: intent.local_sequence,
-                route_reservation_id: route_proof.as_ref().map(|proof| proof.reservation_id),
-                route_generation: route_proof.as_ref().map(|proof| proof.generation),
-                route_fencing_token: route_proof.map(|proof| proof.fencing_token),
-            },
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("remote cloud acceptance failed"))?;
-    store.activate_cloud_job(&intent.job_id, Utc::now().timestamp_millis())?;
-    Ok(())
-}
-
-async fn maintain_lease<T, Work, Renew, Renewal>(
-    initial_expires_at: chrono::DateTime<Utc>,
-    maximum_interval: Duration,
-    work: Work,
-    mut renew: Renew,
-) -> Result<T>
-where
-    Work: Future<Output = Result<T>>,
-    Renew: FnMut() -> Renewal,
-    Renewal: Future<Output = Result<chrono::DateTime<Utc>>>,
-{
-    let mut expires_at = initial_expires_at;
-    tokio::pin!(work);
-    loop {
-        let delay = lease_renewal_delay(expires_at, maximum_interval);
-        tokio::select! {
-            biased;
-            () = tokio::time::sleep(delay) => {
-                expires_at = renew().await?;
-            }
-            result = &mut work => return result,
-        }
-    }
-}
-
-fn lease_renewal_delay(expires_at: chrono::DateTime<Utc>, maximum_interval: Duration) -> Duration {
-    const SAFETY_MARGIN: Duration = Duration::from_secs(5);
-    const NORMAL_MINIMUM_DELAY: Duration = Duration::from_millis(250);
-    let maximum_interval = maximum_interval.max(Duration::from_millis(1));
-    let minimum_delay = maximum_interval.min(NORMAL_MINIMUM_DELAY);
-    let remaining = (expires_at - Utc::now()).to_std().unwrap_or(Duration::ZERO);
-    remaining
-        .saturating_sub(SAFETY_MARGIN)
-        .min(maximum_interval)
-        .max(minimum_delay)
 }
 
 #[allow(
@@ -4757,7 +6065,7 @@ async fn materialize_descriptor(
             }
             let response = cloud
                 .client
-                .download_content(&cloud.identity, job_id, lease_id, lease_token)
+                .download_content(cloud.identity.as_ref(), job_id, lease_id, lease_token)
                 .await?;
             if response
                 .content_length()
@@ -4821,7 +6129,7 @@ async fn materialize_descriptor(
                 .context("encrypted job recipient key is unavailable")?;
             let response = cloud
                 .client
-                .download_content(&cloud.identity, job_id, lease_id, lease_token)
+                .download_content(cloud.identity.as_ref(), job_id, lease_id, lease_token)
                 .await?;
             if response
                 .content_length()
@@ -4875,17 +6183,55 @@ async fn materialize_descriptor(
                 )
                 .await?)
         }
-        ContentDescriptor::BusinessDocument {
+        ContentDescriptor::PrintPacket {
             policy: _,
             render,
             fallback,
             fallback_allowed,
             decision_reason: _,
         } => {
-            let rendered = if render.renderer_abi == RENDERER_ABI
+            let neutral = printpacket::RendererCapabilities::reference_pdf();
+            let supported_features = neutral
+                .features
+                .iter()
+                .map(print_packet_feature_id)
+                .collect::<Vec<_>>();
+            let template_bytes = serde_json::to_vec(&render.specification)
+                .ok()
+                .and_then(|value| u64::try_from(value.len()).ok())
+                .unwrap_or(u64::MAX);
+            let input_bytes = serde_json::to_vec(&render.input)
+                .ok()
+                .and_then(|value| u64::try_from(value.len()).ok())
+                .unwrap_or(u64::MAX);
+            let resource_count = u32::try_from(render.resources.len()).unwrap_or(u32::MAX);
+            let total_resource_bytes = render.resources.iter().fold(0_u64, |total, resource| {
+                total.saturating_add(resource.byte_length)
+            });
+            let rendered = if render.negotiation_version == 2
+                && render.input.is_object()
+                && render.packet_version == printpacket::DOCUMENT_V1
+                && render
+                    .required_feature_ids
+                    .iter()
+                    .all(|required| supported_features.contains(required))
+                && render.conformance_profile == printpacket::CONFORMANCE_CORE_V1
+                && render.output_profile == printpacket::PDF_BASE14_V1
+                && render.expected_page_count > 0
+                && template_bytes <= neutral.limits.max_template_bytes
+                && input_bytes <= neutral.limits.max_data_bytes
+                && render.expected_pdf_bytes <= neutral.limits.max_output_bytes
+                && render.expected_page_count <= neutral.limits.max_pages
+                && resource_count <= neutral.limits.max_resources
+                && total_resource_bytes <= neutral.limits.max_total_resource_bytes
+                && render.resources.iter().all(|resource| {
+                    resource.byte_length <= neutral.limits.max_resource_bytes
+                        && neutral.resource_media_types.contains(&resource.media_type)
+                })
+                && render.renderer_abi == RENDERER_ABI
                 && render.resource_abi == RESOURCE_ABI
             {
-                let specification: piqae_document_renderer::BusinessDocumentV1 =
+                let specification: printpacket_renderer::PrintPacketV1 =
                     serde_json::from_value(render.specification.clone())
                         .context("decode business document specification")?;
                 let resources = resolve_node_render_resources(
@@ -4897,8 +6243,6 @@ async fn materialize_descriptor(
                     &render.resources,
                 )
                 .await;
-                let input_bytes =
-                    u64::try_from(serde_json::to_vec(&render.input)?.len()).unwrap_or(u64::MAX);
                 let capabilities = NodeDocumentCapabilities::local()
                     .with_persistent_resource_cache(DOCUMENT_RESOURCE_MAX_BYTES);
                 resources.map_or_else(
@@ -4912,12 +6256,11 @@ async fn materialize_descriptor(
                             &NodeRenderRequirement {
                                 negotiation_version: 1,
                                 renderer_abi: render.renderer_abi.clone(),
-                                renderer_build: piqae_document_renderer::RENDERER_VERSION.into(),
-                                spec_version: piqae_document_renderer::BUSINESS_DOCUMENT_FORMAT
-                                    .into(),
+                                renderer_build: printpacket_renderer::RENDERER_VERSION.into(),
+                                spec_version: specification.format.clone(),
                                 input_bytes,
                                 maximum_pdf_bytes: render.expected_pdf_bytes,
-                                maximum_pages: 10_000,
+                                maximum_pages: render.expected_page_count,
                                 expected_pdf_sha256: render.expected_pdf_sha256.clone(),
                             },
                             &specification,
@@ -4963,9 +6306,9 @@ async fn resolve_node_render_resources(
     job_id: JobId,
     lease_id: uuid::Uuid,
     lease_token: &str,
-    specification: &piqae_document_renderer::BusinessDocumentV1,
-    offered: &[piqae_protocol::agent::BusinessDocumentResourceDescriptor],
-) -> Result<piqae_document_renderer::ResolvedResources> {
+    specification: &printpacket_renderer::PrintPacketV1,
+    offered: &[piqae_protocol::agent::PrintPacketResourceDescriptor],
+) -> Result<printpacket_renderer::ResolvedResources> {
     let cache = DOCUMENT_RESOURCE_CACHE
         .get()
         .context("document resource cache is unavailable")?;
@@ -4981,9 +6324,9 @@ async fn resolve_node_render_resources(
             )
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    let mut resolved = piqae_document_renderer::ResolvedResources::default();
+    let mut resolved = printpacket_renderer::ResolvedResources::default();
     for (resource_id, resource) in &specification.resources {
-        let piqae_document_renderer::Resource::Image {
+        let printpacket_renderer::Resource::Image {
             digest,
             media_type,
             byte_length,
@@ -5042,7 +6385,7 @@ async fn download_document_resource_bounded(
     let response = cloud
         .client
         .download_document_resource(
-            &cloud.identity,
+            cloud.identity.as_ref(),
             job_id,
             lease_id,
             lease_token,
@@ -5198,36 +6541,264 @@ fn redacted_sync_error_code(error: &ClientError) -> Option<String> {
     error.unauthorized_code().map(str::to_owned)
 }
 
-async fn sync_failed(
-    error: &ClientError,
-    failures: &mut u32,
-    connection: &RwLock<ConnectionState>,
-) -> Duration {
-    *failures = failures.saturating_add(1);
-    let state = failure_state(error);
-    *connection.write().await = state;
-    if state == ConnectionState::Unauthorized {
-        error!(
-            code = error.unauthorized_code().unwrap_or("unauthorized"),
-            retry_seconds = UNAUTHORIZED_RETRY_SECONDS,
-            "the control plane rejected this node's identity; it has been \
-             revoked or its device key no longer matches. Pair this node again \
-             to restore cloud printing."
-        );
-        return Duration::from_secs(UNAUTHORIZED_RETRY_SECONDS);
+fn print_packet_feature_id(feature: &printpacket::Feature) -> String {
+    serde_json::to_value(feature)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "invalid_feature_serialization".into())
+}
+
+const PRINTER_NATIVE_BINDINGS_SETTING: &str = "printer_native_bindings_v2";
+const PRINTER_NATIVE_BINDING_ENVELOPE_VERSION: u8 = 1;
+
+#[derive(Debug)]
+struct PrinterNativeBindingSession {
+    process_session_id: String,
+    generation: AtomicU64,
+    refresh_lock: Mutex<()>,
+    current: std::sync::RwLock<Option<LocalPrinterNativeBindingEnvelope>>,
+}
+
+impl PrinterNativeBindingSession {
+    fn new() -> Self {
+        Self {
+            process_session_id: uuid::Uuid::new_v4().simple().to_string(),
+            generation: AtomicU64::new(0),
+            refresh_lock: Mutex::new(()),
+            current: std::sync::RwLock::new(None),
+        }
     }
-    if let Some(code) = error.unauthorized_code() {
-        warn!(
-            code,
-            "this node's clock is outside the control-plane signing window; \
-             the offset has been corrected and the next attempt will use it. \
-             Enable time synchronization to avoid repeating this."
-        );
+
+    #[cfg(test)]
+    fn fixture(process_session_id: &str) -> Self {
+        Self {
+            process_session_id: process_session_id.to_owned(),
+            generation: AtomicU64::new(0),
+            refresh_lock: Mutex::new(()),
+            current: std::sync::RwLock::new(None),
+        }
     }
-    let exponent = (*failures).min(5);
-    let delay = 1_u64.checked_shl(exponent).unwrap_or(30).min(30);
-    warn!(%error, retry_seconds = delay, "agent sync failed");
-    Duration::from_secs(delay)
+
+    fn begin_refresh(&self) -> u64 {
+        let generation = self
+            .generation
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
+        if let Ok(mut current) = self.current.write() {
+            *current = None;
+        }
+        generation
+    }
+
+    fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn publish(&self, envelope: LocalPrinterNativeBindingEnvelope) -> Result<()> {
+        let mut current = self
+            .current
+            .write()
+            .map_err(|_| anyhow::anyhow!("printer-native binding session lock poisoned"))?;
+        *current = Some(envelope);
+        drop(current);
+        Ok(())
+    }
+
+    fn current_envelope(&self) -> Option<LocalPrinterNativeBindingEnvelope> {
+        self.current.read().ok()?.clone()
+    }
+
+    fn matches_pin(&self, pin: &PrinterNativeBindingPin) -> bool {
+        let Some(envelope) = self.current_envelope() else {
+            return false;
+        };
+        envelope.version == PRINTER_NATIVE_BINDING_ENVELOPE_VERSION
+            && envelope.process_session_id == pin.process_session_id
+            && envelope.generation == pin.generation
+            && envelope.generation == self.current_generation()
+            && envelope
+                .bindings
+                .iter()
+                .any(|binding| binding_matches_pin(binding, pin))
+    }
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct LocalPrinterNativeBindingEnvelope {
+    version: u8,
+    process_session_id: String,
+    generation: u64,
+    bindings: Vec<LocalPrinterNativeBinding>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct LocalPrinterNativeBinding {
+    printer_id: String,
+    output_profile_id: String,
+    language_profile: piqae_protocol::agent::PrinterNativeLanguageProfile,
+}
+
+fn persist_printer_native_binding_envelope(
+    store: &mut AgentStore,
+    session: &PrinterNativeBindingSession,
+    generation: u64,
+    bindings: &[LocalPrinterNativeBinding],
+) -> Result<()> {
+    let envelope = LocalPrinterNativeBindingEnvelope {
+        version: PRINTER_NATIVE_BINDING_ENVELOPE_VERSION,
+        process_session_id: session.process_session_id.clone(),
+        generation,
+        bindings: bindings.to_vec(),
+    };
+    store.set_setting(
+        PRINTER_NATIVE_BINDINGS_SETTING,
+        &serde_json::to_string(&envelope)?,
+    )?;
+    session.publish(envelope)?;
+    Ok(())
+}
+
+fn current_printer_native_bindings(
+    store: &AgentStore,
+    session: &PrinterNativeBindingSession,
+) -> Vec<LocalPrinterNativeBinding> {
+    let persisted = match store.setting(PRINTER_NATIVE_BINDINGS_SETTING) {
+        Ok(Some(encoded)) => serde_json::from_str::<LocalPrinterNativeBindingEnvelope>(&encoded),
+        Ok(None) => return Vec::new(),
+        Err(error) => {
+            warn!(%error, "printer-native binding evidence could not be read; withdrawing native output");
+            return Vec::new();
+        }
+    };
+    let Ok(persisted) = persisted else {
+        warn!("printer-native binding evidence was invalid; withdrawing native output");
+        return Vec::new();
+    };
+    let Some(envelope) = session.current_envelope() else {
+        return Vec::new();
+    };
+    if envelope != persisted
+        || envelope.version != PRINTER_NATIVE_BINDING_ENVELOPE_VERSION
+        || envelope.process_session_id != session.process_session_id
+        || envelope.generation != session.current_generation()
+    {
+        return Vec::new();
+    }
+    envelope.bindings
+}
+
+fn withdraw_printer_native_bindings(
+    store: &mut AgentStore,
+    session: &PrinterNativeBindingSession,
+    generation: u64,
+) {
+    if let Err(error) = persist_printer_native_binding_envelope(store, session, generation, &[]) {
+        // Generation advances in memory before discovery starts, so even a
+        // failed quarantine write cannot make the previous envelope current.
+        warn!(%error, "printer-native binding evidence could not be durably withdrawn");
+    }
+}
+
+fn validate_current_printer_native_offer(
+    content_kind: ContentKind,
+    store: &AgentStore,
+    session: &PrinterNativeBindingSession,
+    metadata: &std::collections::BTreeMap<String, String>,
+    printer_id: &str,
+) -> Result<Option<PrinterNativeBindingPin>, CloudWorkerError> {
+    if content_kind != ContentKind::Raw {
+        return Ok(None);
+    }
+    current_printer_native_bindings(store, session)
+        .into_iter()
+        .find(|binding| printer_native_offer_matches(metadata, printer_id, binding))
+        .map(|binding| binding_pin(session, &binding))
+        .map(Some)
+        .ok_or_else(|| CloudWorkerError::new("printer_native_binding_stale"))
+}
+
+fn binding_pin(
+    session: &PrinterNativeBindingSession,
+    binding: &LocalPrinterNativeBinding,
+) -> PrinterNativeBindingPin {
+    let language = &binding.language_profile;
+    PrinterNativeBindingPin {
+        process_session_id: session.process_session_id.clone(),
+        generation: session.current_generation(),
+        printer_id: binding.printer_id.clone(),
+        output_profile_id: binding.output_profile_id.clone(),
+        language_profile_id: language.id.clone(),
+        language: language.language.clone(),
+        language_version: language.language_version.clone(),
+        profile_version: language.profile_version.clone(),
+        media_type: language.media_type.clone(),
+        driver_fingerprint_sha256: language.driver_fingerprint_sha256.clone(),
+        support_pack_digest_sha256: language.support_pack_digest_sha256.clone(),
+    }
+}
+
+#[allow(
+    clippy::suspicious_operation_groupings,
+    reason = "the durable pin deliberately flattens nested language-profile field names"
+)]
+fn binding_matches_pin(binding: &LocalPrinterNativeBinding, pin: &PrinterNativeBindingPin) -> bool {
+    let language = &binding.language_profile;
+    binding.printer_id == pin.printer_id
+        && binding.output_profile_id == pin.output_profile_id
+        && language.id == pin.language_profile_id
+        && language.language == pin.language
+        && language.language_version == pin.language_version
+        && language.profile_version == pin.profile_version
+        && language.media_type == pin.media_type
+        && language.driver_fingerprint_sha256 == pin.driver_fingerprint_sha256
+        && language.support_pack_digest_sha256 == pin.support_pack_digest_sha256
+}
+
+fn printer_native_offer_matches(
+    metadata: &std::collections::BTreeMap<String, String>,
+    printer_id: &str,
+    binding: &LocalPrinterNativeBinding,
+) -> bool {
+    let language = &binding.language_profile;
+    binding.printer_id == printer_id
+        && language
+            .printer_ids
+            .iter()
+            .any(|bound_printer| bound_printer == printer_id)
+        && metadata.get("piqae.printer_native.output_profile") == Some(&binding.output_profile_id)
+        && metadata.get("piqae.printer_native.language_profile") == Some(&language.id)
+        && metadata.get("piqae.printer_native.language") == Some(&language.language)
+        && metadata.get("piqae.printer_native.language_version") == Some(&language.language_version)
+        && metadata.get("piqae.printer_native.profile_version") == Some(&language.profile_version)
+        && metadata.get("piqae.printer_native.media_type") == Some(&language.media_type)
+        && metadata.get("piqae.printer_native.driver_fingerprint_sha256")
+            == Some(&language.driver_fingerprint_sha256)
+        && metadata.get("piqae.printer_native.support_pack_digest_sha256")
+            == Some(&language.support_pack_digest_sha256)
+        && metadata.get("piqae.printer_native.printer_id") == Some(&binding.printer_id)
+}
+
+fn apply_printer_native_bindings(
+    request: &mut AgentSyncRequest,
+    bindings: &[LocalPrinterNativeBinding],
+) {
+    let Some(packet) = request.document_render.print_packet.as_mut() else {
+        return;
+    };
+    for binding in bindings {
+        let language = &binding.language_profile;
+        let output = piqae_protocol::agent::PrintPacketOutputProfile::PrinterNative {
+            id: binding.output_profile_id.clone(),
+            media_type: language.media_type.clone(),
+            language_profile_id: language.id.clone(),
+        };
+        if !packet.output_profiles.contains(&output) {
+            packet.output_profiles.push(output);
+        }
+        packet.native_language_profiles.push(language.clone());
+    }
 }
 
 fn sync_request(
@@ -5284,6 +6855,41 @@ fn sync_request(
             // independently authorized connectors. Never disclose membership
             // across those tenant boundaries; offers still get local hits.
             cached_resource_digests: Vec::new(),
+            print_packet: Some({
+                let local = NodeDocumentCapabilities::local();
+                let neutral = printpacket::RendererCapabilities::reference_pdf();
+                piqae_protocol::agent::PrintPacketCapabilitiesV2 {
+                    negotiation_version: 2,
+                    supported_packet_versions: vec![printpacket::DOCUMENT_V1.into()],
+                    feature_ids: neutral
+                        .features
+                        .iter()
+                        .map(print_packet_feature_id)
+                        .collect(),
+                    conformance_profiles: neutral.conformance_suites.into_iter().collect(),
+                    output_profiles: vec![piqae_protocol::agent::PrintPacketOutputProfile::Pdf {
+                        id: printpacket::PDF_BASE14_V1.into(),
+                        media_type: "application/pdf".into(),
+                    }],
+                    deterministic: local.deterministic,
+                    limits: piqae_protocol::agent::PrintPacketLimits {
+                        max_template_bytes: neutral.limits.max_template_bytes,
+                        max_input_bytes: neutral.limits.max_data_bytes,
+                        max_output_bytes: neutral.limits.max_output_bytes,
+                        max_pages: neutral.limits.max_pages,
+                        max_resource_count: neutral.limits.max_resources,
+                        max_resource_bytes: neutral.limits.max_resource_bytes,
+                        max_total_resource_bytes: neutral.limits.max_total_resource_bytes,
+                    },
+                    resource_types: neutral.resource_media_types.into_iter().collect(),
+                    direct_offline: neutral.direct_offline_rendering,
+                    // Native languages are printer/driver specific. The node
+                    // does not claim one until a reviewed support pack binds
+                    // it to exact printer IDs.
+                    native_language_profiles: Vec::new(),
+                    implementation_version: neutral.implementation_version,
+                }
+            }),
         },
         capabilities: piqae_protocol::agent::AgentProtocolCapabilities {
             features: vec![
@@ -5304,6 +6910,7 @@ fn sync_request(
         route_observations: Vec::new(),
         topology_changes: Vec::new(),
         native_handoffs: Vec::new(),
+        runtime: None,
     })
 }
 
@@ -5313,7 +6920,7 @@ async fn discover_cloud_printers(
     route_coordinator: &Arc<Mutex<route_coordinator::RouteCoordinator>>,
     support_packs: &SupportPackRegistry,
     inventory_revision: u64,
-) -> Result<Vec<PrinterSnapshot>> {
+) -> Result<(Vec<PrinterSnapshot>, Vec<LocalPrinterNativeBinding>)> {
     let discovered = run_printer_discovery(discovery).await?;
     let observed_at = Utc::now();
     let mut routes =
@@ -5326,6 +6933,7 @@ async fn discover_cloud_printers(
         .map(|printer| printer.native_id.clone())
         .collect::<Vec<_>>();
     let observed_unix_ms = Utc::now().timestamp_millis();
+    let mut native_bindings = Vec::new();
     let snapshots = discovered
         .into_iter()
         .map(|printer| {
@@ -5342,6 +6950,11 @@ async fn discover_cloud_printers(
                 &capabilities,
                 observed_unix_ms,
             )?;
+            append_local_printer_native_bindings(
+                &mut native_bindings,
+                &stored.printer_id,
+                support_packs.native_language_profiles(printer.driver_fingerprint.as_ref())?,
+            );
             let native_options = serde_json::to_string(&printer.native_options)?;
             let profile = store.store_printer_profile(
                 &stored.printer_id,
@@ -5400,7 +7013,37 @@ async fn discover_cloud_printers(
         })
         .collect::<Result<Vec<Option<PrinterSnapshot>>>>()?;
     store.reconcile_printer_presence(&present_native_ids)?;
-    Ok(snapshots.into_iter().flatten().collect())
+    native_bindings.sort_by(|left, right| {
+        (&left.printer_id, &left.language_profile.id)
+            .cmp(&(&right.printer_id, &right.language_profile.id))
+    });
+    native_bindings.truncate(32);
+    Ok((snapshots.into_iter().flatten().collect(), native_bindings))
+}
+
+fn append_local_printer_native_bindings(
+    bindings: &mut Vec<LocalPrinterNativeBinding>,
+    printer_id: &str,
+    profiles: Vec<piqae_support_packs::BoundNativeLanguageProfile>,
+) {
+    bindings.extend(
+        profiles
+            .into_iter()
+            .map(|profile| LocalPrinterNativeBinding {
+                printer_id: printer_id.to_owned(),
+                output_profile_id: profile.output_profile_id,
+                language_profile: piqae_protocol::agent::PrinterNativeLanguageProfile {
+                    id: profile.id,
+                    language: profile.language,
+                    language_version: profile.language_version,
+                    profile_version: profile.profile_version,
+                    media_type: profile.media_type,
+                    driver_fingerprint_sha256: profile.driver_fingerprint_sha256,
+                    support_pack_digest_sha256: profile.support_pack_digest_sha256,
+                    printer_ids: vec![printer_id.to_owned()],
+                },
+            }),
+    );
 }
 
 fn route_observation_inputs(
@@ -5560,6 +7203,8 @@ async fn run_printer_discovery(discovery: &PrinterDiscovery) -> Result<Vec<Disco
             driver_fingerprint: None,
             identity_evidence: Vec::new(),
         }],
+        #[cfg(test)]
+        PrinterDiscovery::Failing => anyhow::bail!("fixture printer discovery failed"),
         PrinterDiscovery::Process(executor) => match executor
             .execute_operation(
                 ExecutorOperation::DiscoverPrinters,
@@ -5691,6 +7336,142 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+    #[tokio::test]
+    async fn missing_cancel_is_bounded_while_sibling_command_survives_restart() {
+        let directory = tempfile::tempdir().expect("directory");
+        let database = directory.path().join("queue.db");
+        let coordinator = Arc::new(Mutex::new(
+            route_coordinator::RouteCoordinator::open(directory.path().join("routes"))
+                .expect("coordinator"),
+        ));
+        let missing = AgentCommand::CancelJob {
+            job_id: JobId::new(),
+        };
+        let pause = AgentCommand::Pause;
+        let paused = AtomicBool::new(false);
+        let mut store = AgentStore::open(&database).expect("store");
+        let first = apply_commands(
+            &mut store,
+            &paused,
+            &coordinator,
+            "ncon_test",
+            vec![missing.clone(), pause.clone()],
+            Some("2".into()),
+        )
+        .await
+        .expect("deferred outcome");
+        assert!(first.attempted_failure);
+        assert_eq!(first.retry_after, Some(Duration::from_secs(30)));
+        assert!(paused.load(Ordering::Relaxed));
+        assert_eq!(
+            store.setting("paused").expect("paused"),
+            Some("true".into())
+        );
+        assert_eq!(store.setting("command_cursor").expect("cursor"), None);
+        let recovery_before_restart = store
+            .setting("cloud_command_recovery_v1")
+            .expect("recovery")
+            .expect("recovery document");
+        drop(store);
+
+        let mut restarted = AgentStore::open(&database).expect("restart store");
+        paused.store(false, Ordering::Relaxed);
+        let deferred = apply_commands(
+            &mut restarted,
+            &paused,
+            &coordinator,
+            "ncon_test",
+            vec![missing, pause.clone()],
+            Some("2".into()),
+        )
+        .await
+        .expect("restart deferred outcome");
+        assert!(!deferred.attempted_failure);
+        assert!(
+            !paused.load(Ordering::Relaxed),
+            "applied sibling was not replayed"
+        );
+        assert_eq!(
+            restarted
+                .setting("cloud_command_recovery_v1")
+                .expect("recovery")
+                .expect("recovery document"),
+            recovery_before_restart
+        );
+
+        let completed = apply_commands(
+            &mut restarted,
+            &paused,
+            &coordinator,
+            "ncon_test",
+            vec![pause],
+            Some("2".into()),
+        )
+        .await
+        .expect("authority-retired stale command");
+        assert_eq!(completed, CloudCommandApplication::complete());
+        assert_eq!(
+            restarted.setting("command_cursor").expect("cursor"),
+            Some("2".into())
+        );
+    }
+
+    #[test]
+    fn computer_name_is_bounded_and_rejects_control_data() {
+        assert_eq!(
+            privacy_safe_computer_name(b"Warehouse Mac mini\n").as_deref(),
+            Some("Warehouse Mac mini")
+        );
+        assert!(privacy_safe_computer_name(b"operator\naddress").is_none());
+        assert_eq!(
+            privacy_safe_computer_name(&[b'a'; 140])
+                .expect("name")
+                .len(),
+            120
+        );
+    }
+
+    #[test]
+    fn approved_connectors_enable_cloud_runtime_in_every_launch_mode() {
+        assert_eq!(
+            runtime_mode(AgentMode::Local, 0),
+            NodeRuntimeMode::LocalOnly
+        );
+        assert_eq!(
+            runtime_mode(AgentMode::Local, 1),
+            NodeRuntimeMode::CloudCapable
+        );
+        assert_eq!(
+            runtime_mode(AgentMode::Local, 3),
+            NodeRuntimeMode::CloudCapable
+        );
+        assert_eq!(
+            runtime_mode(AgentMode::Hosted, 0),
+            NodeRuntimeMode::CloudCapable
+        );
+        assert_eq!(
+            runtime_mode(AgentMode::SelfHosted, 0),
+            NodeRuntimeMode::CloudCapable
+        );
+    }
+
+    fn test_node_runtime(root: &Path) -> NodeRuntime {
+        NodeRuntime::start(RuntimeConfiguration {
+            data_directory: root.join("runtime"),
+            mode: NodeRuntimeMode::LocalOnly,
+            host: HostCapabilities {
+                host_kind: HostKind::UserAgent,
+                availability: AvailabilityClass::ContinuousWhileAwake,
+                secure_storage: true,
+                local_ipc_broker: false,
+                can_prevent_idle_sleep_during_handoff: false,
+                can_receive_remote_wake_hint: false,
+                printer_transports: std::collections::BTreeSet::new(),
+            },
+        })
+        .expect("test node runtime")
+    }
+
     fn test_connector_record(id: &str) -> connector_runtime::ConnectorRecord {
         connector_runtime::ConnectorRecord {
             connector_id: id.to_owned(),
@@ -5703,11 +7484,213 @@ mod tests {
             environment_id: Some("env_test".to_owned()),
             requesting_service_account_id: Some("svc_test".to_owned()),
             manage_url: Some(Url::parse("https://app.example/manage").expect("url")),
-            device_key_file: format!("connectors/{id}/device.key").into(),
+            device_key_file: Some(format!("connectors/{id}/device.key").into()),
+            secure_key_handle: None,
             enabled: true,
             printer_grant: PrinterGrant::SelectedPrinters,
             allowed_printer_ids: vec!["prn_test".to_owned()],
+            node_identity_revision: None,
+            node_identity_applied_local_revision: None,
+            node_identity_conflict_revision: None,
+            node_identity_conflict_local_revision: None,
         }
+    }
+
+    #[test]
+    fn connector_identity_projection_survives_restart_and_does_not_loop() {
+        let directory = tempfile::tempdir().expect("connector directory");
+        let connector_id = "ncon_identity_restart";
+        let mut registry =
+            connector_runtime::ConnectorRegistry::load(directory.path()).expect("load registry");
+        registry
+            .add(test_connector_record(connector_id))
+            .expect("add connector");
+        let paths = registry.paths(connector_id).expect("connector paths");
+        let identity = NodeIdentity::new(
+            "Dispatch Mac",
+            Some("Warehouse".into()),
+            None,
+            vec!["shipping".into()],
+        )
+        .expect("identity");
+
+        assert_eq!(
+            stage_connector_identity(directory.path(), &identity).expect("initial stage"),
+            vec![connector_id]
+        );
+        let mut store = AgentStore::open(&paths.database).expect("queue store");
+        let desired = store
+            .setting(NODE_IDENTITY_DESIRED_SETTING)
+            .expect("read desired")
+            .expect("desired value");
+        store
+            .set_setting(NODE_IDENTITY_APPLIED_SETTING, &desired)
+            .expect("simulate acknowledged projection");
+        store
+            .set_setting(NODE_IDENTITY_SERVER_REVISION_SETTING, "8")
+            .expect("server revision");
+        store
+            .set_setting(NODE_IDENTITY_DESIRED_SETTING, "")
+            .expect("clear desired");
+        drop(store);
+
+        assert_eq!(
+            stage_connector_identity(directory.path(), &identity).expect("restart stage"),
+            vec![connector_id]
+        );
+        let store = AgentStore::open(&paths.database).expect("reopened queue store");
+        assert_eq!(
+            store
+                .setting(NODE_IDENTITY_DESIRED_SETTING)
+                .expect("read pending"),
+            Some(String::new()),
+            "periodic restart recovery must not repeatedly increment cloud identity revision"
+        );
+        assert_eq!(
+            store
+                .setting(NODE_IDENTITY_SERVER_REVISION_SETTING)
+                .expect("read server revision"),
+            Some("8".into())
+        );
+        drop(store);
+
+        let mut store = AgentStore::open(&paths.database).expect("conflicted queue store");
+        store
+            .set_setting(NODE_IDENTITY_CONFLICT_REVISION_SETTING, "9")
+            .expect("record operator revision");
+        drop(store);
+        let replacement = NodeIdentity::new(
+            "Dispatch Mac 2",
+            Some("Warehouse".into()),
+            None,
+            vec!["shipping".into()],
+        )
+        .expect("replacement identity");
+        stage_connector_identity(directory.path(), &replacement).expect("explicit reconciliation");
+        let store = AgentStore::open(&paths.database).expect("reconciled queue store");
+        assert_eq!(
+            store
+                .setting(NODE_IDENTITY_SERVER_REVISION_SETTING)
+                .expect("read adopted revision"),
+            Some("9".into()),
+            "a deliberate local edit after conflict fences against the observed operator revision"
+        );
+        assert_eq!(
+            store
+                .setting(NODE_IDENTITY_CONFLICT_REVISION_SETTING)
+                .expect("read cleared conflict"),
+            Some(String::new())
+        );
+    }
+
+    async fn unsupported_connector_authority() -> (Url, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind old authority fixture");
+        let address = listener.local_addr().expect("old authority address");
+        let task = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.expect("accept request");
+                let mut request = [0_u8; 16 * 1024];
+                let _ = stream.read(&mut request).await.expect("read request");
+                let body = br#"{"error":{"code":"not_found"}}"#;
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .expect("write response headers");
+                stream.write_all(body).await.expect("write response body");
+            }
+        });
+        (
+            Url::parse(&format!("http://{address}/")).expect("old authority URL"),
+            task,
+        )
+    }
+
+    #[tokio::test]
+    async fn installed_n_minus_one_disconnect_retains_key_registry_and_pending_queue() {
+        let directory = tempfile::tempdir().expect("connector directory");
+        let connector_id = "ncon_installed_upgrade";
+        let agent_id = AgentId::new();
+        let (origin, server) = unsupported_connector_authority().await;
+        let mut record = test_connector_record(connector_id);
+        record.agent_id = agent_id.to_string();
+        record.control_plane_url = origin;
+        record.device_key_file = Some(PathBuf::from("connectors/installed-upgrade/device.key"));
+        let key_path = directory
+            .path()
+            .join(record.device_key_file.as_ref().expect("key path"));
+        std::fs::create_dir_all(key_path.parent().expect("key parent")).expect("create key parent");
+        std::fs::write(&key_path, hex::encode([11_u8; 32])).expect("write device key");
+
+        let mut registry = connector_runtime::ConnectorRegistry::load(directory.path())
+            .expect("load connector registry");
+        registry.add(record.clone()).expect("add connector");
+        registry.revoke(connector_id).expect("prepare revocation");
+        let paths = registry.paths(connector_id).expect("connector paths");
+        std::fs::create_dir_all(paths.database.parent().expect("queue parent"))
+            .expect("create queue parent");
+        let mut store = AgentStore::open(&paths.database).expect("connector queue");
+        let job_id = JobId::new();
+        store
+            .prepare_cloud_job(
+                &AcceptedJob {
+                    job_id: job_id.to_string(),
+                    submission_id: "sub_installed_upgrade".into(),
+                    printer_id: "prn_installed_upgrade".into(),
+                    printer_native_id: "fake:installed-upgrade".into(),
+                    title: "Installed upgrade fence".into(),
+                    content_sha256: "0".repeat(64),
+                    content_path: directory
+                        .path()
+                        .join("fixture.pdf")
+                        .to_string_lossy()
+                        .into(),
+                    content_kind: "pdf".into(),
+                    options_json: "{}".into(),
+                    expires_unix_ms: None,
+                    accepted_unix_ms: Utc::now().timestamp_millis(),
+                    cloud_managed: true,
+                },
+                &uuid::Uuid::new_v4().to_string(),
+                "redacted-lease-token",
+                Utc::now().timestamp_millis() + 60_000,
+                &CloudRouteProof {
+                    reservation_id: uuid::Uuid::new_v4().to_string(),
+                    generation: 1,
+                    fencing_token: "redacted-route-fence".into(),
+                },
+            )
+            .expect("prepare pending acceptance");
+        drop(store);
+
+        let error = revoke_installed_authority(&record, directory.path())
+            .await
+            .expect_err("old authority must fail closed");
+        assert!(
+            format!("{error:#}").contains("connector_authority_upgrade_required"),
+            "unexpected error: {error:#}"
+        );
+        server.await.expect("old authority fixture");
+        assert!(key_path.exists());
+        let restarted = connector_runtime::ConnectorRegistry::load(directory.path())
+            .expect("restart connector registry");
+        assert_eq!(restarted.pending_remote_revocations().count(), 1);
+        assert!(restarted.key_cleanup().is_empty());
+        assert_eq!(
+            AgentStore::open(paths.database)
+                .expect("restart connector queue")
+                .pending_cloud_accepts()
+                .expect("pending acceptance")
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -5870,38 +7853,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connector_worker_restarts_when_reauthentication_rotates_identity() {
-        let stop = StopSignal::default();
-        let spawn_waiter = || {
-            let stop = stop.clone();
-            tokio::spawn(async move { stop.cancelled().await })
-        };
-        let record = test_connector_record("ncon_child");
-        let worker = ConnectorWorker {
-            record: record.clone(),
-            printer_inventory_dirty: Arc::new(AtomicBool::new(false)),
-            wakeup: Arc::new(Notify::new()),
-            last_sync_error_code: Arc::new(RwLock::new(None)),
-            sync_stop: StopSignal::default(),
-            scheduler_stop: StopSignal::default(),
-            connection_stop: StopSignal::default(),
-            sync: spawn_waiter(),
-            scheduler: spawn_waiter(),
-            connection_watch: spawn_waiter(),
-        };
-        assert!(connector_worker_matches(&worker, &record));
-
-        let mut rotated = record;
-        rotated.device_key_file = "connectors/keys/rotated.key".into();
-        assert!(!connector_worker_matches(&worker, &rotated));
-
-        stop.stop();
-        let _ = worker.sync.await;
-        let _ = worker.scheduler.await;
-        let _ = worker.connection_watch.await;
-    }
-
-    #[tokio::test]
     async fn connector_control_distinguishes_busy_from_unavailable() {
         let (sender, _receiver) = mpsc::channel(1);
         let (occupied_tx, _occupied_rx) = oneshot::channel();
@@ -6031,8 +7982,25 @@ mod tests {
                     .expect("route coordinator"),
             )),
             observation_cache: Arc::new(Mutex::new(RouteObservationCache::default())),
+            native_binding_session: Arc::new(PrinterNativeBindingSession::new()),
             connector_id: "test".into(),
         };
+        let node_runtime = Arc::new(
+            NodeRuntime::start(RuntimeConfiguration {
+                data_directory: directory.path().join("test-runtime"),
+                mode: NodeRuntimeMode::LocalOnly,
+                host: HostCapabilities {
+                    host_kind: HostKind::UserAgent,
+                    availability: AvailabilityClass::ContinuousWhileAwake,
+                    secure_storage: true,
+                    local_ipc_broker: false,
+                    can_prevent_idle_sleep_during_handoff: false,
+                    can_receive_remote_wake_hint: false,
+                    printer_transports: std::collections::BTreeSet::new(),
+                },
+            })
+            .expect("test runtime"),
+        );
         let error = reload_connector_workers(
             directory.path(),
             &mut workers,
@@ -6041,6 +8009,7 @@ mod tests {
             &PrinterDiscovery::Disabled,
             &Arc::new(SupportPackRegistry::default()),
             &connections,
+            &node_runtime,
         )
         .await
         .expect_err("missing bad connector key must fail the aggregate");
@@ -6466,53 +8435,6 @@ mod tests {
         assert!(arguments.device_key_file.is_none());
     }
 
-    #[tokio::test]
-    async fn delayed_content_stream_renews_until_materialized() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let store = ContentStore::open(directory.path()).await.expect("store");
-        let (mut writer, reader) = tokio::io::duplex(64);
-        let source = tokio::spawn(async move {
-            writer.write_all(b"first").await.expect("first");
-            tokio::time::sleep(Duration::from_millis(11)).await;
-            writer.write_all(b"-second").await.expect("second");
-            tokio::time::sleep(Duration::from_millis(11)).await;
-            writer.write_all(b"-third").await.expect("third");
-        });
-        let renewals = Arc::new(AtomicUsize::new(0));
-        let renewal_counter = Arc::clone(&renewals);
-        let content = maintain_lease(
-            Utc::now() + chrono::Duration::seconds(30),
-            Duration::from_millis(10),
-            async { Ok(store.put(reader).await?) },
-            move || {
-                let counter = Arc::clone(&renewal_counter);
-                async move {
-                    counter.fetch_add(1, Ordering::Relaxed);
-                    Ok(Utc::now() + chrono::Duration::seconds(30))
-                }
-            },
-        )
-        .await
-        .expect("materialize");
-        source.await.expect("source");
-        assert_eq!(
-            tokio::fs::read(content.path).await.expect("content"),
-            b"first-second-third"
-        );
-        assert!(
-            renewals.load(Ordering::Relaxed) >= 2,
-            "the delayed stream must cross at least two renewal intervals"
-        );
-    }
-
-    #[test]
-    fn near_expiry_lease_renewal_never_busy_loops() {
-        let maximum = Duration::from_millis(10);
-        let delay = lease_renewal_delay(Utc::now() - chrono::Duration::seconds(1), maximum);
-        assert!(delay >= Duration::from_millis(1));
-        assert!(delay <= maximum);
-    }
-
     #[test]
     fn sync_uses_the_persisted_monotonic_printer_revision() {
         let mut store = AgentStore::in_memory().expect("store");
@@ -6539,200 +8461,434 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn failed_renewal_prevents_acceptance_and_restart_accepts_once() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let database = directory.path().join("agent.sqlite");
-        let job = cloud_job();
-        let mut store = AgentStore::open(&database).expect("store");
-        let error = maintain_lease(
-            Utc::now() + chrono::Duration::seconds(30),
-            Duration::from_millis(10),
-            async {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-                store.prepare_cloud_job(
-                    &job,
-                    &uuid::Uuid::new_v4().to_string(),
-                    "first-lease",
-                    Utc::now().timestamp_millis() + 30_000,
-                )?;
-                Ok(())
+    fn test_printer_native_binding() -> LocalPrinterNativeBinding {
+        LocalPrinterNativeBinding {
+            printer_id: "ptr_fixture".into(),
+            output_profile_id: "escpos.example/v1".into(),
+            language_profile: piqae_protocol::agent::PrinterNativeLanguageProfile {
+                id: "escpos.example/v1".into(),
+                language: "escpos".into(),
+                language_version: "1".into(),
+                profile_version: "3.2.0".into(),
+                media_type: "application/vnd.escpos".into(),
+                driver_fingerprint_sha256: "a".repeat(64),
+                support_pack_digest_sha256: "b".repeat(64),
+                printer_ids: vec!["ptr_fixture".into()],
             },
-            || async { Err(anyhow::anyhow!("renewal unavailable")) },
-        )
-        .await
-        .expect_err("renewal must fail");
-        assert_eq!(error.to_string(), "renewal unavailable");
-        assert!(store.get_job(&job.job_id).expect("query").is_none());
-        drop(store);
-
-        let mut restarted = AgentStore::open(&database).expect("restart");
-        let renewals = Arc::new(AtomicUsize::new(0));
-        let renewal_counter = Arc::clone(&renewals);
-        maintain_lease(
-            Utc::now() + chrono::Duration::seconds(30),
-            Duration::from_millis(10),
-            async {
-                tokio::time::sleep(Duration::from_millis(15)).await;
-                restarted.prepare_cloud_job(
-                    &job,
-                    &uuid::Uuid::new_v4().to_string(),
-                    "restart-lease",
-                    Utc::now().timestamp_millis() + 30_000,
-                )?;
-                Ok(())
-            },
-            move || {
-                let counter = Arc::clone(&renewal_counter);
-                async move {
-                    counter.fetch_add(1, Ordering::Relaxed);
-                    Ok(Utc::now() + chrono::Duration::seconds(30))
-                }
-            },
-        )
-        .await
-        .expect("accept after restart");
-        assert!(restarted.runnable_heads(10).expect("runnable").is_empty());
-        restarted
-            .activate_cloud_job(&job.job_id, 10)
-            .expect("remote accepted");
-        restarted
-            .activate_cloud_job(&job.job_id, 11)
-            .expect("duplicate response");
-        assert!(
-            renewals.load(Ordering::Relaxed) >= 1,
-            "the restarted materialization must renew its lease before acceptance"
-        );
-        assert_eq!(restarted.pending_events(0, 10).expect("events").len(), 1);
+        }
     }
 
-    #[tokio::test]
-    async fn ambiguous_server_accept_retries_exact_intent_before_activation() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let address = listener.local_addr().expect("address");
-        let server = tokio::spawn(async move {
-            let mut bodies = Vec::new();
-            for attempt in 0..2 {
-                let (mut stream, _) = listener.accept().await.expect("accept");
-                bodies.push(read_request_body(&mut stream).await);
-                if attempt == 0 {
-                    continue;
-                }
-                let body = br#"{"accepted_at":"2026-01-01T00:00:00Z","state":"agent_accepted"}"#;
-                stream
-                    .write_all(
-                        format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                            body.len()
-                        )
-                        .as_bytes(),
-                    )
-                    .await
-                    .expect("headers");
-                stream.write_all(body).await.expect("body");
-            }
-            bodies
-        });
+    fn test_printer_native_metadata(
+        binding: &LocalPrinterNativeBinding,
+    ) -> std::collections::BTreeMap<String, String> {
+        std::collections::BTreeMap::from([
+            (
+                "piqae.printer_native.output_profile".into(),
+                binding.output_profile_id.clone(),
+            ),
+            (
+                "piqae.printer_native.language_profile".into(),
+                binding.language_profile.id.clone(),
+            ),
+            (
+                "piqae.printer_native.language".into(),
+                binding.language_profile.language.clone(),
+            ),
+            (
+                "piqae.printer_native.language_version".into(),
+                binding.language_profile.language_version.clone(),
+            ),
+            (
+                "piqae.printer_native.profile_version".into(),
+                binding.language_profile.profile_version.clone(),
+            ),
+            (
+                "piqae.printer_native.media_type".into(),
+                binding.language_profile.media_type.clone(),
+            ),
+            (
+                "piqae.printer_native.driver_fingerprint_sha256".into(),
+                binding.language_profile.driver_fingerprint_sha256.clone(),
+            ),
+            (
+                "piqae.printer_native.support_pack_digest_sha256".into(),
+                binding.language_profile.support_pack_digest_sha256.clone(),
+            ),
+            (
+                "piqae.printer_native.printer_id".into(),
+                binding.printer_id.clone(),
+            ),
+        ])
+    }
 
-        let agent_id = AgentId::new();
-        let test_encryption_key = SecretKey::random(&mut rand::rngs::OsRng);
-        let cloud = CloudConfiguration {
-            client: AgentClient::new(Url::parse(&format!("http://{address}/")).expect("base URL"))
-                .expect("client"),
-            identity: DeviceIdentity::generate(agent_id),
-            agent_id,
-            content_encryption_keys: Arc::new(content_key_store::ContentKeyring::from_active(
-                "cek_test".into(),
-                test_encryption_key,
-            )),
-            allowed_printer_ids: None,
-            connector_id: "test".into(),
-        };
-        let mut store = AgentStore::in_memory().expect("store");
-        let job = cloud_job();
-        let lease_id = uuid::Uuid::new_v4();
-        let local = store
-            .prepare_cloud_job(&job, &lease_id.to_string(), "retry-secret", i64::MAX)
-            .expect("prepare");
-        let intent = CloudAcceptIntent {
-            job_id: job.job_id.clone(),
-            lease_id: lease_id.to_string(),
-            lease_token: "retry-secret".into(),
-            lease_expires_unix_ms: i64::MAX,
-            content_sha256: job.content_sha256.clone(),
-            local_sequence: u64::try_from(local.printer_sequence).expect("sequence"),
-        };
-        let coordinator_dir = tempfile::tempdir().expect("coordinator tempdir");
-        let route_coordinator = Arc::new(Mutex::new(
-            route_coordinator::RouteCoordinator::open(coordinator_dir.path())
+    async fn sync_after_failing_printer_discovery(
+        inventory: &mut AgentStore,
+        native_binding_session: &PrinterNativeBindingSession,
+    ) -> AgentSyncRequest {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let coordinator = Arc::new(Mutex::new(
+            route_coordinator::RouteCoordinator::open(directory.path().join("routes"))
                 .expect("route coordinator"),
         ));
-        confirm_cloud_accept(&cloud, &mut store, &route_coordinator, &intent)
+        let observation_cache = Arc::new(Mutex::new(RouteObservationCache::default()));
+        let node_runtime = test_node_runtime(directory.path());
+        let mut queue = AgentStore::in_memory().expect("queue");
+        prepare_sync_request(
+            &mut queue,
+            inventory,
+            &PrinterDiscovery::Failing,
+            &coordinator,
+            &observation_cache,
+            &SupportPackRegistry::default(),
+            "failing-discovery",
+            AgentId::new(),
+            Utc::now(),
+            false,
+            true,
+            None,
+            &node_runtime,
+            native_binding_session,
+        )
+        .await
+        .expect("PDF sync survives failed native discovery")
+    }
+
+    #[test]
+    fn stale_or_forged_printer_native_offer_is_rejected_against_local_binding() {
+        let binding = test_printer_native_binding();
+        let mut metadata = test_printer_native_metadata(&binding);
+        assert!(printer_native_offer_matches(
+            &metadata,
+            "ptr_fixture",
+            &binding
+        ));
+        metadata.insert(
+            "piqae.printer_native.driver_fingerprint_sha256".into(),
+            "c".repeat(64),
+        );
+        assert!(!printer_native_offer_matches(
+            &metadata,
+            "ptr_fixture",
+            &binding
+        ));
+        metadata.insert(
+            "piqae.printer_native.driver_fingerprint_sha256".into(),
+            "a".repeat(64),
+        );
+        metadata.insert("piqae.printer_native.language_version".into(), "2".into());
+        assert!(!printer_native_offer_matches(
+            &metadata,
+            "ptr_fixture",
+            &binding
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_restart_binding_is_not_advertised_and_pdf_remains_available() {
+        let mut store = AgentStore::in_memory().expect("store");
+        let binding = test_printer_native_binding();
+        let metadata = test_printer_native_metadata(&binding);
+
+        let prior_process = PrinterNativeBindingSession::fixture("prior-process");
+        let prior_generation = prior_process.begin_refresh();
+        persist_printer_native_binding_envelope(
+            &mut store,
+            &prior_process,
+            prior_generation,
+            std::slice::from_ref(&binding),
+        )
+        .expect("persist stale prior-process binding");
+
+        let current_process = PrinterNativeBindingSession::fixture("current-process");
+        assert!(current_printer_native_bindings(&store, &current_process).is_empty());
+        let request = sync_after_failing_printer_discovery(&mut store, &current_process).await;
+        let packet = request
+            .document_render
+            .print_packet
+            .as_ref()
+            .expect("PrintPacket PDF capability");
+        assert!(packet.native_language_profiles.is_empty());
+        assert!(packet.output_profiles.iter().any(|profile| matches!(
+            profile,
+            piqae_protocol::agent::PrintPacketOutputProfile::Pdf { .. }
+        )));
+        assert!(
+            validate_current_printer_native_offer(
+                ContentKind::Raw,
+                &store,
+                &current_process,
+                &metadata,
+                "ptr_fixture",
+            )
+            .is_err()
+        );
+        assert!(
+            validate_current_printer_native_offer(
+                ContentKind::Pdf,
+                &store,
+                &current_process,
+                &metadata,
+                "ptr_fixture",
+            )
+            .is_ok(),
+            "stale native evidence must not disable PDF"
+        );
+    }
+
+    fn native_test_submission(
+        job_id: &str,
+        content_kind: &str,
+        pin: Option<PrinterNativeBindingPin>,
+    ) -> LocalSubmission {
+        LocalSubmission {
+            job_id: job_id.into(),
+            submission_id: format!("sub-{job_id}"),
+            printer_id: "ptr_fixture".into(),
+            printer_native_id: "native-fixture".into(),
+            title: "virtual binding fence".into(),
+            content_path: PathBuf::from("/virtual/not-read"),
+            content_kind: content_kind.into(),
+            options: piqae_domain::JobOptions::default(),
+            native_profile: None,
+            printer_native_binding: pin,
+            deadline_unix_ms: i64::MAX,
+            route_fence: None,
+        }
+    }
+
+    fn native_test_executor(
+        directory: &Path,
+        session: Arc<PrinterNativeBindingSession>,
+    ) -> SharedRuntimeExecutor {
+        SharedRuntimeExecutor {
+            runtime: Arc::new(Mutex::new(RuntimeExecutor::Fake(FakeExecutor::default()))),
+            coordinator: Arc::new(Mutex::new(
+                route_coordinator::RouteCoordinator::open(directory).expect("route coordinator"),
+            )),
+            observation_cache: Arc::new(Mutex::new(RouteObservationCache::default())),
+            native_binding_session: session,
+            connector_id: "virtual-connector".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_handoff_rejects_changed_generation_before_virtual_executor() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut store = AgentStore::in_memory().expect("store");
+        let binding = test_printer_native_binding();
+        let session = Arc::new(PrinterNativeBindingSession::fixture("current-process"));
+        let generation = session.begin_refresh();
+        persist_printer_native_binding_envelope(
+            &mut store,
+            &session,
+            generation,
+            std::slice::from_ref(&binding),
+        )
+        .expect("publish binding");
+        let pin = binding_pin(&session, &binding);
+        session.begin_refresh();
+
+        let mut executor = native_test_executor(directory.path(), Arc::clone(&session));
+        let failure = executor
+            .submit(native_test_submission("raw-changed", "raw", Some(pin)))
             .await
-            .expect_err("first response is ambiguous");
-        assert!(store.runnable_heads(10).expect("runnable").is_empty());
-        assert_eq!(store.pending_cloud_accepts().expect("intents").len(), 1);
-
-        resume_pending_cloud_accepts(&cloud, &mut store, &route_coordinator).await;
-        let bodies = server.await.expect("server");
-        assert_eq!(bodies.len(), 2);
-        assert_eq!(bodies[0], bodies[1]);
-        assert!(bodies[0].contains("\"lease_token\":\"retry-secret\""));
-        assert_eq!(store.runnable_heads(10).expect("runnable").len(), 1);
-        assert_eq!(store.pending_events(0, 10).expect("events").len(), 1);
-        assert!(store.pending_cloud_accepts().expect("intents").is_empty());
+            .expect_err("changed generation must fail closed");
+        assert_eq!(failure.code, "printer_native_binding_stale");
+        assert!(!failure.retryable);
+        assert!(!failure.handoff_may_have_succeeded);
+        let runtime = executor.runtime.lock().await;
+        let RuntimeExecutor::Fake(fake) = &*runtime else {
+            panic!("virtual executor expected");
+        };
+        assert!(fake.submitted.is_empty());
+        drop(runtime);
     }
 
-    async fn read_request_body(stream: &mut tokio::net::TcpStream) -> String {
-        let mut request = Vec::new();
-        let body_start;
-        let content_length;
-        loop {
-            let mut chunk = [0_u8; 1024];
-            let count = stream.read(&mut chunk).await.expect("request");
-            assert!(count > 0);
-            request.extend_from_slice(&chunk[..count]);
-            if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
-                body_start = index + 4;
-                let headers = String::from_utf8_lossy(&request[..index]);
-                content_length = headers
-                    .lines()
-                    .find_map(|line| {
-                        line.to_ascii_lowercase()
-                            .strip_prefix("content-length:")
-                            .and_then(|value| value.trim().parse::<usize>().ok())
-                    })
-                    .expect("content length");
-                break;
-            }
-        }
-        while request.len() < body_start + content_length {
-            let mut chunk = [0_u8; 1024];
-            let count = stream.read(&mut chunk).await.expect("body");
-            assert!(count > 0);
-            request.extend_from_slice(&chunk[..count]);
-        }
-        String::from_utf8(request[body_start..body_start + content_length].to_vec())
-            .expect("JSON body")
+    #[tokio::test]
+    async fn raw_handoff_rejects_restart_pin_while_pdf_still_reaches_virtual_executor() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut store = AgentStore::in_memory().expect("store");
+        let binding = test_printer_native_binding();
+        let old_session = PrinterNativeBindingSession::fixture("old-process");
+        let generation = old_session.begin_refresh();
+        persist_printer_native_binding_envelope(
+            &mut store,
+            &old_session,
+            generation,
+            std::slice::from_ref(&binding),
+        )
+        .expect("publish old binding");
+        let pin = binding_pin(&old_session, &binding);
+        let restarted = Arc::new(PrinterNativeBindingSession::fixture("restarted-process"));
+        let mut executor = native_test_executor(directory.path(), restarted);
+
+        let failure = executor
+            .submit(native_test_submission("raw-restart", "raw", Some(pin)))
+            .await
+            .expect_err("restart pin must fail closed");
+        assert_eq!(failure.code, "printer_native_binding_stale");
+        executor
+            .submit(native_test_submission("pdf-restart", "pdf", None))
+            .await
+            .expect("PDF is not subject to printer-native binding fence");
+        let runtime = executor.runtime.lock().await;
+        let RuntimeExecutor::Fake(fake) = &*runtime else {
+            panic!("virtual executor expected");
+        };
+        assert_eq!(fake.submitted.len(), 1);
+        assert_eq!(fake.submitted[0].content_kind, "pdf");
+        drop(runtime);
     }
 
-    fn cloud_job() -> AcceptedJob {
-        AcceptedJob {
-            job_id: JobId::new().to_string(),
-            submission_id: "sub_restart".into(),
-            printer_id: "printer".into(),
-            printer_native_id: "native".into(),
-            title: "Restart-safe receipt".into(),
-            content_sha256: "abc".into(),
-            content_path: "/content/abc".into(),
-            content_kind: "pdf".into(),
-            options_json: "{}".into(),
-            expires_unix_ms: None,
-            accepted_unix_ms: 1,
-            cloud_managed: true,
-        }
+    #[tokio::test]
+    async fn accepted_raw_restart_failure_is_durable_and_never_claims_handoff() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let binding = test_printer_native_binding();
+        let old_session = PrinterNativeBindingSession::fixture("accepted-process");
+        let generation = old_session.begin_refresh();
+        let mut inventory = AgentStore::in_memory().expect("inventory");
+        persist_printer_native_binding_envelope(
+            &mut inventory,
+            &old_session,
+            generation,
+            std::slice::from_ref(&binding),
+        )
+        .expect("publish binding");
+        let pin = binding_pin(&old_session, &binding);
+        let executor = native_test_executor(
+            directory.path(),
+            Arc::new(PrinterNativeBindingSession::fixture("restarted-process")),
+        );
+        let mut engine = AgentEngine::new(
+            AgentStore::in_memory().expect("queue"),
+            executor,
+            SystemClock,
+        );
+        engine
+            .accept_with_facts(
+                &AcceptedJob {
+                    job_id: "accepted-raw-restart".into(),
+                    submission_id: "sub-accepted-raw-restart".into(),
+                    printer_id: "ptr_fixture".into(),
+                    printer_native_id: "native-fixture".into(),
+                    title: "accepted RAW restart".into(),
+                    content_sha256: "virtual-digest".into(),
+                    content_path: "/virtual/not-read".into(),
+                    content_kind: "raw".into(),
+                    options_json: "{}".into(),
+                    expires_unix_ms: None,
+                    accepted_unix_ms: Utc::now().timestamp_millis(),
+                    cloud_managed: true,
+                },
+                &JobPersistenceFacts {
+                    printer_native_binding: Some(pin),
+                    ..JobPersistenceFacts::default()
+                },
+            )
+            .expect("durable accepted responsibility");
+        engine.run_once().await.expect("bounded local failure");
+        let job = engine
+            .store()
+            .get_job("accepted-raw-restart")
+            .expect("query")
+            .expect("job");
+        assert_eq!(job.state, "failed_terminal");
+        let events = engine.store().pending_events(0, 20).expect("events");
+        let terminal = events.last().expect("terminal event");
+        assert_eq!(terminal.state, "failed_terminal");
+        assert_eq!(
+            terminal.reason.as_deref(),
+            Some("printer_native_binding_stale")
+        );
+        let runtime = engine.executor_mut().runtime.lock().await;
+        let RuntimeExecutor::Fake(fake) = &*runtime else {
+            panic!("virtual executor expected");
+        };
+        assert!(fake.submitted.is_empty());
+        drop(runtime);
+    }
+
+    #[tokio::test]
+    async fn successful_refresh_restores_native_and_later_failure_withdraws_it() {
+        let mut store = AgentStore::in_memory().expect("store");
+        let binding = test_printer_native_binding();
+        let metadata = test_printer_native_metadata(&binding);
+        let current_process = PrinterNativeBindingSession::fixture("current-process");
+        let successful_generation = current_process.begin_refresh();
+        persist_printer_native_binding_envelope(
+            &mut store,
+            &current_process,
+            successful_generation,
+            std::slice::from_ref(&binding),
+        )
+        .expect("publish current successful discovery");
+        assert_eq!(
+            current_printer_native_bindings(&store, &current_process).len(),
+            1
+        );
+        let mut restored = sync_request(&store, AgentId::new(), Utc::now(), false, None)
+            .expect("restored sync request");
+        apply_printer_native_bindings(
+            &mut restored,
+            &current_printer_native_bindings(&store, &current_process),
+        );
+        assert_eq!(
+            restored
+                .document_render
+                .print_packet
+                .expect("PrintPacket capabilities")
+                .native_language_profiles
+                .len(),
+            1,
+            "a successful current-process discovery restores native advertisement"
+        );
+        assert!(
+            validate_current_printer_native_offer(
+                ContentKind::Raw,
+                &store,
+                &current_process,
+                &metadata,
+                "ptr_fixture",
+            )
+            .is_ok()
+        );
+
+        let failed_request =
+            sync_after_failing_printer_discovery(&mut store, &current_process).await;
+        assert!(
+            current_printer_native_bindings(&store, &current_process).is_empty(),
+            "beginning a later refresh must withdraw the prior generation before I/O"
+        );
+        let failed_packet = failed_request
+            .document_render
+            .print_packet
+            .expect("PDF remains advertised after failed native discovery");
+        assert!(failed_packet.native_language_profiles.is_empty());
+        assert!(failed_packet.output_profiles.iter().any(|profile| matches!(
+            profile,
+            piqae_protocol::agent::PrintPacketOutputProfile::Pdf { .. }
+        )));
+        assert!(
+            validate_current_printer_native_offer(
+                ContentKind::Raw,
+                &store,
+                &current_process,
+                &metadata,
+                "ptr_fixture",
+            )
+            .is_err(),
+            "a failed refresh must not retain the prior successful generation"
+        );
+        assert!(
+            validate_current_printer_native_offer(
+                ContentKind::Pdf,
+                &store,
+                &current_process,
+                &metadata,
+                "ptr_fixture",
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -6785,11 +8941,12 @@ mod tests {
         )
         .await
         .expect("discovery");
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].profiles.len(), 1);
-        assert_eq!(first[0].profiles[0].name, "Current printer defaults");
-        assert!(first[0].profiles[0].is_default);
-        assert!(first[0].profiles[0].published);
+        assert_eq!(first.0.len(), 1);
+        assert!(first.1.is_empty());
+        assert_eq!(first.0[0].profiles.len(), 1);
+        assert_eq!(first.0[0].profiles[0].name, "Current printer defaults");
+        assert!(first.0[0].profiles[0].is_default);
+        assert!(first.0[0].profiles[0].published);
         let printer = store
             .present_printers()
             .expect("printers")
@@ -6814,10 +8971,10 @@ mod tests {
         )
         .await
         .expect("restart discovery");
-        assert_eq!(restarted[0].id, first[0].id);
+        assert_eq!(restarted.0[0].id, first.0[0].id);
         assert_eq!(
-            restarted[0].profiles[0].profile_id,
-            first[0].profiles[0].profile_id
+            restarted.0[0].profiles[0].profile_id,
+            first.0[0].profiles[0].profile_id
         );
         assert_eq!(
             store
@@ -6838,6 +8995,8 @@ mod tests {
                 .expect("route coordinator"),
         ));
         let observation_cache = Arc::new(Mutex::new(RouteObservationCache::default()));
+        let node_runtime = test_node_runtime(coordinator_dir.path());
+        let native_binding_session = PrinterNativeBindingSession::fixture("connector-sync");
         // Initial discovery creates the node-owned stable printer identity.
         let initial = discover_cloud_printers(
             &mut node_inventory,
@@ -6848,7 +9007,7 @@ mod tests {
         )
         .await
         .expect("initial discovery");
-        assert_eq!(initial.len(), 1);
+        assert_eq!(initial.0.len(), 1);
         let printer = node_inventory
             .present_printers()
             .expect("node printers")
@@ -6871,6 +9030,8 @@ mod tests {
             false,
             true,
             None,
+            &node_runtime,
+            &native_binding_session,
         )
         .await
         .expect("connector sync");
@@ -6915,6 +9076,8 @@ mod tests {
             false,
             true,
             Some(&selected),
+            &node_runtime,
+            &native_binding_session,
         )
         .await
         .expect("selected connector sync");
@@ -6930,6 +9093,8 @@ mod tests {
                 .expect("route coordinator"),
         ));
         let observation_cache = Arc::new(Mutex::new(RouteObservationCache::default()));
+        let node_runtime = test_node_runtime(directory.path());
+        let native_binding_session = PrinterNativeBindingSession::fixture("restart-sync");
         let expected_printer_id = {
             let mut node_inventory = AgentStore::open(&inventory_path).expect("node inventory");
             discover_cloud_printers(
@@ -6940,7 +9105,8 @@ mod tests {
                 1,
             )
             .await
-            .expect("initial discovery")[0]
+            .expect("initial discovery")
+            .0[0]
                 .id
         };
 
@@ -6968,6 +9134,8 @@ mod tests {
                 false,
                 true,
                 None,
+                &node_runtime,
+                &native_binding_session,
             )
             .await
             .expect("connector sync");
@@ -7051,6 +9219,17 @@ mod tests {
         assert_eq!(pin.profile_id, "prf_shipping");
         assert_eq!(pin.profile_revision, 7);
         assert_eq!(pin.stock_id.as_deref(), Some("stk_a4"));
+    }
+
+    #[test]
+    fn local_submission_identity_is_stable_and_caller_scoped() {
+        let first = local_job_identity("broker\0com.example.a\0retry-1");
+        let repeated = local_job_identity("broker\0com.example.a\0retry-1");
+        let other_application = local_job_identity("broker\0com.example.b\0retry-1");
+        assert_eq!(first, repeated);
+        assert_ne!(first, other_application);
+        assert!(first.0.starts_with("job_local_"));
+        assert!(first.1.starts_with("local:"));
     }
 
     #[test]

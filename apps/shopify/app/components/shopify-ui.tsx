@@ -13,7 +13,7 @@ export type OrderRow = {
 };
 
 export const editorDocument = {
-  format: "piqae.business-document/v1",
+  format: "printpacket/v1",
   media: {
     kind: "paged",
     size: "A4",

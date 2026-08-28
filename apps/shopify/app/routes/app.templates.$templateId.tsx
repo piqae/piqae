@@ -10,17 +10,17 @@ import {
   type MerchantTemplate,
 } from "../core/workflows.server";
 import {
-  BusinessDocumentEditor,
-  BusinessDocumentPreview,
+  PrintPacketEditor,
+  PrintPacketPreview,
   DocumentSettingsFields,
   Icon,
-} from "../components/BusinessDocumentEditor";
+} from "../components/PrintPacketEditor";
 import { starterTemplates } from "../core/starter-templates";
 import {
   parseTemplateEnvelope,
   removeSystemOwnership,
   serializeTemplateEnvelope,
-  type BusinessDocument,
+  type PrintPacket,
   type TemplateEditorMode,
 } from "../core/template-model";
 import { syncTemplateIndex } from "../core/template-index.server";
@@ -176,7 +176,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
     } else {
       const document = JSON.parse(
         bounded(form, "document", 196608, true),
-      ) as BusinessDocument;
+      ) as PrintPacket;
       envelope.document = document;
       envelope.editor.liquid = canonicalToLiquid(document).source;
     }
@@ -454,9 +454,9 @@ export default function TemplateEditor() {
               </div>
             ) : null}
             {workspace === "preview" ? (
-              <BusinessDocumentPreview value={document} />
+              <PrintPacketPreview value={document} />
             ) : workspace === "visual" ? (
-              <BusinessDocumentEditor
+              <PrintPacketEditor
                 value={document}
                 disabled={false}
                 customFields={customFields}

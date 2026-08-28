@@ -4,16 +4,16 @@
 //! mode. The control plane must always retain an ordinary PDF fallback until
 //! the node proves that the exact deterministic renderer contract is present.
 
-use piqae_document_renderer::{
-    BUSINESS_DOCUMENT_FORMAT, BusinessDocumentV1, RENDERER_VERSION, RenderLimits,
-    ResolvedResources, render, render_with_resources,
+use printpacket_renderer::{
+    PRINT_PACKET_DOCUMENT_FORMAT, PrintPacketV1, RENDERER_VERSION, RenderLimits, ResolvedResources,
+    render, render_with_resources,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 /// Changes whenever otherwise-valid input could produce different PDF bytes.
-pub const RENDERER_ABI: &str = "piqae.business-document-pdf/v1";
+pub const RENDERER_ABI: &str = "printpacket.pdf-renderer/v1";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -44,7 +44,7 @@ impl NodeDocumentCapabilities {
             negotiation_version: 1,
             renderer_abi: RENDERER_ABI.into(),
             renderer_build: RENDERER_VERSION.into(),
-            spec_versions: vec![BUSINESS_DOCUMENT_FORMAT.into()],
+            spec_versions: vec![PRINT_PACKET_DOCUMENT_FORMAT.into()],
             deterministic: true,
             max_input_bytes: 4 * 1024 * 1024,
             max_output_bytes: u64::try_from(limits.max_output_bytes).unwrap_or(u64::MAX),
@@ -104,7 +104,7 @@ pub enum FallbackReason {
 pub fn render_with_resources_or_fallback(
     capabilities: &NodeDocumentCapabilities,
     requirement: &NodeRenderRequirement,
-    spec: &BusinessDocumentV1,
+    spec: &PrintPacketV1,
     input: &Value,
     resources: &ResolvedResources,
 ) -> NodeRenderResult {
@@ -119,7 +119,7 @@ pub fn render_with_resources_or_fallback(
         };
     }
     for resource in spec.resources.values() {
-        let piqae_document_renderer::Resource::Image {
+        let printpacket_renderer::Resource::Image {
             media_type,
             byte_length,
             ..
@@ -205,7 +205,7 @@ pub fn negotiate(
     if requirement.maximum_pdf_bytes > capabilities.max_output_bytes {
         return fallback(FallbackReason::OutputLimit);
     }
-    if requirement.maximum_pages > capabilities.max_pages {
+    if requirement.maximum_pages == 0 || requirement.maximum_pages > capabilities.max_pages {
         return fallback(FallbackReason::PageLimit);
     }
     if !is_sha256(&requirement.expected_pdf_sha256) {
@@ -226,7 +226,7 @@ pub enum NodeRenderResult {
 pub fn render_or_fallback(
     capabilities: &NodeDocumentCapabilities,
     requirement: &NodeRenderRequirement,
-    spec: &BusinessDocumentV1,
+    spec: &PrintPacketV1,
     input: &Value,
 ) -> NodeRenderResult {
     if let RenderPlan::ServerPdf { reason } = negotiate(capabilities, requirement) {
@@ -272,14 +272,14 @@ fn is_sha256(value: &str) -> bool {
 )]
 mod tests {
     use super::*;
-    use piqae_document_renderer::{
+    use printpacket_renderer::{
         Edges, Expr, Inline, Media, Node, Orientation, PageSize, TextStyle, Theme,
     };
     use std::collections::BTreeMap;
 
-    fn spec() -> BusinessDocumentV1 {
-        BusinessDocumentV1 {
-            format: BUSINESS_DOCUMENT_FORMAT.into(),
+    fn spec() -> PrintPacketV1 {
+        PrintPacketV1 {
+            format: PRINT_PACKET_DOCUMENT_FORMAT.into(),
             media: Media::Paged {
                 size: PageSize::A5,
                 orientation: Orientation::Portrait,
@@ -311,7 +311,7 @@ mod tests {
             negotiation_version: 1,
             renderer_abi: RENDERER_ABI.into(),
             renderer_build: RENDERER_VERSION.into(),
-            spec_version: BUSINESS_DOCUMENT_FORMAT.into(),
+            spec_version: PRINT_PACKET_DOCUMENT_FORMAT.into(),
             input_bytes: 32,
             maximum_pdf_bytes: 1024 * 1024,
             maximum_pages: 2,
@@ -331,6 +331,71 @@ mod tests {
                 &input
             ),
             NodeRenderResult::Pdf(expected)
+        );
+    }
+
+    #[test]
+    fn authoritative_completed_page_count_is_the_node_render_bound() {
+        let input = serde_json::json!({"order":"#1001"});
+        let expected = render(&spec(), &input, RenderLimits::default()).expect("fixture render");
+        let mut requirement = requirement(&expected);
+        requirement.maximum_pages = 1;
+        assert!(matches!(
+            render_or_fallback(
+                &NodeDocumentCapabilities::local(),
+                &requirement,
+                &spec(),
+                &input
+            ),
+            NodeRenderResult::Pdf(_)
+        ));
+
+        // This was the installed agent's old guessed requirement. It exceeds
+        // the renderer capability and therefore made every offer fall back.
+        requirement.maximum_pages = 10_000;
+        assert_eq!(
+            render_or_fallback(
+                &NodeDocumentCapabilities::local(),
+                &requirement,
+                &spec(),
+                &input
+            ),
+            NodeRenderResult::UseServerPdf {
+                reason: FallbackReason::PageLimit
+            }
+        );
+    }
+
+    #[test]
+    fn only_the_canonical_format_negotiates() {
+        let input = serde_json::json!({"order":"#1001"});
+        let capabilities = NodeDocumentCapabilities::local();
+        assert_eq!(capabilities.spec_versions, [PRINT_PACKET_DOCUMENT_FORMAT]);
+        let document = spec();
+        let expected = render(&document, &input, RenderLimits::default()).expect("render");
+        let requirement = requirement(&expected);
+        assert_eq!(
+            render_or_fallback(&capabilities, &requirement, &document, &input),
+            NodeRenderResult::Pdf(expected)
+        );
+    }
+
+    #[test]
+    fn offer_without_authoritative_pages_falls_back_before_rendering() {
+        let input = serde_json::json!({"order":"#1001"});
+        let expected = render(&spec(), &input, RenderLimits::default()).expect("render");
+        let mut requirement = requirement(&expected);
+        requirement.maximum_pages = 0;
+        assert_eq!(
+            render_or_fallback(
+                &NodeDocumentCapabilities::local(),
+                &requirement,
+                &spec(),
+                &input
+            ),
+            NodeRenderResult::UseServerPdf {
+                reason: FallbackReason::PageLimit
+            }
         );
     }
 
@@ -364,7 +429,7 @@ mod tests {
         let mut document = spec();
         document.resources.insert(
             "logo".into(),
-            piqae_document_renderer::Resource::Image {
+            printpacket_renderer::Resource::Image {
                 digest: format!("sha256:{}", "a".repeat(64)),
                 media_type: "image/jpeg".into(),
                 byte_length: 10,

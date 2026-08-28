@@ -90,6 +90,16 @@ private final class ProfileTestContext: NSObject {
     }
 }
 
+private final class BrokerAuthorizationActionContext: NSObject {
+    let request: LocalPendingBrokerAuthorization
+    let approved: Bool
+
+    init(request: LocalPendingBrokerAuthorization, approved: Bool) {
+        self.request = request
+        self.approved = approved
+    }
+}
+
 @MainActor
 final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
@@ -99,6 +109,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var status: LocalStatus?
     private var printers: [LocalPrinter] = []
     private var recentJobs: [RecentJob] = []
+    private var pendingBrokerAuthorizations: [LocalPendingBrokerAuthorization] = []
     private var profilesSupported = false
     private var queueSupported = false
     private var lastError: String?
@@ -108,6 +119,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var refreshTimer: Timer?
     private var updateCoordinator: PiqaeUpdateCoordinator?
     private var nativeComponentUpdateTask: Task<String?, Never>?
+    private var hostLifecycleMonitor: PiqaeMacHostLifecycleMonitor?
     private let connectReplayGuard = NodeConnectReplayGuard()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -138,6 +150,13 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateCoordinator?.onPresentationChange = { [weak self] in
             self?.rebuildMenu()
         }
+        if let client {
+            let monitor = PiqaeMacHostLifecycleMonitor(
+                reporter: PiqaeLocalAPIHostLifecycleReporter(client: client)
+            )
+            monitor.start()
+            hostLifecycleMonitor = monitor
+        }
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = symbol(
@@ -165,6 +184,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshTask?.cancel()
         actionTask?.cancel()
         refreshTimer?.invalidate()
+        hostLifecycleMonitor?.stop()
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -410,6 +430,16 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 async let nextStatus = client.status()
                 async let nextPrinters = client.printers()
                 let (loadedStatus, loadedPrinters) = try await (nextStatus, nextPrinters)
+                let loadedAuthorizations: [LocalPendingBrokerAuthorization]
+                do {
+                    loadedAuthorizations = try await client.pendingBrokerAuthorizations()
+                } catch let LocalAPIError.rejected(status, _) where [404, 405].contains(status) {
+                    loadedAuthorizations = []
+                } catch {
+                    // Consent polling is additive. A transient failure must not
+                    // discard otherwise fresh status, printer, and queue data.
+                    loadedAuthorizations = pendingBrokerAuthorizations
+                }
 
                 var loadedJobs: [RecentJob] = []
                 var supportsQueue = loadedPrinters.isEmpty
@@ -464,6 +494,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
                 }
                 profilesSupported = loadedPrinters.allSatisfy { $0.profiles != nil }
+                pendingBrokerAuthorizations = loadedAuthorizations
                 queueSupported = supportsQueue
                 if supportsQueue {
                     recentJobs = Array(
@@ -482,6 +513,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 profilesSupported = false
                 queueSupported = false
                 recentJobs = []
+                pendingBrokerAuthorizations = []
                 lastError = error.localizedDescription
             }
         }
@@ -515,6 +547,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
+        addNodeIdentityItem()
         addPrinterSection()
         addRecentJobsSection()
 
@@ -542,6 +575,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
         addConnectionsItem()
+        addApplicationAuthorizationItems()
         addUpdateItem()
         menu.addItem(diagnosticsItem())
 
@@ -552,6 +586,82 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             keyEquivalent: "q"
         )
         quit.target = self
+    }
+
+    private func addNodeIdentityItem() {
+        let root = NSMenuItem(
+            title: status?.nodeIdentity?.displayName ?? MenuPresentation.nodeTitle,
+            action: nil,
+            keyEquivalent: ""
+        )
+        root.image = symbol("desktopcomputer", description: "This Piqae node")
+        let node = NSMenu()
+        node.addItem(informational(MenuPresentation.nodeSummary(identity: status?.nodeIdentity)))
+        node.addItem(
+            informational("Standalone node · user-managed connections")
+        )
+        node.addItem(.separator())
+        let edit = node.addItem(
+            withTitle: "Rename & Set Location…",
+            action: #selector(editNodeIdentity),
+            keyEquivalent: ""
+        )
+        edit.target = self
+        edit.isEnabled = client != nil && status?.nodeIdentityRevision != nil
+        root.submenu = node
+        menu.addItem(root)
+    }
+
+    private func addApplicationAuthorizationItems() {
+        guard !pendingBrokerAuthorizations.isEmpty else { return }
+        menu.addItem(.separator())
+        menu.addItem(
+            informational("APP ACCESS REQUESTS (\(pendingBrokerAuthorizations.count))")
+        )
+        for request in pendingBrokerAuthorizations {
+            let root = NSMenuItem(
+                title: shortened(request.application.displayName),
+                action: nil,
+                keyEquivalent: ""
+            )
+            root.image = symbol("app.badge", description: "Application access request")
+            let submenu = NSMenu()
+            submenu.addItem(informational("App ID: \(shortened(request.application.applicationID))"))
+            if let signingIdentity = request.application.signingIdentitySHA256 {
+                submenu.addItem(
+                    informational("Signing identity: \(shortened(signingIdentity))")
+                )
+            } else {
+                submenu.addItem(informational("Signing identity not supplied"))
+            }
+            submenu.addItem(informational("REQUESTED ACCESS"))
+            for capability in request.requestedCapabilities {
+                submenu.addItem(informational(capability.displayName))
+            }
+            submenu.addItem(.separator())
+            let approve = submenu.addItem(
+                withTitle: "Approve…",
+                action: #selector(decideApplicationAuthorization(_:)),
+                keyEquivalent: ""
+            )
+            approve.target = self
+            approve.representedObject = BrokerAuthorizationActionContext(
+                request: request,
+                approved: true
+            )
+            let deny = submenu.addItem(
+                withTitle: "Deny…",
+                action: #selector(decideApplicationAuthorization(_:)),
+                keyEquivalent: ""
+            )
+            deny.target = self
+            deny.representedObject = BrokerAuthorizationActionContext(
+                request: request,
+                approved: false
+            )
+            root.submenu = submenu
+            menu.addItem(root)
+        }
     }
 
     private func addPrinterSection() {
@@ -856,6 +966,50 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refresh()
     }
 
+    @objc private func editNodeIdentity() {
+        guard let status, let revision = status.nodeIdentityRevision else { return }
+        let current = status.nodeIdentity
+        let name = NSTextField(string: current?.displayName ?? "")
+        name.placeholderString = "Node name"
+        let site = NSTextField(string: current?.site ?? "")
+        site.placeholderString = "Site (optional)"
+        let location = NSTextField(string: current?.location ?? "")
+        location.placeholderString = "Location (optional)"
+        let grid = NSGridView(views: [
+            [NSTextField(labelWithString: "Name"), name],
+            [NSTextField(labelWithString: "Site"), site],
+            [NSTextField(labelWithString: "Location"), location],
+        ])
+        grid.rowSpacing = 8
+        grid.columnSpacing = 10
+        grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 1).width = 280
+        let alert = NSAlert()
+        alert.messageText = "Name this Piqae node"
+        alert.informativeText = "Use a device or workplace name. Piqae does not upload your macOS account name or address."
+        alert.accessoryView = grid
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let displayName = name.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !displayName.isEmpty else {
+            showAlert(title: "Node name required", message: "Enter a name for this computer.")
+            return
+        }
+        let cleanSite = site.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanLocation = location.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        performAction(successMessage: "Node details updated.") { client in
+            _ = try await client.updateNodeIdentity(
+                expectedRevision: revision,
+                displayName: displayName,
+                site: cleanSite.isEmpty ? nil : cleanSite,
+                location: cleanLocation.isEmpty ? nil : cleanLocation,
+                labels: current?.labels ?? []
+            )
+        }
+    }
+
     @objc private func pauseAgent() {
         performAction(successMessage: nil) { client in
             try await client.pause()
@@ -978,11 +1132,13 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.addButton(withTitle: "Cancel")
         NSApplication.shared.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let profileID = context.profileID
+        let printerID = printer.printerID
 
         performAction(successMessage: "Test page accepted for \(printer.name).") { client in
             _ = try await client.submitDriverTest(
-                printerID: printer.printerID,
-                profileID: context.profileID
+                printerID: printerID,
+                profileID: profileID
             )
         }
     }
@@ -1038,6 +1194,51 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSWorkspace.shared.open(configured)
         } else {
             openNodeDashboard(view: "connections", fallbackURL: dashboardURL())
+        }
+    }
+
+    @objc private func decideApplicationAuthorization(_ sender: NSMenuItem) {
+        guard
+            let context = sender.representedObject as? BrokerAuthorizationActionContext,
+            !context.request.isExpired()
+        else {
+            refresh()
+            return
+        }
+        let capabilityNames = context.request.requestedCapabilities
+            .map(\.displayName)
+            .joined(separator: "\n• ")
+        let alert = NSAlert()
+        alert.alertStyle = context.approved ? .warning : .informational
+        alert.messageText = context.approved
+            ? "Allow \(context.request.application.displayName) to use Piqae?"
+            : "Deny \(context.request.application.displayName)?"
+        alert.informativeText = context.approved
+            ? "Only approve an app you recognize. Requested access:\n• \(capabilityNames)"
+            : "The app will not receive a local capability. It may request access again later."
+        alert.addButton(withTitle: context.approved ? "Approve" : "Deny")
+        alert.addButton(withTitle: "Cancel")
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard !context.request.isExpired() else {
+            showAlert(
+                title: "Application request expired",
+                message: "Ask the application to request access again. No access was granted."
+            )
+            refresh()
+            return
+        }
+        let authorizationID = context.request.authorizationID
+        let approved = context.approved
+        let grantedCapabilities = approved ? context.request.requestedCapabilities : []
+
+        performAction(successMessage: approved ? "Application access approved." : "Application access denied.") {
+            client in
+            try await client.decideBrokerAuthorization(
+                authorizationID: authorizationID,
+                approved: approved,
+                grantedCapabilities: grantedCapabilities
+            )
         }
     }
 

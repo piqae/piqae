@@ -11,11 +11,15 @@ use piqae_domain::{
     PrinterCapabilities, PrinterId, PrinterState, WorkspaceId, validate_transition,
 };
 use piqae_protocol::agent::AgentCommand;
+use piqae_storage_postgres::destination_topology::{
+    DestinationTopologyRepository, MemoryDestinationTopologyRepository, TenantScope,
+};
 use piqae_storage_postgres::{
     AgentAuthenticationRecord, CreateDocumentResult, CreateJobResult as PgCreateJobResult,
-    DeliveryAttemptProof, DestinationRouteReassignment, DocumentRenderWork, EnrolledAgent,
-    ExpiredDocumentArtifactWork, JobLease, NewDeviceAuthorization, NodeUpdatePolicy,
-    NodeUpdateState, PostgresStore, StorageError, StoredAgent, StoredAgentCommandBatch,
+    DeliveryAttemptProof, DestinationRouteReassignment, DocumentRenderWork, DurableJobTransition,
+    EnrolledAgent, ExpiredDocumentArtifactWork, ExpiredJobTransition, JobLease,
+    NewDeviceAuthorization, NodeUpdatePolicy, NodeUpdateState, PendingWakeHintDispatch,
+    PostgresStore, PreHandoffTransitionOutcome, StorageError, StoredAgent, StoredAgentCommandBatch,
     StoredApiKey, StoredBillingSummary, StoredConnectSessionPreview, StoredContentEncryptionKey,
     StoredDeviceAuthorization, StoredDocumentPreview, StoredDocumentRender, StoredDocumentTemplate,
     StoredDocumentTemplateRevision, StoredLoadedMedia, StoredNodeConnector, StoredNodeDiagnostic,
@@ -24,12 +28,16 @@ use piqae_storage_postgres::{
     StoredTenantEvent, StoredUpload, StoredUsageSummary, StoredWebhook, StoredWebhookDelivery,
     StoredWorkspace, StoredWorkspaceMember, StripeBillingEvent, StripeProjectionResult,
     SyncedPrinter, UpsertedPlatformAccount, WebhookDeliveryWork, WorkOsIdentityEvent,
-    WorkOsProjectionResult,
+    WorkOsProjectionResult, acceptance_revocation_webhook_idempotency_key,
+    agent_acceptance_webhook_idempotency_key, node_capability_recovered_webhook_idempotency_key,
+    node_update_required_webhook_idempotency_key, preaccept_cancellation_webhook_idempotency_key,
+    prehandoff_expiry_webhook_idempotency_key, prehandoff_failure_webhook_idempotency_key,
 };
-use sha2::Digest as _;
+use sha2::{Digest as _, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
+    time::Duration as StdDuration,
 };
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -65,6 +73,8 @@ pub enum RepositoryError {
     NodeQuotaExceeded,
     #[error("platform mode is already enabled")]
     PlatformAlreadyEnabled,
+    #[error("node identity revision conflict; current revision is {0}")]
+    NodeIdentityRevisionConflict(u64),
     #[error("persistence failure: {0}")]
     Persistence(String),
 }
@@ -80,6 +90,9 @@ impl From<StorageError> for RepositoryError {
             StorageError::BillingBlocked => Self::BillingBlocked,
             StorageError::NodeQuotaExceeded => Self::NodeQuotaExceeded,
             StorageError::PlatformAlreadyEnabled => Self::PlatformAlreadyEnabled,
+            StorageError::NodeIdentityRevisionConflict(revision) => {
+                Self::NodeIdentityRevisionConflict(revision)
+            }
             other => Self::Persistence(other.to_string()),
         }
     }
@@ -87,6 +100,10 @@ impl From<StorageError> for RepositoryError {
 
 #[async_trait]
 pub trait Repository: Send + Sync + 'static {
+    fn memory_destination_topology(&self) -> Option<Arc<dyn DestinationTopologyRepository>> {
+        None
+    }
+
     async fn ready(&self) -> Result<(), RepositoryError>;
     async fn create_document_template(
         &self,
@@ -351,6 +368,10 @@ pub trait Repository: Send + Sync + 'static {
         &self,
         agent_id: AgentId,
     ) -> Result<AgentAuthenticationRecord, RepositoryError>;
+    async fn agent_for_revocation_authentication(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<AgentAuthenticationRecord, RepositoryError>;
     async fn reserve_agent_nonce(
         &self,
         agent_id: AgentId,
@@ -373,7 +394,7 @@ pub trait Repository: Send + Sync + 'static {
         environment_id: EnvironmentId,
         printer_id: PrinterId,
     ) -> Result<piqae_protocol::agent::DocumentRenderCapabilities, RepositoryError>;
-    async fn register_business_document_resource(
+    async fn register_printpacket_resource(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
@@ -381,20 +402,20 @@ pub trait Repository: Send + Sync + 'static {
         media_type: &str,
         byte_length: i64,
     ) -> Result<(), RepositoryError>;
-    async fn link_business_document_render_resources(
+    async fn link_printpacket_render_resources(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         render_id: &str,
         digests: &[String],
     ) -> Result<(), RepositoryError>;
-    async fn claim_expired_business_document_resources(
+    async fn claim_expired_printpacket_resources(
         &self,
         limit: i64,
-    ) -> Result<Vec<piqae_storage_postgres::ExpiredBusinessDocumentResource>, RepositoryError>;
-    async fn complete_expired_business_document_resource(
+    ) -> Result<Vec<piqae_storage_postgres::ExpiredPrintPacketResource>, RepositoryError>;
+    async fn complete_expired_printpacket_resource(
         &self,
-        resource: &piqae_storage_postgres::ExpiredBusinessDocumentResource,
+        resource: &piqae_storage_postgres::ExpiredPrintPacketResource,
     ) -> Result<(), RepositoryError>;
     async fn create_node_diagnostic(
         &self,
@@ -449,19 +470,20 @@ pub trait Repository: Send + Sync + 'static {
         environment_id: EnvironmentId,
         agent_id: AgentId,
     ) -> Result<StoredAgent, RepositoryError>;
-    async fn rename_agent(
+    async fn update_agent_identity(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         agent_id: AgentId,
-        name: &str,
+        expected_revision: Option<u64>,
+        identity: &piqae_protocol::agent::NodeDisplayIdentity,
     ) -> Result<StoredAgent, RepositoryError>;
     async fn revoke_agent(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         agent_id: AgentId,
-    ) -> Result<(), RepositoryError>;
+    ) -> Result<Vec<Job>, RepositoryError>;
     async fn list_node_connectors(
         &self,
         workspace_id: WorkspaceId,
@@ -474,7 +496,7 @@ pub trait Repository: Send + Sync + 'static {
         environment_id: EnvironmentId,
         agent_id: AgentId,
         connector_id: &str,
-    ) -> Result<(), RepositoryError>;
+    ) -> Result<Vec<Job>, RepositoryError>;
     async fn get_node_update(
         &self,
         workspace_id: WorkspaceId,
@@ -767,6 +789,7 @@ pub trait Repository: Send + Sync + 'static {
         protocol_version: u16,
         enforce_cloud_billing: bool,
         _installation_id: &str,
+        _installation_public_key: &[u8],
         _printer_grant: &str,
         _allowed_printer_ids: &[String],
     ) -> Result<EnrolledAgent, RepositoryError> {
@@ -817,6 +840,14 @@ pub trait Repository: Send + Sync + 'static {
     ) -> Result<(), RepositoryError>;
     async fn enqueue_webhook_event(
         &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        event_type: &str,
+        payload: &serde_json::Value,
+    ) -> Result<String, RepositoryError>;
+    async fn enqueue_webhook_event_idempotently(
+        &self,
+        idempotency_key: &str,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         event_type: &str,
@@ -1000,12 +1031,36 @@ pub trait Repository: Send + Sync + 'static {
         agent_id: Option<AgentId>,
         native_job_id: Option<String>,
     ) -> Result<Job, RepositoryError>;
+    async fn ensure_waiting_job_wake_hints(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        job_id: JobId,
+    ) -> Result<usize, RepositoryError>;
+    async fn repair_waiting_job_wake_hints(&self, limit: i64) -> Result<usize, RepositoryError>;
+    async fn claim_wake_hint_dispatches(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<PendingWakeHintDispatch>, RepositoryError>;
+    async fn complete_wake_hint_dispatch(&self, outbox_id: &str) -> Result<(), RepositoryError>;
+    async fn retry_wake_hint_dispatch(
+        &self,
+        outbox_id: &str,
+        delay: StdDuration,
+    ) -> Result<(), RepositoryError>;
     async fn request_job_cancellation(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         job_id: JobId,
     ) -> Result<Job, RepositoryError>;
+    async fn retire_terminal_absent_local_cancellation(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+    ) -> Result<bool, RepositoryError>;
     async fn claim_jobs(
         &self,
         workspace_id: WorkspaceId,
@@ -1058,6 +1113,44 @@ pub trait Repository: Send + Sync + 'static {
         lease_id: Uuid,
         lease_token: &str,
     ) -> Result<(), RepositoryError>;
+    async fn block_agent_lease_for_node_update(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+    ) -> Result<PreHandoffTransitionOutcome, RepositoryError>;
+    async fn fail_agent_lease_before_handoff(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        reason: JobFailureReason,
+        message: &str,
+    ) -> Result<PreHandoffTransitionOutcome, RepositoryError>;
+    async fn list_node_update_required_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, RepositoryError>;
+    async fn recover_node_update_required_job(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+    ) -> Result<Option<DurableJobTransition>, RepositoryError>;
+    async fn expire_jobs_before_handoff(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<ExpiredJobTransition>, RepositoryError>;
     async fn validate_agent_lease(
         &self,
         workspace_id: WorkspaceId,
@@ -1111,6 +1204,32 @@ pub trait Repository: Send + Sync + 'static {
         )
         .await
     }
+    #[allow(clippy::too_many_arguments)]
+    async fn reconcile_agent_acceptance(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        content_sha256: &str,
+        local_sequence: u64,
+        proof: DeliveryAttemptProof<'_>,
+    ) -> Result<(bool, bool, bool), RepositoryError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn abandon_agent_acceptance(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        content_sha256: &str,
+        local_sequence: u64,
+        proof: DeliveryAttemptProof<'_>,
+    ) -> Result<bool, RepositoryError>;
     async fn compatibility_id(
         &self,
         workspace_id: WorkspaceId,
@@ -1286,6 +1405,62 @@ impl Repository for PostgresStore {
         proof: DeliveryAttemptProof<'_>,
     ) -> Result<Job, RepositoryError> {
         PostgresStore::accept_agent_job_with_delivery_attempt(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+            content_sha256,
+            local_sequence,
+            proof,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn reconcile_agent_acceptance(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        content_sha256: &str,
+        local_sequence: u64,
+        proof: DeliveryAttemptProof<'_>,
+    ) -> Result<(bool, bool, bool), RepositoryError> {
+        PostgresStore::reconcile_agent_acceptance(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+            content_sha256,
+            local_sequence,
+            proof,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn abandon_agent_acceptance(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        content_sha256: &str,
+        local_sequence: u64,
+        proof: DeliveryAttemptProof<'_>,
+    ) -> Result<bool, RepositoryError> {
+        PostgresStore::abandon_agent_acceptance(
             self,
             workspace_id,
             environment_id,
@@ -1842,6 +2017,15 @@ impl Repository for PostgresStore {
             .map_err(Into::into)
     }
 
+    async fn agent_for_revocation_authentication(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<AgentAuthenticationRecord, RepositoryError> {
+        Self::agent_for_revocation_authentication(self, agent_id)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn reserve_agent_nonce(
         &self,
         agent_id: AgentId,
@@ -1890,9 +2074,8 @@ impl Repository for PostgresStore {
             printer_id,
         )
         .await
-        .map_err(Into::into)
     }
-    async fn register_business_document_resource(
+    async fn register_printpacket_resource(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
@@ -1900,7 +2083,7 @@ impl Repository for PostgresStore {
         media_type: &str,
         byte_length: i64,
     ) -> Result<(), RepositoryError> {
-        Self::register_business_document_resource(
+        Self::register_printpacket_resource(
             self,
             workspace_id,
             environment_id,
@@ -1911,14 +2094,14 @@ impl Repository for PostgresStore {
         .await
         .map_err(Into::into)
     }
-    async fn link_business_document_render_resources(
+    async fn link_printpacket_render_resources(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         render_id: &str,
         digests: &[String],
     ) -> Result<(), RepositoryError> {
-        Self::link_business_document_render_resources(
+        Self::link_printpacket_render_resources(
             self,
             workspace_id,
             environment_id,
@@ -1928,19 +2111,19 @@ impl Repository for PostgresStore {
         .await
         .map_err(Into::into)
     }
-    async fn claim_expired_business_document_resources(
+    async fn claim_expired_printpacket_resources(
         &self,
         limit: i64,
-    ) -> Result<Vec<piqae_storage_postgres::ExpiredBusinessDocumentResource>, RepositoryError> {
-        Self::claim_expired_business_document_resources(self, limit)
+    ) -> Result<Vec<piqae_storage_postgres::ExpiredPrintPacketResource>, RepositoryError> {
+        Self::claim_expired_printpacket_resources(self, limit)
             .await
             .map_err(Into::into)
     }
-    async fn complete_expired_business_document_resource(
+    async fn complete_expired_printpacket_resource(
         &self,
-        resource: &piqae_storage_postgres::ExpiredBusinessDocumentResource,
+        resource: &piqae_storage_postgres::ExpiredPrintPacketResource,
     ) -> Result<(), RepositoryError> {
-        Self::complete_expired_business_document_resource(self, resource)
+        Self::complete_expired_printpacket_resource(self, resource)
             .await
             .map_err(Into::into)
     }
@@ -2016,16 +2199,24 @@ impl Repository for PostgresStore {
             .map_err(Into::into)
     }
 
-    async fn rename_agent(
+    async fn update_agent_identity(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         agent_id: AgentId,
-        name: &str,
+        expected_revision: Option<u64>,
+        identity: &piqae_protocol::agent::NodeDisplayIdentity,
     ) -> Result<StoredAgent, RepositoryError> {
-        Self::rename_agent(self, workspace_id, environment_id, agent_id, name)
-            .await
-            .map_err(Into::into)
+        Self::update_agent_identity(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            expected_revision,
+            identity,
+        )
+        .await
+        .map_err(Into::into)
     }
 
     async fn revoke_agent(
@@ -2033,7 +2224,7 @@ impl Repository for PostgresStore {
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         agent_id: AgentId,
-    ) -> Result<(), RepositoryError> {
+    ) -> Result<Vec<Job>, RepositoryError> {
         Self::revoke_agent(self, workspace_id, environment_id, agent_id)
             .await
             .map_err(Into::into)
@@ -2056,7 +2247,7 @@ impl Repository for PostgresStore {
         environment_id: EnvironmentId,
         agent_id: AgentId,
         connector_id: &str,
-    ) -> Result<(), RepositoryError> {
+    ) -> Result<Vec<Job>, RepositoryError> {
         Self::revoke_node_connector(self, workspace_id, environment_id, agent_id, connector_id)
             .await
             .map_err(Into::into)
@@ -2552,6 +2743,7 @@ impl Repository for PostgresStore {
         protocol_version: u16,
         enforce_cloud_billing: bool,
         installation_id: &str,
+        installation_public_key: &[u8],
         printer_grant: &str,
         allowed_printer_ids: &[String],
     ) -> Result<EnrolledAgent, RepositoryError> {
@@ -2567,6 +2759,7 @@ impl Repository for PostgresStore {
             protocol_version,
             enforce_cloud_billing,
             Some(installation_id),
+            Some(installation_public_key),
             printer_grant,
             allowed_printer_ids,
         )
@@ -2649,6 +2842,26 @@ impl Repository for PostgresStore {
         Self::enqueue_webhook_event(self, workspace_id, environment_id, event_type, payload)
             .await
             .map_err(Into::into)
+    }
+
+    async fn enqueue_webhook_event_idempotently(
+        &self,
+        idempotency_key: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        event_type: &str,
+        payload: &serde_json::Value,
+    ) -> Result<String, RepositoryError> {
+        Self::enqueue_webhook_event_idempotently(
+            self,
+            idempotency_key,
+            workspace_id,
+            environment_id,
+            event_type,
+            payload,
+        )
+        .await
+        .map_err(Into::into)
     }
 
     async fn list_tenant_events(
@@ -2919,6 +3132,48 @@ impl Repository for PostgresStore {
             .map_err(Into::into)
     }
 
+    async fn ensure_waiting_job_wake_hints(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        job_id: JobId,
+    ) -> Result<usize, RepositoryError> {
+        PostgresStore::ensure_waiting_job_wake_hints(self, workspace_id, environment_id, job_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn repair_waiting_job_wake_hints(&self, limit: i64) -> Result<usize, RepositoryError> {
+        PostgresStore::repair_waiting_job_wake_hints(self, limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn claim_wake_hint_dispatches(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<PendingWakeHintDispatch>, RepositoryError> {
+        PostgresStore::claim_wake_hint_dispatches(self, limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn complete_wake_hint_dispatch(&self, outbox_id: &str) -> Result<(), RepositoryError> {
+        PostgresStore::complete_wake_hint_dispatch(self, outbox_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn retry_wake_hint_dispatch(
+        &self,
+        outbox_id: &str,
+        delay: StdDuration,
+    ) -> Result<(), RepositoryError> {
+        PostgresStore::retry_wake_hint_dispatch(self, outbox_id, delay)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn request_job_cancellation(
         &self,
         workspace_id: WorkspaceId,
@@ -2932,6 +3187,24 @@ impl Repository for PostgresStore {
             job_id,
             &serde_json::to_value(AgentCommand::CancelJob { job_id })
                 .map_err(|error| RepositoryError::Persistence(error.to_string()))?,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn retire_terminal_absent_local_cancellation(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+    ) -> Result<bool, RepositoryError> {
+        Self::retire_terminal_absent_local_cancellation(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
         )
         .await
         .map_err(Into::into)
@@ -3002,6 +3275,87 @@ impl Repository for PostgresStore {
         )
         .await
         .map_err(Into::into)
+    }
+
+    async fn block_agent_lease_for_node_update(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+    ) -> Result<PreHandoffTransitionOutcome, RepositoryError> {
+        Self::block_agent_lease_for_node_update(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn fail_agent_lease_before_handoff(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        reason: JobFailureReason,
+        message: &str,
+    ) -> Result<PreHandoffTransitionOutcome, RepositoryError> {
+        Self::fail_agent_lease_before_handoff(
+            self,
+            workspace_id,
+            environment_id,
+            agent_id,
+            job_id,
+            lease_id,
+            lease_token,
+            reason,
+            message,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn list_node_update_required_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, RepositoryError> {
+        Self::list_node_update_required_jobs(self, workspace_id, environment_id, agent_id, limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn recover_node_update_required_job(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+    ) -> Result<Option<DurableJobTransition>, RepositoryError> {
+        Self::recover_node_update_required_job(self, workspace_id, environment_id, agent_id, job_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn expire_jobs_before_handoff(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<ExpiredJobTransition>, RepositoryError> {
+        Self::expire_jobs_before_handoff(self, limit)
+            .await
+            .map_err(Into::into)
     }
 
     async fn validate_agent_lease(
@@ -3152,6 +3506,22 @@ struct MemoryJobAcceptance {
     lease_token: Option<String>,
     content_sha256: Option<String>,
     local_sequence: u64,
+    route_reservation_id: Option<String>,
+    route_generation: Option<u64>,
+    route_fencing_token_hash: Option<Vec<u8>>,
+    connector_generation: u64,
+}
+
+#[derive(Clone, Debug)]
+struct MemoryWakeHintOutbox {
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    hint: piqae_storage_postgres::destination_topology::NodeWakeHint,
+    idempotency_key: String,
+    attempts: u32,
+    available_at: DateTime<Utc>,
+    claimed_until: Option<DateTime<Utc>>,
+    processed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug)]
@@ -3162,6 +3532,69 @@ struct MemoryDeviceAuthorization {
     public_key: Vec<u8>,
     agent_version: String,
     installation_id: String,
+}
+
+fn ensure_memory_waiting_job_wake_hint(
+    state: &mut MemoryState,
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+) -> Result<usize, RepositoryError> {
+    let record = state.jobs.get(&job_id).ok_or(RepositoryError::NotFound)?;
+    if record.job.workspace_id != workspace_id || record.job.environment_id != environment_id {
+        return Err(RepositoryError::NotFound);
+    }
+    if record.job.state != JobState::WaitingForAgent {
+        return Ok(0);
+    }
+    let (sequence, agent_id) = (record.sequence, record.agent_id);
+    let reconciliation_key = (workspace_id, environment_id, job_id, sequence);
+    if let Some(candidate_count) = state.wake_reconciliations.get(&reconciliation_key) {
+        return Ok(*candidate_count);
+    }
+    let active_assignee =
+        state
+            .agents
+            .get(&agent_id)
+            .is_some_and(|(agent_workspace_id, agent_environment_id, _)| {
+                *agent_workspace_id == workspace_id && *agent_environment_id == environment_id
+            });
+    let candidate_count = usize::from(active_assignee);
+    state
+        .wake_reconciliations
+        .insert(reconciliation_key, candidate_count);
+    if !active_assignee {
+        return Ok(0);
+    }
+    let digest = sha2::Sha256::digest(
+        format!("{workspace_id}:{environment_id}:{job_id}:{sequence}:{agent_id}").as_bytes(),
+    );
+    let idempotency_key = format!("automatic-wake:{digest:x}");
+    let now = Utc::now();
+    let hint = piqae_storage_postgres::destination_topology::NodeWakeHint {
+        id: format!("wkh_{}", ulid::Ulid::new()),
+        agent_id: agent_id.to_string(),
+        reason: "job_available".into(),
+        delivery_channel: "external_push".into(),
+        status: "pending".into(),
+        requested_at: now,
+        expires_at: now + chrono::Duration::minutes(5),
+        observed_at: None,
+    };
+    state.wake_hint_outbox.insert(
+        EventId::new().to_string(),
+        MemoryWakeHintOutbox {
+            workspace_id,
+            environment_id,
+            hint,
+            idempotency_key,
+            attempts: 0,
+            available_at: now,
+            claimed_until: None,
+            processed_at: None,
+        },
+    );
+    Ok(1)
 }
 
 /// Workspace, environment, installation identifier, expiry, and the node whose
@@ -3205,20 +3638,27 @@ struct MemoryState {
     targets: HashMap<String, (WorkspaceId, EnvironmentId, StoredTarget)>,
     target_bindings: HashMap<String, (WorkspaceId, EnvironmentId, StoredTargetBinding)>,
     agents: HashMap<AgentId, (WorkspaceId, EnvironmentId, StoredAgent)>,
+    document_render_capabilities:
+        HashMap<AgentId, piqae_protocol::agent::DocumentRenderCapabilities>,
     /// Which node owns each installation, so pairing rebinds an existing node
     /// instead of admitting a duplicate — matching the `PostgreSQL` behaviour
     /// that in-place key rotation depends on.
     agent_installations: HashMap<(WorkspaceId, EnvironmentId, String), AgentId>,
+    installation_public_keys: HashMap<String, Vec<u8>>,
     agent_public_keys: HashMap<AgentId, Vec<u8>>,
     content_encryption_keys: HashMap<(AgentId, String), StoredContentEncryptionKey>,
     encrypted_job_key_references: HashSet<(JobId, AgentId, String)>,
     node_connectors: HashMap<(WorkspaceId, EnvironmentId, AgentId, String), StoredNodeConnector>,
+    connector_generations: HashMap<(WorkspaceId, EnvironmentId, AgentId), u64>,
     enrolments: HashMap<String, MemoryEnrolment>,
     device_authorizations: HashMap<String, MemoryDeviceAuthorization>,
     node_updates: HashMap<AgentId, StoredNodeUpdate>,
     webhooks: HashMap<String, (WorkspaceId, EnvironmentId, StoredWebhook, Vec<u8>)>,
     webhook_deliveries: HashMap<String, (WorkspaceId, EnvironmentId, StoredWebhookDelivery)>,
     webhook_work: HashMap<String, WebhookDeliveryWork>,
+    webhook_idempotency: HashMap<(WorkspaceId, EnvironmentId, String), String>,
+    webhook_materializations: HashSet<(String, String)>,
+    tenant_event_occurred_at: HashMap<String, DateTime<Utc>>,
     tenant_events: Vec<(WorkspaceId, EnvironmentId, StoredTenantEvent)>,
     uploads: HashMap<String, (WorkspaceId, EnvironmentId, StoredUpload)>,
     document_artifact_acquisitions: HashMap<(WorkspaceId, EnvironmentId, String, String), String>,
@@ -3231,23 +3671,135 @@ struct MemoryState {
     job_acceptances: HashMap<JobId, MemoryJobAcceptance>,
     routing_attempts: Vec<(JobId, String, String)>,
     idempotency: HashMap<(WorkspaceId, EnvironmentId, String), (Vec<u8>, JobId)>,
+    wake_hint_outbox: HashMap<String, MemoryWakeHintOutbox>,
+    wake_reconciliations: HashMap<(WorkspaceId, EnvironmentId, JobId, u64), usize>,
+    capability_recovery_next_checks: HashMap<JobId, DateTime<Utc>>,
     consumed_envelopes: HashMap<(WorkspaceId, EnvironmentId, String), (String, JobId)>,
     compatibility: HashMap<(WorkspaceId, EnvironmentId, String, String), i64>,
     reverse_compatibility: HashMap<(WorkspaceId, EnvironmentId, String, i64), String>,
     next_compatibility_id: i64,
 }
 
+fn enqueue_memory_webhook_event(
+    state: &mut MemoryState,
+    idempotency_key: Option<&str>,
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    event_type: &str,
+    payload: &serde_json::Value,
+) -> String {
+    if let Some(event_id) = idempotency_key.and_then(|key| {
+        state
+            .webhook_idempotency
+            .get(&(workspace_id, environment_id, key.to_owned()))
+    }) {
+        return event_id.clone();
+    }
+    let event_id = EventId::new().to_string();
+    let event_occurred_at = Utc::now();
+    state
+        .tenant_event_occurred_at
+        .insert(event_id.clone(), event_occurred_at);
+    state.tenant_events.push((
+        workspace_id,
+        environment_id,
+        StoredTenantEvent {
+            id: event_id.clone(),
+            event_type: event_type.into(),
+            payload: payload.clone(),
+        },
+    ));
+    if let Some(key) = idempotency_key {
+        state.webhook_idempotency.insert(
+            (workspace_id, environment_id, key.to_owned()),
+            event_id.clone(),
+        );
+    }
+    event_id
+}
+
+fn enqueue_memory_agent_acceptance_event(
+    state: &mut MemoryState,
+    job: &Job,
+) -> Result<(), RepositoryError> {
+    let payload = serde_json::to_value(job)
+        .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+    enqueue_memory_webhook_event(
+        state,
+        Some(&agent_acceptance_webhook_idempotency_key(
+            job.workspace_id,
+            job.environment_id,
+            job.id,
+        )),
+        job.workspace_id,
+        job.environment_id,
+        "job.updated",
+        &payload,
+    );
+    Ok(())
+}
+
+fn memory_connector_is_active(
+    state: &MemoryState,
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    agent_id: AgentId,
+) -> bool {
+    !state
+        .node_connectors
+        .iter()
+        .any(|((workspace, environment, node, _), connector)| {
+            *workspace == workspace_id
+                && *environment == environment_id
+                && *node == agent_id
+                && connector.revoked_at.is_some()
+        })
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct MemoryRepository {
     state: Arc<RwLock<MemoryState>>,
+    destination_topology: MemoryDestinationTopologyRepository,
 }
 
 impl MemoryRepository {
+    #[must_use]
+    pub fn with_destination_topology(
+        destination_topology: MemoryDestinationTopologyRepository,
+    ) -> Self {
+        Self {
+            state: Arc::default(),
+            destination_topology,
+        }
+    }
+
     #[cfg(test)]
     pub async fn expire_document_render_lease_for_test(&self, id: &str) {
         if let Some((_, _, _, _, render)) = self.state.write().await.document_renders.get_mut(id) {
             render.lease_expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
         }
+    }
+
+    #[cfg(test)]
+    pub async fn mark_local_responsibility_for_test(&self, job_id: JobId, agent_id: AgentId) {
+        let mut state = self.state.write().await;
+        if let Some(record) = state.jobs.get_mut(&job_id) {
+            record.job.state = JobState::FailedRetryable;
+        }
+        state.job_acceptances.insert(
+            job_id,
+            MemoryJobAcceptance {
+                agent_id,
+                lease_id: Uuid::new_v4(),
+                lease_token: None,
+                content_sha256: None,
+                local_sequence: 1,
+                route_reservation_id: None,
+                route_generation: None,
+                route_fencing_token_hash: None,
+                connector_generation: 1,
+            },
+        );
     }
     pub async fn add_printer(
         &self,
@@ -3279,6 +3831,10 @@ impl MemoryRepository {
                 StoredAgent {
                     id: agent_id,
                     name: "Test agent".into(),
+                    site: None,
+                    location: None,
+                    labels: Vec::new(),
+                    identity_revision: 1,
                     platform: "test".into(),
                     state: "connected".into(),
                     version: env!("CARGO_PKG_VERSION").into(),
@@ -3288,6 +3844,7 @@ impl MemoryRepository {
                     sqlite_integrity_ok: None,
                     executor_crashes: 0,
                     last_error_code: None,
+                    document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
                 },
             ),
         );
@@ -3339,10 +3896,34 @@ impl MemoryRepository {
             agent.last_seen_at = Utc::now() - chrono::Duration::minutes(5);
         }
     }
+
+    #[cfg(test)]
+    pub async fn reactivate_connector_for_test(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+    ) {
+        let mut state = self.state.write().await;
+        for ((workspace, environment, node, _), connector) in &mut state.node_connectors {
+            if *workspace == workspace_id && *environment == environment_id && *node == agent_id {
+                connector.revoked_at = None;
+            }
+        }
+        let generation = state
+            .connector_generations
+            .entry((workspace_id, environment_id, agent_id))
+            .or_insert(1);
+        *generation = generation.saturating_add(1);
+    }
 }
 
 #[async_trait]
 impl Repository for MemoryRepository {
+    fn memory_destination_topology(&self) -> Option<Arc<dyn DestinationTopologyRepository>> {
+        Some(Arc::new(self.destination_topology.clone()))
+    }
+
     async fn ready(&self) -> Result<(), RepositoryError> {
         Ok(())
     }
@@ -3604,7 +4185,7 @@ impl Repository for MemoryRepository {
             id: revision_id.into(),
             template_id: template_id.into(),
             revision: 1,
-            renderer_profile: "piqae.business-document/v1".into(),
+            renderer_profile: "printpacket/v1".into(),
             created_at: Utc::now(),
             spec_ciphertext: template.draft_ciphertext.clone(),
             spec_sha256: template.draft_sha256.clone(),
@@ -4037,6 +4618,38 @@ impl Repository for MemoryRepository {
         agent_id: AgentId,
     ) -> Result<AgentAuthenticationRecord, RepositoryError> {
         let state = self.state.read().await;
+        let connector_records = state
+            .node_connectors
+            .values()
+            .filter(|connector| connector.node_id == agent_id)
+            .collect::<Vec<_>>();
+        if !connector_records.is_empty()
+            && !connector_records
+                .iter()
+                .any(|connector| connector.revoked_at.is_none())
+        {
+            return Err(RepositoryError::NotFound);
+        }
+        state
+            .agents
+            .get(&agent_id)
+            .map(|(workspace, environment, _)| AgentAuthenticationRecord {
+                workspace_id: *workspace,
+                environment_id: *environment,
+                public_key: state
+                    .agent_public_keys
+                    .get(&agent_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            })
+            .ok_or(RepositoryError::NotFound)
+    }
+
+    async fn agent_for_revocation_authentication(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<AgentAuthenticationRecord, RepositoryError> {
+        let state = self.state.read().await;
         state
             .agents
             .get(&agent_id)
@@ -4103,15 +4716,9 @@ impl Repository for MemoryRepository {
         installation_key: &str,
     ) -> Result<Vec<u8>, RepositoryError> {
         let state = self.state.read().await;
-        let agent_id = state
-            .agent_installations
-            .iter()
-            .find(|((_, _, key), _)| key == installation_key)
-            .map(|(_, agent_id)| *agent_id)
-            .ok_or(RepositoryError::NotFound)?;
         state
-            .agent_public_keys
-            .get(&agent_id)
+            .installation_public_keys
+            .get(installation_key)
             .cloned()
             .ok_or(RepositoryError::NotFound)
     }
@@ -4167,7 +4774,7 @@ impl Repository for MemoryRepository {
         agent_id: AgentId,
         version: &str,
         health: &piqae_protocol::agent::AgentHealth,
-        _document_render: &piqae_protocol::agent::DocumentRenderCapabilities,
+        document_render: &piqae_protocol::agent::DocumentRenderCapabilities,
         printers: Option<&[SyncedPrinter]>,
     ) -> Result<(), RepositoryError> {
         let mut state = self.state.write().await;
@@ -4186,6 +4793,10 @@ impl Repository for MemoryRepository {
         agent.sqlite_integrity_ok = Some(health.sqlite_integrity_ok);
         agent.executor_crashes = health.executor_crashes;
         agent.last_error_code.clone_from(&health.last_error_code);
+        agent.document_render.clone_from(document_render);
+        state
+            .document_render_capabilities
+            .insert(agent_id, document_render.clone());
         if let Some(printers) = printers {
             state
                 .printers
@@ -4226,13 +4837,17 @@ impl Repository for MemoryRepository {
             .printers
             .get(&(workspace_id, environment_id, printer_id))
             .ok_or(RepositoryError::NotFound)?;
-        let _agent = state
+        let (_, _, agent) = state
             .agents
             .get(&printer.agent_id)
             .ok_or(RepositoryError::NotFound)?;
-        Ok(piqae_protocol::agent::DocumentRenderCapabilities::default())
+        Ok(state
+            .document_render_capabilities
+            .get(&printer.agent_id)
+            .cloned()
+            .unwrap_or_else(|| agent.document_render.clone()))
     }
-    async fn register_business_document_resource(
+    async fn register_printpacket_resource(
         &self,
         _workspace_id: WorkspaceId,
         _environment_id: EnvironmentId,
@@ -4242,7 +4857,7 @@ impl Repository for MemoryRepository {
     ) -> Result<(), RepositoryError> {
         Ok(())
     }
-    async fn link_business_document_render_resources(
+    async fn link_printpacket_render_resources(
         &self,
         _workspace_id: WorkspaceId,
         _environment_id: EnvironmentId,
@@ -4251,15 +4866,15 @@ impl Repository for MemoryRepository {
     ) -> Result<(), RepositoryError> {
         Ok(())
     }
-    async fn claim_expired_business_document_resources(
+    async fn claim_expired_printpacket_resources(
         &self,
         _limit: i64,
-    ) -> Result<Vec<piqae_storage_postgres::ExpiredBusinessDocumentResource>, RepositoryError> {
+    ) -> Result<Vec<piqae_storage_postgres::ExpiredPrintPacketResource>, RepositoryError> {
         Ok(Vec::new())
     }
-    async fn complete_expired_business_document_resource(
+    async fn complete_expired_printpacket_resource(
         &self,
-        _resource: &piqae_storage_postgres::ExpiredBusinessDocumentResource,
+        _resource: &piqae_storage_postgres::ExpiredPrintPacketResource,
     ) -> Result<(), RepositoryError> {
         Ok(())
     }
@@ -4480,12 +5095,13 @@ impl Repository for MemoryRepository {
             .ok_or(RepositoryError::NotFound)
     }
 
-    async fn rename_agent(
+    async fn update_agent_identity(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         agent_id: AgentId,
-        name: &str,
+        expected_revision: Option<u64>,
+        identity: &piqae_protocol::agent::NodeDisplayIdentity,
     ) -> Result<StoredAgent, RepositoryError> {
         let mut state = self.state.write().await;
         let (_, _, agent) = state
@@ -4495,16 +5111,41 @@ impl Repository for MemoryRepository {
                 *workspace == workspace_id && *environment == environment_id
             })
             .ok_or(RepositoryError::NotFound)?;
-        name.clone_into(&mut agent.name);
+        if expected_revision.is_some_and(|revision| revision != agent.identity_revision) {
+            if expected_revision.and_then(|revision| revision.checked_add(1))
+                == Some(agent.identity_revision)
+                && agent.name == identity.display_name
+                && agent.site == identity.site
+                && agent.location == identity.location
+                && agent.labels == identity.labels
+            {
+                return Ok(agent.clone());
+            }
+            return Err(RepositoryError::NodeIdentityRevisionConflict(
+                agent.identity_revision,
+            ));
+        }
+        agent.name.clone_from(&identity.display_name);
+        agent.site.clone_from(&identity.site);
+        agent.location.clone_from(&identity.location);
+        agent.labels.clone_from(&identity.labels);
+        agent.identity_revision = agent
+            .identity_revision
+            .checked_add(1)
+            .ok_or_else(|| RepositoryError::Persistence("identity revision exhausted".into()))?;
         Ok(agent.clone())
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "memory parity keeps connector revocation and accepted-job fencing atomic"
+    )]
     async fn revoke_agent(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         agent_id: AgentId,
-    ) -> Result<(), RepositoryError> {
+    ) -> Result<Vec<Job>, RepositoryError> {
         let mut state = self.state.write().await;
         let belongs_to_tenant =
             state
@@ -4516,8 +5157,133 @@ impl Repository for MemoryRepository {
         if !belongs_to_tenant {
             return Err(RepositoryError::NotFound);
         }
+        let revoked_at = Utc::now();
+        let mut affected_jobs = Vec::new();
+        loop {
+            let accepted_jobs = state
+                .job_acceptances
+                .iter()
+                .filter_map(|(job_id, acceptance)| {
+                    (acceptance.agent_id == agent_id).then_some(*job_id)
+                })
+                .filter(|job_id| {
+                    state.jobs.get(job_id).is_some_and(|record| {
+                        record.job.workspace_id == workspace_id
+                            && record.job.environment_id == environment_id
+                            && !record.job.state.is_terminal()
+                    })
+                })
+                .take(256)
+                .collect::<Vec<_>>();
+            if accepted_jobs.is_empty() {
+                break;
+            }
+            for job_id in accepted_jobs {
+                let job = {
+                    let record = state
+                        .jobs
+                        .get_mut(&job_id)
+                        .ok_or(RepositoryError::NotFound)?;
+                    record.job.state = JobState::DeliveryUncertain;
+                    record.job.delivery_uncertain_since = Some(revoked_at);
+                    record.sequence = record.sequence.saturating_add(1);
+                    record.events.push(JobEvent {
+                        id: EventId::new(),
+                        job_id,
+                        sequence: record.sequence,
+                        state: JobState::DeliveryUncertain,
+                        reason: Some(piqae_domain::JobFailureReason::AmbiguousHandoff),
+                        message: Some(
+                            "Node revoked with accepted work and unreported delivery".into(),
+                        ),
+                        agent_id: Some(agent_id),
+                        native_job_id: None,
+                        occurred_at: revoked_at,
+                    });
+                    record.job.clone()
+                };
+                let payload = serde_json::to_value(&job)
+                    .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+                for event_type in ["job.updated", "job.delivery_uncertain"] {
+                    enqueue_memory_webhook_event(
+                        &mut state,
+                        Some(&acceptance_revocation_webhook_idempotency_key(
+                            workspace_id,
+                            environment_id,
+                            job_id,
+                            event_type,
+                        )),
+                        workspace_id,
+                        environment_id,
+                        event_type,
+                        &payload,
+                    );
+                }
+                if affected_jobs.len() < 256 {
+                    affected_jobs.push(job);
+                }
+            }
+        }
+        for ((connector_workspace, connector_environment, connector_agent, _), connector) in
+            &mut state.node_connectors
+        {
+            if *connector_workspace == workspace_id
+                && *connector_environment == environment_id
+                && *connector_agent == agent_id
+                && connector.revoked_at.is_none()
+            {
+                connector.revoked_at = Some(revoked_at);
+            }
+        }
+        for item in state.wake_hint_outbox.values_mut().filter(|item| {
+            item.workspace_id == workspace_id
+                && item.environment_id == environment_id
+                && item.hint.agent_id == agent_id.to_string()
+        }) {
+            if item.hint.status == "pending" {
+                item.hint.status = "cancelled".into();
+            }
+            item.processed_at.get_or_insert(revoked_at);
+            item.claimed_until = None;
+        }
+        let waiting_jobs = state
+            .jobs
+            .iter()
+            .filter(|(_, record)| {
+                record.job.workspace_id == workspace_id
+                    && record.job.environment_id == environment_id
+                    && record.agent_id == agent_id
+                    && matches!(
+                        record.job.state,
+                        JobState::Registered
+                            | JobState::ContentPending
+                            | JobState::WaitingForAgent
+                            | JobState::AgentDownloading
+                    )
+            })
+            .map(|(job_id, _)| *job_id)
+            .collect::<Vec<_>>();
+        for job_id in waiting_jobs {
+            if let Some(record) = state.jobs.get_mut(&job_id) {
+                record.job.state = JobState::WaitingForAgent;
+            }
+            state.leases.remove(&job_id);
+        }
+        state
+            .agent_installations
+            .retain(|_, installed_agent| *installed_agent != agent_id);
         state.agents.remove(&agent_id);
-        Ok(())
+        drop(state);
+        self.destination_topology
+            .revoke_agent_topology(
+                TenantScope {
+                    workspace_id,
+                    environment_id,
+                },
+                &agent_id.to_string(),
+            )
+            .map_err(RepositoryError::from)?;
+        Ok(affected_jobs)
     }
 
     async fn list_node_connectors(
@@ -4548,13 +5314,17 @@ impl Repository for MemoryRepository {
         )
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "memory parity keeps credential fencing, accepted-job terminalization and its outbox atomic"
+    )]
     async fn revoke_node_connector(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         agent_id: AgentId,
         connector_id: &str,
-    ) -> Result<(), RepositoryError> {
+    ) -> Result<Vec<Job>, RepositoryError> {
         let mut state = self.state.write().await;
         let created_at = state
             .agents
@@ -4573,18 +5343,91 @@ impl Repository for MemoryRepository {
             agent_id,
             connector_id.to_owned(),
         );
-        let connector = state.node_connectors.entry(key).or_insert_with(|| StoredNodeConnector {
-            id: connector_id.to_owned(),
-            node_id: agent_id,
-            permissions: serde_json::json!({"printers":"all","print_jobs":"create_and_monitor"}),
-            revoked_at: None,
-            created_at,
-        });
-        if connector.revoked_at.is_some() {
-            return Err(RepositoryError::NotFound);
+        {
+            let connector =
+                state
+                    .node_connectors
+                    .entry(key)
+                    .or_insert_with(|| StoredNodeConnector {
+                        id: connector_id.to_owned(),
+                        node_id: agent_id,
+                        permissions: serde_json::json!({"printers":"all","print_jobs":"create_and_monitor"}),
+                        revoked_at: None,
+                        created_at,
+                    });
+            if connector.revoked_at.is_none() {
+                connector.revoked_at = Some(Utc::now());
+            }
         }
-        connector.revoked_at = Some(Utc::now());
-        Ok(())
+        let now = Utc::now();
+        let mut affected_jobs = Vec::new();
+        loop {
+            let mut outstanding = state
+                .job_acceptances
+                .iter()
+                .filter_map(|(job_id, acceptance)| {
+                    (acceptance.agent_id == agent_id).then_some(*job_id)
+                })
+                .filter(|job_id| {
+                    state.jobs.get(job_id).is_some_and(|record| {
+                        record.job.workspace_id == workspace_id
+                            && record.job.environment_id == environment_id
+                            && !record.job.state.is_terminal()
+                    })
+                })
+                .take(256)
+                .collect::<Vec<_>>();
+            if outstanding.is_empty() {
+                break;
+            }
+            outstanding.sort_unstable();
+            for job_id in outstanding {
+                let job = {
+                    let record = state
+                        .jobs
+                        .get_mut(&job_id)
+                        .ok_or(RepositoryError::NotFound)?;
+                    record.job.state = JobState::DeliveryUncertain;
+                    record.job.delivery_uncertain_since = Some(now);
+                    record.sequence = record.sequence.saturating_add(1);
+                    record.events.push(JobEvent {
+                        id: EventId::new(),
+                        job_id,
+                        sequence: record.sequence,
+                        state: JobState::DeliveryUncertain,
+                        reason: Some(piqae_domain::JobFailureReason::AmbiguousHandoff),
+                        message: Some(
+                            "Connector revoked with accepted work and unreported delivery".into(),
+                        ),
+                        agent_id: Some(agent_id),
+                        native_job_id: None,
+                        occurred_at: now,
+                    });
+                    record.job.clone()
+                };
+                let payload = serde_json::to_value(&job)
+                    .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+                for event_type in ["job.updated", "job.delivery_uncertain"] {
+                    enqueue_memory_webhook_event(
+                        &mut state,
+                        Some(&acceptance_revocation_webhook_idempotency_key(
+                            workspace_id,
+                            environment_id,
+                            job_id,
+                            event_type,
+                        )),
+                        workspace_id,
+                        environment_id,
+                        event_type,
+                        &payload,
+                    );
+                }
+                if affected_jobs.len() < 256 {
+                    affected_jobs.push(job);
+                }
+            }
+        }
+        Ok(affected_jobs)
     }
 
     async fn get_node_update(
@@ -5274,6 +6117,10 @@ impl Repository for MemoryRepository {
         let agent = StoredAgent {
             id: agent_id,
             name: proposed_name,
+            site: None,
+            location: None,
+            labels: Vec::new(),
+            identity_revision: 1,
             platform,
             state: "disconnected".into(),
             version,
@@ -5283,11 +6130,16 @@ impl Repository for MemoryRepository {
             sqlite_integrity_ok: None,
             executor_crashes: 0,
             last_error_code: None,
+            document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
         };
         state
             .agents
             .insert(agent_id, (workspace_id, environment_id, agent));
+        let installation_key = installation.2.clone();
         state.agent_installations.insert(installation, agent_id);
+        state
+            .installation_public_keys
+            .insert(installation_key, public_key.clone());
         state.agent_public_keys.insert(agent_id, public_key);
         Ok(EnrolledAgent {
             agent_id,
@@ -5350,6 +6202,10 @@ impl Repository for MemoryRepository {
                 StoredAgent {
                     id: agent_id,
                     name: name.into(),
+                    site: None,
+                    location: None,
+                    labels: Vec::new(),
+                    identity_revision: 1,
                     platform: platform.into(),
                     state: "connected".into(),
                     version: version.into(),
@@ -5359,6 +6215,7 @@ impl Repository for MemoryRepository {
                     sqlite_integrity_ok: None,
                     executor_crashes: 0,
                     last_error_code: None,
+                    document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
                 },
             ),
         );
@@ -5370,6 +6227,109 @@ impl Repository for MemoryRepository {
             workspace_id,
             environment_id,
             connector_id: Some(format!("ncon_{agent_id}")),
+        })
+    }
+
+    async fn enrol_agent_connector_with_billing(
+        &self,
+        secret_hash: &str,
+        public_key: &[u8],
+        name: &str,
+        hostname: &str,
+        platform: &str,
+        architecture: &str,
+        version: &str,
+        protocol_version: u16,
+        _enforce_cloud_billing: bool,
+        installation_id: &str,
+        installation_public_key: &[u8],
+        printer_grant: &str,
+        allowed_printer_ids: &[String],
+    ) -> Result<EnrolledAgent, RepositoryError> {
+        {
+            let state = self.state.read().await;
+            if state
+                .installation_public_keys
+                .get(installation_id)
+                .is_some_and(|existing| existing != installation_public_key)
+            {
+                return Err(RepositoryError::NotFound);
+            }
+        }
+        let enrolled = self
+            .enrol_agent(
+                secret_hash,
+                public_key,
+                name,
+                hostname,
+                platform,
+                architecture,
+                version,
+                protocol_version,
+            )
+            .await?;
+        let connector_id = enrolled
+            .connector_id
+            .clone()
+            .unwrap_or_else(|| format!("ncon_{}", enrolled.agent_id));
+        let mut state = self.state.write().await;
+        state
+            .installation_public_keys
+            .entry(installation_id.to_owned())
+            .or_insert_with(|| installation_public_key.to_vec());
+        state.agent_installations.insert(
+            (
+                enrolled.workspace_id,
+                enrolled.environment_id,
+                installation_id.to_owned(),
+            ),
+            enrolled.agent_id,
+        );
+        let printers = if printer_grant == "all_local_printers" {
+            serde_json::Value::String("all".into())
+        } else {
+            serde_json::to_value(allowed_printer_ids).map_err(|_| RepositoryError::NotFound)?
+        };
+        let generation_key = (
+            enrolled.workspace_id,
+            enrolled.environment_id,
+            enrolled.agent_id,
+        );
+        let resurrecting_revoked_connector =
+            state
+                .node_connectors
+                .iter()
+                .any(|((workspace, environment, node, _), connector)| {
+                    *workspace == enrolled.workspace_id
+                        && *environment == enrolled.environment_id
+                        && *node == enrolled.agent_id
+                        && connector.revoked_at.is_some()
+                });
+        let generation = state
+            .connector_generations
+            .entry(generation_key)
+            .or_insert(1);
+        if resurrecting_revoked_connector {
+            *generation = generation.saturating_add(1);
+        }
+        state.node_connectors.insert(
+            (
+                enrolled.workspace_id,
+                enrolled.environment_id,
+                enrolled.agent_id,
+                connector_id.clone(),
+            ),
+            StoredNodeConnector {
+                id: connector_id.clone(),
+                node_id: enrolled.agent_id,
+                permissions: serde_json::json!({"printers":printers,"print_jobs":"create_and_monitor"}),
+                revoked_at: None,
+                created_at: Utc::now(),
+            },
+        );
+        Ok(EnrolledAgent {
+            connector_id: Some(connector_id),
+            ..enrolled
         })
     }
 
@@ -5485,45 +6445,33 @@ impl Repository for MemoryRepository {
         payload: &serde_json::Value,
     ) -> Result<String, RepositoryError> {
         let mut state = self.state.write().await;
-        let event_id = EventId::new().to_string();
-        let event_occurred_at = Utc::now();
-        let endpoints = state
-            .webhooks
-            .values()
-            .filter(|(workspace, environment, endpoint, _)| {
-                *workspace == workspace_id
-                    && *environment == environment_id
-                    && endpoint.enabled
-                    && endpoint.events.iter().any(|event| event == event_type)
-            })
-            .map(|(_, _, endpoint, secret)| (endpoint.url.clone(), secret.clone()))
-            .collect::<Vec<_>>();
-        for (url, secret_ciphertext) in endpoints {
-            let id = format!("whd_{}", ulid::Ulid::new());
-            state.webhook_work.insert(
-                id.clone(),
-                WebhookDeliveryWork {
-                    id,
-                    event_id: event_id.clone(),
-                    event_type: event_type.into(),
-                    url,
-                    secret_ciphertext,
-                    payload: payload.clone(),
-                    event_occurred_at,
-                    attempt: 0,
-                },
-            );
-        }
-        state.tenant_events.push((
+        Ok(enqueue_memory_webhook_event(
+            &mut state,
+            None,
             workspace_id,
             environment_id,
-            StoredTenantEvent {
-                id: event_id.clone(),
-                event_type: event_type.into(),
-                payload: payload.clone(),
-            },
-        ));
-        Ok(event_id)
+            event_type,
+            payload,
+        ))
+    }
+
+    async fn enqueue_webhook_event_idempotently(
+        &self,
+        idempotency_key: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        event_type: &str,
+        payload: &serde_json::Value,
+    ) -> Result<String, RepositoryError> {
+        let mut state = self.state.write().await;
+        Ok(enqueue_memory_webhook_event(
+            &mut state,
+            Some(idempotency_key),
+            workspace_id,
+            environment_id,
+            event_type,
+            payload,
+        ))
     }
 
     async fn list_tenant_events(
@@ -5553,15 +6501,72 @@ impl Repository for MemoryRepository {
         &self,
         limit: i64,
     ) -> Result<Vec<WebhookDeliveryWork>, RepositoryError> {
-        Ok(self
-            .state
-            .read()
-            .await
-            .webhook_work
-            .values()
-            .take(usize::try_from(limit.clamp(1, 100)).unwrap_or(100))
-            .cloned()
-            .collect())
+        let limit = usize::try_from(limit.clamp(1, 100)).unwrap_or(100);
+        let mut state = self.state.write().await;
+        let mut missing = Vec::new();
+        'events: for (workspace, environment, event) in &state.tenant_events {
+            for (webhook_id, (hook_workspace, hook_environment, endpoint, secret)) in
+                &state.webhooks
+            {
+                let subscribed = endpoint.events.iter().any(|pattern| {
+                    pattern == &event.event_type
+                        || pattern
+                            .strip_suffix(".*")
+                            .is_some_and(|prefix| event.event_type.starts_with(prefix))
+                });
+                let event_occurred_at = state
+                    .tenant_event_occurred_at
+                    .get(&event.id)
+                    .copied()
+                    .unwrap_or_else(Utc::now);
+                if endpoint.enabled
+                    && workspace == hook_workspace
+                    && environment == hook_environment
+                    && event_occurred_at >= endpoint.created_at
+                    && subscribed
+                    && !state
+                        .webhook_materializations
+                        .contains(&(event.id.clone(), webhook_id.clone()))
+                {
+                    missing.push((
+                        event.clone(),
+                        webhook_id.clone(),
+                        endpoint.url.clone(),
+                        secret.clone(),
+                    ));
+                    if missing.len() == limit {
+                        break 'events;
+                    }
+                }
+            }
+        }
+        for (event, webhook_id, url, secret_ciphertext) in missing {
+            let digest = Sha256::digest(format!("{}:{webhook_id}", event.id).as_bytes());
+            let id = format!("whd_0{digest:x}");
+            let id = id[..30].to_owned();
+            state
+                .webhook_materializations
+                .insert((event.id.clone(), webhook_id));
+            let event_occurred_at = state
+                .tenant_event_occurred_at
+                .get(&event.id)
+                .copied()
+                .unwrap_or_else(Utc::now);
+            state
+                .webhook_work
+                .entry(id.clone())
+                .or_insert_with(|| WebhookDeliveryWork {
+                    id,
+                    event_id: event.id,
+                    event_type: event.event_type,
+                    url,
+                    secret_ciphertext,
+                    payload: event.payload,
+                    event_occurred_at,
+                    attempt: 0,
+                });
+        }
+        Ok(state.webhook_work.values().take(limit).cloned().collect())
     }
 
     async fn record_webhook_attempt(
@@ -6319,6 +7324,122 @@ impl Repository for MemoryRepository {
         Ok(record.job.clone())
     }
 
+    async fn ensure_waiting_job_wake_hints(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        job_id: JobId,
+    ) -> Result<usize, RepositoryError> {
+        let mut state = self.state.write().await;
+        ensure_memory_waiting_job_wake_hint(&mut state, workspace_id, environment_id, job_id)
+    }
+
+    async fn repair_waiting_job_wake_hints(&self, limit: i64) -> Result<usize, RepositoryError> {
+        let mut state = self.state.write().await;
+        let mut pending = state
+            .jobs
+            .iter()
+            .filter(|(_, record)| record.job.state == JobState::WaitingForAgent)
+            .filter(|(job_id, record)| {
+                !state.wake_reconciliations.contains_key(&(
+                    record.job.workspace_id,
+                    record.job.environment_id,
+                    **job_id,
+                    record.sequence,
+                ))
+            })
+            .map(|(job_id, record)| {
+                (
+                    record.job.created_at,
+                    *job_id,
+                    record.job.workspace_id,
+                    record.job.environment_id,
+                )
+            })
+            .collect::<Vec<_>>();
+        pending.sort_by_key(|(created_at, job_id, _, _)| (*created_at, *job_id));
+        pending.truncate(usize::try_from(limit.clamp(1, 100)).unwrap_or(100));
+        let mut repaired = 0_usize;
+        for (_, job_id, workspace_id, environment_id) in pending {
+            repaired = repaired.saturating_add(ensure_memory_waiting_job_wake_hint(
+                &mut state,
+                workspace_id,
+                environment_id,
+                job_id,
+            )?);
+        }
+        Ok(repaired)
+    }
+
+    async fn claim_wake_hint_dispatches(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<PendingWakeHintDispatch>, RepositoryError> {
+        let now = Utc::now();
+        let mut state = self.state.write().await;
+        let mut ids = state
+            .wake_hint_outbox
+            .iter()
+            .filter(|(_, item)| {
+                item.processed_at.is_none()
+                    && item.available_at <= now
+                    && item.claimed_until.is_none_or(|until| until <= now)
+                    && item.hint.status == "pending"
+                    && item.hint.expires_at > now
+            })
+            .map(|(id, item)| (item.available_at, id.clone()))
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.truncate(usize::try_from(limit.clamp(1, 100)).unwrap_or(100));
+        let mut claimed = Vec::with_capacity(ids.len());
+        for (_, outbox_id) in ids {
+            if let Some(item) = state.wake_hint_outbox.get_mut(&outbox_id) {
+                item.attempts = item.attempts.saturating_add(1);
+                item.claimed_until = Some(now + chrono::Duration::seconds(30));
+                claimed.push(PendingWakeHintDispatch {
+                    outbox_id,
+                    workspace_id: item.workspace_id,
+                    environment_id: item.environment_id,
+                    hint: item.hint.clone(),
+                    idempotency_key: item.idempotency_key.clone(),
+                    attempt: item.attempts,
+                });
+            }
+        }
+        Ok(claimed)
+    }
+
+    async fn complete_wake_hint_dispatch(&self, outbox_id: &str) -> Result<(), RepositoryError> {
+        let mut state = self.state.write().await;
+        let item = state
+            .wake_hint_outbox
+            .get_mut(outbox_id)
+            .ok_or(RepositoryError::NotFound)?;
+        if item.processed_at.is_some() {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        item.processed_at = Some(Utc::now());
+        item.claimed_until = None;
+        Ok(())
+    }
+
+    async fn retry_wake_hint_dispatch(
+        &self,
+        outbox_id: &str,
+        delay: StdDuration,
+    ) -> Result<(), RepositoryError> {
+        let mut state = self.state.write().await;
+        let item = state
+            .wake_hint_outbox
+            .get_mut(outbox_id)
+            .ok_or(RepositoryError::NotFound)?;
+        item.available_at = Utc::now()
+            + chrono::Duration::from_std(delay)
+                .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+        item.claimed_until = None;
+        Ok(())
+    }
+
     async fn request_job_cancellation(
         &self,
         workspace_id: WorkspaceId,
@@ -6326,11 +7447,11 @@ impl Repository for MemoryRepository {
         job_id: JobId,
     ) -> Result<Job, RepositoryError> {
         let mut state = self.state.write().await;
-        let (job, assigned_agent) = {
-            let record = state
-                .jobs
-                .get_mut(&job_id)
-                .ok_or(RepositoryError::NotFound)?;
+        let accepted = state.job_acceptances.contains_key(&job_id);
+        let (job, assigned_agent, terminalized_locally) = {
+            let Some(record) = state.jobs.get_mut(&job_id) else {
+                return Err(RepositoryError::NotFound);
+            };
             if record.job.workspace_id != workspace_id
                 || record.job.environment_id != environment_id
             {
@@ -6351,8 +7472,40 @@ impl Repository for MemoryRepository {
                 native_job_id: None,
                 occurred_at: Utc::now(),
             });
-            (record.job.clone(), record.agent_id)
+            if !accepted {
+                record.job.state = JobState::Cancelled;
+                record.sequence = record.sequence.saturating_add(1);
+                record.events.push(JobEvent {
+                    id: EventId::new(),
+                    job_id,
+                    sequence: record.sequence,
+                    state: JobState::Cancelled,
+                    reason: Some(JobFailureReason::CancelledByUser),
+                    message: Some("Cancellation completed before node acceptance".into()),
+                    agent_id: None,
+                    native_job_id: None,
+                    occurred_at: Utc::now(),
+                });
+            }
+            (record.job.clone(), record.agent_id, !accepted)
         };
+        if terminalized_locally {
+            let payload = serde_json::to_value(&job)
+                .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+            enqueue_memory_webhook_event(
+                &mut state,
+                Some(&preaccept_cancellation_webhook_idempotency_key(
+                    workspace_id,
+                    environment_id,
+                    job_id,
+                )),
+                workspace_id,
+                environment_id,
+                "job.updated",
+                &payload,
+            );
+            return Ok(job);
+        }
         state.next_agent_command_cursor = state.next_agent_command_cursor.saturating_add(1);
         let cursor = state.next_agent_command_cursor;
         state
@@ -6368,6 +7521,74 @@ impl Repository for MemoryRepository {
         Ok(job)
     }
 
+    async fn retire_terminal_absent_local_cancellation(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+    ) -> Result<bool, RepositoryError> {
+        let mut state = self.state.write().await;
+        let accepted = state.job_acceptances.contains_key(&job_id);
+        let updated_job = {
+            let Some(record) = state.jobs.get_mut(&job_id) else {
+                return Ok(false);
+            };
+            if record.job.workspace_id != workspace_id
+                || record.job.environment_id != environment_id
+                || record.agent_id != agent_id
+                || accepted
+                || (!record.job.state.is_terminal()
+                    && record.job.state != JobState::CancelRequested)
+            {
+                return Ok(false);
+            }
+            if record.job.state.is_terminal() {
+                None
+            } else {
+                record.job.state = JobState::Cancelled;
+                record.sequence = record.sequence.saturating_add(1);
+                record.events.push(JobEvent {
+                    id: EventId::new(),
+                    job_id,
+                    sequence: record.sequence,
+                    state: JobState::Cancelled,
+                    reason: Some(JobFailureReason::CancelledByUser),
+                    message: Some("Cancellation completed before node acceptance".into()),
+                    agent_id: Some(agent_id),
+                    native_job_id: None,
+                    occurred_at: Utc::now(),
+                });
+                Some(record.job.clone())
+            }
+        };
+        if let Some(job) = updated_job {
+            let payload = serde_json::to_value(&job)
+                .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+            enqueue_memory_webhook_event(
+                &mut state,
+                Some(&preaccept_cancellation_webhook_idempotency_key(
+                    workspace_id,
+                    environment_id,
+                    job_id,
+                )),
+                workspace_id,
+                environment_id,
+                "job.updated",
+                &payload,
+            );
+        }
+        if let Some(commands) = state.agent_commands.get_mut(&agent_id) {
+            for stored in commands {
+                if matches!(stored.command, AgentCommand::CancelJob { job_id: candidate } if candidate == job_id)
+                {
+                    stored.acknowledged = true;
+                }
+            }
+        }
+        Ok(true)
+    }
+
     async fn claim_jobs(
         &self,
         workspace_id: WorkspaceId,
@@ -6378,7 +7599,8 @@ impl Repository for MemoryRepository {
     ) -> Result<Vec<JobLease>, RepositoryError> {
         let lease_until = Utc::now() + chrono::Duration::seconds(30);
         let mut state = self.state.write().await;
-        let jobs = state
+        let now = Utc::now();
+        let mut jobs = state
             .jobs
             .values()
             .filter(|record| {
@@ -6389,10 +7611,19 @@ impl Repository for MemoryRepository {
                         record.job.state,
                         JobState::WaitingForAgent | JobState::FailedRetryable
                     )
+                    && state
+                        .leases
+                        .get(&record.job.id)
+                        .is_none_or(|(_, _, _, expiry)| *expiry <= now)
             })
-            .take(usize::try_from(limit.clamp(1, 100)).unwrap_or(100))
             .map(|record| record.job.clone())
             .collect::<Vec<_>>();
+        jobs.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.to_string().cmp(&right.id.to_string()))
+        });
+        jobs.truncate(usize::try_from(limit.clamp(1, 100)).unwrap_or(100));
         let mut leases = Vec::with_capacity(jobs.len());
         for job in jobs {
             let lease_id = Uuid::new_v4();
@@ -6478,6 +7709,367 @@ impl Repository for MemoryRepository {
         .await?;
         self.state.write().await.leases.remove(&job_id);
         Ok(())
+    }
+
+    async fn block_agent_lease_for_node_update(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+    ) -> Result<PreHandoffTransitionOutcome, RepositoryError> {
+        let mut state = self.state.write().await;
+        let valid_lease = state.leases.get(&job_id).is_some_and(
+            |(stored_agent, stored_id, stored_token, expiry)| {
+                *stored_agent == agent_id
+                    && *stored_id == lease_id
+                    && stored_token == lease_token
+                    && *expiry > Utc::now()
+            },
+        );
+        if !valid_lease {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        if state.job_acceptances.contains_key(&job_id) {
+            return Ok(PreHandoffTransitionOutcome::UnsafeLocalResponsibility);
+        }
+        let (job, sequence) = {
+            let record = state
+                .jobs
+                .get_mut(&job_id)
+                .filter(|record| {
+                    record.job.workspace_id == workspace_id
+                        && record.job.environment_id == environment_id
+                        && record.agent_id == agent_id
+                        && matches!(
+                            record.job.state,
+                            JobState::WaitingForAgent | JobState::FailedRetryable
+                        )
+                })
+                .ok_or(RepositoryError::NotFound)?;
+            record.sequence = record.sequence.saturating_add(1);
+            record.job.state = JobState::Blocked;
+            record.events.push(JobEvent {
+                id: EventId::new(),
+                job_id,
+                sequence: record.sequence,
+                state: JobState::Blocked,
+                reason: Some(JobFailureReason::NodeUpdateRequired),
+                message: Some(
+                    "Assigned node requires an update for this job's exact print capabilities"
+                        .into(),
+                ),
+                // Server provenance keeps this distinct from a physical block
+                // reported by the authenticated node.
+                agent_id: None,
+                native_job_id: None,
+                occurred_at: Utc::now(),
+            });
+            (record.job.clone(), record.sequence)
+        };
+        state.leases.remove(&job_id);
+        state
+            .capability_recovery_next_checks
+            .insert(job_id, Utc::now());
+        let payload = serde_json::to_value(&job)
+            .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+        let webhook_idempotency_key = node_update_required_webhook_idempotency_key(
+            workspace_id,
+            environment_id,
+            job_id,
+            sequence,
+        );
+        enqueue_memory_webhook_event(
+            &mut state,
+            Some(&webhook_idempotency_key),
+            workspace_id,
+            environment_id,
+            "job.updated",
+            &payload,
+        );
+        Ok(PreHandoffTransitionOutcome::Transitioned(Box::new(
+            DurableJobTransition {
+                job,
+                webhook_idempotency_key,
+            },
+        )))
+    }
+
+    async fn fail_agent_lease_before_handoff(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        reason: JobFailureReason,
+        message: &str,
+    ) -> Result<PreHandoffTransitionOutcome, RepositoryError> {
+        let mut state = self.state.write().await;
+        let valid_lease = state.leases.get(&job_id).is_some_and(
+            |(stored_agent, stored_id, stored_token, expiry)| {
+                *stored_agent == agent_id
+                    && *stored_id == lease_id
+                    && stored_token == lease_token
+                    && *expiry > Utc::now()
+            },
+        );
+        if !valid_lease {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        if state.job_acceptances.contains_key(&job_id) {
+            return Ok(PreHandoffTransitionOutcome::UnsafeLocalResponsibility);
+        }
+        let (job, sequence) = {
+            let record = state
+                .jobs
+                .get_mut(&job_id)
+                .filter(|record| {
+                    record.job.workspace_id == workspace_id
+                        && record.job.environment_id == environment_id
+                        && record.agent_id == agent_id
+                        && matches!(
+                            record.job.state,
+                            JobState::WaitingForAgent | JobState::FailedRetryable
+                        )
+                })
+                .ok_or(RepositoryError::NotFound)?;
+            record.sequence = record.sequence.saturating_add(1);
+            record.job.state = JobState::FailedTerminal;
+            record.events.push(JobEvent {
+                id: EventId::new(),
+                job_id,
+                sequence: record.sequence,
+                state: JobState::FailedTerminal,
+                reason: Some(reason),
+                message: Some(message.to_owned()),
+                agent_id: None,
+                native_job_id: None,
+                occurred_at: Utc::now(),
+            });
+            (record.job.clone(), record.sequence)
+        };
+        state.leases.remove(&job_id);
+        state.capability_recovery_next_checks.remove(&job_id);
+        let payload = serde_json::to_value(&job)
+            .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+        let webhook_idempotency_key = prehandoff_failure_webhook_idempotency_key(
+            workspace_id,
+            environment_id,
+            job_id,
+            sequence,
+        );
+        enqueue_memory_webhook_event(
+            &mut state,
+            Some(&webhook_idempotency_key),
+            workspace_id,
+            environment_id,
+            "job.updated",
+            &payload,
+        );
+        Ok(PreHandoffTransitionOutcome::Transitioned(Box::new(
+            DurableJobTransition {
+                job,
+                webhook_idempotency_key,
+            },
+        )))
+    }
+
+    async fn list_node_update_required_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, RepositoryError> {
+        let mut state = self.state.write().await;
+        let now = Utc::now();
+        let mut jobs = state
+            .jobs
+            .values()
+            .filter(|record| {
+                record.job.workspace_id == workspace_id
+                    && record.job.environment_id == environment_id
+                    && record.agent_id == agent_id
+                    && record.job.state == JobState::Blocked
+                    && record.job.expires_at > Utc::now()
+                    && state
+                        .capability_recovery_next_checks
+                        .get(&record.job.id)
+                        .is_none_or(|next_check_at| *next_check_at <= now)
+                    && record.events.last().is_some_and(|event| {
+                        event.reason == Some(JobFailureReason::NodeUpdateRequired)
+                            && event.agent_id.is_none()
+                    })
+            })
+            .map(|record| record.job.clone())
+            .collect::<Vec<_>>();
+        jobs.sort_by(|left, right| {
+            state
+                .capability_recovery_next_checks
+                .get(&left.id)
+                .cmp(&state.capability_recovery_next_checks.get(&right.id))
+                .then_with(|| left.created_at.cmp(&right.created_at))
+                .then_with(|| left.id.to_string().cmp(&right.id.to_string()))
+        });
+        jobs.truncate(usize::try_from(limit.clamp(1, 100)).unwrap_or(100));
+        let next_check_at = now + chrono::Duration::seconds(30);
+        for job in &jobs {
+            state
+                .capability_recovery_next_checks
+                .insert(job.id, next_check_at);
+        }
+        Ok(jobs)
+    }
+
+    async fn recover_node_update_required_job(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+    ) -> Result<Option<DurableJobTransition>, RepositoryError> {
+        let mut state = self.state.write().await;
+        let (job, sequence) = {
+            let Some(record) = state.jobs.get_mut(&job_id).filter(|record| {
+                record.job.workspace_id == workspace_id
+                    && record.job.environment_id == environment_id
+                    && record.agent_id == agent_id
+                    && record.job.state == JobState::Blocked
+                    && record.job.expires_at > Utc::now()
+                    && record.events.last().is_some_and(|event| {
+                        event.reason == Some(JobFailureReason::NodeUpdateRequired)
+                            && event.agent_id.is_none()
+                    })
+            }) else {
+                return Ok(None);
+            };
+            // This is the only server-authorized Blocked -> Waiting transition:
+            // the latest durable event proves this was a pre-handoff capability
+            // block rather than a physical spooler observation.
+            record.sequence = record.sequence.saturating_add(1);
+            record.job.state = JobState::WaitingForAgent;
+            record.events.push(JobEvent {
+                id: EventId::new(),
+                job_id,
+                sequence: record.sequence,
+                state: JobState::WaitingForAgent,
+                reason: None,
+                message: Some("Node print capabilities restored; job returned to queue".into()),
+                agent_id: None,
+                native_job_id: None,
+                occurred_at: Utc::now(),
+            });
+            (record.job.clone(), record.sequence)
+        };
+        state.capability_recovery_next_checks.remove(&job_id);
+        let payload = serde_json::to_value(&job)
+            .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+        let webhook_idempotency_key = node_capability_recovered_webhook_idempotency_key(
+            workspace_id,
+            environment_id,
+            job_id,
+            sequence,
+        );
+        enqueue_memory_webhook_event(
+            &mut state,
+            Some(&webhook_idempotency_key),
+            workspace_id,
+            environment_id,
+            "job.updated",
+            &payload,
+        );
+        Ok(Some(DurableJobTransition {
+            job,
+            webhook_idempotency_key,
+        }))
+    }
+
+    async fn expire_jobs_before_handoff(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<ExpiredJobTransition>, RepositoryError> {
+        let mut state = self.state.write().await;
+        let now = Utc::now();
+        let mut candidates = state
+            .jobs
+            .values()
+            .filter(|record| {
+                record.job.expires_at <= now
+                    && !record.job.state.is_terminal()
+                    && !state.job_acceptances.contains_key(&record.job.id)
+                    && (matches!(
+                        record.job.state,
+                        JobState::Registered
+                            | JobState::ContentPending
+                            | JobState::WaitingForAgent
+                            | JobState::FailedRetryable
+                    ) || (record.job.state == JobState::Blocked
+                        && state
+                            .capability_recovery_next_checks
+                            .contains_key(&record.job.id)
+                        && record.events.last().is_some_and(|event| {
+                            event.reason == Some(JobFailureReason::NodeUpdateRequired)
+                                && event.agent_id.is_none()
+                        })))
+            })
+            .map(|record| (record.job.expires_at, record.job.created_at, record.job.id))
+            .collect::<Vec<_>>();
+        candidates.sort();
+        candidates.truncate(usize::try_from(limit.clamp(1, 100)).unwrap_or(100));
+        let mut expired = Vec::with_capacity(candidates.len());
+        for (_, _, job_id) in candidates {
+            let (job, sequence) = {
+                let record = state
+                    .jobs
+                    .get_mut(&job_id)
+                    .ok_or(RepositoryError::ConcurrentStateChange)?;
+                record.sequence = record.sequence.saturating_add(1);
+                record.job.state = JobState::Expired;
+                record.events.push(JobEvent {
+                    id: EventId::new(),
+                    job_id,
+                    sequence: record.sequence,
+                    state: JobState::Expired,
+                    reason: Some(JobFailureReason::Expired),
+                    message: Some("Job expired before node or native handoff".into()),
+                    agent_id: None,
+                    native_job_id: None,
+                    occurred_at: now,
+                });
+                (record.job.clone(), record.sequence)
+            };
+            state.leases.remove(&job_id);
+            state.capability_recovery_next_checks.remove(&job_id);
+            let webhook_idempotency_key = prehandoff_expiry_webhook_idempotency_key(
+                job.workspace_id,
+                job.environment_id,
+                job_id,
+                sequence,
+            );
+            let payload = serde_json::to_value(&job)
+                .map_err(|error| RepositoryError::Persistence(error.to_string()))?;
+            enqueue_memory_webhook_event(
+                &mut state,
+                Some(&webhook_idempotency_key),
+                job.workspace_id,
+                job.environment_id,
+                "job.updated",
+                &payload,
+            );
+            expired.push(ExpiredJobTransition {
+                workspace_id: job.workspace_id,
+                environment_id: job.environment_id,
+                transition: DurableJobTransition {
+                    job,
+                    webhook_idempotency_key,
+                },
+            });
+        }
+        Ok(expired)
     }
 
     async fn validate_agent_lease(
@@ -6574,11 +8166,13 @@ impl Repository for MemoryRepository {
                     }
                     Some(_) | None => return Err(RepositoryError::IdempotencyConflict),
                 }
-                return state
+                let job = state
                     .jobs
                     .get(&job_id)
                     .map(|record| record.job.clone())
-                    .ok_or(RepositoryError::NotFound);
+                    .ok_or(RepositoryError::NotFound)?;
+                enqueue_memory_agent_acceptance_event(&mut state, &job)?;
+                return Ok(job);
             }
         }
         self.renew_agent_lease(
@@ -6592,6 +8186,11 @@ impl Repository for MemoryRepository {
         .await?;
         let mut state = self.state.write().await;
         state.leases.remove(&job_id);
+        let connector_generation = state
+            .connector_generations
+            .get(&(workspace_id, environment_id, agent_id))
+            .copied()
+            .unwrap_or(1);
         let record = state
             .jobs
             .get_mut(&job_id)
@@ -6618,9 +8217,284 @@ impl Repository for MemoryRepository {
                 lease_token: Some(lease_token.to_owned()),
                 content_sha256: content_sha256.map(str::to_owned),
                 local_sequence,
+                route_reservation_id: None,
+                route_generation: None,
+                route_fencing_token_hash: None,
+                connector_generation,
             },
         );
+        enqueue_memory_agent_acceptance_event(&mut state, &job)?;
         Ok(job)
+    }
+
+    async fn accept_agent_job_with_delivery_attempt(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        content_sha256: Option<&str>,
+        local_sequence: u64,
+        proof: DeliveryAttemptProof<'_>,
+    ) -> Result<Job, RepositoryError> {
+        let mut state = self.state.write().await;
+        let fence_hash = Sha256::digest(proof.fencing_token.as_bytes()).to_vec();
+        let current_connector_generation = state
+            .connector_generations
+            .get(&(workspace_id, environment_id, agent_id))
+            .copied()
+            .unwrap_or(1);
+        let job_is_accepted = state.jobs.get(&job_id).is_some_and(|record| {
+            record.job.workspace_id == workspace_id
+                && record.job.environment_id == environment_id
+                && record.job.state == JobState::AgentAccepted
+        });
+        if let Some(acceptance) = state.job_acceptances.get_mut(&job_id) {
+            if acceptance.agent_id != agent_id
+                || acceptance.lease_id != lease_id
+                || acceptance.content_sha256.as_deref() != content_sha256
+                || acceptance.local_sequence != local_sequence
+                || acceptance.route_reservation_id.as_deref() != Some(proof.reservation_id)
+                || acceptance.route_generation != Some(proof.generation)
+                || acceptance.route_fencing_token_hash.as_deref() != Some(fence_hash.as_slice())
+                || acceptance.connector_generation != current_connector_generation
+            {
+                return Err(RepositoryError::IdempotencyConflict);
+            }
+            match acceptance.lease_token.as_deref() {
+                Some(stored) if stored == lease_token => {}
+                None if job_is_accepted => acceptance.lease_token = Some(lease_token.to_owned()),
+                Some(_) | None => return Err(RepositoryError::IdempotencyConflict),
+            }
+            let job = state
+                .jobs
+                .get(&job_id)
+                .map(|record| record.job.clone())
+                .ok_or(RepositoryError::NotFound)?;
+            enqueue_memory_agent_acceptance_event(&mut state, &job)?;
+            return Ok(job);
+        }
+
+        let valid_lease = state.leases.get(&job_id).is_some_and(
+            |(stored_agent, stored_id, stored_token, expiry)| {
+                *stored_agent == agent_id
+                    && *stored_id == lease_id
+                    && stored_token == lease_token
+                    && *expiry > Utc::now()
+            },
+        );
+        let valid_job = state.jobs.get(&job_id).is_some_and(|record| {
+            record.job.workspace_id == workspace_id
+                && record.job.environment_id == environment_id
+                && record.agent_id == agent_id
+                && matches!(
+                    record.job.state,
+                    JobState::WaitingForAgent | JobState::AgentDownloading
+                )
+        });
+        let connector_active =
+            memory_connector_is_active(&state, workspace_id, environment_id, agent_id);
+        if !valid_lease || !valid_job || !connector_active {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        let connector_generation = current_connector_generation;
+        state.leases.remove(&job_id);
+        let record = state
+            .jobs
+            .get_mut(&job_id)
+            .ok_or(RepositoryError::NotFound)?;
+        record.job.state = JobState::AgentAccepted;
+        record.sequence = record.sequence.saturating_add(1);
+        record.events.push(JobEvent {
+            id: EventId::new(),
+            job_id,
+            sequence: record.sequence,
+            state: JobState::AgentAccepted,
+            reason: None,
+            message: Some("Agent durably accepted the job".into()),
+            agent_id: Some(agent_id),
+            native_job_id: None,
+            occurred_at: Utc::now(),
+        });
+        let job = record.job.clone();
+        state.job_acceptances.insert(
+            job_id,
+            MemoryJobAcceptance {
+                agent_id,
+                lease_id,
+                lease_token: Some(lease_token.to_owned()),
+                content_sha256: content_sha256.map(str::to_owned),
+                local_sequence,
+                route_reservation_id: Some(proof.reservation_id.to_owned()),
+                route_generation: Some(proof.generation),
+                route_fencing_token_hash: Some(fence_hash),
+                connector_generation,
+            },
+        );
+        enqueue_memory_agent_acceptance_event(&mut state, &job)?;
+        Ok(job)
+    }
+
+    async fn reconcile_agent_acceptance(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        content_sha256: &str,
+        local_sequence: u64,
+        proof: DeliveryAttemptProof<'_>,
+    ) -> Result<(bool, bool, bool), RepositoryError> {
+        let state = self.state.read().await;
+        let scoped_job = state.jobs.get(&job_id).filter(|record| {
+            record.job.workspace_id == workspace_id
+                && record.job.environment_id == environment_id
+                && record.agent_id == agent_id
+        });
+        if scoped_job.is_none() {
+            return Ok((false, false, false));
+        }
+        let agent_active =
+            state
+                .agents
+                .get(&agent_id)
+                .is_some_and(|(workspace, environment, _)| {
+                    *workspace == workspace_id && *environment == environment_id
+                });
+        let current_generation = state
+            .connector_generations
+            .get(&(workspace_id, environment_id, agent_id))
+            .copied()
+            .unwrap_or(1);
+        let exact_evidence = scoped_job.and_then(|record| {
+            state
+                .job_acceptances
+                .get(&job_id)
+                .filter(|acceptance| {
+                    acceptance.agent_id == agent_id
+                        && acceptance.lease_id == lease_id
+                        && acceptance.lease_token.as_deref() == Some(lease_token)
+                        && acceptance.content_sha256.as_deref() == Some(content_sha256)
+                        && acceptance.local_sequence == local_sequence
+                        && acceptance.route_reservation_id.as_deref() == Some(proof.reservation_id)
+                        && acceptance.route_generation == Some(proof.generation)
+                        && acceptance.route_fencing_token_hash.as_deref()
+                            == Some(Sha256::digest(proof.fencing_token.as_bytes()).as_slice())
+                })
+                .map(|acceptance| (record, acceptance))
+        });
+        let connector_revoked = !agent_active
+            || state.node_connectors.iter().any(
+                |((workspace, environment, node, _), connector)| {
+                    *workspace == workspace_id
+                        && *environment == environment_id
+                        && *node == agent_id
+                        && connector.revoked_at.is_some()
+                },
+            );
+        let accepted = agent_active
+            && exact_evidence.is_some_and(|(record, acceptance)| {
+                record.job.state == JobState::AgentAccepted
+                    && acceptance.connector_generation == current_generation
+            });
+        let fenced = exact_evidence.is_some() && !accepted;
+        Ok((accepted, connector_revoked, fenced))
+    }
+
+    async fn abandon_agent_acceptance(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        content_sha256: &str,
+        local_sequence: u64,
+        proof: DeliveryAttemptProof<'_>,
+    ) -> Result<bool, RepositoryError> {
+        let mut state = self.state.write().await;
+        if state
+            .node_connectors
+            .iter()
+            .any(|((workspace, environment, node, _), connector)| {
+                *workspace == workspace_id
+                    && *environment == environment_id
+                    && *node == agent_id
+                    && connector.revoked_at.is_some()
+            })
+        {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        let exact = state
+            .job_acceptances
+            .get(&job_id)
+            .is_some_and(|acceptance| {
+                acceptance.agent_id == agent_id
+                    && acceptance.lease_id == lease_id
+                    && acceptance.lease_token.as_deref() == Some(lease_token)
+                    && acceptance.content_sha256.as_deref() == Some(content_sha256)
+                    && acceptance.local_sequence == local_sequence
+                    && acceptance.route_reservation_id.as_deref() == Some(proof.reservation_id)
+                    && acceptance.route_generation == Some(proof.generation)
+                    && acceptance.route_fencing_token_hash.as_deref()
+                        == Some(Sha256::digest(proof.fencing_token.as_bytes()).as_slice())
+            });
+        if !exact {
+            return Ok(false);
+        }
+        let record = state
+            .jobs
+            .get_mut(&job_id)
+            .ok_or(RepositoryError::NotFound)?;
+        if record.job.workspace_id != workspace_id
+            || record.job.environment_id != environment_id
+            || record.agent_id != agent_id
+        {
+            return Ok(false);
+        }
+        if record.job.state == JobState::Cancelled {
+            return Ok(true);
+        }
+        if !matches!(
+            record.job.state,
+            JobState::AgentAccepted | JobState::CancelRequested
+        ) {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        if record.job.state == JobState::AgentAccepted {
+            record.job.state = JobState::CancelRequested;
+            record.sequence = record.sequence.saturating_add(1);
+            record.events.push(JobEvent {
+                id: EventId::new(),
+                job_id,
+                sequence: record.sequence,
+                state: JobState::CancelRequested,
+                reason: None,
+                message: Some("Connector requested pre-activation compensation".into()),
+                agent_id: Some(agent_id),
+                native_job_id: None,
+                occurred_at: Utc::now(),
+            });
+        }
+        record.job.state = JobState::Cancelled;
+        record.sequence = record.sequence.saturating_add(1);
+        record.events.push(JobEvent {
+            id: EventId::new(),
+            job_id,
+            sequence: record.sequence,
+            state: JobState::Cancelled,
+            reason: Some(JobFailureReason::CancelledByUser),
+            message: Some("Connector disconnected before local queue activation".into()),
+            agent_id: Some(agent_id),
+            native_job_id: None,
+            occurred_at: Utc::now(),
+        });
+        Ok(true)
     }
 
     async fn compatibility_id(
@@ -6719,8 +8593,103 @@ impl Repository for MemoryRepository {
 mod routing_repository_tests {
     use super::*;
     use piqae_domain::JobOptions;
-    use piqae_storage_postgres::PrinterProfileSnapshot;
+    use piqae_storage_postgres::{
+        PrinterProfileSnapshot,
+        destination_topology::{
+            DestinationTopologyRepository, IdentityConfidence, NodeWakeHint,
+            StoredPhysicalDestination, StoredPrinterRoute,
+        },
+    };
     use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn node_operator_details_are_tenant_scoped_and_clearable() {
+        let repository = MemoryRepository::default();
+        let workspace = WorkspaceId::new();
+        let other_workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        let node = AgentId::new();
+        repository.state.write().await.agents.insert(
+            node,
+            (
+                workspace,
+                environment,
+                StoredAgent {
+                    id: node,
+                    name: "Piqae node".into(),
+                    site: None,
+                    location: None,
+                    labels: Vec::new(),
+                    identity_revision: 1,
+                    platform: "macos".into(),
+                    state: "connected".into(),
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    last_seen_at: Utc::now(),
+                    health_started_at: None,
+                    health_observed_at: None,
+                    sqlite_integrity_ok: None,
+                    executor_crashes: 0,
+                    last_error_code: None,
+                    document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
+                },
+            ),
+        );
+
+        let labels = vec!["shipping".to_owned(), "labels".to_owned()];
+        let updated = repository
+            .update_agent_identity(
+                workspace,
+                environment,
+                node,
+                Some(1),
+                &piqae_protocol::agent::NodeDisplayIdentity {
+                    display_name: "Warehouse Mac mini".into(),
+                    site: Some("Main warehouse".into()),
+                    location: Some("Dispatch desk".into()),
+                    labels: labels.clone(),
+                },
+            )
+            .await
+            .expect("update own node");
+        assert_eq!(updated.site.as_deref(), Some("Main warehouse"));
+        assert_eq!(updated.location.as_deref(), Some("Dispatch desk"));
+        assert_eq!(updated.labels, labels);
+        assert!(matches!(
+            repository
+                .update_agent_identity(
+                    other_workspace,
+                    environment,
+                    node,
+                    Some(2),
+                    &piqae_protocol::agent::NodeDisplayIdentity {
+                        display_name: "Other".into(),
+                        site: None,
+                        location: None,
+                        labels: Vec::new(),
+                    },
+                )
+                .await,
+            Err(RepositoryError::NotFound)
+        ));
+        let cleared = repository
+            .update_agent_identity(
+                workspace,
+                environment,
+                node,
+                Some(2),
+                &piqae_protocol::agent::NodeDisplayIdentity {
+                    display_name: updated.name,
+                    site: None,
+                    location: None,
+                    labels: labels.clone(),
+                },
+            )
+            .await
+            .expect("clear optional labels");
+        assert!(cleared.site.is_none());
+        assert!(cleared.location.is_none());
+        assert_eq!(cleared.labels, labels);
+    }
 
     #[tokio::test]
     async fn destination_reroute_listing_filters_before_applying_its_limit() {
@@ -7246,6 +9215,10 @@ mod routing_repository_tests {
                 StoredAgent {
                     id: node,
                     name: "Shared PC".into(),
+                    site: None,
+                    location: None,
+                    labels: Vec::new(),
+                    identity_revision: 1,
                     platform: "test".into(),
                     state: "connected".into(),
                     version: "1".into(),
@@ -7255,6 +9228,7 @@ mod routing_repository_tests {
                     sqlite_integrity_ok: None,
                     executor_crashes: 0,
                     last_error_code: None,
+                    document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
                 },
             ),
         );
@@ -7295,12 +9269,224 @@ mod routing_repository_tests {
             .expect("revoked connector remains visible");
         assert_eq!(connectors.len(), 1);
         assert!(connectors[0].revoked_at.is_some());
+        repository
+            .revoke_node_connector(workspace, environment, node, &format!("ncon_{node}"))
+            .await
+            .expect("self-revoke retry is idempotent");
         assert!(matches!(
-            repository
-                .revoke_node_connector(workspace, environment, node, &format!("ncon_{node}"))
-                .await,
+            repository.agent_for_authentication(node).await,
             Err(RepositoryError::NotFound)
         ));
+        assert!(
+            repository
+                .agent_for_revocation_authentication(node)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_node_revocation_retires_linked_state_and_fences_stale_projection() {
+        let repository = MemoryRepository::default();
+        let workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        let scope = TenantScope {
+            workspace_id: workspace,
+            environment_id: environment,
+        };
+        let node = AgentId::new();
+        let printer = PrinterId::new();
+        let job_id = JobId::new();
+        let now = Utc::now();
+        let connector_id = format!("ncon_{node}");
+        let wake_id = "wkh_memory_revoke".to_owned();
+        let outbox_id = "evt_memory_revoke".to_owned();
+        let lease_id = Uuid::new_v4();
+        {
+            let mut state = repository.state.write().await;
+            state.agents.insert(
+                node,
+                (
+                    workspace,
+                    environment,
+                    StoredAgent {
+                        id: node,
+                        name: "Revoked memory node".into(),
+                        site: None,
+                        location: None,
+                        labels: Vec::new(),
+                        identity_revision: 1,
+                        platform: "test".into(),
+                        state: "connected".into(),
+                        version: "1".into(),
+                        last_seen_at: now,
+                        health_started_at: None,
+                        health_observed_at: None,
+                        sqlite_integrity_ok: None,
+                        executor_crashes: 0,
+                        last_error_code: None,
+                        document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(
+                        ),
+                    },
+                ),
+            );
+            state.node_connectors.insert(
+                (workspace, environment, node, connector_id.clone()),
+                StoredNodeConnector {
+                    id: connector_id,
+                    node_id: node,
+                    permissions: serde_json::json!({"printers":"all"}),
+                    revoked_at: None,
+                    created_at: now,
+                },
+            );
+            state.jobs.insert(
+                job_id,
+                MemoryJob {
+                    job: Job {
+                        id: job_id,
+                        workspace_id: workspace,
+                        environment_id: environment,
+                        printer_id: printer,
+                        title: "Queued fixture".into(),
+                        source: None,
+                        content_kind: piqae_domain::ContentKind::Pdf,
+                        content: piqae_domain::ContentSource::Base64 {
+                            data: "JVBERi0=".into(),
+                        },
+                        options: JobOptions::default(),
+                        metadata: BTreeMap::new(),
+                        deliveries: 1,
+                        state: JobState::AgentDownloading,
+                        created_at: now,
+                        expires_at: now + chrono::Duration::hours(1),
+                        delivery_uncertain_since: None,
+                    },
+                    agent_id: node,
+                    sequence: 3,
+                    events: Vec::new(),
+                },
+            );
+            state.leases.insert(
+                job_id,
+                (
+                    node,
+                    lease_id,
+                    "memory-lease-token".into(),
+                    now + chrono::Duration::minutes(1),
+                ),
+            );
+            state.wake_hint_outbox.insert(
+                outbox_id.clone(),
+                MemoryWakeHintOutbox {
+                    workspace_id: workspace,
+                    environment_id: environment,
+                    hint: NodeWakeHint {
+                        id: wake_id,
+                        agent_id: node.to_string(),
+                        reason: "job_available".into(),
+                        delivery_channel: "external_push".into(),
+                        status: "pending".into(),
+                        requested_at: now,
+                        expires_at: now + chrono::Duration::minutes(5),
+                        observed_at: None,
+                    },
+                    idempotency_key: "memory-revoke-wake".into(),
+                    attempts: 0,
+                    available_at: now,
+                    claimed_until: None,
+                    processed_at: None,
+                },
+            );
+        }
+        let destination = StoredPhysicalDestination {
+            id: "pdst_memory_revoke".into(),
+            name: "Attention destination".into(),
+            identity_confidence: IdentityConfidence::Conflict,
+            state: "attention".into(),
+            scheduling_authority_id: None,
+            identity_revision: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        repository
+            .destination_topology
+            .upsert_destination(scope, &destination)
+            .await
+            .expect("memory destination fixture");
+        let route = StoredPrinterRoute {
+            id: "rte_memory_revoke".into(),
+            destination_id: destination.id.clone(),
+            printer_id: printer.to_string(),
+            agent_id: node.to_string(),
+            native_queue_id: "native-memory".into(),
+            local_route_key: Some("local-memory".into()),
+            state: "available".into(),
+            role: "primary".into(),
+            priority: 0,
+            enabled: true,
+            capability_revision: 1,
+            profile_revision: 1,
+            last_seen_at: Some(now),
+            created_at: now,
+            updated_at: now,
+        };
+        repository
+            .destination_topology
+            .upsert_route(scope, &route)
+            .await
+            .expect("memory route fixture");
+
+        repository
+            .revoke_agent(workspace, environment, node)
+            .await
+            .expect("memory node revocation");
+
+        let state = repository.state.read().await;
+        assert!(!state.agents.contains_key(&node));
+        assert_eq!(state.jobs[&job_id].job.state, JobState::WaitingForAgent);
+        assert!(!state.leases.contains_key(&job_id));
+        assert!(
+            state
+                .node_connectors
+                .values()
+                .all(|item| item.revoked_at.is_some())
+        );
+        assert_eq!(state.wake_hint_outbox[&outbox_id].hint.status, "cancelled");
+        assert!(state.wake_hint_outbox[&outbox_id].processed_at.is_some());
+        drop(state);
+        assert_eq!(
+            repository
+                .destination_topology
+                .get_route(scope, &route.id)
+                .await
+                .expect("retained route audit")
+                .state,
+            "retired"
+        );
+        assert_eq!(
+            repository
+                .destination_topology
+                .get_destination(scope, &destination.id)
+                .await
+                .expect("retained attention destination")
+                .state,
+            "attention"
+        );
+        assert!(matches!(
+            repository
+                .destination_topology
+                .upsert_route(scope, &route)
+                .await,
+            Err(StorageError::NotFound)
+        ));
+        assert!(
+            repository
+                .claim_wake_hint_dispatches(10)
+                .await
+                .expect("terminal wake claim")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -7317,6 +9503,10 @@ mod routing_repository_tests {
                 StoredAgent {
                     id: node,
                     name: "Encryption node".into(),
+                    site: None,
+                    location: None,
+                    labels: Vec::new(),
+                    identity_revision: 1,
                     platform: "test".into(),
                     state: "connected".into(),
                     version: "1".into(),
@@ -7326,6 +9516,7 @@ mod routing_repository_tests {
                     sqlite_integrity_ok: None,
                     executor_crashes: 0,
                     last_error_code: None,
+                    document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
                 },
             ),
         );
@@ -7813,6 +10004,176 @@ mod routing_repository_tests {
                 .await
                 .routing_attempts
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_block_is_ordered_tenant_scoped_idempotent_and_recoverable() {
+        let repository = MemoryRepository::default();
+        let workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        let other_workspace = WorkspaceId::new();
+        let agent = AgentId::new();
+        let printer = PrinterId::new();
+        repository
+            .add_printer(workspace, environment, printer, agent)
+            .await;
+        let make_job = |title: &str, created_at: DateTime<Utc>| Job {
+            id: JobId::new(),
+            workspace_id: workspace,
+            environment_id: environment,
+            printer_id: printer,
+            title: title.into(),
+            source: None,
+            content_kind: piqae_domain::ContentKind::Raw,
+            content: piqae_domain::ContentSource::Base64 {
+                data: "G0BmaXh0dXJl".into(),
+            },
+            options: JobOptions::default(),
+            metadata: BTreeMap::new(),
+            deliveries: 1,
+            state: JobState::WaitingForAgent,
+            created_at,
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            delivery_uncertain_since: None,
+        };
+        let oldest = make_job(
+            "old incompatible",
+            Utc::now() - chrono::Duration::seconds(2),
+        );
+        let later = make_job(
+            "later compatible",
+            Utc::now() - chrono::Duration::seconds(1),
+        );
+        for job in [&oldest, &later] {
+            repository
+                .create_job(job, agent, None, job.title.as_bytes())
+                .await
+                .expect("create job");
+        }
+
+        let leases = repository
+            .claim_jobs(workspace, environment, agent, "test", 16)
+            .await
+            .expect("ordered leases");
+        assert_eq!(leases.len(), 2);
+        assert_eq!(leases[0].job.id, oldest.id);
+        assert_eq!(leases[1].job.id, later.id);
+        let blocked = repository
+            .block_agent_lease_for_node_update(
+                workspace,
+                environment,
+                agent,
+                oldest.id,
+                leases[0].lease_id,
+                &leases[0].lease_token,
+            )
+            .await
+            .expect("block incompatible lease");
+        let PreHandoffTransitionOutcome::Transitioned(blocked) = blocked else {
+            panic!("unaccepted fixture must be safe to block")
+        };
+        assert_eq!(blocked.job.state, JobState::Blocked);
+        assert!(matches!(
+            repository
+                .block_agent_lease_for_node_update(
+                    workspace,
+                    environment,
+                    agent,
+                    oldest.id,
+                    leases[0].lease_id,
+                    &leases[0].lease_token,
+                )
+                .await,
+            Err(RepositoryError::ConcurrentStateChange)
+        ));
+        let events = repository
+            .list_job_events(workspace, environment, oldest.id)
+            .await
+            .expect("job events");
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events.last().and_then(|event| event.reason.clone()),
+            Some(JobFailureReason::NodeUpdateRequired)
+        );
+        assert_eq!(
+            events.last().and_then(|event| event.agent_id),
+            None,
+            "automatic recovery must be limited to server-authored capability blocks"
+        );
+        assert_eq!(
+            repository
+                .list_node_update_required_jobs(workspace, environment, agent, 1)
+                .await
+                .expect("blocked jobs")
+                .iter()
+                .map(|job| job.id)
+                .collect::<Vec<_>>(),
+            vec![oldest.id]
+        );
+        assert!(
+            repository
+                .list_node_update_required_jobs(other_workspace, environment, agent, 16)
+                .await
+                .expect("other tenant blocked jobs")
+                .is_empty()
+        );
+        assert_eq!(
+            repository
+                .list_tenant_events(workspace, environment, None, 100)
+                .await
+                .expect("tenant events")
+                .iter()
+                .filter(|event| {
+                    event.event_type == "job.updated"
+                        && event.payload["id"] == oldest.id.as_ulid().to_string()
+                })
+                .count(),
+            1
+        );
+
+        assert!(
+            repository
+                .recover_node_update_required_job(workspace, environment, agent, oldest.id)
+                .await
+                .expect("recover capability block")
+                .is_some()
+        );
+        assert!(
+            repository
+                .recover_node_update_required_job(workspace, environment, agent, oldest.id)
+                .await
+                .expect("idempotent recovery")
+                .is_none()
+        );
+        assert_eq!(
+            repository
+                .get_job(workspace, environment, oldest.id)
+                .await
+                .expect("recovered job")
+                .state,
+            JobState::WaitingForAgent
+        );
+        assert_eq!(
+            repository
+                .list_job_events(workspace, environment, oldest.id)
+                .await
+                .expect("recovered events")
+                .len(),
+            3
+        );
+        assert_eq!(
+            repository
+                .list_tenant_events(workspace, environment, None, 100)
+                .await
+                .expect("recovered tenant events")
+                .iter()
+                .filter(|event| {
+                    event.event_type == "job.updated"
+                        && event.payload["id"] == oldest.id.as_ulid().to_string()
+                })
+                .count(),
+            2
         );
     }
 

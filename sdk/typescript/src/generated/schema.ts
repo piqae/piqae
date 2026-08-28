@@ -1736,11 +1736,21 @@ export interface paths {
         get: operations["getNode"];
         put?: never;
         post?: never;
-        /** Revoke a node and its device key */
+        /**
+         * Revoke a node and its device key
+         * @description Revokes this tenant's node identity and connectors, retires its printer
+         *     routes, cancels pending wake hints, and releases only delivery attempts
+         *     that have not crossed node acceptance. Other nodes that reach the same
+         *     physical destination remain eligible. Accepted or uncertain delivery
+         *     evidence and the node's local state are not erased or silently retried.
+         */
         delete: operations["deleteNode"];
         options?: never;
         head?: never;
-        /** Rename a node */
+        /**
+         * Update node display identity
+         * @description Updates tenant-visible operator details. Site and location are never inferred from personal data. expected_revision provides compare-and-set protection; older clients may omit it during the N/N-1 compatibility window. Every successful update increments identity_revision.
+         */
         patch: operations["patchNode"];
         trace?: never;
     };
@@ -1776,6 +1786,71 @@ export interface paths {
         put?: never;
         /** Durably request node resume */
         post: operations["resumeNode"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/nodes/{node_id}/runtime": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: components["parameters"]["NodeId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Get the latest node host and execution-availability observation
+         * @description A missing observation means the node predates embedded-host capability reporting; it does not imply background execution.
+         */
+        get: operations["getNodeRuntime"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/nodes/runtime-observations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the latest runtime observation for each node in this tenant
+         * @description Bounded, node-ID ordered projection for operational tables. The cursor and every returned observation remain workspace/environment scoped.
+         */
+        get: operations["listNodeRuntimeObservations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/nodes/{node_id}/wake-hints": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: components["parameters"]["NodeId"];
+            };
+            cookie?: never;
+        };
+        /** List advisory wake requests for a node */
+        get: operations["listNodeWakeHints"];
+        put?: never;
+        /**
+         * Request an advisory node wake
+         * @description This operator route records and emits a connected-session hint only. It never leases a job or authorizes spooler handoff; work remains queued until a fresh authenticated eligible node sync. Separately, a durable job entering waiting_for_agent creates content-free external_push hints for bounded same-destination candidates and emits node.wake_hint.requested for a tenant webhook relay.
+         */
+        post: operations["createNodeWakeHint"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2100,6 +2175,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/agent/identity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Update this connector's node display identity
+         * @description Compares the supplied revision with this tenant-scoped agent record. The operation changes display metadata only; it never rotates the device credential, installation identity, printer routes, or queue. A conflict includes the current revision in error.details.current_revision.
+         */
+        put: operations["updateAgentIdentity"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/agent/connectors/{connector_id}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                connector_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Revoke the calling connector's authority grant
+         * @description Performs the connector's final signed authority request. Exact retries remain authenticated only for this revocation operation so a node can recover if the local durable confirmation failed after server commit.
+         */
+        post: operations["revokeAgentConnector"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/agent/content-encryption-key": {
         parameters: {
             query?: never;
@@ -2149,6 +2266,50 @@ export interface paths {
         put?: never;
         /** Durably accept a leased job */
         post: operations["acceptAgentJob"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/agent/jobs/{job_id}/acceptance/reconcile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reconcile an exact durable acceptance after a crash
+         * @description Evidence-only recovery for the crash window after the authority committed an acceptance but before the node persisted its response. The request must exactly match the stored lease, content, local sequence, and physical-route proof. During a mixed-version rollout the authority may durably backfill appended proof columns after validating the live route under lock. The node may activate only when accepted is true and fenced is false; fenced is always a terminal local-abandon instruction even after a connector has been re-enrolled.
+         */
+        post: operations["reconcileAgentAcceptance"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/agent/jobs/{job_id}/acceptance/abandon": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Abandon an exact accepted job before local queue activation
+         * @description Compensates the narrow crash boundary where the authority committed an acceptance but the node has not activated durable local work. The connector must still be active and the complete lease, content, local sequence, and physical-route proof must match. This operation cannot cancel work after local activation.
+         */
+        post: operations["abandonAgentAcceptance"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2215,7 +2376,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-templates": {
+    "/v1/printpacket/templates": {
         parameters: {
             query?: never;
             header?: never;
@@ -2224,23 +2385,23 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Create a draft document template */
-        post: operations["createBusinessDocumentTemplate"];
+        /** Create a draft PrintPacket template */
+        post: operations["createPrintPacketTemplate"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-templates/{template_id}": {
+    "/v1/printpacket/templates/{template_id}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Retrieve a document template */
-        get: operations["retrieveBusinessDocumentTemplate"];
+        /** Retrieve a PrintPacket template */
+        get: operations["retrievePrintPacketTemplate"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2249,7 +2410,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-templates/{template_id}/publish": {
+    "/v1/printpacket/templates/{template_id}/publish": {
         parameters: {
             query?: never;
             header?: never;
@@ -2258,23 +2419,23 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Publish an immutable document template revision */
-        post: operations["publishBusinessDocumentTemplate"];
+        /** Publish an immutable PrintPacket template revision */
+        post: operations["publishPrintPacketTemplate"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-template-revisions/{revision_id}": {
+    "/v1/printpacket/template-revisions/{revision_id}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Retrieve an immutable document template revision */
-        get: operations["retrieveBusinessDocumentTemplateRevision"];
+        /** Retrieve an immutable PrintPacket template revision */
+        get: operations["retrievePrintPacketTemplateRevision"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2283,7 +2444,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-renders": {
+    "/v1/printpacket/renders": {
         parameters: {
             query?: never;
             header?: never;
@@ -2292,15 +2453,15 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Register an asynchronous document render */
-        post: operations["createBusinessDocumentRender"];
+        /** Register an asynchronous PrintPacket render */
+        post: operations["createPrintPacketRender"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-resources/{digest}": {
+    "/v1/printpacket/resources/{digest}": {
         parameters: {
             query?: never;
             header?: never;
@@ -2308,8 +2469,8 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Store an immutable content-addressed business-document resource */
-        put: operations["putBusinessDocumentResource"];
+        /** Store an immutable content-addressed PrintPacket resource */
+        put: operations["putPrintPacketResource"];
         post?: never;
         delete?: never;
         options?: never;
@@ -2317,15 +2478,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-renders/{render_id}": {
+    "/v1/printpacket/renders/{render_id}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Retrieve a document render */
-        get: operations["retrieveBusinessDocumentRender"];
+        /** Retrieve a PrintPacket render */
+        get: operations["retrievePrintPacketRender"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2334,7 +2495,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-renders/{render_id}/render-readiness": {
+    "/v1/printpacket/renders/{render_id}/readiness": {
         parameters: {
             query?: never;
             header?: never;
@@ -2344,14 +2505,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Evaluate exact destination readiness and render policy */
-        post: operations["evaluateBusinessDocumentRenderReadiness"];
+        post: operations["evaluatePrintPacketRenderReadiness"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-renders/{render_id}/artifact": {
+    "/v1/printpacket/renders/{render_id}/artifact": {
         parameters: {
             query?: never;
             header?: never;
@@ -2359,10 +2520,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Download a completed document render artifact
+         * Download a completed PrintPacket render artifact
          * @description Authenticated same-origin PDF download. The response never exposes an object-store key or signed URL.
          */
-        get: operations["downloadBusinessDocumentRenderArtifact"];
+        get: operations["downloadPrintPacketRenderArtifact"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2371,7 +2532,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-renders/{render_id}/print": {
+    "/v1/printpacket/renders/{render_id}/print": {
         parameters: {
             query?: never;
             header?: never;
@@ -2380,15 +2541,15 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Register a print job for a completed document render */
-        post: operations["printBusinessDocumentRender"];
+        /** Register a print job for a completed PrintPacket render */
+        post: operations["printPacketRender"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-renders/{render_id}/previews": {
+    "/v1/printpacket/renders/{render_id}/previews": {
         parameters: {
             query?: never;
             header?: never;
@@ -2401,22 +2562,22 @@ export interface paths {
          * Create an expiring approval gate for a completed render
          * @description Retains the exact rendered artifact. No print job is created before approval.
          */
-        post: operations["createBusinessDocumentPreview"];
+        post: operations["createPrintPacketPreview"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-previews/{preview_id}": {
+    "/v1/printpacket/previews/{preview_id}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Retrieve a document preview approval gate */
-        get: operations["retrieveBusinessDocumentPreview"];
+        /** Retrieve a PrintPacket preview approval gate */
+        get: operations["retrievePrintPacketPreview"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2425,7 +2586,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-previews/{preview_id}/artifact": {
+    "/v1/printpacket/previews/{preview_id}/artifact": {
         parameters: {
             query?: never;
             header?: never;
@@ -2433,7 +2594,7 @@ export interface paths {
             cookie?: never;
         };
         /** Download the exact artifact held by a live preview */
-        get: operations["downloadBusinessDocumentPreviewArtifact"];
+        get: operations["downloadPrintPacketPreviewArtifact"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2442,7 +2603,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-previews/{preview_id}/approve": {
+    "/v1/printpacket/previews/{preview_id}/approve": {
         parameters: {
             query?: never;
             header?: never;
@@ -2452,14 +2613,14 @@ export interface paths {
         get?: never;
         put?: never;
         /** Approve a preview and idempotently create exactly one print job */
-        post: operations["approveBusinessDocumentPreview"];
+        post: operations["approvePrintPacketPreview"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/business-document-previews/{preview_id}/cancel": {
+    "/v1/printpacket/previews/{preview_id}/cancel": {
         parameters: {
             query?: never;
             header?: never;
@@ -2469,7 +2630,7 @@ export interface paths {
         get?: never;
         put?: never;
         /** Cancel a preview before approval */
-        post: operations["cancelBusinessDocumentPreview"];
+        post: operations["cancelPrintPacketPreview"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2610,6 +2771,8 @@ export interface components {
             routes?: components["schemas"]["PrinterRoute"][];
             /** @description Latest privacy-safe observation per returned route. */
             route_observations?: components["schemas"]["RouteObservation"][];
+            /** @description Latest authenticated host/runtime availability per reporting customer node. Customer attribution is inherited only from this immutable containing row. */
+            runtime_observations?: components["schemas"]["NodeRuntimeObservation"][];
         };
         PlatformOperationsPage: {
             data: components["schemas"]["PlatformOperationsRow"][];
@@ -2985,6 +3148,8 @@ export interface components {
             protocol_version: 1;
             /** @description Stable physical installation ID when adding an isolated connector. */
             installation_id?: string;
+            /** @description Base64 Ed25519 public key for a new physical installation identity. Required only on the first connector for an installation; subsequent connectors are verified against the stored key. */
+            installation_public_key?: string;
             /** @description Exact printer IDs approved by the local operator when printer_grant is selected_printers; empty never means all. */
             allowed_printer_ids?: string[];
             /**
@@ -3034,6 +3199,90 @@ export interface components {
              */
             return_url: string | null;
         };
+        NodeRuntimeObservation: {
+            node_id: string;
+            /** Format: int64 */
+            sequence: number;
+            /** @enum {string} */
+            host_mode: "machine_service" | "user_agent" | "embedded_application" | "attached_client";
+            /** @enum {string} */
+            availability_class: "continuous_while_awake" | "foreground_only" | "background_opportunistic" | "managed_kiosk" | "wake_relay_capable";
+            /** @enum {string} */
+            lifecycle_state: "available" | "foreground" | "background" | "suspending" | "suspended" | "waking" | "unavailable";
+            accepts_cloud_jobs: boolean;
+            /** Format: int64 */
+            execution_budget_ms: number | null;
+            wake_mechanisms: ("local_broker" | "apns_background" | "bluetooth_accessory" | "external_accessory" | "wake_on_lan" | "manual")[];
+            /** Format: date-time */
+            observed_at: string;
+            /** Format: date-time */
+            expires_at: string;
+            /** @enum {string} */
+            freshness: "live" | "recent" | "stale";
+        };
+        NodeRuntimeObservationPage: {
+            data: components["schemas"]["NodeRuntimeObservation"][];
+            next_cursor: string | null;
+            has_more: boolean;
+        };
+        AgentRuntimeObservation: {
+            /** Format: int64 */
+            sequence: number;
+            /** @enum {string} */
+            host_mode: "machine_service" | "user_agent" | "embedded_application" | "attached_client";
+            /** @enum {string} */
+            availability_class: "continuous_while_awake" | "foreground_only" | "background_opportunistic" | "managed_kiosk" | "wake_relay_capable";
+            /** @enum {string} */
+            lifecycle_state: "available" | "foreground" | "background" | "suspending" | "suspended" | "waking" | "unavailable";
+            accepts_cloud_jobs: boolean;
+            /** Format: int64 */
+            execution_budget_ms?: number | null;
+            /** @default [] */
+            wake_mechanisms?: ("local_broker" | "apns_background" | "bluetooth_accessory" | "external_accessory" | "wake_on_lan" | "manual")[];
+            /** Format: date-time */
+            observed_at: string;
+            /** Format: date-time */
+            fresh_until: string;
+        };
+        CreateNodeWakeHint: {
+            /** @enum {string} */
+            reason: "job_available" | "operator_request" | "inventory_refresh" | "diagnostics";
+            /** @default 300 */
+            expires_in_seconds?: number;
+        };
+        NodeWakeHint: {
+            id: string;
+            node_id: string;
+            /** @enum {string} */
+            reason: "job_available" | "operator_request" | "inventory_refresh" | "diagnostics";
+            /**
+             * @description Actual durable delivery path. connected_session means the already-awake node observed the hint on signed sync and is not remote-wake evidence. external_push means the content-free hint was handed to the tenant event/webhook stream; it does not prove APNs or another provider woke the device.
+             * @enum {string}
+             */
+            delivery_channel?: "connected_session" | "external_push" | "local_relay" | "manual";
+            /** @enum {string} */
+            status: "pending" | "observed" | "expired" | "cancelled";
+            /** Format: date-time */
+            requested_at: string;
+            /** Format: date-time */
+            expires_at: string;
+            /** Format: date-time */
+            observed_at: string | null;
+        };
+        AgentWakeHint: {
+            id: string;
+            /** @enum {string} */
+            reason: "job_available" | "operator_request" | "inventory_refresh" | "diagnostics";
+            /**
+             * @description The hint's durable delivery path. A signed sync observes any pending hint after the host wakes while preserving whether it was originally requested through the active session, an external push, a local relay, or manually.
+             * @enum {string}
+             */
+            delivery_channel?: "connected_session" | "external_push" | "local_relay" | "manual";
+            /** Format: date-time */
+            requested_at: string;
+            /** Format: date-time */
+            expires_at: string;
+        };
         QueueSnapshot: {
             queued_jobs: number;
             active_jobs: number;
@@ -3075,6 +3324,32 @@ export interface components {
             /** @default [] */
             diagnostics?: components["schemas"]["DiagnosticReport"][];
             document_render?: components["schemas"]["DocumentRenderCapabilities"];
+            runtime?: components["schemas"]["AgentRuntimeObservation"] | null;
+        };
+        NodeDisplayIdentity: {
+            /** @description At most 120 bytes when UTF-8 encoded. */
+            display_name: string;
+            /** @description At most 120 bytes when UTF-8 encoded. */
+            site: string | null;
+            /** @description At most 120 bytes when UTF-8 encoded. */
+            location: string | null;
+            labels: string[];
+        };
+        AgentIdentityUpdateRequest: {
+            /** Format: int64 */
+            expected_revision: number;
+            /** @description At most 120 bytes when UTF-8 encoded. */
+            display_name: string;
+            /** @description At most 120 bytes when UTF-8 encoded. */
+            site: string | null;
+            /** @description At most 120 bytes when UTF-8 encoded. */
+            location: string | null;
+            labels: string[];
+        };
+        AgentIdentityUpdateResponse: {
+            /** Format: int64 */
+            revision: number;
+            identity: components["schemas"]["NodeDisplayIdentity"];
         };
         DocumentRenderCapabilities: {
             renderer_abi?: string | null;
@@ -3086,6 +3361,65 @@ export interface components {
             image_media_types?: "image/jpeg"[];
             font_media_types?: string[];
             cached_resource_digests?: components["schemas"]["Sha256Hex"][];
+            /** @description Version 2 print-packet negotiation. Missing means the node predates print-packet negotiation and is treated as unsupported_old_node; standalone renderer fields never imply support for this contract. */
+            print_packet?: components["schemas"]["PrintPacketCapabilitiesV2"] | null;
+        };
+        PrintPacketCapabilitiesV2: {
+            /** @constant */
+            negotiation_version: 2;
+            supported_packet_versions: string[];
+            feature_ids: string[];
+            conformance_profiles: string[];
+            output_profiles: components["schemas"]["PrintPacketOutputProfile"][];
+            /** @description True only when the declared deterministic output profile is byte-stable. */
+            deterministic: boolean;
+            limits: components["schemas"]["PrintPacketLimits"];
+            resource_types: string[];
+            /** @description Diagnostic fact; it does not authorize cloud delivery or background execution. */
+            direct_offline: boolean;
+            native_language_profiles: components["schemas"]["PrinterNativeLanguageProfile"][];
+            /** @description Display-only implementation/build diagnostic; never used instead of exact capability intersection. */
+            implementation_version: string;
+        };
+        PrintPacketLimits: {
+            /** Format: int64 */
+            max_template_bytes: number;
+            /** Format: int64 */
+            max_input_bytes: number;
+            /** Format: int64 */
+            max_output_bytes: number;
+            /** Format: int64 */
+            max_pages: number;
+            /** Format: int64 */
+            max_resource_count: number;
+            /** Format: int64 */
+            max_resource_bytes: number;
+            /** Format: int64 */
+            max_total_resource_bytes: number;
+        };
+        PrintPacketOutputProfile: {
+            id: string;
+            /** @constant */
+            kind: "pdf";
+            /** @constant */
+            media_type: "application/pdf";
+        } | {
+            id: string;
+            /** @constant */
+            kind: "printer_native";
+            media_type: string;
+            language_profile_id: string;
+        };
+        /** @description Exact, printer-scoped native-language binding derived from one trusted support pack and one installed driver fingerprint. Every field is persisted with a RAW job and must still match before an offer is made. */
+        PrinterNativeLanguageProfile: {
+            id: string;
+            language: string;
+            language_version: string;
+            profile_version: string;
+            media_type: string;
+            driver_fingerprint_sha256: components["schemas"]["Sha256Hex"];
+            support_pack_digest_sha256: components["schemas"]["Sha256Hex"];
+            printer_ids: string[];
         };
         AgentSyncResponse: {
             /** Format: date-time */
@@ -3111,6 +3445,8 @@ export interface components {
             } | null;
             /** Format: int64 */
             acknowledged_handoff_sequence?: number | null;
+            /** @default [] */
+            wake_hints?: components["schemas"]["AgentWakeHint"][];
         };
         DiagnosticReport: {
             request_id: string;
@@ -3153,21 +3489,32 @@ export interface components {
         };
         ContentDescriptor: {
             /** @constant */
-            type: "business_document";
-            policy: components["schemas"]["BusinessDocumentRenderPolicy"];
+            type: "print_packet";
+            policy: components["schemas"]["PrintPacketRenderPolicy"];
             render: {
                 /** @constant */
-                renderer_abi: "piqae.business-document-pdf/v1";
+                negotiation_version: 2;
                 /** @constant */
-                resource_abi: "piqae.document-resources/v1";
-                specification: components["schemas"]["BusinessDocumentV1"];
+                packet_version: "printpacket/v1";
+                required_feature_ids: string[];
+                /** @constant */
+                conformance_profile: "printpacket.conformance/core-v1";
+                /** @constant */
+                output_profile: "printpacket.pdf-base14/v1";
+                /** @constant */
+                renderer_abi: "printpacket.pdf-renderer/v1";
+                /** @constant */
+                resource_abi: "printpacket.resources/v1";
+                specification: components["schemas"]["PrintPacketV1"];
                 input: {
                     [key: string]: unknown;
                 };
-                resources: components["schemas"]["BusinessDocumentResourceDescriptor"][];
+                resources: components["schemas"]["PrintPacketResourceDescriptor"][];
                 expected_pdf_sha256: components["schemas"]["Sha256Hex"];
                 /** Format: int64 */
                 expected_pdf_bytes: number;
+                /** Format: int64 */
+                expected_page_count: number;
             };
             fallback: components["schemas"]["ContentDescriptor"];
             fallback_allowed: boolean;
@@ -3231,6 +3578,19 @@ export interface components {
             content_sha256: components["schemas"]["Sha256"];
             /** Format: int64 */
             local_sequence: number;
+            /** Format: uuid */
+            route_reservation_id?: string;
+            /** Format: int64 */
+            route_generation?: number;
+            route_fencing_token?: string;
+        };
+        /** @description Complete durable lease and physical-route evidence used only for exact crash reconciliation or pre-activation compensation. */
+        AgentExactAcceptanceRequest: components["schemas"]["AgentAcceptRequest"] & {
+            /** Format: uuid */
+            route_reservation_id: string;
+            /** Format: int64 */
+            route_generation: number;
+            route_fencing_token: string;
         };
         AgentAcceptResponse: {
             /** Format: date-time */
@@ -3246,6 +3606,8 @@ export interface components {
             source?: string | null;
             /** @enum {string} */
             content_type: "pdf" | "raw";
+            /** @description Required for native RAW jobs and rejected for PDF jobs. Both identifiers must exactly match a printer-bound capability reported by the destination node; application/octet-stream alone is never a language claim. */
+            printer_native?: components["schemas"]["PrinterNativeJobDescriptor"];
             content: {
                 /** @constant */
                 type: "upload";
@@ -3275,7 +3637,17 @@ export interface components {
             };
             /** @description Digest returned by resolvePrintIntent. Required when submitting a resolved professional workflow. */
             resolved_ticket_digest?: components["schemas"]["Sha256Hex"];
-        } & (unknown | unknown);
+        } & ((unknown | unknown) & ({
+            /** @constant */
+            content_type?: "pdf";
+        } | {
+            /** @constant */
+            content_type?: "raw";
+        }));
+        PrinterNativeJobDescriptor: {
+            output_profile_id: string;
+            language_profile_id: string;
+        };
         /** @description A dedicated node content-encryption public key. This is not, and must never be substituted with, the node's Ed25519 authentication/signing key. Recipient discovery and encrypted-job submission are Preview contracts; the plaintext job endpoint does not accept this object. */
         EncryptedJobRecipientKey: {
             key_id: string;
@@ -3615,6 +3987,13 @@ export interface components {
             job_id: string;
             sequence: number;
             state: components["schemas"]["JobState"];
+            /**
+             * @description Stable machine-readable failure reason. `node_update_required`
+             *     means the assigned node no longer satisfies the job's exact
+             *     PrintPacket or printer-native capability contract. The job remains
+             *     blocked without lease retries until an authenticated capability
+             *     report proves compatibility has been restored.
+             */
             reason: string | null;
             message: string | null;
             agent_id: string | null;
@@ -3734,7 +4113,7 @@ export interface components {
              * @description Privacy-safe freshness of the loaded-media projection; no driver-private values are exposed.
              * @enum {string}
              */
-            stock_state?: "current" | "stale" | "unknown";
+            stock_state?: "current" | "stale" | "not_reported" | "unknown";
             latest_observation?: components["schemas"]["RouteObservation"] | null;
             scheduling_authority_id?: string | null;
             /** Format: date-time */
@@ -3783,17 +4162,29 @@ export interface components {
             printer_state: "online" | "busy" | "paused" | "paper_out" | "error" | "offline" | "unknown";
             state_reasons?: string[];
             accepting_jobs: boolean;
+            /** @description False when printer state was observed but native spooler counts could not be collected; zero counts must not be interpreted as an empty queue in that case. */
+            queue_reported: boolean;
             total_jobs: number;
             active_jobs: number;
             held_jobs: number;
             connector_jobs: number;
             other_piqae_or_external_jobs: number;
             unknown_jobs: number;
+            queue_occupancy?: components["schemas"]["PrivacySafeQueueOccupancy"];
             estimated_busy_seconds?: number | null;
             /** Format: date-time */
             observed_at: string;
             /** Format: date-time */
             expires_at: string;
+        };
+        /** @description Counts only. External and unknown work never exposes job identifiers, titles, documents, owners, or another tenant's data. */
+        PrivacySafeQueueOccupancy: {
+            /** @description Jobs attributable to this authenticated Piqae connector. */
+            piqae_owned_jobs: number;
+            /** @description Opaque count known not to belong to this connector, excluding unknown ownership so the three preferred categories partition total_jobs. */
+            external_jobs: number;
+            /** @description Opaque count whose ownership cannot be safely classified. */
+            unknown_jobs: number;
         };
         RouteReservation: {
             id: string;
@@ -4047,6 +4438,13 @@ export interface components {
         Agent: {
             id: string;
             name: string;
+            /** @description Operator-supplied site label, at most 120 UTF-8 bytes; never inferred from personal data. */
+            site: string | null;
+            /** @description Operator-supplied physical placement label, at most 120 UTF-8 bytes. */
+            location: string | null;
+            labels: string[];
+            /** Format: int64 */
+            identity_revision: number;
             platform: string;
             /** @enum {unknown} */
             state: "connected" | "disconnected" | "paused" | "degraded";
@@ -4064,6 +4462,8 @@ export interface components {
              */
             executor_crashes?: number;
             last_error_code?: string | null;
+            /** @description Last authenticated PrintPacket capability report; missing means node_update_required. */
+            document_render?: components["schemas"]["DocumentRenderCapabilities"];
         };
         Webhook: {
             id: string;
@@ -4086,13 +4486,13 @@ export interface components {
             /** Format: date-time */
             dead_lettered_at: string | null;
         };
-        BusinessDocumentEdges: {
+        PrintPacketEdges: {
             top_mm: number;
             right_mm: number;
             bottom_mm: number;
             left_mm: number;
         };
-        BusinessDocumentExpression: {
+        PrintPacketExpression: {
             /** @constant */
             type: "literal";
             value: unknown;
@@ -4103,33 +4503,33 @@ export interface components {
         } | {
             /** @enum {unknown} */
             type: "coalesce" | "concat";
-            values: components["schemas"]["BusinessDocumentExpression"][];
+            values: components["schemas"]["PrintPacketExpression"][];
         } | {
             /** @constant */
             type: "compare";
             /** @enum {unknown} */
             operator: "equal" | "not_equal" | "less" | "less_or_equal" | "greater" | "greater_or_equal";
-            left: components["schemas"]["BusinessDocumentExpression"];
-            right: components["schemas"]["BusinessDocumentExpression"];
+            left: components["schemas"]["PrintPacketExpression"];
+            right: components["schemas"]["PrintPacketExpression"];
         } | {
             /** @constant */
             type: "boolean";
             /** @enum {unknown} */
             operator: "and" | "or";
-            values: components["schemas"]["BusinessDocumentExpression"][];
+            values: components["schemas"]["PrintPacketExpression"][];
         } | {
             /** @constant */
             type: "not";
-            value: components["schemas"]["BusinessDocumentExpression"];
+            value: components["schemas"]["PrintPacketExpression"];
         } | {
             /** @constant */
             type: "exists";
-            value: components["schemas"]["BusinessDocumentExpression"];
+            value: components["schemas"]["PrintPacketExpression"];
         } | {
             /** @constant */
             type: "contains";
-            collection: components["schemas"]["BusinessDocumentExpression"];
-            value: components["schemas"]["BusinessDocumentExpression"];
+            collection: components["schemas"]["PrintPacketExpression"];
+            value: components["schemas"]["PrintPacketExpression"];
         } | {
             /** @enum {unknown} */
             type: "page_number" | "page_count";
@@ -4138,35 +4538,35 @@ export interface components {
             type: "arithmetic";
             /** @enum {unknown} */
             operator: "add" | "subtract" | "multiply" | "divide";
-            left: components["schemas"]["BusinessDocumentExpression"];
-            right: components["schemas"]["BusinessDocumentExpression"];
+            left: components["schemas"]["PrintPacketExpression"];
+            right: components["schemas"]["PrintPacketExpression"];
         } | {
             /** @constant */
             type: "format_number";
-            value: components["schemas"]["BusinessDocumentExpression"];
+            value: components["schemas"]["PrintPacketExpression"];
             /** @default 0 */
             decimals?: number;
         } | {
             /** @constant */
             type: "format_money";
-            amount: components["schemas"]["BusinessDocumentExpression"];
-            currency: components["schemas"]["BusinessDocumentExpression"];
+            amount: components["schemas"]["PrintPacketExpression"];
+            currency: components["schemas"]["PrintPacketExpression"];
             /** @default 2 */
             decimals?: number;
         } | {
             /** @constant */
             type: "format_date";
-            value: components["schemas"]["BusinessDocumentExpression"];
+            value: components["schemas"]["PrintPacketExpression"];
             /** @enum {unknown} */
             format: "iso_date" | "day_month_year" | "month_day_year";
         } | {
             /** @constant */
             type: "format_string";
-            value: components["schemas"]["BusinessDocumentExpression"];
+            value: components["schemas"]["PrintPacketExpression"];
             /** @enum {unknown} */
             operation: "trim" | "uppercase_ascii" | "lowercase_ascii";
         };
-        BusinessDocumentTextStyle: {
+        PrintPacketTextStyle: {
             /** @default false */
             bold?: boolean;
             /** @default false */
@@ -4179,97 +4579,97 @@ export interface components {
              * @enum {unknown}
              */
             align?: "left" | "center" | "right";
-            color?: components["schemas"]["BusinessDocumentColor"];
+            color?: components["schemas"]["PrintPacketColor"];
         };
-        BusinessDocumentColor: {
+        PrintPacketColor: {
             red: number;
             green: number;
             blue: number;
         };
-        BusinessDocumentBoxStyle: {
+        PrintPacketBoxStyle: {
             /** @default 0 */
             padding_mm?: number;
-            background?: components["schemas"]["BusinessDocumentColor"];
-            border_color?: components["schemas"]["BusinessDocumentColor"];
+            background?: components["schemas"]["PrintPacketColor"];
+            border_color?: components["schemas"]["PrintPacketColor"];
             /** @default 0 */
             border_width_pt?: number;
         };
-        BusinessDocumentTableStyle: {
+        PrintPacketTableStyle: {
             /** @default 1 */
             cell_padding_mm?: number;
-            header_background?: components["schemas"]["BusinessDocumentColor"];
-            header_text_color?: components["schemas"]["BusinessDocumentColor"];
-            border_color?: components["schemas"]["BusinessDocumentColor"];
+            header_background?: components["schemas"]["PrintPacketColor"];
+            header_text_color?: components["schemas"]["PrintPacketColor"];
+            border_color?: components["schemas"]["PrintPacketColor"];
             /** @default 0.25 */
             border_width_pt?: number;
         };
-        BusinessDocumentInline: {
+        PrintPacketInline: {
             /** @constant */
             type: "text";
             value: string;
-            style?: components["schemas"]["BusinessDocumentTextStyle"];
+            style?: components["schemas"]["PrintPacketTextStyle"];
         } | {
             /** @constant */
             type: "value";
-            value: components["schemas"]["BusinessDocumentExpression"];
-            style?: components["schemas"]["BusinessDocumentTextStyle"];
+            value: components["schemas"]["PrintPacketExpression"];
+            style?: components["schemas"]["PrintPacketTextStyle"];
         } | {
             /** @constant */
             type: "line_break";
         };
-        BusinessDocumentNode: {
+        PrintPacketNode: {
             /** @enum {unknown} */
             type: "section" | "stack" | "row";
-            children: components["schemas"]["BusinessDocumentNode"][];
+            children: components["schemas"]["PrintPacketNode"][];
             /** @default 0 */
             gap_mm?: number;
         } | {
             /** @constant */
             type: "box";
-            children: components["schemas"]["BusinessDocumentNode"][];
-            style?: components["schemas"]["BusinessDocumentBoxStyle"];
+            children: components["schemas"]["PrintPacketNode"][];
+            style?: components["schemas"]["PrintPacketBoxStyle"];
         } | {
             /** @constant */
             type: "paragraph";
-            content: components["schemas"]["BusinessDocumentInline"][];
-            style?: components["schemas"]["BusinessDocumentTextStyle"];
+            content: components["schemas"]["PrintPacketInline"][];
+            style?: components["schemas"]["PrintPacketTextStyle"];
         } | {
             /** @constant */
             type: "heading";
-            content: components["schemas"]["BusinessDocumentInline"][];
+            content: components["schemas"]["PrintPacketInline"][];
             /** @default 1 */
             level?: number;
-            style?: components["schemas"]["BusinessDocumentTextStyle"];
+            style?: components["schemas"]["PrintPacketTextStyle"];
         } | {
             /** @constant */
             type: "grid";
             columns: number[];
-            children: components["schemas"]["BusinessDocumentNode"][];
+            children: components["schemas"]["PrintPacketNode"][];
             /** @default 0 */
             gap_mm?: number;
         } | {
             /** @constant */
             type: "table";
-            items: components["schemas"]["BusinessDocumentExpression"];
-            columns: components["schemas"]["BusinessDocumentTableColumn"][];
+            items: components["schemas"]["PrintPacketExpression"];
+            columns: components["schemas"]["PrintPacketTableColumn"][];
             /** @default false */
             repeat_header?: boolean;
-            empty?: components["schemas"]["BusinessDocumentNode"][];
-            style?: components["schemas"]["BusinessDocumentTableStyle"];
+            empty?: components["schemas"]["PrintPacketNode"][];
+            style?: components["schemas"]["PrintPacketTableStyle"];
         } | {
             /** @constant */
             type: "repeat";
-            items: components["schemas"]["BusinessDocumentExpression"];
-            children: components["schemas"]["BusinessDocumentNode"][];
+            items: components["schemas"]["PrintPacketExpression"];
+            children: components["schemas"]["PrintPacketNode"][];
             /** @default 0 */
             gap_mm?: number;
         } | {
             /** @constant */
             type: "data_list";
-            items: components["schemas"]["BusinessDocumentExpression"];
-            header?: components["schemas"]["BusinessDocumentNode"][];
-            item: components["schemas"]["BusinessDocumentNode"][];
-            empty?: components["schemas"]["BusinessDocumentNode"][];
+            items: components["schemas"]["PrintPacketExpression"];
+            header?: components["schemas"]["PrintPacketNode"][];
+            item: components["schemas"]["PrintPacketNode"][];
+            empty?: components["schemas"]["PrintPacketNode"][];
             /** @default true */
             repeat_header?: boolean;
             /** @default 0 */
@@ -4277,9 +4677,9 @@ export interface components {
         } | {
             /** @constant */
             type: "conditional";
-            condition: components["schemas"]["BusinessDocumentExpression"];
-            then: components["schemas"]["BusinessDocumentNode"][];
-            else?: components["schemas"]["BusinessDocumentNode"][];
+            condition: components["schemas"]["PrintPacketExpression"];
+            then: components["schemas"]["PrintPacketNode"][];
+            else?: components["schemas"]["PrintPacketNode"][];
         } | {
             /** @constant */
             type: "spacer";
@@ -4295,7 +4695,7 @@ export interface components {
         } | {
             /** @constant */
             type: "keep_together";
-            children: components["schemas"]["BusinessDocumentNode"][];
+            children: components["schemas"]["PrintPacketNode"][];
         } | {
             /** @constant */
             type: "image";
@@ -4310,7 +4710,7 @@ export interface components {
         } | {
             /** @constant */
             type: "image_value";
-            resource: components["schemas"]["BusinessDocumentExpression"];
+            resource: components["schemas"]["PrintPacketExpression"];
             width_mm: number;
             height_mm: number;
             /**
@@ -4321,7 +4721,7 @@ export interface components {
         } | {
             /** @constant */
             type: "qr";
-            value: components["schemas"]["BusinessDocumentExpression"];
+            value: components["schemas"]["PrintPacketExpression"];
             size_mm: number;
             /**
              * @default M
@@ -4331,7 +4731,7 @@ export interface components {
         } | {
             /** @constant */
             type: "barcode";
-            value: components["schemas"]["BusinessDocumentExpression"];
+            value: components["schemas"]["PrintPacketExpression"];
             /** @constant */
             symbology: "code128";
             width_mm: number;
@@ -4339,9 +4739,9 @@ export interface components {
             /** @default false */
             human_readable?: boolean;
         };
-        BusinessDocumentTableColumn: {
-            header: components["schemas"]["BusinessDocumentInline"][];
-            cell: components["schemas"]["BusinessDocumentInline"][];
+        PrintPacketTableColumn: {
+            header: components["schemas"]["PrintPacketInline"][];
+            cell: components["schemas"]["PrintPacketInline"][];
             /** @default 1 */
             width?: number;
             /**
@@ -4350,14 +4750,14 @@ export interface components {
              */
             align?: "left" | "center" | "right";
         };
-        BusinessDocumentRegion: {
-            first?: components["schemas"]["BusinessDocumentNode"][];
-            default?: components["schemas"]["BusinessDocumentNode"][];
-            last?: components["schemas"]["BusinessDocumentNode"][];
+        PrintPacketRegion: {
+            first?: components["schemas"]["PrintPacketNode"][];
+            default?: components["schemas"]["PrintPacketNode"][];
+            last?: components["schemas"]["PrintPacketNode"][];
         };
-        BusinessDocumentV1: {
+        PrintPacketV1: {
             /** @constant */
-            format: "piqae.business-document/v1";
+            format: "printpacket/v1";
             media: {
                 /** @constant */
                 kind: "paged";
@@ -4368,18 +4768,18 @@ export interface components {
                  * @enum {unknown}
                  */
                 orientation?: "portrait" | "landscape";
-                margins?: components["schemas"]["BusinessDocumentEdges"];
+                margins?: components["schemas"]["PrintPacketEdges"];
             } | {
                 /** @constant */
                 kind: "continuous";
                 width_mm: number;
-                margins?: components["schemas"]["BusinessDocumentEdges"];
+                margins?: components["schemas"]["PrintPacketEdges"];
             } | {
                 /** @constant */
                 kind: "label";
                 width_mm: number;
                 height_mm: number;
-                margins?: components["schemas"]["BusinessDocumentEdges"];
+                margins?: components["schemas"]["PrintPacketEdges"];
             };
             theme?: {
                 /** @default 10 */
@@ -4402,46 +4802,46 @@ export interface components {
                     byte_length: number;
                 };
             };
-            header?: components["schemas"]["BusinessDocumentRegion"];
-            body: components["schemas"]["BusinessDocumentNode"][];
-            footer?: components["schemas"]["BusinessDocumentRegion"];
+            header?: components["schemas"]["PrintPacketRegion"];
+            body: components["schemas"]["PrintPacketNode"][];
+            footer?: components["schemas"]["PrintPacketRegion"];
         };
-        CreateBusinessDocumentTemplate: {
+        CreatePrintPacketTemplate: {
             name: string;
-            specification: components["schemas"]["BusinessDocumentV1"];
+            specification: components["schemas"]["PrintPacketV1"];
         };
-        PublishBusinessDocumentTemplate: {
-            specification: components["schemas"]["BusinessDocumentV1"];
+        PublishPrintPacketTemplate: {
+            specification: components["schemas"]["PrintPacketV1"];
         };
-        BusinessDocumentTemplate: {
+        PrintPacketTemplate: {
             id: string;
             name: string;
             /** @enum {unknown} */
             state: "draft" | "published" | "archived";
-            specification: components["schemas"]["BusinessDocumentV1"];
+            specification: components["schemas"]["PrintPacketV1"];
             published_revision_id?: string | null;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
             updated_at: string;
         };
-        BusinessDocumentTemplateRevision: {
+        PrintPacketTemplateRevision: {
             id: string;
             template_id: string;
-            specification: components["schemas"]["BusinessDocumentV1"];
+            specification: components["schemas"]["PrintPacketV1"];
             revision: number;
             /** @constant */
-            renderer_profile: "piqae.business-document/v1";
+            renderer_profile: "printpacket/v1";
             /** Format: date-time */
             created_at: string;
         };
-        CreateBusinessDocumentRender: {
+        CreatePrintPacketRender: {
             template_revision_id: string;
             input: {
                 [key: string]: unknown;
             };
         };
-        BusinessDocumentRender: {
+        PrintPacketRender: {
             id: string;
             template_revision_id: string;
             /** @enum {unknown} */
@@ -4457,23 +4857,23 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
-        PrintBusinessDocumentRender: {
+        PrintPacketPrintRequest: {
             printer_id?: string;
             target_id?: string;
             title: string;
             options?: components["schemas"]["JobOptions"];
             /** @default 1 */
             deliveries?: number;
-            render_policy?: components["schemas"]["BusinessDocumentRenderPolicy"];
-            render_cost?: components["schemas"]["BusinessDocumentRenderCost"];
+            render_policy?: components["schemas"]["PrintPacketRenderPolicy"];
+            render_cost?: components["schemas"]["PrintPacketRenderCost"];
         } & (unknown | unknown);
         /**
          * @description automatic uses bounded measured costs; cloud_only always delivers the approved PDF; prefer_node uses exact node rendering only when compatible and otherwise delivers the approved PDF; require_node fails closed when exact compatibility is unavailable.
          * @default automatic
          * @enum {string}
          */
-        BusinessDocumentRenderPolicy: "automatic" | "cloud_only" | "prefer_node" | "require_node";
-        BusinessDocumentRenderCost: {
+        PrintPacketRenderPolicy: "automatic" | "cloud_only" | "prefer_node" | "require_node";
+        PrintPacketRenderCost: {
             document_count: number;
             page_count: number;
             /** Format: int64 */
@@ -4481,7 +4881,7 @@ export interface components {
             /** Format: int64 */
             input_bytes: number;
         };
-        BusinessDocumentResourceDescriptor: {
+        PrintPacketResourceDescriptor: {
             digest: components["schemas"]["Sha256Hex"];
             /**
              * @description Renderer ABI v1 intentionally supports resolved JPEG resources only; fonts remain built-in Base-14/Windows-1252.
@@ -4491,14 +4891,21 @@ export interface components {
             /** Format: int64 */
             byte_length: number;
         };
-        BusinessDocumentRenderReadiness: {
-            requested_policy: components["schemas"]["BusinessDocumentRenderPolicy"];
+        PrintPacketRenderReadiness: {
+            requested_policy: components["schemas"]["PrintPacketRenderPolicy"];
             /** @enum {string} */
             selected_mode: "cloud_pdf" | "node_render";
+            /** @enum {string} */
+            status: "ready" | "fallback_ready" | "node_update_required";
             reason: string;
+            /** @description True only when the immutable completed PDF may be delivered under the requested policy. */
+            approved_pdf_fallback: boolean;
             destination: {
                 supported: boolean;
                 ready: boolean;
+                missing_features: string[];
+                supported_packet_versions: string[];
+                current_implementation: string | null;
                 missing_resources: components["schemas"]["Sha256Hex"][];
                 reason: string | null;
             };
@@ -4509,16 +4916,16 @@ export interface components {
                 node_ms: number;
             };
         };
-        EvaluateBusinessDocumentRenderReadiness: {
+        EvaluatePrintPacketRenderReadiness: {
             printer_id: string;
-            render_policy?: components["schemas"]["BusinessDocumentRenderPolicy"];
-            render_cost?: components["schemas"]["BusinessDocumentRenderCost"];
+            render_policy?: components["schemas"]["PrintPacketRenderPolicy"];
+            render_cost?: components["schemas"]["PrintPacketRenderCost"];
         };
-        CreateBusinessDocumentPreview: {
+        CreatePrintPacketPreview: {
             /** @default 600 */
             expires_in_seconds?: number;
         };
-        BusinessDocumentPreview: {
+        PrintPacketPreview: {
             id: string;
             render_id: string;
             /** @enum {unknown} */
@@ -4531,8 +4938,8 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
-        ApprovedBusinessDocumentPreview: {
-            preview: components["schemas"]["BusinessDocumentPreview"];
+        ApprovedPrintPacketPreview: {
+            preview: components["schemas"]["PrintPacketPreview"];
             job: components["schemas"]["Job"];
         };
         ErrorEnvelope: {
@@ -7267,7 +7674,15 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": {
-                    name: string;
+                    /** @description At most 120 bytes when UTF-8 encoded. */
+                    name?: string;
+                    /** @description Optional operator-supplied site label, at most 120 UTF-8 bytes. Piqae never infers this from a user or address. */
+                    site?: string | null;
+                    /** @description Optional operator-supplied placement such as Dispatch desk or Kitchen, at most 120 UTF-8 bytes. */
+                    location?: string | null;
+                    labels?: string[];
+                    /** Format: int64 */
+                    expected_revision?: number;
                 };
             };
         };
@@ -7283,6 +7698,7 @@ export interface operations {
             };
             400: components["responses"]["Error"];
             404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
         };
     };
     pauseNode: {
@@ -7324,6 +7740,111 @@ export interface operations {
                 };
                 content?: never;
             };
+            404: components["responses"]["Error"];
+        };
+    };
+    getNodeRuntime: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: components["parameters"]["NodeId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Latest authenticated lifecycle observation. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeRuntimeObservation"];
+                };
+            };
+            404: components["responses"]["Error"];
+        };
+    };
+    listNodeRuntimeObservations: {
+        parameters: {
+            query?: {
+                limit?: number;
+                /** @description Last node ID returned by the previous page. */
+                after?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Latest authenticated runtime observation per reporting node. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeRuntimeObservationPage"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+        };
+    };
+    listNodeWakeHints: {
+        parameters: {
+            query?: {
+                /** @description Maximum number of newest wake requests to return. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                node_id: components["parameters"]["NodeId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Newest tenant-scoped wake requests first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeWakeHint"][];
+                };
+            };
+            404: components["responses"]["Error"];
+        };
+    };
+    createNodeWakeHint: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                node_id: components["parameters"]["NodeId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateNodeWakeHint"];
+            };
+        };
+        responses: {
+            /** @description Advisory wake request recorded. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeWakeHint"];
+                };
+            };
+            400: components["responses"]["Error"];
             404: components["responses"]["Error"];
         };
     };
@@ -7871,6 +8392,65 @@ export interface operations {
             401: components["responses"]["Error"];
         };
     };
+    updateAgentIdentity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AgentIdentityUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Display identity updated at exactly the next revision. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentIdentityUpdateResponse"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
+    revokeAgentConnector: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                connector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description Connector authority grant is revoked. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        revoked: true;
+                    };
+                };
+            };
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
     registerAgentContentEncryptionKey: {
         parameters: {
             query?: never;
@@ -7941,6 +8521,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AgentAcceptResponse"];
+                };
+            };
+            401: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
+    reconcileAgentAcceptance: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AgentExactAcceptanceRequest"];
+            };
+        };
+        responses: {
+            /** @description Exact durable acceptance evidence and revocation stability. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        accepted: boolean;
+                        /** @description Admission for this connector or its owning node has been revoked. When true, an acceptance absent from the exact evidence set must not become runnable locally. */
+                        connector_revoked: boolean;
+                        /** @description The exact acceptance belongs to a revoked or superseded connector incarnation, or its job is already terminal; the node must abandon local pending work. */
+                        fenced: boolean;
+                    };
+                };
+            };
+            401: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
+    abandonAgentAcceptance: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: components["parameters"]["JobId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AgentExactAcceptanceRequest"];
+            };
+        };
+        responses: {
+            /** @description Whether the exact accepted job was safely abandoned. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        abandoned: boolean;
+                    };
                 };
             };
             401: components["responses"]["Error"];
@@ -8038,7 +8682,7 @@ export interface operations {
             503: components["responses"]["Error"];
         };
     };
-    createBusinessDocumentTemplate: {
+    createPrintPacketTemplate: {
         parameters: {
             query?: never;
             header?: {
@@ -8049,7 +8693,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateBusinessDocumentTemplate"];
+                "application/json": components["schemas"]["CreatePrintPacketTemplate"];
             };
         };
         responses: {
@@ -8059,7 +8703,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentTemplate"];
+                    "application/json": components["schemas"]["PrintPacketTemplate"];
                 };
             };
             /** @description Draft template created. */
@@ -8068,7 +8712,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentTemplate"];
+                    "application/json": components["schemas"]["PrintPacketTemplate"];
                 };
             };
             400: components["responses"]["Error"];
@@ -8076,7 +8720,7 @@ export interface operations {
             409: components["responses"]["Error"];
         };
     };
-    retrieveBusinessDocumentTemplate: {
+    retrievePrintPacketTemplate: {
         parameters: {
             query?: never;
             header?: never;
@@ -8093,14 +8737,14 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentTemplate"];
+                    "application/json": components["schemas"]["PrintPacketTemplate"];
                 };
             };
             401: components["responses"]["Error"];
             404: components["responses"]["Error"];
         };
     };
-    publishBusinessDocumentTemplate: {
+    publishPrintPacketTemplate: {
         parameters: {
             query?: never;
             header?: {
@@ -8113,7 +8757,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["PublishBusinessDocumentTemplate"];
+                "application/json": components["schemas"]["PublishPrintPacketTemplate"];
             };
         };
         responses: {
@@ -8123,7 +8767,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentTemplateRevision"];
+                    "application/json": components["schemas"]["PrintPacketTemplateRevision"];
                 };
             };
             /** @description Immutable revision published. */
@@ -8132,7 +8776,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentTemplateRevision"];
+                    "application/json": components["schemas"]["PrintPacketTemplateRevision"];
                 };
             };
             400: components["responses"]["Error"];
@@ -8140,7 +8784,7 @@ export interface operations {
             409: components["responses"]["Error"];
         };
     };
-    retrieveBusinessDocumentTemplateRevision: {
+    retrievePrintPacketTemplateRevision: {
         parameters: {
             query?: never;
             header?: never;
@@ -8157,14 +8801,14 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentTemplateRevision"];
+                    "application/json": components["schemas"]["PrintPacketTemplateRevision"];
                 };
             };
             401: components["responses"]["Error"];
             404: components["responses"]["Error"];
         };
     };
-    createBusinessDocumentRender: {
+    createPrintPacketRender: {
         parameters: {
             query?: never;
             header?: {
@@ -8175,7 +8819,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateBusinessDocumentRender"];
+                "application/json": components["schemas"]["CreatePrintPacketRender"];
             };
         };
         responses: {
@@ -8185,7 +8829,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentRender"];
+                    "application/json": components["schemas"]["PrintPacketRender"];
                 };
             };
             /** @description Render durably registered. */
@@ -8194,7 +8838,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentRender"];
+                    "application/json": components["schemas"]["PrintPacketRender"];
                 };
             };
             400: components["responses"]["Error"];
@@ -8202,7 +8846,7 @@ export interface operations {
             409: components["responses"]["Error"];
         };
     };
-    putBusinessDocumentResource: {
+    putPrintPacketResource: {
         parameters: {
             query?: never;
             header?: never;
@@ -8228,7 +8872,7 @@ export interface operations {
             401: components["responses"]["Error"];
         };
     };
-    retrieveBusinessDocumentRender: {
+    retrievePrintPacketRender: {
         parameters: {
             query?: never;
             header?: never;
@@ -8245,13 +8889,13 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentRender"];
+                    "application/json": components["schemas"]["PrintPacketRender"];
                 };
             };
             404: components["responses"]["Error"];
         };
     };
-    evaluateBusinessDocumentRenderReadiness: {
+    evaluatePrintPacketRenderReadiness: {
         parameters: {
             query?: never;
             header?: never;
@@ -8262,7 +8906,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["EvaluateBusinessDocumentRenderReadiness"];
+                "application/json": components["schemas"]["EvaluatePrintPacketRenderReadiness"];
             };
         };
         responses: {
@@ -8272,7 +8916,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentRenderReadiness"];
+                    "application/json": components["schemas"]["PrintPacketRenderReadiness"];
                 };
             };
             400: components["responses"]["Error"];
@@ -8280,7 +8924,7 @@ export interface operations {
             404: components["responses"]["Error"];
         };
     };
-    downloadBusinessDocumentRenderArtifact: {
+    downloadPrintPacketRenderArtifact: {
         parameters: {
             query?: never;
             header?: never;
@@ -8310,7 +8954,7 @@ export interface operations {
             503: components["responses"]["Error"];
         };
     };
-    printBusinessDocumentRender: {
+    printPacketRender: {
         parameters: {
             query?: never;
             header?: {
@@ -8323,7 +8967,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["PrintBusinessDocumentRender"];
+                "application/json": components["schemas"]["PrintPacketPrintRequest"];
             };
         };
         responses: {
@@ -8350,7 +8994,7 @@ export interface operations {
             409: components["responses"]["Error"];
         };
     };
-    createBusinessDocumentPreview: {
+    createPrintPacketPreview: {
         parameters: {
             query?: never;
             header?: {
@@ -8363,7 +9007,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateBusinessDocumentPreview"];
+                "application/json": components["schemas"]["CreatePrintPacketPreview"];
             };
         };
         responses: {
@@ -8373,7 +9017,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentPreview"];
+                    "application/json": components["schemas"]["PrintPacketPreview"];
                 };
             };
             /** @description Preview awaiting approval */
@@ -8382,7 +9026,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentPreview"];
+                    "application/json": components["schemas"]["PrintPacketPreview"];
                 };
             };
             400: components["responses"]["Error"];
@@ -8391,7 +9035,7 @@ export interface operations {
             409: components["responses"]["Error"];
         };
     };
-    retrieveBusinessDocumentPreview: {
+    retrievePrintPacketPreview: {
         parameters: {
             query?: never;
             header?: never;
@@ -8408,14 +9052,14 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentPreview"];
+                    "application/json": components["schemas"]["PrintPacketPreview"];
                 };
             };
             401: components["responses"]["Error"];
             404: components["responses"]["Error"];
         };
     };
-    downloadBusinessDocumentPreviewArtifact: {
+    downloadPrintPacketPreviewArtifact: {
         parameters: {
             query?: never;
             header?: never;
@@ -8441,7 +9085,7 @@ export interface operations {
             503: components["responses"]["Error"];
         };
     };
-    approveBusinessDocumentPreview: {
+    approvePrintPacketPreview: {
         parameters: {
             query?: never;
             header?: {
@@ -8454,7 +9098,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["PrintBusinessDocumentRender"];
+                "application/json": components["schemas"]["PrintPacketPrintRequest"];
             };
         };
         responses: {
@@ -8464,7 +9108,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ApprovedBusinessDocumentPreview"];
+                    "application/json": components["schemas"]["ApprovedPrintPacketPreview"];
                 };
             };
             /** @description Approved preview and newly registered job */
@@ -8473,7 +9117,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ApprovedBusinessDocumentPreview"];
+                    "application/json": components["schemas"]["ApprovedPrintPacketPreview"];
                 };
             };
             400: components["responses"]["Error"];
@@ -8482,7 +9126,7 @@ export interface operations {
             409: components["responses"]["Error"];
         };
     };
-    cancelBusinessDocumentPreview: {
+    cancelPrintPacketPreview: {
         parameters: {
             query?: never;
             header?: {
@@ -8501,7 +9145,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BusinessDocumentPreview"];
+                    "application/json": components["schemas"]["PrintPacketPreview"];
                 };
             };
             401: components["responses"]["Error"];

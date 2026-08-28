@@ -18,6 +18,9 @@ platforms:
   linux_aarch64:
     tier: preview
     reason: v0.1.11 aarch64 packaging, checksum, SBOM and provenance evidence exists; clean-install, upgrade/rollback and low-power hardware gates have not run
+  ios_ipados_16_plus:
+    tier: preview
+    reason: a source-buildable standalone SwiftUI host and shared NodeKit runtime exist with deterministic simulator tests; signed App Store/TestFlight distribution, APNs provider, supervised background, accessory entitlement, physical printing and fleet-soak evidence remain open
 features:
   durable_job_registration:
     tier: preview
@@ -54,19 +57,43 @@ features:
     reason: cross-resource/concurrency isolation, operator attribution, selector rejection, and full redaction evidence are incomplete
   multi_integrator_node_runtime:
     tier: preview
-    reason: isolated connector runtime and macOS consent flow are implemented, but Windows/Linux native consent, signed packages, fleet concurrency and revocation soak evidence are incomplete
+    reason: isolated connector workers plus OS-verified macOS Unix-socket and Windows named-pipe consent are implemented in source, but signed current SDK packages, Linux native consent, fleet concurrency and revocation soak evidence are incomplete
+  embeddable_node_runtime:
+    tier: preview
+    reason: the shared runtime, versioned broker and native ABI have deterministic local-only, connector-isolation, lifecycle, generation-fenced immediate reconciliation and restart evidence; signed SDK artifacts, host-app fleet soak and physical printing remain release gates
+  apple_nodekit:
+    tier: preview
+    reason: the source Swift package exposes OS-verified fail-closed protocol-v4 installed-node consent plus app-scoped APIs with Keychain-backed connector signing, deadline-bounded immediate wake reconciliation, coalesced automatic durable-work drain, foreground-safe AirPrint and lifecycle tests; signed binary distribution, APNs provider evidence, App Store review, accessory entitlements, prolonged kiosk and physical printer evidence remain incomplete
+  standalone_ios_ipados_node:
+    tier: preview
+    reason: the thin standalone host uses the shared durable runtime for multi-connection enrollment, selected printer inventory, profiles/media truth, queue/history and lifecycle diagnostics; its unsigned artifact is compilation evidence only and all Apple distribution, background, accessory and physical gates remain open
+  windows_node_sdk:
+    tier: disabled
+    reason: the native ABI, managed facade, bounded resume/network reconciliation, Credential Manager protected-at-rest Ed25519 fallback and OS-verified named-pipe consent are implemented in source; hosted Windows CI, signed NuGet publication, suspend-resume and physical Winspool evidence remain release gates
+  unattended_ipados_printing:
+    tier: disabled
+    reason: iPadOS background execution and silent notifications are opportunistic; no force-quit or sleeping-device guarantee exists, and APNs, managed-kiosk, BLE, MFi, vendor-adapter and physical soak gates remain open
+  external_node_wake_relay:
+    tier: disabled
+    reason: wake hints are durable and never carry job content or leases, but only already-connected session delivery is verified; APNs and LAN wake dispatchers, tenant-bound registration, rate limiting and hardware wake evidence remain open
+  mobile_printer_adapter_registry:
+    tier: preview
+    reason: exact adapter-version, transport, device-family and firmware matching is bounded and fail-closed; vendor licensing, entitlement review and physical option-mapping certification remain adapter-specific release gates
   content_confidential_printing:
     tier: disabled
     reason: encrypted transport and local decryption are implemented for evaluation but lack independent cryptographic review, hardware-backed keys and physical release evidence
   declarative_document_generation:
     tier: disabled
-    reason: the bounded business-document renderer, encrypted tenant persistence, SDK/MCP contracts, content-addressed JPEG resources, optional exact node rendering, PostgreSQL cutover tests, virtual lifecycle tests, and a 250-page local synthetic benchmark exist; international Unicode shaping, downloadable fonts, PNG/SVG, production fleet soak, independent security review, and physical release gates remain open
+    reason: the bounded PrintPacket renderer, encrypted tenant persistence, SDK/MCP contracts, content-addressed JPEG resources, optional exact node rendering, canonical fresh-schema tenant tests, virtual lifecycle tests, and a 250-page local synthetic benchmark exist; international Unicode shaping, downloadable fonts, PNG/SVG, production fleet soak, independent security review, and physical release gates remain open
   shopify_order_printing:
     tier: disabled
     reason: the embedded app, Word-like semantic editor, Liquid compiler, Admin/POS/customer extensions, render-policy/readiness controls, verified asset publication, direct-node path, and PDF fallback pass local and virtual gates; international typography, deployment of the new API, Shopify approvals, live bulk store/POS validation, Web Vitals evidence, production fleet soak, and physical printing remain open
   macos_embedded_node_onboarding:
     tier: preview
-    reason: Piqae-branded application-link consent and proof-of-possession are tested in source and included in signed/notarised v0.1.11 Preview packaging; clean-install, update/rollback and fleet evidence remain open
-  windows_linux_embedded_node_onboarding:
+    reason: OS-verified Unix-socket peer identity, Piqae-branded consent and protocol-v4 proof-of-possession are tested in source; the current embedded SDK candidate is unsigned and its clean-install, update/rollback, App Store and fleet evidence remain open
+  windows_embedded_node_onboarding:
     tier: disabled
-    reason: only the shared headless stdin transaction exists; native application-link registration and local consent shells are not implemented
+    reason: OS-verified named-pipe peer identity, local consent and protocol-v4 proof-of-possession are implemented in source; hosted Windows CI, Authenticode-signed packaging, install/update/rollback and fleet evidence remain open
+  linux_embedded_node_onboarding:
+    tier: disabled
+    reason: only the shared headless enrollment transaction exists; a native OS-verified application identity, application-link registration and local consent shell are not implemented

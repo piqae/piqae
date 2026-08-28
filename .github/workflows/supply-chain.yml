@@ -66,6 +66,8 @@ jobs:
         run: python3 release/tools/check_security_exceptions.py
       - name: Enforce competitor terminology boundary
         run: python3 release/tools/check_competitor_mentions.py
+      - name: Reject removed PrintPacket predecessor contracts
+        run: python3 release/tools/check_printpacket_source_policy.py
       - name: Reject mutable action references
         run: python3 release/tools/check_workflow_pins.py .github/workflows/*.yml
       - name: Require switchable runner indirection

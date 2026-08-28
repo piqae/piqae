@@ -8,11 +8,11 @@ use chrono::Utc;
 use ed25519_dalek::{Signer, SigningKey};
 use piqae_domain::{AgentId, JobId};
 use piqae_protocol::agent::{
-    AgentAcceptJobRequest, AgentAcceptJobResponse, AgentReleaseLeaseRequest,
-    AgentRenewLeaseRequest, AgentRenewLeaseResponse, AgentSyncRequest, AgentSyncResponse,
-    ConnectSessionPreview, ConnectSessionPreviewRequest, CreateDeviceAuthorizationRequest,
-    CreatedDeviceAuthorization, DeviceAuthorizationExchange, DeviceAuthorizationStatus,
-    EnrolRequest, EnrolResponse,
+    AgentAcceptJobRequest, AgentAcceptJobResponse, AgentIdentityUpdateRequest,
+    AgentIdentityUpdateResponse, AgentReleaseLeaseRequest, AgentRenewLeaseRequest,
+    AgentRenewLeaseResponse, AgentSyncRequest, AgentSyncResponse, ConnectSessionPreview,
+    ConnectSessionPreviewRequest, CreateDeviceAuthorizationRequest, CreatedDeviceAuthorization,
+    DeviceAuthorizationExchange, DeviceAuthorizationStatus, EnrolRequest, EnrolResponse,
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
@@ -48,6 +48,10 @@ pub enum ClientError {
     ResponseTooLarge,
     #[error("device authorization request failed")]
     DeviceAuthorization,
+    #[error("device request signing failed")]
+    Signing,
+    #[error("node identity revision conflict; current revision is {current_revision}")]
+    NodeIdentityRevisionConflict { current_revision: u64 },
 }
 
 impl ClientError {
@@ -56,6 +60,19 @@ impl ClientError {
     #[must_use]
     pub const fn is_unauthorized(&self) -> bool {
         matches!(self, Self::Unauthorized { .. })
+    }
+
+    /// Reports that an additive recovery endpoint is unavailable on an N-1
+    /// or older self-hosted authority.
+    #[must_use]
+    pub const fn is_endpoint_unsupported(&self) -> bool {
+        matches!(
+            self,
+            Self::Status {
+                status: 404 | 405,
+                ..
+            }
+        )
     }
 
     /// The control-plane error code for a rejected node request.
@@ -125,6 +142,18 @@ fn server_time_ms(headers: &HeaderMap) -> Option<i64> {
 }
 
 fn status_error(status: u16, bytes: &[u8]) -> ClientError {
+    if status == 409
+        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes)
+        && value
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str)
+            == Some("node_identity_revision_conflict")
+        && let Some(current_revision) = value
+            .pointer("/error/details/current_revision")
+            .and_then(serde_json::Value::as_u64)
+    {
+        return ClientError::NodeIdentityRevisionConflict { current_revision };
+    }
     let body: String = String::from_utf8_lossy(bytes).chars().take(1024).collect();
     if status == 401 {
         let code = serde_json::from_slice::<serde_json::Value>(bytes)
@@ -146,6 +175,72 @@ fn status_error(status: u16, bytes: &[u8]) -> ClientError {
 pub struct DeviceIdentity {
     agent_id: AgentId,
     signing_key: SigningKey,
+}
+
+/// Signing contract shared by file-backed installed nodes and embedded hosts
+/// whose connector private keys never leave Keychain/Credential Manager.
+pub trait DeviceRequestSigner: std::fmt::Debug + Send + Sync {
+    fn agent_id(&self) -> &AgentId;
+    /// Signs one bounded canonical HTTP request.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Signing` when the backing identity cannot sign safely.
+    fn sign(&self, message: &[u8]) -> Result<[u8; 64], ClientError>;
+
+    /// Builds the complete authenticated header set for one exact request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a signing or invalid-header error.
+    fn signed_headers(
+        &self,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        timestamp_unix_ms: i64,
+        nonce: Uuid,
+    ) -> Result<HeaderMap, ClientError> {
+        let digest = format!("{:x}", Sha256::digest(body));
+        let canonical = format!(
+            "{}\n{}\n{}\n{}\n{}",
+            method.to_ascii_uppercase(),
+            path,
+            timestamp_unix_ms,
+            nonce,
+            digest
+        );
+        let signature = self.sign(canonical.as_bytes())?;
+        let mut headers = HeaderMap::new();
+        insert_header(
+            &mut headers,
+            "x-piqae-agent-id",
+            &self.agent_id().to_string(),
+        )?;
+        insert_header(
+            &mut headers,
+            "x-piqae-timestamp",
+            &timestamp_unix_ms.to_string(),
+        )?;
+        insert_header(&mut headers, "x-piqae-nonce", &nonce.to_string())?;
+        insert_header(&mut headers, "x-piqae-body-sha256", &digest)?;
+        insert_header(
+            &mut headers,
+            "x-piqae-signature",
+            &STANDARD_NO_PAD.encode(signature),
+        )?;
+        Ok(headers)
+    }
+}
+
+impl DeviceRequestSigner for DeviceIdentity {
+    fn agent_id(&self) -> &AgentId {
+        &self.agent_id
+    }
+
+    fn sign(&self, message: &[u8]) -> Result<[u8; 64], ClientError> {
+        Ok(self.signing_key.sign(message).to_bytes())
+    }
 }
 
 impl DeviceIdentity {
@@ -252,6 +347,10 @@ impl AgentClient {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(40))
+            // Enrollment and signed node requests are origin-pinned. Following
+            // redirects could forward invitation or lease capabilities to a
+            // different authority selected by a compromised proxy response.
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("piqae-agent/", env!("CARGO_PKG_VERSION")))
             .build()?;
         Ok(Self {
@@ -359,11 +458,121 @@ impl AgentClient {
     /// or response-decoding failure.
     pub async fn sync(
         &self,
-        identity: &DeviceIdentity,
+        identity: &dyn DeviceRequestSigner,
         request: &AgentSyncRequest,
     ) -> Result<AgentSyncResponse, ClientError> {
         self.post_json("v1/agent/sync", request, Some(identity))
             .await
+    }
+
+    /// Updates only this connector's tenant-visible node metadata using an
+    /// independent server revision. Exact response-loss retries are
+    /// idempotent and never rotate node credentials or queue identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NodeIdentityRevisionConflict` with the current server revision
+    /// when an operator or another client updated this connector first.
+    pub async fn update_node_identity(
+        &self,
+        identity: &dyn DeviceRequestSigner,
+        request: &AgentIdentityUpdateRequest,
+    ) -> Result<AgentIdentityUpdateResponse, ClientError> {
+        let body = serde_json::to_vec(request)?;
+        let path = "/v1/agent/identity";
+        let mut builder = self
+            .client
+            .put(self.base_url.join(path.trim_start_matches('/'))?)
+            .header("content-type", "application/json")
+            .body(body.clone());
+        builder = builder.headers(identity.signed_headers(
+            "PUT",
+            path,
+            &body,
+            self.clock.signing_timestamp_ms(),
+            Uuid::new_v4(),
+        )?);
+        let mut response = builder.send().await?;
+        self.clock.observe(response.headers());
+        let status = response.status();
+        let bytes = bounded_response_bytes(&mut response).await?;
+        if !status.is_success() {
+            return Err(status_error(status.as_u16(), &bytes));
+        }
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    /// Durably revokes this connector's server-side grant using its final
+    /// signed request. A successful response means the credential is denied
+    /// by subsequent agent authentication and may be deleted locally.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the connector id is malformed, request signing
+    /// fails, the authority cannot be reached, or the authority rejects the
+    /// exact connector credential.
+    pub async fn revoke_connector(
+        &self,
+        identity: &dyn DeviceRequestSigner,
+        connector_id: &str,
+    ) -> Result<(), ClientError> {
+        if !connector_id.starts_with("ncon_")
+            || connector_id.len() > 128
+            || !connector_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err(ClientError::Status {
+                status: 400,
+                body: "invalid connector id".into(),
+            });
+        }
+        self.post_json::<_, serde_json::Value>(
+            &format!("v1/agent/connectors/{connector_id}/revoke"),
+            &serde_json::json!({}),
+            Some(identity),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Reconciles one exact durable local acceptance against authority state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when signing, transport, status validation, or decoding fails.
+    pub async fn reconcile_acceptance(
+        &self,
+        identity: &dyn DeviceRequestSigner,
+        job_id: piqae_domain::JobId,
+        request: &piqae_protocol::agent::AgentAcceptJobRequest,
+    ) -> Result<piqae_protocol::agent::AgentAcceptanceReconciliationResponse, ClientError> {
+        self.post_json::<_, piqae_protocol::agent::AgentAcceptanceReconciliationResponse>(
+            &format!("v1/agent/jobs/{job_id}/acceptance/reconcile"),
+            request,
+            Some(identity),
+        )
+        .await
+    }
+
+    /// Compensates one exact accepted job before local queue activation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when signing, transport, status validation, or decoding fails.
+    pub async fn abandon_acceptance(
+        &self,
+        identity: &dyn DeviceRequestSigner,
+        job_id: piqae_domain::JobId,
+        request: &piqae_protocol::agent::AgentAcceptJobRequest,
+    ) -> Result<bool, ClientError> {
+        self.post_json::<_, piqae_protocol::agent::AgentAcceptanceAbandonResponse>(
+            &format!("v1/agent/jobs/{job_id}/acceptance/abandon"),
+            request,
+            Some(identity),
+        )
+        .await
+        .map(|response| response.abandoned)
     }
 
     /// Registers this node's public content-encryption key using device authentication.
@@ -373,7 +582,7 @@ impl AgentClient {
     /// Returns an error for signing, serialization, transport, status, or decoding failure.
     pub async fn register_content_encryption_key(
         &self,
-        identity: &DeviceIdentity,
+        identity: &dyn DeviceRequestSigner,
         key_id: &str,
         public_key_spki: &str,
     ) -> Result<serde_json::Value, ClientError> {
@@ -411,7 +620,7 @@ impl AgentClient {
     /// or response-decoding failure.
     pub async fn accept_job(
         &self,
-        identity: &DeviceIdentity,
+        identity: &dyn DeviceRequestSigner,
         job_id: JobId,
         request: &AgentAcceptJobRequest,
     ) -> Result<AgentAcceptJobResponse, ClientError> {
@@ -431,7 +640,7 @@ impl AgentClient {
     /// or response-decoding failure.
     pub async fn renew_lease(
         &self,
-        identity: &DeviceIdentity,
+        identity: &dyn DeviceRequestSigner,
         job_id: JobId,
         request: &AgentRenewLeaseRequest,
     ) -> Result<AgentRenewLeaseResponse, ClientError> {
@@ -451,7 +660,7 @@ impl AgentClient {
     /// or response-decoding failure.
     pub async fn release_lease(
         &self,
-        identity: &DeviceIdentity,
+        identity: &dyn DeviceRequestSigner,
         job_id: JobId,
         request: &AgentReleaseLeaseRequest,
     ) -> Result<serde_json::Value, ClientError> {
@@ -474,7 +683,7 @@ impl AgentClient {
     /// failures.
     pub async fn download_content(
         &self,
-        identity: &DeviceIdentity,
+        identity: &dyn DeviceRequestSigner,
         job_id: JobId,
         lease_id: Uuid,
         lease_token: &str,
@@ -513,7 +722,7 @@ impl AgentClient {
     /// or HTTP status failure.
     pub async fn download_document_resource(
         &self,
-        identity: &DeviceIdentity,
+        identity: &dyn DeviceRequestSigner,
         job_id: JobId,
         lease_id: Uuid,
         lease_token: &str,
@@ -558,7 +767,7 @@ impl AgentClient {
         &self,
         path: &str,
         request: &Req,
-        identity: Option<&DeviceIdentity>,
+        identity: Option<&dyn DeviceRequestSigner>,
     ) -> Result<Res, ClientError> {
         let body = serde_json::to_vec(request)?;
         let url = self.base_url.join(path)?;
@@ -686,6 +895,17 @@ mod tests {
         let outage = status_error(503, b"{}");
         assert!(!outage.is_unauthorized());
         assert!(matches!(outage, ClientError::Status { status: 503, .. }));
+
+        let conflict = status_error(
+            409,
+            br#"{"error":{"code":"node_identity_revision_conflict","details":{"current_revision":14}}}"#,
+        );
+        assert!(matches!(
+            conflict,
+            ClientError::NodeIdentityRevisionConflict {
+                current_revision: 14
+            }
+        ));
     }
 
     #[test]

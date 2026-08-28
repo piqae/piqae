@@ -45,13 +45,13 @@ export async function publishCanonicalTemplate(input: {
       bytes.byteOffset,
       bytes.byteOffset + bytes.byteLength,
     ) as ArrayBuffer;
-    await client.businessDocuments.resources.putJpeg(asset.digest, body);
+    await client.printPackets.resources.putJpeg(asset.digest, body);
   });
-  const template = await client.businessDocuments.templates.create(
+  const template = await client.printPackets.templates.create(
     { name: input.name, specification: envelope.document },
     `shopify-template-${canonicalDigest}`,
   );
-  const revision = await client.businessDocuments.templates.publish(
+  const revision = await client.printPackets.templates.publish(
     template.id,
     envelope.document,
     `shopify-template-publish-${canonicalDigest}`,

@@ -18,30 +18,35 @@ export type DestinationIdentityEvidence = components['schemas']['DestinationIden
 export type DestinationIdentityDecision = components['schemas']['DestinationIdentityDecision'];
 export type CreateDestinationIdentityDecision = components['schemas']['CreateDestinationIdentityDecision'];
 export type RouteObservation = components['schemas']['RouteObservation'];
+export type PrivacySafeQueueOccupancy = components['schemas']['PrivacySafeQueueOccupancy'];
 export type RouteReservation = components['schemas']['RouteReservation'];
 export type DeliveryAttempt = components['schemas']['DeliveryAttempt'];
 export type ResolveUncertainDelivery = components['schemas']['ResolveUncertainDelivery'];
 export type UncertainDeliveryResolution = components['schemas']['UncertainDeliveryResolution'];
+export type NodeRuntimeObservation = components['schemas']['NodeRuntimeObservation'];
+export type NodeRuntimeObservationPage = components['schemas']['NodeRuntimeObservationPage'];
+export type NodeWakeHint = components['schemas']['NodeWakeHint'];
+export type CreateNodeWakeHint = components['schemas']['CreateNodeWakeHint'];
 
-export type BusinessDocumentV1 = components['schemas']['BusinessDocumentV1'];
-export type BusinessDocumentNode = components['schemas']['BusinessDocumentNode'];
-export type BusinessDocumentInline = components['schemas']['BusinessDocumentInline'];
-export type BusinessDocumentExpression = components['schemas']['BusinessDocumentExpression'];
-export type CreateBusinessDocumentTemplate = components['schemas']['CreateBusinessDocumentTemplate'];
-export type BusinessDocumentTemplate = components['schemas']['BusinessDocumentTemplate'];
-export type BusinessDocumentTemplateRevision = components['schemas']['BusinessDocumentTemplateRevision'];
-export type CreateBusinessDocumentRender = components['schemas']['CreateBusinessDocumentRender'];
-export type BusinessDocumentRender = components['schemas']['BusinessDocumentRender'];
-export type BusinessDocumentRenderPolicy = components['schemas']['BusinessDocumentRenderPolicy'];
-export type BusinessDocumentRenderCost = components['schemas']['BusinessDocumentRenderCost'];
-export type EvaluateBusinessDocumentRenderReadiness = components['schemas']['EvaluateBusinessDocumentRenderReadiness'];
-export type BusinessDocumentRenderReadiness = components['schemas']['BusinessDocumentRenderReadiness'];
-export type PrintBusinessDocumentRender =
-  & { title: string; options?: JobOptions; deliveries?: number; render_policy?: BusinessDocumentRenderPolicy; render_cost?: BusinessDocumentRenderCost }
+export type PrintPacketV1 = components['schemas']['PrintPacketV1'];
+export type PrintPacketNode = components['schemas']['PrintPacketNode'];
+export type PrintPacketInline = components['schemas']['PrintPacketInline'];
+export type PrintPacketExpression = components['schemas']['PrintPacketExpression'];
+export type CreatePrintPacketTemplate = components['schemas']['CreatePrintPacketTemplate'];
+export type PrintPacketTemplate = components['schemas']['PrintPacketTemplate'];
+export type PrintPacketTemplateRevision = components['schemas']['PrintPacketTemplateRevision'];
+export type CreatePrintPacketRender = components['schemas']['CreatePrintPacketRender'];
+export type PrintPacketRender = components['schemas']['PrintPacketRender'];
+export type PrintPacketRenderPolicy = components['schemas']['PrintPacketRenderPolicy'];
+export type PrintPacketRenderCost = components['schemas']['PrintPacketRenderCost'];
+export type EvaluatePrintPacketRenderReadiness = components['schemas']['EvaluatePrintPacketRenderReadiness'];
+export type PrintPacketRenderReadiness = components['schemas']['PrintPacketRenderReadiness'];
+export type PrintPacketPrintRequest =
+  & { title: string; options?: JobOptions; deliveries?: number; render_policy?: PrintPacketRenderPolicy; render_cost?: PrintPacketRenderCost }
   & ({ printer_id: PiqaeId; target_id?: never } | { target_id: PiqaeId; printer_id?: never });
-export type CreateBusinessDocumentPreview = components['schemas']['CreateBusinessDocumentPreview'];
-export type BusinessDocumentPreview = components['schemas']['BusinessDocumentPreview'];
-export type ApprovedBusinessDocumentPreview = components['schemas']['ApprovedBusinessDocumentPreview'];
+export type CreatePrintPacketPreview = components['schemas']['CreatePrintPacketPreview'];
+export type PrintPacketPreview = components['schemas']['PrintPacketPreview'];
+export type ApprovedPrintPacketPreview = components['schemas']['ApprovedPrintPacketPreview'];
 
 export interface NodeConnector {
   id: string;
@@ -305,6 +310,9 @@ export interface CreatedApiKey extends ApiKey {
 export interface Agent {
   id: PiqaeId;
   name: string;
+  site?: string | null;
+  location?: string | null;
+  labels?: string[];
   platform: string;
   state: 'connected' | 'disconnected' | 'paused' | 'degraded';
   version: string;
@@ -314,6 +322,14 @@ export interface Agent {
   sqlite_integrity_ok?: boolean | null;
   executor_crashes?: number;
   last_error_code?: string | null;
+  document_render?: components['schemas']['DocumentRenderCapabilities'];
+}
+
+export interface UpdateNodeDetails {
+  name?: string;
+  site?: string | null;
+  location?: string | null;
+  labels?: string[];
 }
 
 export interface DiagnosticReport {
@@ -734,10 +750,11 @@ export type JobContent =
   | { type: 'base64'; data: string }
   | { type: 'uri'; uri: string };
 
+export type PrinterNativeJobContent = Exclude<JobContent, { type: 'encrypted_upload' }>;
+
 export interface CreateJobBase {
   title: string;
   source?: string | null;
-  content_type: 'pdf' | 'raw';
   content: JobContent;
   options?: JobOptions;
   deliveries?: number;
@@ -747,10 +764,24 @@ export interface CreateJobBase {
   resolved_ticket_digest?: string;
 }
 
+export interface PrinterNativeJobDescriptor {
+  output_profile_id: string;
+  language_profile_id: string;
+}
+
 export type CreateJob = CreateJobBase &
   (
     | { printer_id: PiqaeId; target_id?: never }
     | { target_id: PiqaeId; printer_id?: never }
+  ) &
+  (
+    | { content_type: 'pdf'; printer_native?: never; content: JobContent }
+    | {
+        content_type: 'raw';
+        printer_native: PrinterNativeJobDescriptor;
+        content: PrinterNativeJobContent;
+        options?: never;
+      }
   );
 
 export interface Job {

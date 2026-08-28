@@ -833,6 +833,10 @@ mod tests {
         let mut agent = StoredAgent {
             id: piqae_domain::AgentId::new(),
             name: "Node".into(),
+            site: None,
+            location: None,
+            labels: Vec::new(),
+            identity_revision: 1,
             platform: "macos".into(),
             state: "connected".into(),
             version: "0.1.0".into(),
@@ -842,6 +846,7 @@ mod tests {
             sqlite_integrity_ok: None,
             executor_crashes: 0,
             last_error_code: None,
+            document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
         };
         assert!(agent_is_connected_at(&agent, now));
         agent.last_seen_at = now - TimeDelta::seconds(91);

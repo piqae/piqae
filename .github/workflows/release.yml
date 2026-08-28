@@ -152,6 +152,126 @@ jobs:
       publish: ${{ needs.prepare.outputs.publish == 'true' }}
     secrets: inherit
 
+  apple_sdk:
+    name: Apple embedded node SDK candidate
+    needs: prepare
+    runs-on: ${{ vars.PIQAE_RELEASE_MACOS_RUNNER || 'macos-15' }}
+    timeout-minutes: 45
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: release-apple-node-sdk
+          save-if: ${{ github.ref_type == 'tag' }}
+      - name: Validate the source package
+        run: release/tools/test_apple_node_sdk.sh
+      - name: Build the reproducible XCFramework
+        run: sdk/apple/scripts/build-xcframework.sh
+      - name: Validate the linked XCFramework and consumers
+        run: release/tools/test_apple_node_sdk_linked.sh verify-existing
+      - name: Validate Apple release staging and native SBOM failure paths
+        run: >-
+          python3 -m unittest
+          release/tools/test_native_cargo_sbom.py
+          release/tools/test_stage_apple_node_sdk.py
+      - name: Stage versioned Apple SDK evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage=artifacts/apple-node-sdk
+          python3 release/tools/stage_apple_node_sdk.py stage \
+            --repository-root "$PWD" \
+            --version "${{ needs.prepare.outputs.version }}" \
+            --output "$stage"
+      - name: Validate clean downloaded-style Apple SDK consumers
+        run: >-
+          release/tools/test_apple_node_sdk_release.sh
+          "${{ needs.prepare.outputs.version }}"
+          artifacts/apple-node-sdk
+      - name: Gate complete Apple archive SPDX coverage
+        run: |
+          python3 release/tools/release_bundle.py validate-sbom "artifacts/apple-node-sdk/PiqaeNode.xcframework-${{ needs.prepare.outputs.version }}.spdx.json"
+          python3 release/tools/release_bundle.py validate-sbom "artifacts/apple-node-sdk/PiqaeNodeKit-${{ needs.prepare.outputs.version }}.spdx.json"
+      - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        if: github.event.repository.private == false
+        with:
+          subject-path: artifacts/apple-node-sdk/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: piqae-node-apple-sdk
+          path: artifacts/apple-node-sdk/*
+          if-no-files-found: error
+          retention-days: 14
+
+  windows_sdk:
+    name: Windows embedded node SDK candidate
+    needs: prepare
+    runs-on: ${{ vars.PIQAE_RELEASE_WINDOWS_RUNNER || 'windows-latest' }}
+    timeout-minutes: 45
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: release-windows-node-sdk
+          save-if: ${{ github.ref_type == 'tag' }}
+      - uses: actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d # v5
+        with:
+          dotnet-version: 8.0.x
+      - name: Validate Windows package and SBOM failure paths
+        shell: pwsh
+        run: python -m unittest release/tools/test_windows_sdk_release.py
+      - name: Validate and pack the Windows SDK
+        shell: pwsh
+        run: release/tools/test_windows_node_sdk.ps1 -PackageVersion "${{ needs.prepare.outputs.version }}" -OutputDirectory "artifacts/windows-node-sdk"
+      - name: Stage the native C SDK bundle
+        shell: pwsh
+        run: |
+          $stage = "artifacts\windows-node-sdk\native"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item "target\x86_64-pc-windows-msvc\release\piqae_node_ffi.dll", "target\x86_64-pc-windows-msvc\release\piqae_node_ffi.dll.lib", "sdk\native\include\piqae_node.h", "LICENSE", "NOTICE", "sdk\dotnet\README.md" $stage
+          python release/tools/native_cargo_sbom.py generate-license-report --repository-root $PWD --target x86_64-pc-windows-msvc --output "$stage\THIRD_PARTY_LICENSES.json"
+          $archive = "artifacts\windows-node-sdk\PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $archive
+          Get-ChildItem "artifacts\windows-node-sdk\*.nupkg", $archive | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)" | Out-File -Encoding ascii "$($_.FullName).sha256"
+          }
+          python release/tools/windows_sdk_release.py generate-native-sbom --archive $archive --repository-root $PWD --version "${{ needs.prepare.outputs.version }}" --output "artifacts\windows-node-sdk\PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.spdx.json"
+          python release/tools/windows_sdk_release.py generate-sdk-manifest --package "artifacts\windows-node-sdk\Piqae.Node.${{ needs.prepare.outputs.version }}.nupkg" --native-archive $archive --nuget-sbom "artifacts\windows-node-sdk\Piqae.Node.${{ needs.prepare.outputs.version }}.spdx.json" --native-sbom "artifacts\windows-node-sdk\PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.spdx.json" --version "${{ needs.prepare.outputs.version }}" --output "artifacts\windows-node-sdk\PiqaeNode.windows-sdk-artifact.json"
+      - name: Gate the complete Windows SDK SPDX SBOM
+        shell: pwsh
+        run: |
+          python release/tools/windows_sdk_release.py validate-sbom --input "artifacts/windows-node-sdk/Piqae.Node.${{ needs.prepare.outputs.version }}.spdx.json" --package "artifacts/windows-node-sdk/Piqae.Node.${{ needs.prepare.outputs.version }}.nupkg" --version "${{ needs.prepare.outputs.version }}"
+          python release/tools/release_bundle.py validate-sbom "artifacts/windows-node-sdk/Piqae.Node.${{ needs.prepare.outputs.version }}.spdx.json"
+          python release/tools/windows_sdk_release.py validate-native-sbom --archive "artifacts/windows-node-sdk/PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.zip" --input "artifacts/windows-node-sdk/PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.spdx.json" --repository-root $PWD --version "${{ needs.prepare.outputs.version }}"
+          python release/tools/release_bundle.py validate-sbom "artifacts/windows-node-sdk/PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.spdx.json"
+          python release/tools/windows_sdk_release.py validate-sdk-manifest --package "artifacts/windows-node-sdk/Piqae.Node.${{ needs.prepare.outputs.version }}.nupkg" --native-archive "artifacts/windows-node-sdk/PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.zip" --nuget-sbom "artifacts/windows-node-sdk/Piqae.Node.${{ needs.prepare.outputs.version }}.spdx.json" --native-sbom "artifacts/windows-node-sdk/PiqaeNode-native-windows-x64-${{ needs.prepare.outputs.version }}.spdx.json" --version "${{ needs.prepare.outputs.version }}" --input artifacts/windows-node-sdk/PiqaeNode.windows-sdk-artifact.json
+      - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        if: github.event.repository.private == false
+        with:
+          subject-path: artifacts/windows-node-sdk/*.*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: piqae-node-windows-sdk
+          path: artifacts/windows-node-sdk/*.*
+          if-no-files-found: error
+          retention-days: 14
+
   linux:
     name: Linux (${{ matrix.artifact }})
     needs: prepare
@@ -284,12 +404,14 @@ jobs:
 
   finalize:
     name: Publish GitHub prerelease
-    needs: [prepare, macos, windows, linux, server]
+    needs: [prepare, macos, windows, apple_sdk, windows_sdk, linux, server]
     if: >-
       always() && needs.prepare.outputs.publish == 'true'
       && needs.prepare.result == 'success'
       && needs.macos.result == 'success'
       && (needs.windows.result == 'success' || needs.windows.result == 'skipped')
+      && needs.apple_sdk.result == 'success'
+      && needs.windows_sdk.result == 'success'
       && needs.linux.result == 'success'
       && needs.server.result == 'success'
     runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
@@ -303,7 +425,12 @@ jobs:
           pattern: piqae-linux-*
           path: linux-artifacts
           merge-multiple: true
-      - name: Attach Linux assets and publish the draft prerelease
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: piqae-node-*-sdk
+          path: sdk-artifacts
+          merge-multiple: true
+      - name: Attach Linux and SDK assets and publish the draft prerelease
         env:
           CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'piqae/piqae' }}
           GH_REPO: ${{ github.repository }}
@@ -317,4 +444,5 @@ jobs:
           fi
           gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' | grep -Fx true
           gh release upload "$RELEASE_TAG" linux-artifacts/* --clobber
+          gh release upload "$RELEASE_TAG" sdk-artifacts/* --clobber
           gh release edit "$RELEASE_TAG" --draft=false --prerelease

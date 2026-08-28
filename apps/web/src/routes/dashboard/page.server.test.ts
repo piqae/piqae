@@ -1,10 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { createJob, dashboardSource, listPrinters, resolveUncertain } = vi.hoisted(() => ({
+const { createJob, dashboardSource, listPrinters, resolveUncertain, requestNodeRefresh, updateNodeDetails, removeNode } = vi.hoisted(() => ({
   createJob: vi.fn(),
   dashboardSource: vi.fn(),
   listPrinters: vi.fn(),
-  resolveUncertain: vi.fn()
+  resolveUncertain: vi.fn(),
+  requestNodeRefresh: vi.fn(),
+  updateNodeDetails: vi.fn(),
+  removeNode: vi.fn()
 }));
 
 vi.mock('$lib/server/dashboard-data', () => ({
@@ -24,6 +27,9 @@ import { actions, load } from './+page.server';
 
 const createPrintJob = actions.createPrintJob!;
 const resolveUncertainJob = actions.resolveUncertainJob!;
+const requestNodeRefreshAction = actions.requestNodeRefresh!;
+const updateNodeDetailsAction = actions.updateNodeDetails!;
+const removeNodeAction = actions.removeNode!;
 
 function event(form: FormData) {
   return {
@@ -138,6 +144,134 @@ describe('uncertain delivery resolution', () => {
   });
 });
 
+describe('scoped node operations', () => {
+  const account = {
+    id: 'wsp_child',
+    externalId: 'shopify:store-1',
+    name: 'Store one',
+    status: 'active' as const,
+    metadata: {},
+    environments: { testId: 'env_test', liveId: 'env_live' },
+    createdAt: '2026-08-27T00:00:00.000Z',
+    updatedAt: '2026-08-27T00:00:00.000Z'
+  };
+
+  beforeEach(() => {
+    requestNodeRefresh.mockReset();
+    removeNode.mockReset();
+  });
+
+  it('requests an advisory refresh through the resolved managed tenant', async () => {
+    requestNodeRefresh.mockResolvedValue({
+      id: 'wkh_01',
+      nodeId: 'agt_01',
+      reason: 'operator_request',
+      deliveryChannel: null,
+      status: 'pending',
+      requestedAt: '2026-08-27T00:00:00.000Z',
+      expiresAt: '2026-08-27T00:05:00.000Z',
+      observedAt: null
+    });
+    const managedApi = { requestNodeRefresh };
+    dashboardSource.mockReturnValue({
+      api: {
+        account: vi.fn(async () => account),
+        managedWorkspace: vi.fn(() => managedApi)
+      }
+    });
+    const form = new FormData();
+    form.set('managed_customer', account.externalId);
+    form.set('node_id', 'agt_01');
+
+    const result = await requestNodeRefreshAction(event(form));
+
+    expect(result).toMatchObject({ mutation: 'requestNodeRefresh', nodeRefreshHint: { status: 'pending' } });
+    expect(requestNodeRefresh).toHaveBeenCalledWith('agt_01', expect.stringMatching(/^dashboard-refresh-/));
+  });
+
+  it('requires the scoped node name before removing a managed projection', async () => {
+    removeNode.mockResolvedValue({ alreadyRemoved: false });
+    const managedApi = {
+      agents: vi.fn(async () => ({ data: [{ id: 'agt_01', name: 'Kitchen iPad' }], nextCursor: null })),
+      removeNode
+    };
+    dashboardSource.mockReturnValue({
+      api: {
+        account: vi.fn(async () => account),
+        managedWorkspace: vi.fn(() => managedApi)
+      }
+    });
+    const wrong = new FormData();
+    wrong.set('managed_customer', account.externalId);
+    wrong.set('node_id', 'agt_01');
+    wrong.set('expected_node_name', 'Kitchen iPad');
+    wrong.set('confirmation', 'Kitchen Mac');
+    await expect(removeNodeAction(event(wrong))).resolves.toMatchObject({ status: 400 });
+    expect(removeNode).not.toHaveBeenCalled();
+
+    const confirmed = new FormData();
+    confirmed.set('managed_customer', account.externalId);
+    confirmed.set('node_id', 'agt_01');
+    confirmed.set('expected_node_name', 'Caller supplied name is not authoritative');
+    confirmed.set('confirmation', 'Kitchen iPad');
+    await expect(removeNodeAction(event(confirmed))).resolves.toMatchObject({
+      mutation: 'removeNode',
+      removedNodeId: 'agt_01'
+    });
+    expect(removeNode).toHaveBeenCalledWith('agt_01');
+  });
+
+  it('updates privacy-safe managed node labels in the selected workspace', async () => {
+    updateNodeDetails.mockResolvedValue({ id: 'agt_01', name: 'Kitchen iPad' });
+    const managedApi = { updateNodeDetails };
+    dashboardSource.mockReturnValue({
+      api: {
+        account: vi.fn(async () => account),
+        managedWorkspace: vi.fn(() => managedApi)
+      }
+    });
+    const form = new FormData();
+    form.set('managed_customer', account.externalId);
+    form.set('node_id', 'agt_01');
+    form.set('name', 'Kitchen iPad');
+    form.set('site', 'Central cafe');
+    form.set('location', 'Pass');
+    form.set('labels', 'receipts, kitchen');
+
+    await expect(updateNodeDetailsAction(event(form))).resolves.toMatchObject({
+      mutation: 'updateNodeDetails',
+      node: { id: 'agt_01' }
+    });
+    expect(updateNodeDetails).toHaveBeenCalledWith('agt_01', {
+      name: 'Kitchen iPad',
+      site: 'Central cafe',
+      location: 'Pass',
+      labels: ['receipts', 'kitchen']
+    });
+  });
+
+  it('does not remove a node absent from the server-resolved managed workspace', async () => {
+    const managedApi = {
+      agents: vi.fn(async () => ({ data: [], nextCursor: null })),
+      removeNode
+    };
+    dashboardSource.mockReturnValue({
+      api: {
+        account: vi.fn(async () => account),
+        managedWorkspace: vi.fn(() => managedApi)
+      }
+    });
+    const form = new FormData();
+    form.set('managed_customer', account.externalId);
+    form.set('node_id', 'agt_missing');
+    form.set('expected_node_name', 'Kitchen iPad');
+    form.set('confirmation', 'Kitchen iPad');
+
+    await expect(removeNodeAction(event(form))).resolves.toMatchObject({ status: 404 });
+    expect(removeNode).not.toHaveBeenCalled();
+  });
+});
+
 const emptyPage = { data: [], nextCursor: null };
 
 function loadEvent(search: string) {
@@ -164,6 +298,37 @@ function loadEvent(search: string) {
 }
 
 describe('dashboard state addressing', () => {
+  it('keeps node operations visible when only runtime telemetry is unavailable', async () => {
+    dashboardSource.mockReturnValue({
+      api: {
+        platformEnabled: async () => false,
+        overview: async () => ({
+          agents: { total: 1, online: 1, degraded: 0 },
+          printers: { total: 0, online: 0, attention: 0 },
+          jobs: { recent: 0, active: 0, failed: 0, uncertain: 0 }
+        }),
+        jobs: async () => emptyPage,
+        printers: async () => emptyPage,
+        agents: async () => ({ data: [{ id: 'agt_01', name: 'Warehouse Mac' }], nextCursor: null }),
+        destinations: async () => emptyPage,
+        routes: async () => emptyPage,
+        accounts: async () => emptyPage,
+        nodeRuntimeObservations: async () => { throw new Error('runtime projection unavailable'); }
+      }
+    });
+    const result = await load({
+      url: new URL('https://piqae.test/dashboard?view=nodes'),
+      parent: async () => ({ meta: { platform: { accounts: false } } })
+    } as never);
+
+    expect(result).toMatchObject({
+      dataError: null,
+      agents: [{ id: 'agt_01' }],
+      runtimeObservations: [],
+      runtimeDataError: { message: 'runtime projection unavailable' }
+    });
+  });
+
   it('carries an uncertain-delivery filter from the URL into the view model', async () => {
     const data = await load(loadEvent('?view=jobs&state=delivery_uncertain'));
 

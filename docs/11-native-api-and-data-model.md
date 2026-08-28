@@ -170,6 +170,20 @@ Immutable ordered fact:
 - `POST /v1/agents/{id}/diagnostics`
 - `POST /v1/agents/{id}/update`
 
+`PATCH /v1/nodes/{id}` is the canonical spelling for updating the
+operator-visible node name and optional site, location, and labels. An omitted
+field is preserved and an explicit null clears site or location. These fields
+are never inferred from personal data and never participate in physical-device
+matching.
+
+Dashboard health language separates incomplete evidence from an incident. A
+single route with no strong identity evidence is **provisional**, missing
+spooler state is **limited telemetry**, and absent loaded-media data is **not
+reported**. Only explicit identity conflicts, stale/offline routes, operator
+states, rejected projections, failed jobs, and uncertain delivery are
+actionable review items. The scheduler still requires a fresh route observation
+with `accepting_jobs=true` before leasing.
+
 ### Printers
 
 - `GET /v1/printers`

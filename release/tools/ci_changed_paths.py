@@ -35,7 +35,12 @@ NATIVE_SHARED = (
     "crates/executor-supervisor/",
     "crates/local-api/",
     "crates/local-ipc/",
+    "crates/node-client/",
+    "crates/node-ffi/",
+    "crates/node-host-api/",
+    "crates/node-runtime/",
     "crates/piqae-agent/",
+    "crates/printpacket/",
     "crates/protocol/",
     "crates/update-guardian/",
     "crates/update-metadata/",
@@ -67,19 +72,31 @@ def classify(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
         server = shared or path.startswith(("crates/", "migrations/", "bins/", "xtask/"))
         js_workspace = path in {"package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"}
         openapi = path.startswith("contracts/openapi/")
-        sdk = path.startswith("sdk/")
+        printpacket_standard = path.startswith("standards/printpacket/")
+        sdk = path.startswith("sdk/") or printpacket_standard
 
         selected["rust_shared"] |= shared
         selected["rust_server"] |= server
         selected["macos_rust"] |= shared or path.startswith("crates/executor-cups/")
         selected["windows_rust"] |= shared or path.startswith(
-            ("crates/executor-windows/", "crates/shell-windows/")
+            (
+                "crates/executor-windows/",
+                "crates/shell-windows/",
+                "sdk/dotnet/",
+                "sdk/native/",
+            )
         )
-        selected["macos_shell"] |= path.startswith("shells/macos/")
+        selected["macos_shell"] |= path.startswith(
+            ("shells/macos/", "sdk/apple/", "apps/node-apple/")
+        ) or path in {
+            "release/tools/test_apple_node_sdk.sh",
+            "release/tools/test_apple_node_sdk_linked.sh",
+            "release/tools/test_apple_node_app.sh",
+        }
         selected["macos_packaging"] |= path.startswith("packaging/macos/")
         selected["windows_shell"] |= path.startswith("crates/shell-windows/")
         selected["windows_installer"] |= path.startswith("packaging/windows/")
-        selected["web"] |= js_workspace or openapi or path.startswith(
+        selected["web"] |= js_workspace or openapi or printpacket_standard or path.startswith(
             ("apps/web/", "contracts/", "deploy/cloudflare/")
         )
         selected["sdk"] |= js_workspace or openapi or sdk
@@ -99,7 +116,7 @@ def classify(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
         if path.startswith(".github/workflows/"):
             selected["release_tooling"] = True
             name = path.removeprefix(".github/workflows/")
-            selected["sdk"] |= name == "sdk-release.yml"
+            selected["sdk"] |= name in {"sdk-release.yml", "release.yml"}
             selected["mcp"] |= name == "mcp-release.yml"
             selected["shopify"] |= name == "shopify-deploy.yml"
             selected["dependency_policy"] |= name == "supply-chain.yml"

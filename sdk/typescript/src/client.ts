@@ -18,17 +18,17 @@ import type {
   CreatedUpload,
   CreatedDeviceAuthorization,
   DeploymentMeta,
-  CreateBusinessDocumentRender,
-  CreateBusinessDocumentTemplate,
-  BusinessDocumentRender,
-  BusinessDocumentRenderReadiness,
-  EvaluateBusinessDocumentRenderReadiness,
-  BusinessDocumentTemplate,
-  BusinessDocumentTemplateRevision,
-  PrintBusinessDocumentRender,
-  CreateBusinessDocumentPreview,
-  BusinessDocumentPreview,
-  ApprovedBusinessDocumentPreview,
+  CreatePrintPacketRender,
+  CreatePrintPacketTemplate,
+  PrintPacketRender,
+  PrintPacketRenderReadiness,
+  EvaluatePrintPacketRenderReadiness,
+  PrintPacketTemplate,
+  PrintPacketTemplateRevision,
+  PrintPacketPrintRequest,
+  CreatePrintPacketPreview,
+  PrintPacketPreview,
+  ApprovedPrintPacketPreview,
   DeviceAuthorizationExchange,
   DeviceAuthorizationReview,
   DeviceAuthorizationStatus,
@@ -47,6 +47,10 @@ import type {
   ListOptions,
   LocalOwnerSession,
   NodeConnector,
+  NodeRuntimeObservation,
+  NodeRuntimeObservationPage,
+  NodeWakeHint,
+  CreateNodeWakeHint,
   NodeContentEncryptionKey,
   NodeUpdate,
   NodeConnectSession,
@@ -261,16 +265,32 @@ export class PiqaeClient {
     list: () => this.request<Agent[]>('GET', '/v1/nodes'),
     retrieve: (id: string) =>
       this.request<Agent>('GET', `/v1/nodes/${encodeURIComponent(id)}`),
-    rename: (id: string, name: string) =>
+    updateDetails: (id: string, details: import('./types.js').UpdateNodeDetails) =>
       this.request<Agent>('PATCH', `/v1/nodes/${encodeURIComponent(id)}`, {
-        body: { name }
+        body: details
       }),
+    rename: (id: string, name: string) => this.nodes.updateDetails(id, { name }),
     revoke: (id: string) =>
       this.request<void>('DELETE', `/v1/nodes/${encodeURIComponent(id)}`),
     pause: (id: string) =>
       this.request<void>('POST', `/v1/nodes/${encodeURIComponent(id)}/pause`),
     resume: (id: string) =>
       this.request<void>('POST', `/v1/nodes/${encodeURIComponent(id)}/resume`),
+    runtime: (id: string) =>
+      this.request<NodeRuntimeObservation>('GET', `/v1/nodes/${encodeURIComponent(id)}/runtime`),
+    runtimes: (options: Pick<ListOptions, 'limit' | 'after'> = {}) =>
+      this.request<NodeRuntimeObservationPage>('GET', '/v1/nodes/runtime-observations', {
+        query: options
+      }),
+    wakeHints: (id: string, options: Pick<ListOptions, 'limit'> = {}) =>
+      this.request<NodeWakeHint[]>('GET', `/v1/nodes/${encodeURIComponent(id)}/wake-hints`, {
+        query: options
+      }),
+    requestWake: (id: string, input: CreateNodeWakeHint, idempotencyKey: string) =>
+      this.request<NodeWakeHint>('POST', `/v1/nodes/${encodeURIComponent(id)}/wake-hints`, {
+        body: input,
+        idempotencyKey
+      }),
     diagnostics: (id: string) =>
       this.request<{ request_id: string; state: 'requested' }>(
         'POST',
@@ -507,36 +527,111 @@ export class PiqaeClient {
       this.request<Job>('POST', `/v1/jobs/${encodeURIComponent(id)}/cancel`)
   };
 
-  /** Portable business-document generation. PDF and RAW job APIs remain independent. */
-  readonly businessDocuments = {
+  /** Portable PrintPacket generation. PDF and RAW job APIs remain independent. */
+  readonly printPackets = {
     resources: {
-      putJpeg: (digest: string, content: BodyInit) => this.putDocumentResource(digest, content)
+      putJpeg: (digest: string, content: BodyInit) => this.putPrintPacketResource(digest, content)
     },
     templates: {
-      create: (input: CreateBusinessDocumentTemplate, idempotencyKey: string) => this.request<BusinessDocumentTemplate>('POST', '/v1/business-document-templates', { body: input, idempotencyKey }),
-      retrieve: (id: string) => this.request<BusinessDocumentTemplate>('GET', `/v1/business-document-templates/${encodeURIComponent(id)}`),
-      publish: (id: string, specification: CreateBusinessDocumentTemplate['specification'], idempotencyKey: string) => this.request<BusinessDocumentTemplateRevision>('POST', `/v1/business-document-templates/${encodeURIComponent(id)}/publish`, { body: { specification }, idempotencyKey }),
-      retrieveRevision: (id: string) => this.request<BusinessDocumentTemplateRevision>('GET', `/v1/business-document-template-revisions/${encodeURIComponent(id)}`)
+      create: (input: CreatePrintPacketTemplate, idempotencyKey: string) =>
+        this.request<PrintPacketTemplate>('POST', '/v1/printpacket/templates', {
+          body: input,
+          idempotencyKey
+        }),
+      retrieve: (id: string) =>
+        this.request<PrintPacketTemplate>(
+          'GET',
+          `/v1/printpacket/templates/${encodeURIComponent(id)}`
+        ),
+      publish: (
+        id: string,
+        specification: CreatePrintPacketTemplate['specification'],
+        idempotencyKey: string
+      ) =>
+        this.request<PrintPacketTemplateRevision>(
+          'POST',
+          `/v1/printpacket/templates/${encodeURIComponent(id)}/publish`,
+          { body: { specification }, idempotencyKey }
+        ),
+      retrieveRevision: (id: string) =>
+        this.request<PrintPacketTemplateRevision>(
+          'GET',
+          `/v1/printpacket/template-revisions/${encodeURIComponent(id)}`
+        )
     },
     renders: {
-      create: (input: CreateBusinessDocumentRender, idempotencyKey: string) => this.request<BusinessDocumentRender>('POST', '/v1/business-document-renders', { body: input, idempotencyKey }),
-      retrieve: (id: string) => this.request<BusinessDocumentRender>('GET', `/v1/business-document-renders/${encodeURIComponent(id)}`),
-      readiness: (id: string, input: EvaluateBusinessDocumentRenderReadiness) => this.request<BusinessDocumentRenderReadiness>('POST', `/v1/business-document-renders/${encodeURIComponent(id)}/render-readiness`, { body: input }),
+      create: (input: CreatePrintPacketRender, idempotencyKey: string) =>
+        this.request<PrintPacketRender>('POST', '/v1/printpacket/renders', {
+          body: input,
+          idempotencyKey
+        }),
+      retrieve: (id: string) =>
+        this.request<PrintPacketRender>(
+          'GET',
+          `/v1/printpacket/renders/${encodeURIComponent(id)}`
+        ),
+      readiness: (id: string, input: EvaluatePrintPacketRenderReadiness) =>
+        this.request<PrintPacketRenderReadiness>(
+          'POST',
+          `/v1/printpacket/renders/${encodeURIComponent(id)}/readiness`,
+          { body: input }
+        ),
       /** Preserves headers/body streaming for a same-origin Admin or POS proxy. */
-      download: (id: string) => this.requestBinary(`/v1/business-document-renders/${encodeURIComponent(id)}/artifact`),
-      downloadBytes: async (id: string) => new Uint8Array(await (await this.requestBinary(`/v1/business-document-renders/${encodeURIComponent(id)}/artifact`)).arrayBuffer()),
-      print: (id: string, input: PrintBusinessDocumentRender, idempotencyKey: string) => this.request<Job>('POST', `/v1/business-document-renders/${encodeURIComponent(id)}/print`, { body: input, idempotencyKey })
+      download: (id: string) =>
+        this.requestBinary(`/v1/printpacket/renders/${encodeURIComponent(id)}/artifact`),
+      downloadBytes: async (id: string) =>
+        new Uint8Array(
+          await (
+            await this.requestBinary(
+              `/v1/printpacket/renders/${encodeURIComponent(id)}/artifact`
+            )
+          ).arrayBuffer()
+        ),
+      print: (id: string, input: PrintPacketPrintRequest, idempotencyKey: string) =>
+        this.request<Job>(
+          'POST',
+          `/v1/printpacket/renders/${encodeURIComponent(id)}/print`,
+          { body: input, idempotencyKey }
+        )
     },
     previews: {
-      create: (renderId:string,input:CreateBusinessDocumentPreview,idempotencyKey:string)=>this.request<BusinessDocumentPreview>('POST',`/v1/business-document-renders/${encodeURIComponent(renderId)}/previews`,{body:input,idempotencyKey}),
-      retrieve: (id:string)=>this.request<BusinessDocumentPreview>('GET',`/v1/business-document-previews/${encodeURIComponent(id)}`),
-      download: (id:string)=>this.requestBinary(`/v1/business-document-previews/${encodeURIComponent(id)}/artifact`),
-      approve: (id:string,input:PrintBusinessDocumentRender,idempotencyKey:string)=>this.request<ApprovedBusinessDocumentPreview>('POST',`/v1/business-document-previews/${encodeURIComponent(id)}/approve`,{body:input,idempotencyKey}),
-      cancel: (id:string,idempotencyKey:string)=>this.request<BusinessDocumentPreview>('POST',`/v1/business-document-previews/${encodeURIComponent(id)}/cancel`,{idempotencyKey})
+      create: (
+        renderId: string,
+        input: CreatePrintPacketPreview,
+        idempotencyKey: string
+      ) =>
+        this.request<PrintPacketPreview>(
+          'POST',
+          `/v1/printpacket/renders/${encodeURIComponent(renderId)}/previews`,
+          { body: input, idempotencyKey }
+        ),
+      retrieve: (id: string) =>
+        this.request<PrintPacketPreview>(
+          'GET',
+          `/v1/printpacket/previews/${encodeURIComponent(id)}`
+        ),
+      download: (id: string) =>
+        this.requestBinary(`/v1/printpacket/previews/${encodeURIComponent(id)}/artifact`),
+      approve: (id: string, input: PrintPacketPrintRequest, idempotencyKey: string) =>
+        this.request<ApprovedPrintPacketPreview>(
+          'POST',
+          `/v1/printpacket/previews/${encodeURIComponent(id)}/approve`,
+          { body: input, idempotencyKey }
+        ),
+      cancel: (id: string, idempotencyKey: string) =>
+        this.request<PrintPacketPreview>(
+          'POST',
+          `/v1/printpacket/previews/${encodeURIComponent(id)}/cancel`,
+          { idempotencyKey }
+        )
     },
-    renderAndPrint: async (input: CreateBusinessDocumentRender, print: PrintBusinessDocumentRender, idempotencyKeys: { render: string; print: string }) => {
-      const render = await this.businessDocuments.renders.create(input, idempotencyKeys.render);
-      const job = await this.businessDocuments.renders.print(render.id, print, idempotencyKeys.print);
+    renderAndPrint: async (
+      input: CreatePrintPacketRender,
+      print: PrintPacketPrintRequest,
+      idempotencyKeys: { render: string; print: string }
+    ) => {
+      const render = await this.printPackets.renders.create(input, idempotencyKeys.render);
+      const job = await this.printPackets.renders.print(render.id, print, idempotencyKeys.print);
       return { render, job };
     }
   };
@@ -665,7 +760,7 @@ export class PiqaeClient {
     return response;
   }
 
-  private async putDocumentResource(digest: string, content: BodyInit): Promise<void> {
+  private async putPrintPacketResource(digest: string, content: BodyInit): Promise<void> {
     const dynamicToken = await this.accessToken?.();
     const authorization = this.platformKey ?? this.apiKey ?? dynamicToken;
     const headers: Record<string, string> = { ...this.defaultHeaders, 'content-type': 'image/jpeg' };
@@ -674,7 +769,7 @@ export class PiqaeClient {
       headers['x-piqae-environment-id'] = this.platformContext.environmentId;
     }
     if (authorization) headers.authorization = `Bearer ${authorization}`;
-    const response = await this.fetcher(new URL(`${this.baseUrl}/v1/business-document-resources/${encodeURIComponent(digest)}`), {
+    const response = await this.fetcher(new URL(`${this.baseUrl}/v1/printpacket/resources/${encodeURIComponent(digest)}`), {
       method: 'PUT', headers, body: content
     });
     if (!response.ok) {
@@ -685,8 +780,8 @@ export class PiqaeClient {
         // Preserve a stable error when a proxy emits no JSON body.
       }
       throw new PiqaeError(response.status, body?.error ?? {
-        code: 'document_resource_upload_failed',
-        message: response.statusText || 'Business-document resource upload failed',
+        code: 'printpacket_resource_upload_failed',
+        message: response.statusText || 'PrintPacket resource upload failed',
         retryable: response.status >= 500
       });
     }

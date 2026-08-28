@@ -1,0 +1,15 @@
+{
+  "protocol": 4,
+  "request_id": "00000000-0000-0000-0000-000000000044",
+  "operation": {
+    "type": "execute_authenticated",
+    "application_id": "com.example.pos",
+    "capability": "observe_status",
+    "operation": {
+      "type": "status"
+    },
+    "nonce": "fixture-nonce-0000000000000000004",
+    "issued_unix_ms": 1700000000000,
+    "proof": "fixture-request-proof"
+  }
+}

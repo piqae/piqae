@@ -7,7 +7,7 @@ require "set"
 require "yaml"
 
 module ProductRelease
-  VERSION_KINDS = Set.new(%w[cargo_workspace npm]).freeze
+  VERSION_KINDS = Set.new(%w[cargo_workspace dotnet npm]).freeze
   DEPLOYMENT_ORDER = %w[migrations control_plane workers web shopify node_canary].freeze
 
   module_function
@@ -35,6 +35,8 @@ module ProductRelease
       text = File.read(path, encoding: "UTF-8")
       section = text[/\[workspace\.package\](.*?)(?=\n\[|\z)/m, 1]
       section&.match(/^version\s*=\s*"([^"]+)"/)&.[](1)
+    when "dotnet"
+      File.read(path, encoding: "UTF-8")[/<Version>\s*([^<\s]+)\s*<\/Version>/, 1]
     end
   rescue JSON::ParserError, KeyError
     nil
@@ -99,6 +101,14 @@ module ProductRelease
     if release_version
       workspace_version = version(File.join(root, "Cargo.toml"), "cargo_workspace")
       failures << "#{path}: release #{release_version} must match Cargo workspace version #{workspace_version}" unless workspace_version == release_version
+      components.each do |name, component|
+        next unless component["release_version_locked"]
+
+        component_version = version(File.join(root, component.fetch("version_file")), component.fetch("version_kind"))
+        unless component_version == release_version
+          failures << "#{path}: release #{release_version} must match #{name} version #{component_version}"
+        end
+      end
     end
     failures
   rescue Errno::ENOENT => error

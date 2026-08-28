@@ -2,7 +2,7 @@ import {
   canonicalToLiquid,
   liquidToCanonical,
 } from "./liquid-document-adapter";
-import type { BusinessDocument } from "./template-model";
+import type { PrintPacket } from "./template-model";
 
 export type OrderPrinterImportFidelity =
   | "exact"
@@ -19,7 +19,7 @@ export type OrderPrinterImportDiagnostic = {
 export type OrderPrinterImportResult =
   | {
       ok: true;
-      document: BusinessDocument;
+      document: PrintPacket;
       normalizedLiquid: string;
       originalSource: string;
       diagnostics: OrderPrinterImportDiagnostic[];
@@ -263,13 +263,13 @@ function normalizeFilters(
 function parseSafeTheme(
   source: string,
   diagnostics: OrderPrinterImportDiagnostic[],
-): Partial<BusinessDocument["theme"]> {
+): Partial<PrintPacket["theme"]> {
   const css = [...source.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi)]
     .map((match) => match[1])
     .join("\n");
   const body =
     /(?:body|\.document|\.template)\s*\{([^}]*)}/i.exec(css)?.[1] ?? "";
-  const theme: Partial<BusinessDocument["theme"]> = {};
+  const theme: Partial<PrintPacket["theme"]> = {};
   const font = /font-size\s*:\s*(\d+(?:\.\d+)?)\s*(pt|px)/i.exec(body);
   if (font)
     theme.font_size_pt = Math.min(

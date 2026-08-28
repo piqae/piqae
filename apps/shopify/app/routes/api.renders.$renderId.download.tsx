@@ -19,7 +19,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   const client = services.clientForLink(link);
   let upstream: Response | undefined;
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    upstream = await client.businessDocuments.renders.download(renderId);
+    upstream = await client.printPackets.renders.download(renderId);
     if (upstream.ok || upstream.status !== 409) break;
     await new Promise((resolve) =>
       setTimeout(resolve, Math.min(2_000, 100 * 2 ** attempt)),

@@ -26,23 +26,23 @@ describe("PiqaeClient", () => {
         Response.json({ id: "job_1", state: "registered" }, { status: 201 }),
       );
     const client = new PiqaeClient({ fetch: fetcher });
-    const render = await client.businessDocuments.renders.create(
+    const render = await client.printPackets.renders.create(
       { template_revision_id: "rev_1", input: { invoice_number: "redacted" } },
       "render-0001",
     );
-    await client.businessDocuments.renders.print(
+    await client.printPackets.renders.print(
       render.id,
       { target_id: "tgt_1", title: "Invoice" },
       "print-0001",
     );
     expect(String(fetcher.mock.calls[0]?.[0])).toBe(
-      "https://api.piqae.com/v1/business-document-renders",
+      "https://api.piqae.com/v1/printpacket/renders",
     );
     expect(
       new Headers(fetcher.mock.calls[0]?.[1]?.headers).get("idempotency-key"),
     ).toBe("render-0001");
     expect(String(fetcher.mock.calls[1]?.[0])).toBe(
-      "https://api.piqae.com/v1/business-document-renders/rnd_1/print",
+      "https://api.piqae.com/v1/printpacket/renders/rnd_1/print",
     );
     expect(
       new Headers(fetcher.mock.calls[1]?.[1]?.headers).get("idempotency-key"),
@@ -63,13 +63,13 @@ describe("PiqaeClient", () => {
       apiKey: "piq_test_redacted",
       fetch: fetcher,
     });
-    const response = await client.businessDocuments.renders.download("drnd_1");
+    const response = await client.printPackets.renders.download("drnd_1");
     expect(response.headers.get("content-type")).toBe("application/pdf");
     expect(
-      await client.businessDocuments.renders.downloadBytes("drnd_1"),
+      await client.printPackets.renders.downloadBytes("drnd_1"),
     ).toEqual(pdf);
     expect(String(fetcher.mock.calls[0]?.[0])).toBe(
-      "https://api.piqae.com/v1/business-document-renders/drnd_1/artifact",
+      "https://api.piqae.com/v1/printpacket/renders/drnd_1/artifact",
     );
     expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get("accept")).toBe(
       "application/pdf",
@@ -79,12 +79,12 @@ describe("PiqaeClient", () => {
     ).toBe("Bearer piq_test_redacted");
   });
 
-  it("uploads document resources with auth and preserves structured API errors", async () => {
+  it("uploads PrintPacket resources with auth and preserves structured API errors", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       Response.json(
         {
           error: {
-            code: "document_resource_digest_mismatch",
+            code: "printpacket_resource_digest_mismatch",
             message: "Resource bytes do not match the URL digest.",
             request_id: "req_resource_1",
             retryable: false,
@@ -102,21 +102,21 @@ describe("PiqaeClient", () => {
     const digest = "a".repeat(64);
 
     await expect(
-      client.businessDocuments.resources.putJpeg(
+      client.printPackets.resources.putJpeg(
         digest,
         new Uint8Array([1, 2, 3]),
       ),
     ).rejects.toMatchObject({
       name: "PiqaeError",
       status: 400,
-      code: "document_resource_digest_mismatch",
+      code: "printpacket_resource_digest_mismatch",
       requestId: "req_resource_1",
       retryable: false,
       details: { field: "digest" },
     });
     const [url, init] = fetcher.mock.calls[0] ?? [];
     expect(String(url)).toBe(
-      `https://print.example.test/v1/business-document-resources/${digest}`,
+      `https://print.example.test/v1/printpacket/resources/${digest}`,
     );
     expect(init?.method).toBe("PUT");
     expect(new Headers(init?.headers).get("content-type")).toBe("image/jpeg");
@@ -137,14 +137,14 @@ describe("PiqaeClient", () => {
     const client = new PiqaeClient({ fetch: fetcher });
 
     await expect(
-      client.businessDocuments.resources.putJpeg(
+      client.printPackets.resources.putJpeg(
         "b".repeat(64),
         new Uint8Array([1]),
       ),
     ).rejects.toMatchObject({
       name: "PiqaeError",
       status: 503,
-      code: "document_resource_upload_failed",
+      code: "printpacket_resource_upload_failed",
       retryable: true,
     });
   });
@@ -534,6 +534,9 @@ describe("PiqaeClient", () => {
         new Response(JSON.stringify({ id: "node_1", name: "Packing" })),
       )
       .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: "node_1", name: "Packing", site: "Warehouse" })),
+      )
+      .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
             id: "dva_1",
@@ -549,15 +552,25 @@ describe("PiqaeClient", () => {
     });
 
     await client.nodes.rename("node_1", "Packing");
+    await client.nodes.updateDetails("node_1", {
+      site: "Warehouse",
+      location: "Dispatch desk",
+      labels: ["shipping"],
+    });
     await client.pairing.approve("dva_1", "ABCD-EFGH");
 
     expect(String(fetcher.mock.calls[0]?.[0])).toBe(
       "https://print.example.test/v1/nodes/node_1",
     );
     expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
+      site: "Warehouse",
+      location: "Dispatch desk",
+      labels: ["shipping"],
+    });
+    expect(JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body))).toEqual({
       user_code: "ABCD-EFGH",
     });
-    expect(String(fetcher.mock.calls[1]?.[0])).not.toContain("ABCD-EFGH");
+    expect(String(fetcher.mock.calls[2]?.[0])).not.toContain("ABCD-EFGH");
   });
 
   it("lists and revokes only explicitly addressed node connectors", async () => {
@@ -695,6 +708,34 @@ describe("PiqaeClient", () => {
       "https://print.example.test/v1/route-reservations",
       "https://print.example.test/v1/jobs/job%20%2F%20one/delivery-attempts",
     ]);
+  });
+
+  it("keeps wake hints separate from job submission and includes idempotency", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => Response.json([]));
+    const client = new PiqaeClient({
+      apiKey: "piq_live_wake",
+      fetch: fetcher,
+      baseUrl: "https://print.example.test",
+    });
+
+    await client.nodes.runtime("agt / one");
+    await client.nodes.runtimes({ limit: 25, after: "agt_01" });
+    await client.nodes.wakeHints("agt / one", { limit: 5 });
+    await client.nodes.requestWake(
+      "agt / one",
+      { reason: "job_available", expires_in_seconds: 120 },
+      "wake-request-0001",
+    );
+
+    expect(fetcher.mock.calls.map(([url]) => String(url))).toEqual([
+      "https://print.example.test/v1/nodes/agt%20%2F%20one/runtime",
+      "https://print.example.test/v1/nodes/runtime-observations?limit=25&after=agt_01",
+      "https://print.example.test/v1/nodes/agt%20%2F%20one/wake-hints?limit=5",
+      "https://print.example.test/v1/nodes/agt%20%2F%20one/wake-hints",
+    ]);
+    expect((fetcher.mock.calls[3]?.[1]?.headers as Record<string, string>)["idempotency-key"]).toBe(
+      "wake-request-0001",
+    );
   });
 
   it("uploads declared content through the authenticated proxy without base64", async () => {

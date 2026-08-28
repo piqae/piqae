@@ -17,6 +17,10 @@ print jobs through the same API used by the dashboard.
   printer, capture a native profile, and send a test job.
 - [legacy-provider migration](api/legacy-compatibility.md) — switch the tested
   compatibility subset, then adopt native Piqae resources.
+- [Embeddable node runtime RFC](rfcs/0001-embeddable-node-runtime.md) — shared
+  desktop/iPad SDK, lifecycle, identity, queue, and coexistence contract.
+- [Embedded node SDK deployment guide](nodes/embedded-sdk.md) — topology,
+  iPad background truth, multi-app coexistence, sleep, and adapter selection.
 
 ## Build an integration
 
@@ -27,7 +31,7 @@ print jobs through the same API used by the dashboard.
 - [MCP architecture and authorization](api/mcp-agent-integration.md)
 - [Authentication](api/authentication.md)
 - [Uploads and design applications](api/uploads-and-design-apps.md)
-- [Declarative documents](api/declarative-documents.md)
+- [PrintPacket](api/printpacket.md)
 - [End-to-end web design platform integration](api/web-design-platform-integration.md)
 - [Multi-integrator node connectors](api/multi-integrator-node-connectors.md)
 - [Content-confidential printing](api/content-confidential-printing.md)

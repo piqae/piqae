@@ -1,0 +1,47 @@
+[package]
+name = "piqae-node-runtime"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+test-peer-identity = ["piqae-local-ipc/test-peer-identity"]
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+chrono.workspace = true
+ed25519-dalek.workspace = true
+fs2 = "0.4.3"
+futures.workspace = true
+hex.workspace = true
+piqae-domain.workspace = true
+piqae-agent-client = { path = "../agent-client", version = "0.1.22" }
+piqae-agent-storage = { path = "../agent-storage", version = "0.1.22" }
+piqae-local-ipc = { path = "../local-ipc", version = "0.1.22" }
+piqae-node-host-api = { path = "../node-host-api", version = "0.1.22" }
+piqae-protocol.workspace = true
+piqae-support-packs = { path = "../support-packs", version = "0.1.22" }
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "3.20.0"
+tokio.workspace = true
+piqae-local-ipc = { path = "../local-ipc", version = "0.1.22", features = ["test-peer-identity"] }
+
+[lints]
+workspace = true

@@ -16,6 +16,8 @@ required:
     command: swift build --package-path shells/macos
   - id: release_policy
     command: ruby release/tools/check_release_policy.rb
+  - id: printpacket_source_policy
+    command: python3 release/tools/check_printpacket_source_policy.py
   - id: release_evidence
     command: python3 -m unittest discover -s release/tools -p 'test_*.py' -v
   - id: deployment_rendering

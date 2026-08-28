@@ -10,9 +10,9 @@ use piqae_storage_postgres::{
     PostgresStore, StorageError,
     destination_topology::{
         DeliveryAttemptState, DestinationTopologyRepository, IdentityConfidence, IdentityDecision,
-        IdentityDecisionKind, IdentityEvidence, NewDeliveryAttempt, ProjectionAcknowledgement,
-        RouteObservation, SchedulingAuthority, SiteCoordinatorMembership,
-        StoredPhysicalDestination, StoredPrinterRoute, TenantScope,
+        IdentityDecisionKind, IdentityEvidence, NewDeliveryAttempt, NodeRuntimeObservation,
+        NodeWakeHint, ProjectionAcknowledgement, RouteObservation, SchedulingAuthority,
+        SiteCoordinatorMembership, StoredPhysicalDestination, StoredPrinterRoute, TenantScope,
     },
 };
 use sqlx::{PgPool, migrate::Migrator, postgres::PgPoolOptions};
@@ -160,6 +160,98 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
     };
     create_tenant_fixture(&store, first, "first", "ptr_shared").await;
     create_tenant_fixture(&store, second, "second", "ptr_second").await;
+    let runtime_observed_at = Utc::now();
+    for sequence in 1..=80 {
+        store
+            .record_node_runtime_observation(
+                first,
+                &NodeRuntimeObservation {
+                    id: format!("nro_first_{sequence}"),
+                    agent_id: "agt_first".into(),
+                    sequence,
+                    host_mode: "machine_service".into(),
+                    availability_class: "continuous_while_awake".into(),
+                    lifecycle_state: "available".into(),
+                    accepts_cloud_jobs: true,
+                    execution_budget_ms: None,
+                    wake_mechanisms: vec!["local_broker".into()],
+                    observed_at: runtime_observed_at,
+                    fresh_until: runtime_observed_at + Duration::minutes(1),
+                },
+            )
+            .await
+            .expect("record bounded runtime history");
+    }
+    let retained_runtime: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM node_runtime_observations WHERE workspace_id=$1 AND environment_id=$2 AND agent_id='agt_first'",
+    )
+    .bind(first.workspace_id.to_string())
+    .bind(first.environment_id.to_string())
+    .fetch_one(store.pool())
+    .await
+    .expect("count bounded runtime history");
+    assert_eq!(retained_runtime, 64);
+    let stale_runtime = NodeRuntimeObservation {
+        id: "nro_first_replay".into(),
+        agent_id: "agt_first".into(),
+        sequence: 1,
+        host_mode: "machine_service".into(),
+        availability_class: "continuous_while_awake".into(),
+        lifecycle_state: "available".into(),
+        accepts_cloud_jobs: true,
+        execution_budget_ms: None,
+        wake_mechanisms: vec!["local_broker".into()],
+        observed_at: runtime_observed_at,
+        fresh_until: runtime_observed_at + Duration::minutes(1),
+    };
+    assert!(matches!(
+        store
+            .record_node_runtime_observation(first, &stale_runtime)
+            .await,
+        Err(StorageError::ConcurrentStateChange)
+    ));
+    for (scope, suffix) in [(first, "first"), (second, "second")] {
+        sqlx::query("INSERT INTO node_wake_hints (workspace_id,environment_id,id,agent_id,idempotency_key,reason,delivery_channel,status,requested_at,expires_at) VALUES ($1,$2,$3,$4,$5,'job_available','connected_session','pending',now()-interval '9 days',now()-interval '9 days'+interval '5 minutes')")
+            .bind(scope.workspace_id.to_string())
+            .bind(scope.environment_id.to_string())
+            .bind(format!("wkh_old_{suffix}"))
+            .bind(format!("agt_{suffix}"))
+            .bind(format!("old-wake-key-{suffix}"))
+            .execute(store.pool())
+            .await
+            .expect("insert expired wake fixture");
+    }
+    let current_hint = NodeWakeHint {
+        id: "wkh_current_first".into(),
+        agent_id: "agt_first".into(),
+        reason: "inventory_refresh".into(),
+        delivery_channel: "connected_session".into(),
+        status: "pending".into(),
+        requested_at: runtime_observed_at,
+        expires_at: runtime_observed_at + Duration::minutes(5),
+        observed_at: None,
+    };
+    store
+        .create_node_wake_hint(first, &current_hint, "current-wake-key-first")
+        .await
+        .expect("create wake hint and prune old tenant-local history");
+    let first_old_wakes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM node_wake_hints WHERE workspace_id=$1 AND environment_id=$2 AND id='wkh_old_first'",
+    )
+    .bind(first.workspace_id.to_string())
+    .bind(first.environment_id.to_string())
+    .fetch_one(store.pool())
+    .await
+    .expect("count pruned first-tenant wake history");
+    let second_old_wakes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM node_wake_hints WHERE workspace_id=$1 AND environment_id=$2 AND id='wkh_old_second'",
+    )
+    .bind(second.workspace_id.to_string())
+    .bind(second.environment_id.to_string())
+    .fetch_one(store.pool())
+    .await
+    .expect("count isolated second-tenant wake history");
+    assert_eq!((first_old_wakes, second_old_wakes), (0, 1));
     sqlx::query("INSERT INTO agents (id,workspace_id,environment_id,name,installation_id,public_key,os,architecture,version,protocol_version) VALUES ('agt_first_backup',$1,$2,'Backup node','installation-first-backup',$3,'linux','x86_64','test',1)")
         .bind(first.workspace_id.to_string()).bind(first.environment_id.to_string()).bind(vec![9_u8;32]).execute(store.pool()).await.expect("backup route agent");
     sqlx::query("INSERT INTO printers (id,workspace_id,environment_id,agent_id,native_id,name,state,capabilities_revision) VALUES ('ptr_backup',$1,$2,'agt_first_backup','native-first-backup','Shared printer backup route','online',1)")
@@ -263,7 +355,7 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
     );
     assert!(matches!(
         store.upsert_route(second, &cross_tenant_route).await,
-        Err(StorageError::Database(_))
+        Err(StorageError::NotFound)
     ));
 
     let evidence = IdentityEvidence {
@@ -753,7 +845,7 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
             .expect("uncertainty cleared")
     );
 
-    sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at,destination_id,route_id,created_at) VALUES ('job_stale_owner',$1,$2,'ptr_backup','agt_first_backup','{}'::jsonb,'waiting_for_agent',1,now()-interval '1 second','destination_source','route_first_backup',now()-interval '2 minutes'),('job_after_stale',$1,$2,'ptr_backup','agt_first_backup','{}'::jsonb,'waiting_for_agent',2,now()+interval '1 hour','destination_source','route_first_backup',now()-interval '1 minute')")
+    sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at,destination_id,route_id,created_at) VALUES ('job_stale_owner',$1,$2,'ptr_backup','agt_first_backup','{}'::jsonb,'waiting_for_agent',1,now()+interval '1 hour','destination_source','route_first_backup',now()-interval '2 minutes'),('job_after_stale',$1,$2,'ptr_backup','agt_first_backup','{}'::jsonb,'waiting_for_agent',2,now()+interval '1 hour','destination_source','route_first_backup',now()-interval '1 minute')")
         .bind(first.workspace_id.to_string()).bind(first.environment_id.to_string()).execute(store.pool()).await.expect("stale destination handoff jobs");
     store
         .begin_delivery_attempt(
@@ -1129,7 +1221,495 @@ async fn postgres_topology_is_tenant_isolated_and_fences_delivery() {
 }
 
 #[tokio::test]
-async fn migration_42_upgrades_41_and_backfills_without_inferring_route_merges() {
+async fn revoking_node_retires_only_safe_routes_and_preserves_accepted_evidence() {
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL for node revocation evidence");
+        return;
+    };
+    let schema = format!("piqae_node_revoke_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect test PostgreSQL");
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create exact disposable schema");
+    let pool = schema_pool(&database_url, &schema).await;
+    let store = PostgresStore::from_pool(pool.clone());
+    store.migrate().await.expect("migrate empty database");
+    let scope = TenantScope {
+        workspace_id: WorkspaceId::new(),
+        environment_id: EnvironmentId::new(),
+    };
+    let agent_suffix = "01J00000000000000000000000";
+    let agent_id = format!("agt_{agent_suffix}");
+    let safe_job_id = format!("job_{agent_suffix}");
+    create_tenant_fixture(&store, scope, agent_suffix, "ptr_revoke").await;
+    sqlx::query("INSERT INTO printers (id,workspace_id,environment_id,agent_id,native_id,name,state,capabilities_revision) VALUES ('ptr_revoke_accepted',$1,$2,$3,'native-revoke-accepted','Accepted route printer','online',1)")
+        .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&agent_id).execute(store.pool()).await.expect("accepted printer fixture");
+    sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at) VALUES ('job_revoke_accepted',$1,$2,'ptr_revoke_accepted',$3,'{}'::jsonb,'waiting_for_agent',1,now()+interval '1 hour')")
+        .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&agent_id).execute(store.pool()).await.expect("accepted job fixture");
+    sqlx::query("UPDATE jobs SET state='waiting_for_agent' WHERE workspace_id=$1 AND environment_id=$2 AND id=$3")
+        .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&safe_job_id).execute(store.pool()).await.expect("safe job ready fixture");
+    store
+        .upsert_scheduling_authority(
+            scope,
+            &SchedulingAuthority {
+                id: "authority_revoke".into(),
+                kind: "hosted_control_plane".into(),
+                authority_key: "cloud:revoke-test".into(),
+                display_name: "Revocation fixture".into(),
+                active: true,
+            },
+        )
+        .await
+        .expect("revocation authority fixture");
+    let backup_agent_id = "agt_01J00000000000000000000001";
+    sqlx::query("INSERT INTO agents (id,workspace_id,environment_id,name,installation_id,public_key,os,architecture,version,protocol_version) VALUES ($1,$2,$3,'Backup node','installation-revoke-backup',$4,'linux','x86_64','test',1)")
+        .bind(backup_agent_id).bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(vec![7_u8;32]).execute(store.pool()).await.expect("backup agent fixture");
+    sqlx::query("INSERT INTO printers (id,workspace_id,environment_id,agent_id,native_id,name,state,capabilities_revision) VALUES ('ptr_revoke_backup',$1,$2,$3,'native-revoke-backup','Backup route printer','online',1)")
+        .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(backup_agent_id).execute(store.pool()).await.expect("backup printer fixture");
+    for (destination_id, route_id, printer_id, native_queue_id) in [
+        (
+            "pdst_revoke_safe",
+            "rte_revoke_safe",
+            "ptr_revoke",
+            "native-revoke",
+        ),
+        (
+            "pdst_revoke_accepted",
+            "rte_revoke_accepted",
+            "ptr_revoke_accepted",
+            "native-revoke-accepted",
+        ),
+    ] {
+        store
+            .upsert_destination(scope, &destination(destination_id, "authority_revoke"))
+            .await
+            .expect("destination fixture");
+        let mut route = route(
+            route_id,
+            destination_id,
+            agent_suffix,
+            printer_id,
+            "primary",
+        );
+        route.native_queue_id = native_queue_id.into();
+        route.local_route_key = Some(format!("rte_local_{route_id}"));
+        store
+            .upsert_route(scope, &route)
+            .await
+            .expect("route fixture");
+    }
+    sqlx::query(
+        "UPDATE physical_destinations SET state='attention'
+         WHERE workspace_id=$1 AND environment_id=$2 AND id='pdst_revoke_accepted'",
+    )
+    .bind(scope.workspace_id.to_string())
+    .bind(scope.environment_id.to_string())
+    .execute(store.pool())
+    .await
+    .expect("attention destination fixture");
+    let unrelated_destination = destination("pdst_revoke_unrelated", "authority_revoke");
+    store
+        .upsert_destination(scope, &unrelated_destination)
+        .await
+        .expect("unrelated orphan destination fixture");
+    let backup_route = StoredPrinterRoute {
+        id: "rte_revoke_backup".into(),
+        destination_id: "pdst_revoke_safe".into(),
+        printer_id: "ptr_revoke_backup".into(),
+        agent_id: backup_agent_id.into(),
+        native_queue_id: "native-revoke-backup".into(),
+        local_route_key: Some("rte_local_revoke_backup".into()),
+        state: "available".into(),
+        role: "standby".into(),
+        priority: 100,
+        enabled: true,
+        capability_revision: 1,
+        profile_revision: 1,
+        last_seen_at: Some(Utc::now()),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    store
+        .upsert_route(scope, &backup_route)
+        .await
+        .expect("backup route fixture");
+    let safe = store
+        .begin_delivery_attempt(
+            scope,
+            NewDeliveryAttempt {
+                attempt_id: "attempt_revoke_safe",
+                reservation_id: "reservation_revoke_safe",
+                job_id: &safe_job_id,
+                destination_id: "pdst_revoke_safe",
+                route_id: "rte_revoke_safe",
+                lease_until: Utc::now() + Duration::minutes(1),
+            },
+        )
+        .await
+        .expect("pre-acceptance route lease");
+    assert_eq!(safe.attempt.state, DeliveryAttemptState::RouteLeased);
+    let accepted = store
+        .begin_delivery_attempt(
+            scope,
+            NewDeliveryAttempt {
+                attempt_id: "attempt_revoke_accepted",
+                reservation_id: "reservation_revoke_accepted",
+                job_id: "job_revoke_accepted",
+                destination_id: "pdst_revoke_accepted",
+                route_id: "rte_revoke_accepted",
+                lease_until: Utc::now() + Duration::minutes(1),
+            },
+        )
+        .await
+        .expect("accepted route lease");
+    store
+        .transition_delivery_attempt(
+            scope,
+            &accepted.attempt.id,
+            accepted.attempt.generation,
+            &accepted.fencing_token,
+            DeliveryAttemptState::AcceptedByNode,
+        )
+        .await
+        .expect("node acceptance evidence");
+    sqlx::query("UPDATE jobs SET state='agent_accepted' WHERE workspace_id=$1 AND environment_id=$2 AND id='job_revoke_accepted'")
+        .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).execute(store.pool()).await.expect("accepted job state fixture");
+    store
+        .create_node_wake_hint(
+            scope,
+            &NodeWakeHint {
+                id: "wkh_revoke".into(),
+                agent_id: agent_id.clone(),
+                reason: "job_available".into(),
+                delivery_channel: "connected_session".into(),
+                status: "pending".into(),
+                requested_at: Utc::now(),
+                expires_at: Utc::now() + Duration::minutes(5),
+                observed_at: None,
+            },
+            "wake-revoke-node",
+        )
+        .await
+        .expect("pending wake hint");
+
+    store
+        .revoke_agent(
+            scope.workspace_id,
+            scope.environment_id,
+            agent_id.parse().expect("fixture agent id"),
+        )
+        .await
+        .expect("revoke node atomically");
+
+    let routes: Vec<(bool, String, String, bool)> = sqlx::query_as(
+        "SELECT enabled,state,role,retired_at IS NOT NULL
+         FROM printer_routes
+         WHERE workspace_id=$1 AND environment_id=$2
+         ORDER BY id",
+    )
+    .bind(scope.workspace_id.to_string())
+    .bind(scope.environment_id.to_string())
+    .fetch_all(store.pool())
+    .await
+    .expect("retained route audit");
+    assert_eq!(routes.len(), 3);
+    assert_eq!(
+        routes
+            .iter()
+            .filter(|(enabled, state, role, retired)| {
+                !enabled && state == "retired" && role == "disabled" && *retired
+            })
+            .count(),
+        2
+    );
+    assert!(routes.contains(&(true, "available".into(), "standby".into(), false)));
+    let safe_attempt = store
+        .get_latest_delivery_attempt(scope, &safe_job_id)
+        .await
+        .expect("safe attempt retained");
+    assert_eq!(safe_attempt.state, DeliveryAttemptState::Superseded);
+    let accepted_attempt = store
+        .get_latest_delivery_attempt(scope, "job_revoke_accepted")
+        .await
+        .expect("accepted attempt retained");
+    assert_eq!(accepted_attempt.state, DeliveryAttemptState::AcceptedByNode);
+    let job_states: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id,state FROM jobs WHERE workspace_id=$1 AND environment_id=$2 ORDER BY id",
+    )
+    .bind(scope.workspace_id.to_string())
+    .bind(scope.environment_id.to_string())
+    .fetch_all(store.pool())
+    .await
+    .expect("job states after revocation");
+    assert!(job_states.contains(&(safe_job_id.clone(), "waiting_for_agent".into())));
+    assert!(job_states.contains(&("job_revoke_accepted".into(), "agent_accepted".into())));
+    let wake_status: String = sqlx::query_scalar(
+        "SELECT status FROM node_wake_hints WHERE workspace_id=$1 AND environment_id=$2 AND id='wkh_revoke'",
+    )
+    .bind(scope.workspace_id.to_string())
+    .bind(scope.environment_id.to_string())
+    .fetch_one(store.pool())
+    .await
+    .expect("cancelled wake hint");
+    assert_eq!(wake_status, "cancelled");
+    let destination_states: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id,state FROM physical_destinations WHERE workspace_id=$1 AND environment_id=$2 ORDER BY id",
+    )
+    .bind(scope.workspace_id.to_string())
+    .bind(scope.environment_id.to_string())
+    .fetch_all(store.pool())
+    .await
+    .expect("destination states after revocation");
+    assert_eq!(
+        destination_states,
+        vec![
+            ("pdst_revoke_accepted".into(), "attention".into()),
+            ("pdst_revoke_safe".into(), "available".into()),
+            ("pdst_revoke_unrelated".into(), "available".into()),
+        ]
+    );
+    let stale_route = route(
+        "rte_revoke_stale",
+        "pdst_revoke_unrelated",
+        agent_suffix,
+        "ptr_revoke",
+        "primary",
+    );
+    assert!(matches!(
+        store.upsert_route(scope, &stale_route).await,
+        Err(StorageError::NotFound)
+    ));
+    assert!(matches!(
+        store
+            .begin_delivery_attempt(
+                scope,
+                NewDeliveryAttempt {
+                    attempt_id: "attempt_revoke_after",
+                    reservation_id: "reservation_revoke_after",
+                    job_id: &safe_job_id,
+                    destination_id: "pdst_revoke_safe",
+                    route_id: "rte_revoke_safe",
+                    lease_until: Utc::now() + Duration::minutes(1),
+                },
+            )
+            .await,
+        Err(StorageError::NotFound)
+    ));
+
+    pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop exact disposable schema");
+}
+
+#[tokio::test]
+async fn revocation_serializes_with_route_projection_and_retires_the_winner() {
+    let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
+        eprintln!("skipped: set PIQAE_TEST_DATABASE_URL for revocation concurrency evidence");
+        return;
+    };
+    let schema = format!("piqae_revoke_race_{}", ulid::Ulid::new()).to_ascii_lowercase();
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect test PostgreSQL");
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("create exact disposable schema");
+    let pool = schema_pool(&database_url, &schema).await;
+    let store = PostgresStore::from_pool(pool.clone());
+    store.migrate().await.expect("migrate empty database");
+    let scope = TenantScope {
+        workspace_id: WorkspaceId::new(),
+        environment_id: EnvironmentId::new(),
+    };
+    let suffix = "01J00000000000000000000010";
+    let agent_id = format!("agt_{suffix}");
+    create_tenant_fixture(&store, scope, suffix, "ptr_revoke_race").await;
+    let mut projected_destination = destination("pdst_revoke_race", "unused");
+    projected_destination.scheduling_authority_id = None;
+    store
+        .upsert_destination(scope, &projected_destination)
+        .await
+        .expect("race destination fixture");
+
+    let mut projection = pool.begin().await.expect("begin projection transaction");
+    sqlx::query(
+        "SELECT id FROM agents
+         WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 AND revoked_at IS NULL
+         FOR KEY SHARE",
+    )
+    .bind(scope.workspace_id.to_string())
+    .bind(scope.environment_id.to_string())
+    .bind(&agent_id)
+    .fetch_one(&mut *projection)
+    .await
+    .expect("hold projection's active-agent fence");
+
+    let revoke_store = store.clone();
+    let revoked_agent_id = agent_id.clone();
+    let mut revoke = tokio::spawn(async move {
+        revoke_store
+            .revoke_agent(
+                scope.workspace_id,
+                scope.environment_id,
+                revoked_agent_id.parse().expect("fixture agent id"),
+            )
+            .await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut revoke)
+            .await
+            .is_err(),
+        "revocation must wait for the projection holding the active-agent fence"
+    );
+    sqlx::query(
+        "INSERT INTO printer_routes
+         (workspace_id,environment_id,id,destination_id,printer_id,agent_id,native_queue_id,
+          local_route_key,state,role,priority,enabled,capability_revision,profile_revision)
+         VALUES ($1,$2,'rte_revoke_race',$3,'ptr_revoke_race',$4,'native-race',
+                 'local-race','available','primary',0,true,1,1)",
+    )
+    .bind(scope.workspace_id.to_string())
+    .bind(scope.environment_id.to_string())
+    .bind(&projected_destination.id)
+    .bind(&agent_id)
+    .execute(&mut *projection)
+    .await
+    .expect("commit projection before revocation");
+    projection.commit().await.expect("release projection fence");
+    tokio::time::timeout(std::time::Duration::from_secs(5), revoke)
+        .await
+        .expect("revocation completed after projection")
+        .expect("revocation task")
+        .expect("revocation result");
+
+    let retired: (bool, String, bool) = sqlx::query_as(
+        "SELECT enabled,state,retired_at IS NOT NULL FROM printer_routes
+         WHERE workspace_id=$1 AND environment_id=$2 AND id='rte_revoke_race'",
+    )
+    .bind(scope.workspace_id.to_string())
+    .bind(scope.environment_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("projected route retained as audit");
+    assert_eq!(retired, (false, "retired".into(), true));
+
+    let reserve_suffix = "01J00000000000000000000011";
+    let reserve_agent = format!("agt_{reserve_suffix}");
+    let reserve_job = format!("job_{reserve_suffix}");
+    create_tenant_fixture(&store, scope, reserve_suffix, "ptr_revoke_reserve").await;
+    sqlx::query(
+        "UPDATE jobs SET state='waiting_for_agent'
+         WHERE workspace_id=$1 AND environment_id=$2 AND id=$3",
+    )
+    .bind(scope.workspace_id.to_string())
+    .bind(scope.environment_id.to_string())
+    .bind(&reserve_job)
+    .execute(&pool)
+    .await
+    .expect("reserve race job fixture");
+    let mut reserve_destination = destination("pdst_revoke_reserve", "unused");
+    reserve_destination.scheduling_authority_id = None;
+    store
+        .upsert_destination(scope, &reserve_destination)
+        .await
+        .expect("reserve race destination");
+    store
+        .upsert_route(
+            scope,
+            &route(
+                "rte_revoke_reserve",
+                &reserve_destination.id,
+                reserve_suffix,
+                "ptr_revoke_reserve",
+                "primary",
+            ),
+        )
+        .await
+        .expect("reserve race route");
+    let mut blocked_job = pool.begin().await.expect("begin blocked job transaction");
+    sqlx::query(
+        "SELECT id FROM jobs WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 FOR UPDATE",
+    )
+    .bind(scope.workspace_id.to_string())
+    .bind(scope.environment_id.to_string())
+    .bind(&reserve_job)
+    .fetch_one(&mut *blocked_job)
+    .await
+    .expect("hold job row while reservation locks route");
+    let reservation_store = store.clone();
+    let reservation_job = reserve_job.clone();
+    let reservation_destination = reserve_destination.id.clone();
+    let reservation = tokio::spawn(async move {
+        reservation_store
+            .begin_delivery_attempt(
+                scope,
+                NewDeliveryAttempt {
+                    attempt_id: "attempt_revoke_reserve_race",
+                    reservation_id: "reservation_revoke_reserve_race",
+                    job_id: &reservation_job,
+                    destination_id: &reservation_destination,
+                    route_id: "rte_revoke_reserve",
+                    lease_until: Utc::now() + Duration::minutes(1),
+                },
+            )
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let revoke_store = store.clone();
+    let revoke_reserve = tokio::spawn(async move {
+        revoke_store
+            .revoke_agent(
+                scope.workspace_id,
+                scope.environment_id,
+                reserve_agent.parse().expect("reserve fixture agent id"),
+            )
+            .await
+    });
+    blocked_job.commit().await.expect("release blocked job");
+    let reservation_result = tokio::time::timeout(std::time::Duration::from_secs(5), reservation)
+        .await
+        .expect("reservation/revocation cannot deadlock")
+        .expect("reservation task");
+    assert!(
+        reservation_result.is_ok() || matches!(reservation_result, Err(StorageError::NotFound)),
+        "the reservation may win or be fenced, but cannot survive revocation"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), revoke_reserve)
+        .await
+        .expect("revocation/reservation cannot deadlock")
+        .expect("reserve revocation task")
+        .expect("reserve revocation result");
+    let active_attempts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM delivery_attempts
+         WHERE workspace_id=$1 AND environment_id=$2
+           AND route_id='rte_revoke_reserve' AND state='route_leased' AND final_at IS NULL",
+    )
+    .bind(scope.workspace_id.to_string())
+    .bind(scope.environment_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("active reserve-race attempts");
+    assert_eq!(active_attempts, 0);
+
+    pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop exact disposable schema");
+}
+
+#[tokio::test]
+async fn migration_40_upgrades_39_and_backfills_without_inferring_route_merges() {
     let Some(database_url) = env::var("PIQAE_TEST_DATABASE_URL").ok() else {
         eprintln!("skipped: set PIQAE_TEST_DATABASE_URL for PostgreSQL migration evidence");
         return;
@@ -1149,7 +1729,7 @@ async fn migration_42_upgrades_41_and_backfills_without_inferring_route_merges()
     let previous = Migrator {
         migrations: Cow::Owned(
             all.iter()
-                .filter(|migration| migration.version < 42)
+                .filter(|migration| migration.version < 40)
                 .cloned()
                 .collect(),
         ),
@@ -1157,7 +1737,7 @@ async fn migration_42_upgrades_41_and_backfills_without_inferring_route_merges()
         locking: true,
         no_tx: false,
     };
-    previous.run(&pool).await.expect("apply schema version 41");
+    previous.run(&pool).await.expect("apply schema version 39");
     let store = PostgresStore::from_pool(pool.clone());
     let scope = TenantScope {
         workspace_id: WorkspaceId::new(),
@@ -1167,7 +1747,7 @@ async fn migration_42_upgrades_41_and_backfills_without_inferring_route_merges()
     store
         .migrate()
         .await
-        .expect("upgrade application from 41 to 42");
+        .expect("upgrade application from 39 to 40");
     sqlx::query("INSERT INTO jobs (id,workspace_id,environment_id,printer_id,agent_id,payload,state,per_printer_sequence,expires_at) VALUES ('job_upgrade_legacy_writer',$1,$2,'ptr_upgrade','agt_upgrade','{}'::jsonb,'registered',2,now()+interval '1 hour')")
         .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).execute(&pool).await.expect("N-1 writer remains compatible while destination columns are nullable");
     let legacy_destination: Option<String> = sqlx::query_scalar("SELECT destination_id FROM jobs WHERE workspace_id=$1 AND environment_id=$2 AND id='job_upgrade_legacy_writer'")

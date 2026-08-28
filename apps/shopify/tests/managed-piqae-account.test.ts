@@ -37,14 +37,12 @@ describe("managed Piqae Shopify accounts", () => {
         }
         expect(headers.get("x-piqae-workspace-id")).toBe("ws_managed");
         expect(headers.get("x-piqae-environment-id")).toBe("env_live");
-        if (url.pathname === "/v1/business-document-templates") {
+        if (url.pathname === "/v1/printpacket/templates") {
           template += 1;
           return Response.json({ id: `tpl_${template}` });
         }
         if (
-          /^\/v1\/business-document-templates\/tpl_\d+\/publish$/.test(
-            url.pathname,
-          )
+          /^\/v1\/printpacket\/templates\/tpl_\d+\/publish$/.test(url.pathname)
         ) {
           revision += 1;
           return Response.json({ id: `rev_${revision}` });

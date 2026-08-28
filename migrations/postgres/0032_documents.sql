@@ -28,7 +28,7 @@ CREATE TABLE document_template_revisions (
     revision integer NOT NULL CHECK (revision > 0),
     spec_ciphertext bytea NOT NULL CHECK (octet_length(spec_ciphertext) BETWEEN 29 AND 1048605),
     spec_sha256 text NOT NULL CHECK (spec_sha256 ~ '^[0-9a-f]{64}$'),
-    renderer_profile text NOT NULL CHECK (renderer_profile = 'piqae.document/v1'),
+    renderer_profile text NOT NULL CHECK (renderer_profile = 'printpacket/v1'),
     created_at timestamptz NOT NULL DEFAULT now(),
     FOREIGN KEY (workspace_id, environment_id, template_id)
         REFERENCES document_templates(workspace_id, environment_id, id) ON DELETE CASCADE,

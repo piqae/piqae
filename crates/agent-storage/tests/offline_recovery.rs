@@ -3,7 +3,7 @@
     reason = "fault-test setup and assertions must fail immediately with local context"
 )]
 
-use piqae_agent_storage::{AcceptedJob, AgentStore};
+use piqae_agent_storage::{AcceptedJob, AgentStore, CloudRouteProof};
 use std::collections::HashSet;
 
 fn cloud_job() -> AcceptedJob {
@@ -31,6 +31,14 @@ fn numbered_cloud_job(number: usize) -> AcceptedJob {
     job
 }
 
+fn route_proof() -> CloudRouteProof {
+    CloudRouteProof {
+        reservation_id: "00000000-0000-4000-8000-000000000001".into(),
+        generation: 1,
+        fencing_token: "deterministic-route-fence".into(),
+    }
+}
+
 #[test]
 fn acceptance_intent_queue_and_event_cursor_survive_separate_restart_windows() {
     let directory = tempfile::tempdir().expect("isolated state");
@@ -39,7 +47,13 @@ fn acceptance_intent_queue_and_event_cursor_survive_separate_restart_windows() {
     {
         let mut store = AgentStore::open(&database).expect("initial store");
         let prepared = store
-            .prepare_cloud_job(&cloud_job(), "lease-1", "redacted-token", 30_000)
+            .prepare_cloud_job(
+                &cloud_job(),
+                "lease-1",
+                "redacted-token",
+                30_000,
+                &route_proof(),
+            )
             .expect("durable acceptance intent");
         assert_eq!(prepared.state, "cloud_accept_pending");
         assert!(store.runnable_heads(20).expect("queue").is_empty());
@@ -56,8 +70,13 @@ fn acceptance_intent_queue_and_event_cursor_survive_separate_restart_windows() {
         let intents = store.pending_cloud_accepts().expect("acceptance replay");
         assert_eq!(intents.len(), 1);
         assert_eq!(intents[0].lease_id, "lease-1");
+        assert_eq!(intents[0].route_proof(), Some(route_proof()));
         assert!(!format!("{:?}", intents[0]).contains("redacted-token"));
+        assert!(!format!("{:?}", intents[0]).contains("deterministic-route-fence"));
 
+        store
+            .confirm_cloud_accept("job_offline_recovery", 39)
+            .expect("persist remote acceptance outcome");
         store
             .activate_cloud_job("job_offline_recovery", 40)
             .expect("remote acceptance confirmed");
@@ -116,6 +135,7 @@ fn accelerated_disconnect_retry_soak_has_no_loss_or_duplicate_activation() {
                     &format!("lease-{number}"),
                     "redacted-token",
                     60_000,
+                    &route_proof(),
                 )
                 .expect("persist acceptance intent before disconnect");
         }
@@ -131,6 +151,9 @@ fn accelerated_disconnect_retry_soak_has_no_loss_or_duplicate_activation() {
                     .iter()
                     .any(|intent| intent.job_id == format!("job_soak_{number:04}"))
             );
+            store
+                .confirm_cloud_accept(&format!("job_soak_{number:04}"), 99 + timestamp)
+                .expect("persist acceptance response");
             store
                 .activate_cloud_job(&format!("job_soak_{number:04}"), 100 + timestamp)
                 .expect("first acceptance response");

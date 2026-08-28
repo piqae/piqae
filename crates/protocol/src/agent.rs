@@ -8,6 +8,33 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeDisplayIdentity {
+    pub display_name: String,
+    pub site: Option<String>,
+    pub location: Option<String>,
+    pub labels: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentIdentityUpdateRequest {
+    pub expected_revision: u64,
+    pub display_name: String,
+    pub site: Option<String>,
+    pub location: Option<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentIdentityUpdateResponse {
+    pub revision: u64,
+    pub identity: NodeDisplayIdentity,
+}
+
 fn append_proof_field(message: &mut Vec<u8>, value: &[u8]) {
     let length = u64::try_from(value.len()).unwrap_or(u64::MAX);
     message.extend_from_slice(&length.to_be_bytes());
@@ -29,6 +56,10 @@ pub struct EnrolRequest {
     /// adds an isolated connector; it never replaces another tenant's key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installation_id: Option<String>,
+    /// Public key for a new, stable installation principal. This key is
+    /// distinct from every connector key and is accepted only on first use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation_public_key: Option<String>,
     /// Locally approved printer identifiers. Empty never means all printers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_printer_ids: Vec<String>,
@@ -331,6 +362,11 @@ pub struct AgentSyncRequest {
     /// this connector and intentionally omit document metadata.
     #[serde(default)]
     pub native_handoffs: Vec<NativeHandoffEvidence>,
+    /// Host lifecycle and execution availability reported by runtimes which
+    /// can be embedded in foreground-constrained applications. Missing keeps
+    /// the legacy desktop-node admission behaviour during rolling upgrades.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<NodeRuntimeObservation>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -357,6 +393,9 @@ pub enum AgentFeature {
     RouteObservationSequenceV1,
     RouteLeaseRenewalV1,
     AmbiguousHandoffResolutionV1,
+    EmbeddedHostV1,
+    RuntimeAvailabilityV1,
+    WakeHintsV1,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -384,11 +423,94 @@ pub struct DocumentRenderCapabilities {
     /// tenant/node sync and must never be exposed to another tenant.
     #[serde(default)]
     pub cached_resource_digests: Vec<String>,
+    /// Exact V2 `PrintPacket` capability intersection. Missing is an explicit
+    /// update-required signal; standalone renderer ABI strings never imply
+    /// support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub print_packet: Option<PrintPacketCapabilitiesV2>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrintPacketCapabilitiesV2 {
+    pub negotiation_version: u16,
+    pub supported_packet_versions: Vec<String>,
+    pub feature_ids: Vec<String>,
+    pub conformance_profiles: Vec<String>,
+    pub output_profiles: Vec<PrintPacketOutputProfile>,
+    pub deterministic: bool,
+    pub limits: PrintPacketLimits,
+    pub resource_types: Vec<String>,
+    pub direct_offline: bool,
+    pub native_language_profiles: Vec<PrinterNativeLanguageProfile>,
+    /// Display-only diagnostic. Negotiation must use the exact facts above,
+    /// never ordering or assumptions derived from this value.
+    pub implementation_version: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrintPacketLimits {
+    pub max_template_bytes: u64,
+    pub max_input_bytes: u64,
+    pub max_output_bytes: u64,
+    pub max_pages: u32,
+    pub max_resource_count: u32,
+    pub max_resource_bytes: u64,
+    pub max_total_resource_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PrintPacketOutputProfile {
+    Pdf {
+        id: String,
+        media_type: String,
+    },
+    PrinterNative {
+        id: String,
+        media_type: String,
+        language_profile_id: String,
+    },
+}
+
+impl PrintPacketOutputProfile {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Pdf { id, .. } | Self::PrinterNative { id, .. } => id,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrinterNativeLanguageProfile {
+    pub id: String,
+    pub language: String,
+    pub language_version: String,
+    pub profile_version: String,
+    pub media_type: String,
+    /// Canonical SHA-256 of the exact installed driver fingerprint used when
+    /// the trusted support-pack declaration was selected.
+    pub driver_fingerprint_sha256: String,
+    /// Canonical digest of the complete trusted support pack.
+    pub support_pack_digest_sha256: String,
+    /// Public Piqae printer IDs for which this exact language/profile pair was
+    /// authenticated. A node-wide language claim is intentionally invalid.
+    pub printer_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrinterNativeJobDescriptor {
+    pub output_profile_id: String,
+    pub language_profile_id: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum BusinessDocumentRenderPolicy {
+pub enum PrintPacketRenderPolicy {
     #[default]
     Automatic,
     CloudOnly,
@@ -397,21 +519,32 @@ pub enum BusinessDocumentRenderPolicy {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct BusinessDocumentResourceDescriptor {
+#[serde(deny_unknown_fields)]
+pub struct PrintPacketResourceDescriptor {
     pub digest: String,
     pub media_type: String,
     pub byte_length: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct BusinessDocumentNodeRender {
+#[serde(deny_unknown_fields)]
+pub struct PrintPacketNodeRender {
+    pub negotiation_version: u16,
+    pub packet_version: String,
+    pub required_feature_ids: Vec<String>,
+    pub conformance_profile: String,
+    pub output_profile: String,
     pub renderer_abi: String,
     pub resource_abi: String,
     pub specification: serde_json::Value,
     pub input: serde_json::Value,
-    pub resources: Vec<BusinessDocumentResourceDescriptor>,
+    pub resources: Vec<PrintPacketResourceDescriptor>,
     pub expected_pdf_sha256: String,
     pub expected_pdf_bytes: u64,
+    /// Authoritative page count produced with the same immutable specification,
+    /// input, resources, renderer build, and PDF digest. Nodes use this value as
+    /// the render page limit instead of substituting a local guess.
+    pub expected_page_count: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -437,6 +570,92 @@ pub struct AgentSyncResponse {
     /// Highest local handoff evidence sequence durably consumed by the server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acknowledged_handoff_sequence: Option<u64>,
+    /// Wake requests are advisory and never carry a job lease or document.
+    /// A runtime only claims work after it is authenticated and eligible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wake_hints: Vec<AgentWakeHint>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeHostMode {
+    MachineService,
+    UserAgent,
+    EmbeddedApplication,
+    AttachedClient,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeAvailabilityClass {
+    ContinuousWhileAwake,
+    ForegroundOnly,
+    BackgroundOpportunistic,
+    ManagedKiosk,
+    WakeRelayCapable,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeAvailability {
+    Available,
+    Foreground,
+    Background,
+    Suspending,
+    Suspended,
+    Waking,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeMechanism {
+    LocalBroker,
+    ApnsBackground,
+    BluetoothAccessory,
+    ExternalAccessory,
+    WakeOnLan,
+    Manual,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NodeRuntimeObservation {
+    /// Monotonic per connector so replayed lifecycle observations are
+    /// idempotent and out-of-order suspension reports fail closed.
+    pub sequence: u64,
+    pub host_mode: NodeHostMode,
+    pub availability_class: NodeAvailabilityClass,
+    pub lifecycle_state: NodeAvailability,
+    pub accepts_cloud_jobs: bool,
+    pub observed_at: DateTime<Utc>,
+    pub fresh_until: DateTime<Utc>,
+    /// Remaining operating-system execution budget, when the host can measure
+    /// it. Opportunistic background hosts require a bounded positive budget
+    /// before the server may offer work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_budget_ms: Option<u64>,
+    #[serde(default)]
+    pub wake_mechanisms: Vec<WakeMechanism>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentWakeHint {
+    pub id: String,
+    pub reason: String,
+    /// This hint was observed through the already-authenticated sync session.
+    /// It is not evidence that an external push woke the host.
+    pub delivery_channel: WakeDeliveryChannel,
+    pub requested_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeDeliveryChannel {
+    ConnectedSession,
+    ExternalPush,
+    LocalRelay,
+    Manual,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -537,7 +756,7 @@ impl std::fmt::Debug for CloudRouteReservation {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContentDescriptor {
     Download {
         url: String,
@@ -564,9 +783,9 @@ pub enum ContentDescriptor {
     /// Exact node-render input with the already approved server PDF as a
     /// mandatory fallback. `require_node` is represented by `fallback_allowed`
     /// false and must fail closed instead of printing the fallback.
-    BusinessDocument {
-        policy: BusinessDocumentRenderPolicy,
-        render: Box<BusinessDocumentNodeRender>,
+    PrintPacket {
+        policy: PrintPacketRenderPolicy,
+        render: Box<PrintPacketNodeRender>,
         fallback: Box<ContentDescriptor>,
         fallback_allowed: bool,
         decision_reason: String,
@@ -606,6 +825,18 @@ impl std::fmt::Debug for AgentAcceptJobRequest {
 pub struct AgentAcceptJobResponse {
     pub accepted_at: DateTime<Utc>,
     pub state: piqae_domain::JobState,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AgentAcceptanceReconciliationResponse {
+    pub accepted: bool,
+    pub connector_revoked: bool,
+    pub fenced: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AgentAcceptanceAbandonResponse {
+    pub abandoned: bool,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -936,6 +1167,20 @@ mod route_protocol_tests {
         };
         assert!(!response.inventory_projection_acknowledgement_supported);
         assert!(response.inventory_projection.is_none());
+    }
+
+    #[test]
+    fn print_packet_offer_requires_the_complete_negotiated_descriptor() {
+        let render = serde_json::from_value::<PrintPacketNodeRender>(serde_json::json!({
+            "renderer_abi": "printpacket.pdf-renderer/v1",
+            "resource_abi": "printpacket.resources/v1",
+            "specification": {},
+            "input": {},
+            "resources": [],
+            "expected_pdf_sha256": "a".repeat(64),
+            "expected_pdf_bytes": 100
+        }));
+        assert!(render.is_err());
     }
 
     #[test]

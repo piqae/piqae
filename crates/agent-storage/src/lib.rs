@@ -12,7 +12,7 @@ use piqae_domain::{
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use thiserror::Error;
 
@@ -52,6 +52,8 @@ pub enum StorageError {
     NativeBlobTooLarge(usize),
     #[error("document resource {0} was not found")]
     DocumentResourceNotFound(String),
+    #[error("content {0} is being reclaimed")]
+    ContentReclaimInProgress(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +114,40 @@ pub struct AcceptedJob {
     pub cloud_managed: bool,
 }
 
+/// Exact printer-native language and process-generation facts authorized when
+/// a RAW job became durable. Every field is immutable with the job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrinterNativeBindingPin {
+    pub process_session_id: String,
+    pub generation: u64,
+    pub printer_id: String,
+    pub output_profile_id: String,
+    pub language_profile_id: String,
+    pub language: String,
+    pub language_version: String,
+    pub profile_version: String,
+    pub media_type: String,
+    pub driver_fingerprint_sha256: String,
+    pub support_pack_digest_sha256: String,
+}
+
+/// Immutable routing/profile facts committed with job responsibility.
+///
+/// `profile_snapshot_json` is the executor-ready portable or native profile
+/// selected from the shared node inventory.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JobPersistenceFacts {
+    pub target_id: Option<String>,
+    pub binding_id: Option<String>,
+    pub profile_id: Option<String>,
+    pub profile_revision: Option<u64>,
+    pub stock_id: Option<String>,
+    pub loaded_media_snapshot_json: Option<String>,
+    pub profile_snapshot_json: Option<String>,
+    pub printer_native_binding: Option<PrinterNativeBindingPin>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalJob {
     pub job_id: String,
@@ -133,6 +169,9 @@ pub struct LocalJob {
     pub profile_revision: Option<u64>,
     pub stock_id: Option<String>,
     pub loaded_media_snapshot_json: Option<String>,
+    pub cloud_managed: bool,
+    pub profile_snapshot_json: Option<String>,
+    pub printer_native_binding: Option<PrinterNativeBindingPin>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -310,11 +349,63 @@ pub struct CloudAcceptIntent {
     pub lease_expires_unix_ms: i64,
     pub content_sha256: String,
     pub local_sequence: u64,
+    pub route_reservation_id: Option<String>,
+    pub route_generation: Option<u64>,
+    pub route_fencing_token: Option<String>,
+    pub remote_accept_confirmed: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct CloudReleaseCleanup {
+    pub job_id: String,
+    pub lease_id: String,
+    pub lease_token: String,
+    pub reason: String,
+}
+
+impl std::fmt::Debug for CloudReleaseCleanup {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CloudReleaseCleanup")
+            .field("job_id", &self.job_id)
+            .field("lease_id", &self.lease_id)
+            .field("lease_token", &"[REDACTED]")
+            .field("reason", &self.reason)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudRouteProof {
+    pub reservation_id: String,
+    pub generation: u64,
+    pub fencing_token: String,
+}
+
+impl CloudAcceptIntent {
+    #[must_use]
+    pub fn route_proof(&self) -> Option<CloudRouteProof> {
+        let proof = CloudRouteProof {
+            reservation_id: self.route_reservation_id.clone()?,
+            generation: self.route_generation?,
+            fencing_token: self.route_fencing_token.clone()?,
+        };
+        (!proof.reservation_id.is_empty()
+            && proof.generation > 0
+            && !proof.fencing_token.is_empty())
+        .then_some(proof)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfidentialFile {
     pub job_id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReclaimableContent {
+    pub sha256: String,
     pub path: String,
 }
 
@@ -328,6 +419,10 @@ impl std::fmt::Debug for CloudAcceptIntent {
             .field("lease_expires_unix_ms", &self.lease_expires_unix_ms)
             .field("content_sha256", &self.content_sha256)
             .field("local_sequence", &self.local_sequence)
+            .field("route_reservation_id", &self.route_reservation_id)
+            .field("route_generation", &self.route_generation)
+            .field("route_fencing_token", &"[REDACTED]")
+            .field("remote_accept_confirmed", &self.remote_accept_confirmed)
             .finish()
     }
 }
@@ -586,6 +681,30 @@ impl AgentStore {
             "evicting",
             "INTEGER NOT NULL DEFAULT 0 CHECK (evicting IN (0, 1))",
         )?;
+        ensure_column(
+            &connection,
+            "content_files",
+            "reclaiming",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (reclaiming IN (0, 1))",
+        )?;
+        for (name, definition) in [
+            ("route_reservation_id", "TEXT"),
+            ("route_generation", "INTEGER"),
+            ("route_fencing_token", "TEXT"),
+            (
+                "acceptance_state",
+                "TEXT NOT NULL DEFAULT 'prepared' CHECK (acceptance_state IN ('prepared', 'remote_accept_confirmed'))",
+            ),
+        ] {
+            ensure_column(&connection, "cloud_accept_intents", name, definition)?;
+        }
+        // A claim is process-transient but persisted to close the delete race.
+        // On restart the claimant is gone, so make the file eligible for a
+        // fresh existence check and claim/finalize attempt.
+        connection.execute(
+            "UPDATE content_files SET reclaiming = 0 WHERE reclaiming = 1",
+            [],
+        )?;
         let has_cloud_managed: bool = connection.query_row(
             "SELECT EXISTS (
                SELECT 1 FROM pragma_table_info('jobs') WHERE name = 'cloud_managed'
@@ -697,6 +816,14 @@ impl AgentStore {
             (
                 "loaded_media_snapshot_json",
                 "TEXT CHECK (loaded_media_snapshot_json IS NULL OR json_valid(loaded_media_snapshot_json))",
+            ),
+            (
+                "profile_snapshot_json",
+                "TEXT CHECK (profile_snapshot_json IS NULL OR json_valid(profile_snapshot_json))",
+            ),
+            (
+                "printer_native_binding_json",
+                "TEXT CHECK (printer_native_binding_json IS NULL OR json_valid(printer_native_binding_json))",
             ),
         ] {
             ensure_column(&connection, "jobs", name, definition)?;
@@ -2238,21 +2365,38 @@ impl AgentStore {
     /// Returns an error for conflicting immutable metadata or if any part of
     /// the acceptance transaction fails.
     pub fn accept_job(&mut self, job: &AcceptedJob) -> Result<LocalJob, StorageError> {
+        self.accept_job_with_facts(job, &JobPersistenceFacts::default())
+    }
+
+    /// Atomically accepts a job together with its immutable routing, profile,
+    /// and printer-native facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error before responsibility is committed when any pinned
+    /// fact is incomplete, invalid, or conflicts with an existing job.
+    #[allow(clippy::too_many_lines)]
+    pub fn accept_job_with_facts(
+        &mut self,
+        job: &AcceptedJob,
+        facts: &JobPersistenceFacts,
+    ) -> Result<LocalJob, StorageError> {
+        validate_job_persistence_facts(facts)?;
+        validate_job_native_binding(job, facts)?;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         if let Some(existing) = query_job(&tx, &job.job_id)? {
-            let same = existing.submission_id == job.submission_id
-                && existing.printer_id == job.printer_id
-                && existing.content_sha256 == job.content_sha256
-                && existing.content_kind == job.content_kind;
+            let same = accepted_job_matches(&existing, job)
+                && job_persistence_facts_match(&existing, facts);
             if !same {
                 return Err(StorageError::JobConflict(job.job_id.clone()));
             }
             tx.commit()?;
             return Ok(existing);
         }
+        validate_profile_fact_tx(&tx, facts)?;
 
         tx.execute(
             "INSERT INTO printer_sequences (printer_id, next_sequence)
@@ -2278,22 +2422,32 @@ impl AgentStore {
                 job.accepted_unix_ms
             ],
         )?;
-        tx.execute(
+        let content_recorded = tx.execute(
             "INSERT INTO content_files
              (sha256, path, reference_count, verified_unix_ms)
              VALUES (?1, ?2, 1, ?3)
              ON CONFLICT (sha256)
-             DO UPDATE SET reference_count = reference_count + 1",
+             DO UPDATE SET reference_count = reference_count + 1
+             WHERE content_files.reclaiming = 0",
             params![job.content_sha256, job.content_path, job.accepted_unix_ms],
         )?;
+        if content_recorded == 0 {
+            return Err(StorageError::ContentReclaimInProgress(
+                job.content_sha256.clone(),
+            ));
+        }
         tx.execute(
             "INSERT INTO jobs
              (job_id, submission_id, printer_id, printer_native_id,
               printer_sequence, title, content_sha256, content_path,
               content_kind, options_json, state, expires_unix_ms,
-              accepted_unix_ms, updated_unix_ms, cloud_managed)
+              accepted_unix_ms, updated_unix_ms, cloud_managed,
+              target_id, binding_id, profile_id, profile_revision, stock_id,
+              loaded_media_snapshot_json, profile_snapshot_json,
+              printer_native_binding_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                     'queued_local', ?11, ?12, ?12, ?13)",
+                     'queued_local', ?11, ?12, ?12, ?13, ?14, ?15, ?16,
+                     ?17, ?18, ?19, ?20, ?21)",
             params![
                 job.job_id,
                 job.submission_id,
@@ -2308,6 +2462,14 @@ impl AgentStore {
                 job.expires_unix_ms,
                 job.accepted_unix_ms,
                 job.cloud_managed,
+                facts.target_id,
+                facts.binding_id,
+                facts.profile_id,
+                facts.profile_revision,
+                facts.stock_id,
+                facts.loaded_media_snapshot_json,
+                facts.profile_snapshot_json,
+                encode_native_binding(facts)?,
             ],
         )?;
         append_event_tx(
@@ -2344,20 +2506,54 @@ impl AgentStore {
         lease_id: &str,
         lease_token: &str,
         lease_expires_unix_ms: i64,
+        route: &CloudRouteProof,
     ) -> Result<LocalJob, StorageError> {
-        if !job.cloud_managed || lease_token.is_empty() {
+        self.prepare_cloud_job_with_facts(
+            job,
+            lease_id,
+            lease_token,
+            lease_expires_unix_ms,
+            route,
+            &JobPersistenceFacts::default(),
+        )
+    }
+
+    /// Durably prepares cloud responsibility and every immutable execution
+    /// fact in one `SQLite` transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without leaving an acceptance intent when the profile
+    /// snapshot or printer-native binding is incomplete or invalid.
+    #[allow(clippy::too_many_lines)]
+    pub fn prepare_cloud_job_with_facts(
+        &mut self,
+        job: &AcceptedJob,
+        lease_id: &str,
+        lease_token: &str,
+        lease_expires_unix_ms: i64,
+        route: &CloudRouteProof,
+        facts: &JobPersistenceFacts,
+    ) -> Result<LocalJob, StorageError> {
+        validate_job_persistence_facts(facts)?;
+        validate_job_native_binding(job, facts)?;
+        if !job.cloud_managed
+            || lease_token.is_empty()
+            || route.reservation_id.is_empty()
+            || route.generation == 0
+            || route.fencing_token.is_empty()
+        {
             return Err(StorageError::InvalidLocalEvent(
-                "cloud acceptance requires a managed job and lease token".into(),
+                "cloud acceptance requires a managed job, lease, and route reservation proof"
+                    .into(),
             ));
         }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(existing) = query_job(&transaction, &job.job_id)? {
-            let same = existing.submission_id == job.submission_id
-                && existing.printer_id == job.printer_id
-                && existing.content_sha256 == job.content_sha256
-                && existing.content_kind == job.content_kind;
+            let same = accepted_job_matches(&existing, job)
+                && job_persistence_facts_match(&existing, facts);
             if !same {
                 return Err(StorageError::JobConflict(job.job_id.clone()));
             }
@@ -2373,11 +2569,13 @@ impl AgentStore {
                 lease_id,
                 lease_token,
                 lease_expires_unix_ms,
+                route,
                 job.accepted_unix_ms,
             )?;
             transaction.commit()?;
             return Ok(existing);
         }
+        validate_profile_fact_tx(&transaction, facts)?;
 
         transaction.execute(
             "INSERT INTO printer_sequences (printer_id, next_sequence)
@@ -2402,14 +2600,20 @@ impl AgentStore {
                 job.accepted_unix_ms
             ],
         )?;
-        transaction.execute(
+        let content_recorded = transaction.execute(
             "INSERT INTO content_files
              (sha256, path, reference_count, verified_unix_ms)
              VALUES (?1, ?2, 1, ?3)
              ON CONFLICT (sha256)
-             DO UPDATE SET reference_count = reference_count + 1",
+             DO UPDATE SET reference_count = reference_count + 1
+             WHERE content_files.reclaiming = 0",
             params![job.content_sha256, job.content_path, job.accepted_unix_ms],
         )?;
+        if content_recorded == 0 {
+            return Err(StorageError::ContentReclaimInProgress(
+                job.content_sha256.clone(),
+            ));
+        }
         let confidential = std::path::Path::new(&job.content_path)
             .file_name()
             .and_then(|name| name.to_str())
@@ -2420,9 +2624,13 @@ impl AgentStore {
               printer_sequence, title, content_sha256, content_path,
               content_kind, options_json, state, expires_unix_ms,
               accepted_unix_ms, updated_unix_ms, cloud_managed,
-              confidential, confidential_delete_after_unix_ms)
+              confidential, confidential_delete_after_unix_ms,
+              target_id, binding_id, profile_id, profile_revision, stock_id,
+              loaded_media_snapshot_json, profile_snapshot_json,
+              printer_native_binding_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                     'cloud_accept_pending', ?11, ?12, ?12, 1, ?13, NULL)",
+                     'cloud_accept_pending', ?11, ?12, ?12, 1, ?13, NULL,
+                     ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 job.job_id,
                 job.submission_id,
@@ -2437,6 +2645,14 @@ impl AgentStore {
                 job.expires_unix_ms,
                 job.accepted_unix_ms,
                 i64::from(confidential),
+                facts.target_id,
+                facts.binding_id,
+                facts.profile_id,
+                facts.profile_revision,
+                facts.stock_id,
+                facts.loaded_media_snapshot_json,
+                facts.profile_snapshot_json,
+                encode_native_binding(facts)?,
             ],
         )?;
         let local = query_job(&transaction, &job.job_id)?
@@ -2447,6 +2663,7 @@ impl AgentStore {
             lease_id,
             lease_token,
             lease_expires_unix_ms,
+            route,
             job.accepted_unix_ms,
         )?;
         transaction.commit()?;
@@ -2489,6 +2706,137 @@ impl AgentStore {
         Ok(())
     }
 
+    /// Returns content referenced exclusively by truthful terminal jobs.
+    /// Delivery-uncertain jobs deliberately remain retention barriers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the bounded candidate query cannot be executed.
+    pub fn claim_reclaimable_terminal_content(
+        &mut self,
+        limit: usize,
+    ) -> Result<Vec<ReclaimableContent>, StorageError> {
+        let bounded = i64::try_from(limit.clamp(1, 256)).unwrap_or(256);
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut statement = transaction.prepare(
+            "SELECT c.sha256, c.path
+             FROM content_files c
+             WHERE c.reclaiming = 0 AND NOT EXISTS (
+               SELECT 1 FROM jobs retained
+               WHERE retained.content_sha256 = c.sha256
+                 AND retained.content_path = c.path
+                 AND retained.state NOT IN (
+                   'completed_reported','failed_terminal','cancelled','expired'
+                 )
+             )
+             ORDER BY c.verified_unix_ms, c.sha256
+             LIMIT ?1",
+        )?;
+        let candidates = statement
+            .query_map([bounded], |row| {
+                Ok(ReclaimableContent {
+                    sha256: row.get(0)?,
+                    path: row.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut claimed = Vec::new();
+        for candidate in candidates {
+            let changed = transaction.execute(
+                "UPDATE content_files SET reclaiming = 1
+                 WHERE sha256 = ?1 AND path = ?2 AND reclaiming = 0
+                   AND NOT EXISTS (
+                     SELECT 1 FROM jobs retained
+                     WHERE retained.content_sha256 = ?1
+                       AND retained.content_path = ?2
+                       AND retained.state NOT IN (
+                         'completed_reported','failed_terminal','cancelled','expired'
+                       )
+                   )",
+                params![candidate.sha256, candidate.path],
+            )?;
+            if changed == 1 {
+                claimed.push(candidate);
+            }
+        }
+        transaction.commit()?;
+        Ok(claimed)
+    }
+
+    /// Retires one file after the caller has removed it. The reference check
+    /// is repeated transactionally so an active or uncertain job can never
+    /// lose its document through a stale cleanup candidate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transactional reference check or retirement
+    /// cannot be persisted.
+    pub fn mark_terminal_content_reclaimed(
+        &mut self,
+        sha256: &str,
+        path: &str,
+    ) -> Result<bool, StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let retained: bool = transaction.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM jobs
+               WHERE content_sha256 = ?1 AND content_path = ?2
+                 AND state NOT IN (
+                   'completed_reported','failed_terminal','cancelled','expired'
+                 )
+             )",
+            params![sha256, path],
+            |row| row.get(0),
+        )?;
+        if retained {
+            transaction.execute(
+                "UPDATE content_files SET reclaiming = 0
+                 WHERE sha256 = ?1 AND path = ?2 AND reclaiming = 1",
+                params![sha256, path],
+            )?;
+            transaction.commit()?;
+            return Ok(false);
+        }
+        transaction.execute(
+            "UPDATE jobs SET content_path = 'retired:' || content_sha256
+             WHERE content_sha256 = ?1 AND content_path = ?2
+               AND state IN (
+                 'completed_reported','failed_terminal','cancelled','expired'
+               )",
+            params![sha256, path],
+        )?;
+        transaction.execute(
+            "DELETE FROM content_files
+             WHERE sha256 = ?1 AND path = ?2 AND reclaiming = 1",
+            params![sha256, path],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    /// Releases a reclaim claim after filesystem deletion failed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable claim cannot be cleared.
+    pub fn cancel_terminal_content_reclaim(
+        &self,
+        sha256: &str,
+        path: &str,
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "UPDATE content_files SET reclaiming = 0
+             WHERE sha256 = ?1 AND path = ?2 AND reclaiming = 1",
+            params![sha256, path],
+        )?;
+        Ok(())
+    }
+
     /// Returns accepted cloud jobs whose acknowledgement has not reached the control plane.
     ///
     /// # Errors
@@ -2497,11 +2845,266 @@ impl AgentStore {
     pub fn pending_cloud_accepts(&self) -> Result<Vec<CloudAcceptIntent>, StorageError> {
         let mut statement = self.connection.prepare(
             "SELECT job_id, lease_id, lease_token, lease_expires_unix_ms,
-                    content_sha256, local_sequence
+                    content_sha256, local_sequence, route_reservation_id,
+                    route_generation, route_fencing_token, acceptance_state
              FROM cloud_accept_intents ORDER BY prepared_unix_ms, job_id",
         )?;
         let rows = statement.query_map([], row_to_cloud_accept_intent)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Marks a durable prepared intent after the authority has accepted it.
+    /// This is the crash boundary between remote ownership and local activation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the intent is absent or the durable update fails.
+    pub fn confirm_cloud_accept(
+        &self,
+        job_id: &str,
+        observed_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        let changed = self.connection.execute(
+            "UPDATE cloud_accept_intents
+             SET acceptance_state = 'remote_accept_confirmed', prepared_unix_ms = ?2
+             WHERE job_id = ?1 AND acceptance_state IN ('prepared', 'remote_accept_confirmed')",
+            params![job_id, observed_unix_ms],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::InvalidLocalEvent(format!(
+                "cloud job {job_id} has no acceptance intent to confirm"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Quarantines every proofless legacy intent before any best-effort remote
+    /// cleanup. The separate cleanup row cannot make the queue runnable and a
+    /// stale lease response can never block ordinary synchronization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the quarantine transaction cannot be read or committed.
+    pub fn quarantine_invalid_cloud_accepts(
+        &mut self,
+        observed_unix_ms: i64,
+    ) -> Result<Vec<CloudReleaseCleanup>, StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        loop {
+            let rows = {
+                let mut statement = transaction.prepare(
+                    "SELECT job_id, lease_id, lease_token
+                     FROM cloud_accept_intents
+                     WHERE route_reservation_id IS NULL OR route_reservation_id = ''
+                        OR route_generation IS NULL OR route_generation <= 0
+                        OR route_fencing_token IS NULL OR route_fencing_token = ''
+                     ORDER BY prepared_unix_ms, job_id LIMIT 256",
+                )?;
+                statement
+                    .query_map([], |row| {
+                        Ok(CloudReleaseCleanup {
+                            job_id: row.get(0)?,
+                            lease_id: row.get(1)?,
+                            lease_token: row.get(2)?,
+                            reason: "route_reservation_required".into(),
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            if rows.is_empty() {
+                break;
+            }
+            for cleanup in &rows {
+                transaction.execute(
+                    "INSERT INTO cloud_release_cleanups
+                     (job_id, lease_id, lease_token, reason, quarantined_unix_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(job_id) DO NOTHING",
+                    params![
+                        cleanup.job_id,
+                        cleanup.lease_id,
+                        cleanup.lease_token,
+                        cleanup.reason,
+                        observed_unix_ms
+                    ],
+                )?;
+                transaction.execute(
+                    "DELETE FROM cloud_accept_intents WHERE job_id = ?1",
+                    [&cleanup.job_id],
+                )?;
+                transaction.execute(
+                    "UPDATE jobs SET state = 'cancelled', updated_unix_ms = ?2
+                     WHERE job_id = ?1 AND state = 'cloud_accept_pending'",
+                    params![cleanup.job_id, observed_unix_ms],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        self.pending_cloud_release_cleanups()
+    }
+
+    /// Returns bounded, durable legacy-release cleanup work.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if cleanup rows cannot be read or decoded.
+    pub fn pending_cloud_release_cleanups(&self) -> Result<Vec<CloudReleaseCleanup>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT job_id, lease_id, lease_token, reason
+             FROM cloud_release_cleanups ORDER BY quarantined_unix_ms, job_id LIMIT 256",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok(CloudReleaseCleanup {
+                    job_id: row.get(0)?,
+                    lease_id: row.get(1)?,
+                    lease_token: row.get(2)?,
+                    reason: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Quarantines one not-yet-confirmed cloud intent whose immutable local
+    /// execution facts are no longer valid. Remote responsibility has not
+    /// transferred, so the lease can be released without making the job runnable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid reason or failed quarantine transaction.
+    pub fn quarantine_prepared_cloud_accept(
+        &mut self,
+        job_id: &str,
+        reason: &str,
+        observed_unix_ms: i64,
+    ) -> Result<Option<CloudReleaseCleanup>, StorageError> {
+        if reason.is_empty() || reason.len() > 128 {
+            return Err(StorageError::InvalidLocalEvent(
+                "cloud quarantine reason is invalid".into(),
+            ));
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let cleanup = transaction
+            .query_row(
+                "SELECT job_id, lease_id, lease_token
+                 FROM cloud_accept_intents
+                 WHERE job_id = ?1 AND acceptance_state = 'prepared'",
+                [job_id],
+                |row| {
+                    Ok(CloudReleaseCleanup {
+                        job_id: row.get(0)?,
+                        lease_id: row.get(1)?,
+                        lease_token: row.get(2)?,
+                        reason: reason.to_owned(),
+                    })
+                },
+            )
+            .optional()?;
+        let Some(cleanup) = cleanup else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        transaction.execute(
+            "INSERT INTO cloud_release_cleanups
+             (job_id, lease_id, lease_token, reason, quarantined_unix_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(job_id) DO NOTHING",
+            params![
+                cleanup.job_id,
+                cleanup.lease_id,
+                cleanup.lease_token,
+                cleanup.reason,
+                observed_unix_ms
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM cloud_accept_intents
+             WHERE job_id = ?1 AND acceptance_state = 'prepared'",
+            [job_id],
+        )?;
+        transaction.execute(
+            "UPDATE jobs SET state = 'cancelled', updated_unix_ms = ?2
+             WHERE job_id = ?1 AND state = 'cloud_accept_pending'",
+            params![job_id, observed_unix_ms],
+        )?;
+        transaction.commit()?;
+        Ok(Some(cleanup))
+    }
+
+    /// Removes one cleanup only after the authority has reached a safe disposition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable delete fails.
+    pub fn complete_cloud_release_cleanup(&self, job_id: &str) -> Result<(), StorageError> {
+        self.connection.execute(
+            "DELETE FROM cloud_release_cleanups WHERE job_id = ?1",
+            [job_id],
+        )?;
+        Ok(())
+    }
+
+    /// Clears every proofless cleanup after an authoritative connector revoke.
+    /// The set-based delete avoids a data-sized application loop while the
+    /// per-connector database keeps the scope exact.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable delete fails.
+    pub fn complete_all_cloud_release_cleanups(&self) -> Result<(), StorageError> {
+        self.connection
+            .execute("DELETE FROM cloud_release_cleanups", [])?;
+        Ok(())
+    }
+
+    /// Returns the bounded set of content paths durably referenced by this queue.
+    ///
+    /// Callers use this after a crash to remove only files which never crossed
+    /// the `SQLite` responsibility boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the bounded path inventory cannot be read.
+    pub fn tracked_content_paths(&self) -> Result<BTreeSet<String>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT path FROM content_files ORDER BY path LIMIT 4097")?;
+        let paths = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if paths.len() > 4096 {
+            return Err(StorageError::InvalidLocalEvent(
+                "content path inventory exceeds reconciliation bounds".into(),
+            ));
+        }
+        Ok(paths)
+    }
+
+    /// Reports whether this isolated queue still owns work which may become
+    /// runnable after a retry deadline or inventory restoration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the queue state cannot be read.
+    pub fn has_queued_work(&self) -> Result<bool, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM jobs
+                   WHERE state IN (
+                     'queued_local','failed_retryable','preparing','rendering',
+                     'spool_intent','accepted_by_spooler','spooling','printing'
+                   ) LIMIT 1
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     /// Atomically makes a remotely confirmed cloud job runnable, emits its
@@ -2530,16 +3133,17 @@ impl AgentStore {
                 job.state
             )));
         }
-        let has_intent: bool = transaction.query_row(
+        let confirmed: bool = transaction.query_row(
             "SELECT EXISTS (
-               SELECT 1 FROM cloud_accept_intents WHERE job_id = ?1
+               SELECT 1 FROM cloud_accept_intents
+               WHERE job_id = ?1 AND acceptance_state = 'remote_accept_confirmed'
              )",
             [job_id],
             |row| row.get(0),
         )?;
-        if !has_intent {
+        if !confirmed {
             return Err(StorageError::InvalidLocalEvent(format!(
-                "cloud job {job_id} has no acceptance intent"
+                "cloud job {job_id} has no remotely confirmed acceptance intent"
             )));
         }
         transaction.execute(
@@ -2565,6 +3169,48 @@ impl AgentStore {
         transaction.commit()?;
         self.get_job(job_id)?
             .ok_or_else(|| StorageError::JobNotFound(job_id.to_owned()))
+    }
+
+    /// Fail-closed local rollback for a durable cloud acceptance intent whose
+    /// authority-side acceptance was already compensated or force-fenced.
+    /// This intentionally emits no cloud event: replaying a synthetic local
+    /// cancellation against the authority's terminal state would poison the
+    /// connector outbox after re-enrolment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the job is absent, no longer prepared, or the
+    /// transactional terminal transition cannot be committed.
+    pub fn abandon_cloud_accept(
+        &mut self,
+        job_id: &str,
+        observed_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = query_job(&transaction, job_id)?
+            .ok_or_else(|| StorageError::JobNotFound(job_id.to_owned()))?;
+        if current.state == "cancelled" {
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current.state != "cloud_accept_pending" {
+            return Err(StorageError::InvalidLocalEvent(format!(
+                "cloud job {job_id} cannot abandon from {}",
+                current.state
+            )));
+        }
+        transaction.execute(
+            "DELETE FROM cloud_accept_intents WHERE job_id = ?1",
+            [job_id],
+        )?;
+        transaction.execute(
+            "UPDATE jobs SET state = 'cancelled', updated_unix_ms = ?2 WHERE job_id = ?1",
+            params![job_id, observed_unix_ms],
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Looks up one locally durable job.
@@ -2619,7 +3265,8 @@ impl AgentStore {
                     printer_sequence, title, content_sha256, content_path,
                     content_kind, options_json, state, expires_unix_ms,
                     native_job_id, target_id, binding_id, profile_id,
-                    profile_revision, stock_id, loaded_media_snapshot_json
+                    profile_revision, stock_id, loaded_media_snapshot_json,
+                    cloud_managed, profile_snapshot_json, printer_native_binding_json
              FROM jobs WHERE printer_id = ?1
              ORDER BY printer_sequence DESC LIMIT ?2",
         )?;
@@ -2647,7 +3294,8 @@ impl AgentStore {
                     printer_sequence, title, content_sha256, content_path,
                     content_kind, options_json, state, expires_unix_ms,
                     native_job_id, target_id, binding_id, profile_id,
-                    profile_revision, stock_id, loaded_media_snapshot_json
+                    profile_revision, stock_id, loaded_media_snapshot_json,
+                    cloud_managed, profile_snapshot_json, printer_native_binding_json
              FROM jobs ORDER BY accepted_unix_ms DESC, job_id DESC LIMIT ?1 OFFSET ?2",
         )?;
         let rows = statement.query_map(params![bounded_limit, bounded_offset], row_to_job)?;
@@ -2696,7 +3344,8 @@ impl AgentStore {
                     j.content_kind, j.options_json, j.state, j.expires_unix_ms,
                     j.native_job_id, j.target_id, j.binding_id, j.profile_id,
                     j.profile_revision, j.stock_id,
-                    j.loaded_media_snapshot_json
+                    j.loaded_media_snapshot_json, j.cloud_managed,
+                    j.profile_snapshot_json, j.printer_native_binding_json
              FROM jobs j
              WHERE j.state IN ('queued_local', 'failed_retryable')
                AND (j.next_attempt_unix_ms IS NULL OR j.next_attempt_unix_ms <= ?1)
@@ -2952,6 +3601,8 @@ impl AgentStore {
                     j.content_kind, j.options_json, j.state, j.expires_unix_ms,
                     j.native_job_id, j.target_id, j.binding_id, j.profile_id,
                     j.profile_revision, j.stock_id, j.loaded_media_snapshot_json,
+                    j.cloud_managed, j.profile_snapshot_json,
+                    j.printer_native_binding_json,
                     r.next_observe_unix_ms,
                     r.uncertainty_deadline_unix_ms, r.attempt_count,
                     r.cancel_requested
@@ -2987,11 +3638,14 @@ impl AgentStore {
                     profile_revision: row.get(16)?,
                     stock_id: row.get(17)?,
                     loaded_media_snapshot_json: row.get(18)?,
+                    cloud_managed: row.get(19)?,
+                    profile_snapshot_json: row.get(20)?,
+                    printer_native_binding: decode_native_binding(row, 21)?,
                 },
-                next_observe_unix_ms: row.get(19)?,
-                uncertainty_deadline_unix_ms: row.get(20)?,
-                attempt_count: row.get(21)?,
-                cancel_requested: row.get(22)?,
+                next_observe_unix_ms: row.get(22)?,
+                uncertainty_deadline_unix_ms: row.get(23)?,
+                attempt_count: row.get(24)?,
+                cancel_requested: row.get(25)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -3075,11 +3729,14 @@ impl AgentStore {
         let Some(job) = self.get_job(job_id)? else {
             return Err(StorageError::JobNotFound(job_id.to_owned()));
         };
-        if matches!(
-            job.state.as_str(),
-            "cloud_accept_pending" | "queued_local" | "failed_retryable"
-        ) {
+        if matches!(job.state.as_str(), "queued_local" | "failed_retryable") {
             return self.cancel_before_handoff(job_id, observed_unix_ms);
+        }
+        // A prepared cloud acceptance may already have committed remotely
+        // even when its HTTP response was lost. Only the exact authority
+        // reconciliation/abandon workflow may discard that proof.
+        if job.state == "cloud_accept_pending" {
+            return Ok(false);
         }
         if !matches!(
             job.state.as_str(),
@@ -3263,14 +3920,7 @@ impl AgentStore {
             return Err(StorageError::JobNotFound(job_id.to_owned()));
         };
         if job.state == "cloud_accept_pending" {
-            self.terminalize_prepared_cloud_job(
-                job_id,
-                "cancelled",
-                "cancelled_by_server",
-                "Cancelled by the control plane before cloud acceptance",
-                observed_unix_ms,
-            )?;
-            return Ok(true);
+            return Ok(false);
         }
         if !matches!(job.state.as_str(), "queued_local" | "failed_retryable") {
             return Ok(false);
@@ -3305,9 +3955,7 @@ impl AgentStore {
         let job_ids = {
             let mut statement = self.connection.prepare(
                 "SELECT job_id FROM jobs
-                 WHERE state IN (
-                    'cloud_accept_pending', 'queued_local', 'failed_retryable'
-                 )
+                 WHERE state IN ('queued_local', 'failed_retryable')
                    AND expires_unix_ms IS NOT NULL
                    AND expires_unix_ms <= ?1",
             )?;
@@ -3315,19 +3963,6 @@ impl AgentStore {
             rows.collect::<Result<Vec<_>, _>>()?
         };
         for job_id in &job_ids {
-            if self
-                .get_job(job_id)?
-                .is_some_and(|job| job.state == "cloud_accept_pending")
-            {
-                self.terminalize_prepared_cloud_job(
-                    job_id,
-                    "expired",
-                    "expired_before_handoff",
-                    "Job expired before cloud acceptance",
-                    now_unix_ms,
-                )?;
-                continue;
-            }
             let sequence: i64 = self.connection.query_row(
                 "SELECT COALESCE(MAX(job_sequence), 0) + 1 FROM job_events WHERE job_id = ?1",
                 [job_id],
@@ -3345,48 +3980,6 @@ impl AgentStore {
             )?;
         }
         Ok(job_ids.len())
-    }
-
-    fn terminalize_prepared_cloud_job(
-        &mut self,
-        job_id: &str,
-        state: &str,
-        reason: &str,
-        message: &str,
-        observed_unix_ms: i64,
-    ) -> Result<(), StorageError> {
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current = query_job(&transaction, job_id)?
-            .ok_or_else(|| StorageError::JobNotFound(job_id.to_owned()))?;
-        if current.state != "cloud_accept_pending" {
-            return Err(StorageError::InvalidLocalEvent(format!(
-                "cloud job {job_id} cannot terminate from {}",
-                current.state
-            )));
-        }
-        transaction.execute(
-            "DELETE FROM cloud_accept_intents WHERE job_id = ?1",
-            [job_id],
-        )?;
-        transaction.execute(
-            "UPDATE jobs SET state = ?2, updated_unix_ms = ?3 WHERE job_id = ?1",
-            params![job_id, state, observed_unix_ms],
-        )?;
-        append_event_tx(
-            &transaction,
-            &EventId::new().to_string(),
-            job_id,
-            1,
-            state,
-            Some(reason),
-            Some(message),
-            "{}",
-            observed_unix_ms,
-        )?;
-        transaction.commit()?;
-        Ok(())
     }
 }
 
@@ -3444,7 +4037,8 @@ fn query_job(connection: &Connection, job_id: &str) -> Result<Option<LocalJob>, 
                     printer_sequence, title, content_sha256, content_path,
                     content_kind, options_json, state, expires_unix_ms,
                     native_job_id, target_id, binding_id, profile_id,
-                    profile_revision, stock_id, loaded_media_snapshot_json
+                    profile_revision, stock_id, loaded_media_snapshot_json,
+                    cloud_managed, profile_snapshot_json, printer_native_binding_json
              FROM jobs WHERE job_id = ?1",
             [job_id],
             row_to_job,
@@ -3708,19 +4302,45 @@ fn upsert_cloud_accept_intent(
     lease_id: &str,
     lease_token: &str,
     lease_expires_unix_ms: i64,
+    route: &CloudRouteProof,
     prepared_unix_ms: i64,
 ) -> Result<(), StorageError> {
+    let existing = connection
+        .query_row(
+            "SELECT job_id, lease_id, lease_token, lease_expires_unix_ms,
+                    content_sha256, local_sequence, route_reservation_id,
+                    route_generation, route_fencing_token, acceptance_state
+             FROM cloud_accept_intents WHERE job_id = ?1",
+            [&job.job_id],
+            row_to_cloud_accept_intent,
+        )
+        .optional()?;
+    if existing.as_ref().is_some_and(|intent| {
+        intent.remote_accept_confirmed
+            && !cloud_accept_evidence_matches(intent, job, lease_id, lease_token, route)
+    }) {
+        return Err(StorageError::JobConflict(job.job_id.clone()));
+    }
     connection.execute(
         "INSERT INTO cloud_accept_intents (
             job_id, lease_id, lease_token, lease_expires_unix_ms,
-            content_sha256, local_sequence, prepared_unix_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            content_sha256, local_sequence, route_reservation_id,
+            route_generation, route_fencing_token, acceptance_state, prepared_unix_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'prepared', ?10)
          ON CONFLICT(job_id) DO UPDATE SET
             lease_id = excluded.lease_id,
             lease_token = excluded.lease_token,
             lease_expires_unix_ms = excluded.lease_expires_unix_ms,
             content_sha256 = excluded.content_sha256,
             local_sequence = excluded.local_sequence,
+            route_reservation_id = excluded.route_reservation_id,
+            route_generation = excluded.route_generation,
+            route_fencing_token = excluded.route_fencing_token,
+            acceptance_state = CASE
+              WHEN cloud_accept_intents.acceptance_state = 'remote_accept_confirmed'
+                THEN 'remote_accept_confirmed'
+              ELSE excluded.acceptance_state
+            END,
             prepared_unix_ms = excluded.prepared_unix_ms",
         params![
             job.job_id,
@@ -3729,16 +4349,44 @@ fn upsert_cloud_accept_intent(
             lease_expires_unix_ms,
             job.content_sha256,
             job.printer_sequence,
+            route.reservation_id,
+            i64::try_from(route.generation).map_err(|_| StorageError::InvalidLocalEvent(
+                "route generation exceeds durable storage bounds".into()
+            ))?,
+            route.fencing_token,
             prepared_unix_ms,
         ],
     )?;
     Ok(())
 }
 
+fn cloud_accept_evidence_matches(
+    intent: &CloudAcceptIntent,
+    job: &LocalJob,
+    lease_id: &str,
+    lease_token: &str,
+    route: &CloudRouteProof,
+) -> bool {
+    constant_time_str_eq(&intent.lease_id, lease_id)
+        && constant_time_str_eq(&intent.lease_token, lease_token)
+        && constant_time_str_eq(&intent.content_sha256, &job.content_sha256)
+        && u64::try_from(job.printer_sequence).ok() == Some(intent.local_sequence)
+        && intent
+            .route_reservation_id
+            .as_deref()
+            .is_some_and(|value| constant_time_str_eq(value, &route.reservation_id))
+        && intent.route_generation == Some(route.generation)
+        && intent
+            .route_fencing_token
+            .as_deref()
+            .is_some_and(|value| constant_time_str_eq(value, &route.fencing_token))
+}
+
 fn row_to_cloud_accept_intent(
     row: &rusqlite::Row<'_>,
 ) -> Result<CloudAcceptIntent, rusqlite::Error> {
     let local_sequence: i64 = row.get(5)?;
+    let route_generation: Option<i64> = row.get(7)?;
     Ok(CloudAcceptIntent {
         job_id: row.get(0)?,
         lease_id: row.get(1)?,
@@ -3752,7 +4400,172 @@ fn row_to_cloud_accept_intent(
                 Box::new(error),
             )
         })?,
+        route_reservation_id: row.get(6)?,
+        route_generation: route_generation
+            .map(|value| {
+                u64::try_from(value).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        7,
+                        rusqlite::types::Type::Integer,
+                        Box::new(error),
+                    )
+                })
+            })
+            .transpose()?,
+        route_fencing_token: row.get(8)?,
+        remote_accept_confirmed: row.get::<_, String>(9)? == "remote_accept_confirmed",
     })
+}
+
+fn accepted_job_matches(existing: &LocalJob, offered: &AcceptedJob) -> bool {
+    existing.submission_id == offered.submission_id
+        && existing.printer_id == offered.printer_id
+        && existing.printer_native_id == offered.printer_native_id
+        && existing.title == offered.title
+        && existing.content_sha256 == offered.content_sha256
+        && existing.content_kind == offered.content_kind
+        && existing.options_json == offered.options_json
+        && existing.expires_unix_ms == offered.expires_unix_ms
+        && existing.cloud_managed == offered.cloud_managed
+}
+
+fn validate_job_persistence_facts(facts: &JobPersistenceFacts) -> Result<(), StorageError> {
+    if facts.profile_id.is_some() != facts.profile_revision.is_some() {
+        return Err(StorageError::InvalidLocalEvent(
+            "profile identity and revision must be pinned together".into(),
+        ));
+    }
+    if facts.profile_snapshot_json.is_some() && facts.profile_id.is_none() {
+        return Err(StorageError::InvalidLocalEvent(
+            "profile snapshot requires an exact profile revision".into(),
+        ));
+    }
+    for encoded in [
+        facts.loaded_media_snapshot_json.as_deref(),
+        facts.profile_snapshot_json.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if encoded.len() > MAX_NATIVE_PROFILE_BLOB_BYTES.saturating_mul(2) {
+            return Err(StorageError::InvalidLocalEvent(
+                "job persistence snapshot exceeds the local limit".into(),
+            ));
+        }
+        serde_json::from_str::<serde_json::Value>(encoded)?;
+    }
+    if let Some(pin) = &facts.printer_native_binding {
+        let bounded = [
+            &pin.process_session_id,
+            &pin.printer_id,
+            &pin.output_profile_id,
+            &pin.language_profile_id,
+            &pin.language,
+            &pin.language_version,
+            &pin.profile_version,
+            &pin.media_type,
+        ];
+        if pin.generation == 0
+            || bounded
+                .into_iter()
+                .any(|value| value.is_empty() || value.len() > 512)
+            || !is_sha256_hex(&pin.driver_fingerprint_sha256)
+            || !is_sha256_hex(&pin.support_pack_digest_sha256)
+        {
+            return Err(StorageError::InvalidLocalEvent(
+                "printer-native binding pin is invalid".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_job_native_binding(
+    job: &AcceptedJob,
+    facts: &JobPersistenceFacts,
+) -> Result<(), StorageError> {
+    if let Some(pin) = &facts.printer_native_binding
+        && pin.printer_id != job.printer_id
+    {
+        return Err(StorageError::InvalidLocalEvent(
+            "printer-native binding does not match the job printer".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn encode_native_binding(facts: &JobPersistenceFacts) -> Result<Option<String>, StorageError> {
+    facts
+        .printer_native_binding
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(Into::into)
+}
+
+fn validate_profile_fact_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    facts: &JobPersistenceFacts,
+) -> Result<(), StorageError> {
+    let (Some(profile_id), Some(revision)) = (&facts.profile_id, facts.profile_revision) else {
+        return Ok(());
+    };
+    // Cloud connector queues carry an immutable executor-ready snapshot from
+    // their separate shared inventory. Local queues instead prove the exact
+    // revision exists in this same transaction.
+    if facts.profile_snapshot_json.is_some() {
+        return Ok(());
+    }
+    let exists: bool = transaction.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM printer_profiles
+           WHERE profile_id = ?1 AND revision = ?2 AND deleted = 0
+         )",
+        params![profile_id, revision],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Err(StorageError::InvalidPrinterProfile(format!(
+            "profile {profile_id} revision {revision} was not found"
+        )));
+    }
+    Ok(())
+}
+
+fn job_persistence_facts_match(existing: &LocalJob, facts: &JobPersistenceFacts) -> bool {
+    existing.target_id == facts.target_id
+        && existing.binding_id == facts.binding_id
+        && existing.profile_id == facts.profile_id
+        && existing.profile_revision == facts.profile_revision
+        && existing.stock_id == facts.stock_id
+        && existing.loaded_media_snapshot_json == facts.loaded_media_snapshot_json
+        && existing.profile_snapshot_json == facts.profile_snapshot_json
+        && existing.printer_native_binding == facts.printer_native_binding
+}
+
+fn decode_native_binding(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> Result<Option<PrinterNativeBindingPin>, rusqlite::Error> {
+    let encoded = row.get::<_, Option<String>>(index)?;
+    encoded
+        .map(|encoded| {
+            serde_json::from_str(&encoded).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    index,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()
 }
 
 fn row_to_job(row: &rusqlite::Row<'_>) -> Result<LocalJob, rusqlite::Error> {
@@ -3776,6 +4589,9 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> Result<LocalJob, rusqlite::Error> {
         profile_revision: row.get(16)?,
         stock_id: row.get(17)?,
         loaded_media_snapshot_json: row.get(18)?,
+        cloud_managed: row.get(19)?,
+        profile_snapshot_json: row.get(20)?,
+        printer_native_binding: decode_native_binding(row, 21)?,
     })
 }
 
@@ -3783,6 +4599,14 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> Result<LocalJob, rusqlite::Error> {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    fn cloud_route_proof() -> CloudRouteProof {
+        CloudRouteProof {
+            reservation_id: "00000000-0000-4000-8000-000000000001".into(),
+            generation: 1,
+            fencing_token: "deterministic-route-fence".into(),
+        }
+    }
 
     #[test]
     fn configure_adds_confidential_retention_column_independently() {
@@ -3801,6 +4625,147 @@ mod tests {
             |row| row.get(0),
         ).unwrap();
         assert!(present);
+    }
+
+    #[test]
+    fn legacy_cloud_accept_rows_upgrade_without_fabricating_route_proof() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("legacy.sqlite");
+        let mut legacy_job = job("job-legacy", "p1", 1);
+        legacy_job.cloud_managed = true;
+        {
+            let mut store = AgentStore::open(&database).unwrap();
+            store
+                .prepare_cloud_job(
+                    &legacy_job,
+                    "lease-legacy",
+                    "redacted",
+                    10,
+                    &cloud_route_proof(),
+                )
+                .unwrap();
+        }
+        let connection = Connection::open(&database).unwrap();
+        for column in [
+            "route_reservation_id",
+            "route_generation",
+            "route_fencing_token",
+        ] {
+            connection
+                .execute(
+                    &format!("ALTER TABLE cloud_accept_intents DROP COLUMN {column}"),
+                    [],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "ALTER TABLE cloud_accept_intents DROP COLUMN acceptance_state",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let mut store = AgentStore::open(&database).unwrap();
+        let intents = store.pending_cloud_accepts().unwrap();
+        assert_eq!(intents.len(), 1);
+        assert!(intents[0].route_proof().is_none());
+        assert!(!intents[0].remote_accept_confirmed);
+        for column in [
+            "route_reservation_id",
+            "route_generation",
+            "route_fencing_token",
+        ] {
+            let present: bool = store
+                .connection
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM pragma_table_info('cloud_accept_intents') WHERE name = ?1)",
+                    [column],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(present);
+        }
+        let cleanup = store.quarantine_invalid_cloud_accepts(2).unwrap();
+        assert_eq!(cleanup.len(), 1);
+        assert_eq!(
+            store.get_job("job-legacy").unwrap().unwrap().state,
+            "cancelled"
+        );
+        assert!(
+            store.pending_cloud_events(0, 10).unwrap().is_empty(),
+            "proofless quarantine must not create a remote cancellation event"
+        );
+        drop(store);
+
+        let mut restarted = AgentStore::open(&database).unwrap();
+        assert!(restarted.pending_cloud_accepts().unwrap().is_empty());
+        assert!(restarted.runnable_heads(3).unwrap().is_empty());
+        assert_eq!(restarted.pending_cloud_release_cleanups().unwrap().len(), 1);
+        restarted
+            .complete_cloud_release_cleanup("job-legacy")
+            .unwrap();
+        let mut later = job("job-later", "p1", 4);
+        later.cloud_managed = true;
+        restarted
+            .prepare_cloud_job(
+                &later,
+                "lease-later",
+                "redacted-later",
+                30,
+                &cloud_route_proof(),
+            )
+            .unwrap();
+        restarted.confirm_cloud_accept("job-later", 5).unwrap();
+        restarted.activate_cloud_job("job-later", 6).unwrap();
+        assert_eq!(restarted.runnable_heads(7).unwrap().len(), 1);
+        let events = restarted.pending_cloud_events(0, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].job_id, "job-later");
+    }
+
+    #[test]
+    fn proofless_quarantine_drains_more_than_one_page_before_reconciliation() {
+        let mut store = AgentStore::in_memory().unwrap();
+        for index in 0..300 {
+            let job_id = format!("legacy-page-{index:03}");
+            let mut accepted = job(&job_id, "p1", i64::from(index));
+            accepted.cloud_managed = true;
+            store
+                .prepare_cloud_job(
+                    &accepted,
+                    &format!("lease-{index}"),
+                    "redacted",
+                    10_000,
+                    &cloud_route_proof(),
+                )
+                .unwrap();
+        }
+        store
+            .connection
+            .execute(
+                "UPDATE cloud_accept_intents SET route_reservation_id=NULL,
+                 route_generation=NULL,route_fencing_token=NULL",
+                [],
+            )
+            .unwrap();
+        let first_cleanup_page = store.quarantine_invalid_cloud_accepts(20_000).unwrap();
+        assert_eq!(first_cleanup_page.len(), 256);
+        assert!(store.pending_cloud_accepts().unwrap().is_empty());
+        let mut completed = 0;
+        loop {
+            let page = store.pending_cloud_release_cleanups().unwrap();
+            if page.is_empty() {
+                break;
+            }
+            completed += page.len();
+            for cleanup in page {
+                store
+                    .complete_cloud_release_cleanup(&cleanup.job_id)
+                    .unwrap();
+            }
+        }
+        assert_eq!(completed, 300);
     }
 
     fn job(id: &str, printer: &str, accepted: i64) -> AcceptedJob {
@@ -3862,6 +4827,171 @@ mod tests {
         assert!(store.integrity_check().unwrap());
     }
 
+    fn native_binding_pin() -> PrinterNativeBindingPin {
+        PrinterNativeBindingPin {
+            process_session_id: "session-a".into(),
+            generation: 7,
+            printer_id: "p1".into(),
+            output_profile_id: "zpl/v1".into(),
+            language_profile_id: "zpl/v1".into(),
+            language: "zpl".into(),
+            language_version: "2".into(),
+            profile_version: "1.0.0".into(),
+            media_type: "application/vnd.zebra-zpl".into(),
+            driver_fingerprint_sha256: "a".repeat(64),
+            support_pack_digest_sha256: "b".repeat(64),
+        }
+    }
+
+    #[test]
+    fn cloud_execution_facts_are_atomic_durable_and_exactly_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("atomic-facts.sqlite");
+        let mut cloud = job("cloud-facts", "p1", 10);
+        cloud.cloud_managed = true;
+        cloud.content_kind = "raw".into();
+        let facts = JobPersistenceFacts {
+            profile_id: Some("profile-a".into()),
+            profile_revision: Some(3),
+            profile_snapshot_json: Some(
+                r#"{"kind":"portable","profile_id":"profile-a","revision":3}"#.into(),
+            ),
+            printer_native_binding: Some(native_binding_pin()),
+            ..JobPersistenceFacts::default()
+        };
+        {
+            let mut store = AgentStore::open(&database).unwrap();
+            let first = store
+                .prepare_cloud_job_with_facts(
+                    &cloud,
+                    "lease-a",
+                    "token-a",
+                    100,
+                    &cloud_route_proof(),
+                    &facts,
+                )
+                .unwrap();
+            assert_eq!(first.profile_snapshot_json, facts.profile_snapshot_json);
+            assert_eq!(first.printer_native_binding, facts.printer_native_binding);
+        }
+        let mut restarted = AgentStore::open(&database).unwrap();
+        let replay = restarted
+            .prepare_cloud_job_with_facts(
+                &cloud,
+                "lease-a",
+                "token-a",
+                100,
+                &cloud_route_proof(),
+                &facts,
+            )
+            .unwrap();
+        assert_eq!(replay.printer_native_binding, facts.printer_native_binding);
+
+        let mut changed_options = cloud.clone();
+        changed_options.options_json = r#"{"copies":2}"#.into();
+        assert!(matches!(
+            restarted.prepare_cloud_job_with_facts(
+                &changed_options,
+                "lease-a",
+                "token-a",
+                100,
+                &cloud_route_proof(),
+                &facts,
+            ),
+            Err(StorageError::JobConflict(_))
+        ));
+        let mut changed_facts = facts.clone();
+        changed_facts
+            .printer_native_binding
+            .as_mut()
+            .unwrap()
+            .generation = 8;
+        assert!(matches!(
+            restarted.prepare_cloud_job_with_facts(
+                &cloud,
+                "lease-a",
+                "token-a",
+                100,
+                &cloud_route_proof(),
+                &changed_facts,
+            ),
+            Err(StorageError::JobConflict(_))
+        ));
+    }
+
+    #[test]
+    fn invalid_atomic_profile_facts_leave_no_job_or_cloud_intent() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let mut cloud = job("invalid-facts", "p1", 10);
+        cloud.cloud_managed = true;
+        let facts = JobPersistenceFacts {
+            profile_id: Some("missing-profile".into()),
+            profile_revision: Some(1),
+            profile_snapshot_json: Some("not-json".into()),
+            ..JobPersistenceFacts::default()
+        };
+        assert!(
+            store
+                .prepare_cloud_job_with_facts(
+                    &cloud,
+                    "lease",
+                    "token",
+                    100,
+                    &cloud_route_proof(),
+                    &facts,
+                )
+                .is_err()
+        );
+        assert!(store.get_job("invalid-facts").unwrap().is_none());
+        assert!(store.pending_cloud_accepts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stale_prepared_native_intent_quarantines_but_confirmed_responsibility_does_not() {
+        let mut store = AgentStore::in_memory().unwrap();
+        for job_id in ["prepared", "confirmed"] {
+            let mut cloud = job(job_id, "p1", 10);
+            cloud.cloud_managed = true;
+            cloud.content_kind = "raw".into();
+            store
+                .prepare_cloud_job_with_facts(
+                    &cloud,
+                    &format!("lease-{job_id}"),
+                    "token",
+                    100,
+                    &cloud_route_proof(),
+                    &JobPersistenceFacts {
+                        printer_native_binding: Some(native_binding_pin()),
+                        ..JobPersistenceFacts::default()
+                    },
+                )
+                .unwrap();
+        }
+        store.confirm_cloud_accept("confirmed", 11).unwrap();
+        let cleanup = store
+            .quarantine_prepared_cloud_accept("prepared", "printer_native_binding_stale", 12)
+            .unwrap()
+            .expect("prepared cleanup");
+        assert_eq!(cleanup.reason, "printer_native_binding_stale");
+        assert_eq!(
+            store.get_job("prepared").unwrap().unwrap().state,
+            "cancelled"
+        );
+        assert!(
+            store
+                .quarantine_prepared_cloud_accept("confirmed", "printer_native_binding_stale", 12,)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .pending_cloud_accepts()
+                .unwrap()
+                .iter()
+                .any(|intent| intent.job_id == "confirmed" && intent.remote_accept_confirmed)
+        );
+    }
+
     #[test]
     fn classified_executor_health_survives_restart() {
         let directory = tempfile::tempdir().unwrap();
@@ -3888,7 +5018,13 @@ mod tests {
         {
             let mut store = AgentStore::open(&database).unwrap();
             let prepared = store
-                .prepare_cloud_job(&cloud, lease_id, "secret-token", 30_000)
+                .prepare_cloud_job(
+                    &cloud,
+                    lease_id,
+                    "secret-token",
+                    30_000,
+                    &cloud_route_proof(),
+                )
                 .unwrap();
             assert_eq!(prepared.state, "cloud_accept_pending");
             assert!(store.runnable_heads(20).unwrap().is_empty());
@@ -3909,10 +5045,14 @@ mod tests {
         );
         drop(restarted_before_accept);
 
-        // Model a crash after the server durably accepted the exact intent but
-        // before the client could activate its local queue.
-        let mut restarted = AgentStore::open(&database).unwrap();
+        // Persist the exact server outcome, then model a second crash before
+        // the client can activate its local queue.
+        let restarted = AgentStore::open(&database).unwrap();
         assert_eq!(restarted.pending_cloud_accepts().unwrap(), intents);
+        restarted.confirm_cloud_accept("cloud", 19).unwrap();
+        drop(restarted);
+        let mut restarted = AgentStore::open(&database).unwrap();
+        assert!(restarted.pending_cloud_accepts().unwrap()[0].remote_accept_confirmed);
         restarted.activate_cloud_job("cloud", 20).unwrap();
         restarted.activate_cloud_job("cloud", 21).unwrap();
         assert_eq!(restarted.runnable_heads(30).unwrap().len(), 1);
@@ -3921,16 +5061,95 @@ mod tests {
     }
 
     #[test]
+    fn confirmed_cloud_accept_rejects_conflicting_reoffer_and_retains_exact_proof() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("confirmed-reoffer.sqlite");
+        let mut cloud = job("cloud-reoffer", "p1", 10);
+        cloud.cloud_managed = true;
+        let original_route = cloud_route_proof();
+        let original_lease_id = "lease-original";
+        let original_lease_token = "token-original";
+        {
+            let mut store = AgentStore::open(&database).unwrap();
+            store
+                .prepare_cloud_job(
+                    &cloud,
+                    original_lease_id,
+                    original_lease_token,
+                    30_000,
+                    &original_route,
+                )
+                .unwrap();
+            store.confirm_cloud_accept(&cloud.job_id, 11).unwrap();
+
+            // An identical replay may refresh non-authority scheduling data
+            // without losing the durable remote confirmation.
+            store
+                .prepare_cloud_job(
+                    &cloud,
+                    original_lease_id,
+                    original_lease_token,
+                    60_000,
+                    &original_route,
+                )
+                .unwrap();
+
+            let conflicting_route = CloudRouteProof {
+                reservation_id: "reservation-conflicting".into(),
+                generation: original_route.generation + 1,
+                fencing_token: "fence-conflicting".into(),
+            };
+            assert!(matches!(
+                store.prepare_cloud_job(
+                    &cloud,
+                    "lease-conflicting",
+                    "token-conflicting",
+                    90_000,
+                    &conflicting_route,
+                ),
+                Err(StorageError::JobConflict(_))
+            ));
+        }
+
+        let restarted = AgentStore::open(&database).unwrap();
+        let intents = restarted.pending_cloud_accepts().unwrap();
+        assert_eq!(intents.len(), 1);
+        assert!(intents[0].remote_accept_confirmed);
+        assert_eq!(intents[0].lease_id, original_lease_id);
+        assert_eq!(intents[0].lease_token, original_lease_token);
+        assert_eq!(
+            intents[0].route_reservation_id.as_deref(),
+            Some(original_route.reservation_id.as_str())
+        );
+        assert_eq!(intents[0].route_generation, Some(original_route.generation));
+        assert_eq!(
+            intents[0].route_fencing_token.as_deref(),
+            Some(original_route.fencing_token.as_str())
+        );
+        assert_eq!(
+            restarted.get_job(&cloud.job_id).unwrap().unwrap().state,
+            "cloud_accept_pending"
+        );
+        assert!(restarted.runnable_heads(20).unwrap().is_empty());
+    }
+
+    #[test]
     fn repeated_cloud_offer_updates_only_lease_intent() {
         let mut store = AgentStore::in_memory().unwrap();
         let mut cloud = job("cloud", "p1", 10);
         cloud.cloud_managed = true;
         store
-            .prepare_cloud_job(&cloud, "old-lease", "old-token", 30_000)
+            .prepare_cloud_job(
+                &cloud,
+                "old-lease",
+                "old-token",
+                30_000,
+                &cloud_route_proof(),
+            )
             .unwrap();
         let new_lease = "new-lease";
         let duplicate = store
-            .prepare_cloud_job(&cloud, new_lease, "new-token", 60_000)
+            .prepare_cloud_job(&cloud, new_lease, "new-token", 60_000, &cloud_route_proof())
             .unwrap();
         assert_eq!(duplicate.printer_sequence, 1);
         let intents = store.pending_cloud_accepts().unwrap();
@@ -3942,36 +5161,53 @@ mod tests {
     }
 
     #[test]
-    fn cancel_and_expiry_terminalize_prepared_cloud_jobs_once() {
-        let mut store = AgentStore::in_memory().unwrap();
+    fn cancel_and_expiry_retain_prepared_cloud_proof_across_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("pending-cancel.sqlite");
+        let mut store = AgentStore::open(&database).unwrap();
         let mut cancelled = job("cancelled", "p1", 10);
         cancelled.cloud_managed = true;
         store
-            .prepare_cloud_job(&cancelled, "cancel-lease", "cancel-token", 30_000)
+            .prepare_cloud_job(
+                &cancelled,
+                "cancel-lease",
+                "cancel-token",
+                30_000,
+                &cloud_route_proof(),
+            )
             .unwrap();
-        assert!(store.request_cancel("cancelled", 20).unwrap());
+        assert!(!store.request_cancel("cancelled", 20).unwrap());
         assert_eq!(
             store.get_job("cancelled").unwrap().unwrap().state,
-            "cancelled"
+            "cloud_accept_pending"
         );
 
         let mut expired = job("expired", "p2", 11);
         expired.cloud_managed = true;
         expired.expires_unix_ms = Some(25);
         store
-            .prepare_cloud_job(&expired, "expire-lease", "expire-token", 30_000)
+            .prepare_cloud_job(
+                &expired,
+                "expire-lease",
+                "expire-token",
+                30_000,
+                &cloud_route_proof(),
+            )
             .unwrap();
-        assert_eq!(store.expire_waiting(26).unwrap(), 1);
-        assert_eq!(store.get_job("expired").unwrap().unwrap().state, "expired");
-        assert!(store.pending_cloud_accepts().unwrap().is_empty());
+        assert_eq!(store.expire_waiting(26).unwrap(), 0);
+        assert_eq!(
+            store.get_job("expired").unwrap().unwrap().state,
+            "cloud_accept_pending"
+        );
+        let intents = store.pending_cloud_accepts().unwrap();
+        assert_eq!(intents.len(), 2);
         assert!(store.runnable_heads(30).unwrap().is_empty());
+        assert!(store.pending_events(0, 10).unwrap().is_empty());
+        drop(store);
 
-        let events = store.pending_events(0, 10).unwrap();
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].state, "cancelled");
-        assert_eq!(events[0].reason.as_deref(), Some("cancelled_by_server"));
-        assert_eq!(events[1].state, "expired");
-        assert_eq!(events[1].reason.as_deref(), Some("expired_before_handoff"));
+        let restarted = AgentStore::open(&database).unwrap();
+        assert_eq!(restarted.pending_cloud_accepts().unwrap(), intents);
+        assert!(restarted.runnable_heads(30).unwrap().is_empty());
     }
 
     #[test]
@@ -4143,7 +5379,7 @@ mod tests {
             encrypted.content_sha256 = format!("sha-{index}");
             encrypted.content_path = format!("/content/confidential-{index}");
             store
-                .prepare_cloud_job(&encrypted, "lease", "secret", 60_000)
+                .prepare_cloud_job(&encrypted, "lease", "secret", 60_000, &cloud_route_proof())
                 .unwrap();
             store
                 .connection
@@ -4187,7 +5423,7 @@ mod tests {
             encrypted.content_sha256 = format!("sha-{job_id}");
             encrypted.content_path = format!("/content/confidential-{job_id}");
             store
-                .prepare_cloud_job(&encrypted, "lease", "secret", 60_000)
+                .prepare_cloud_job(&encrypted, "lease", "secret", 60_000, &cloud_route_proof())
                 .unwrap();
             store.connection.execute(
                 "UPDATE jobs SET state = ?2, confidential_delete_after_unix_ms = 1 WHERE job_id = ?1",
@@ -5152,6 +6388,63 @@ mod tests {
                     params![uppercase, "sha256/AA/uppercase"],
                 )
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn content_reclaim_claim_blocks_new_references_until_cancel_or_finalize() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let original = job("terminal", "printer", 1);
+        store.accept_job(&original).unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE jobs SET state = 'completed_reported' WHERE job_id = 'terminal'",
+                [],
+            )
+            .unwrap();
+        let claimed = store.claim_reclaimable_terminal_content(1).unwrap();
+        assert_eq!(claimed.len(), 1);
+
+        let mut concurrent = job("concurrent", "printer", 2);
+        concurrent.content_sha256 = original.content_sha256.clone();
+        concurrent.content_path = original.content_path.clone();
+        assert!(matches!(
+            store.accept_job(&concurrent),
+            Err(StorageError::ContentReclaimInProgress(_))
+        ));
+        store
+            .cancel_terminal_content_reclaim(&claimed[0].sha256, &claimed[0].path)
+            .unwrap();
+        store.accept_job(&concurrent).unwrap();
+    }
+
+    #[test]
+    fn content_reclaim_claim_is_safely_reset_on_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("agent.db");
+        let mut store = AgentStore::open(&database).unwrap();
+        store.accept_job(&job("terminal", "printer", 1)).unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE jobs SET state = 'completed_reported' WHERE job_id = 'terminal'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            store.claim_reclaimable_terminal_content(1).unwrap().len(),
+            1
+        );
+        drop(store);
+
+        let mut restarted = AgentStore::open(&database).unwrap();
+        assert_eq!(
+            restarted
+                .claim_reclaimable_terminal_content(1)
+                .unwrap()
+                .len(),
+            1
         );
     }
 }

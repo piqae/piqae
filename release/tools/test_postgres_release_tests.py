@@ -13,6 +13,8 @@ class PostgresReleaseEvidenceTest(unittest.TestCase):
         self.assertEqual(
             [gate.identifier for gate in evidence.GATES],
             [
+                "automatic_wake_outbox",
+                "automatic_wake_outbox_n_minus_one_upgrade",
                 "destination_topology_fencing_fifo",
                 "destination_topology_n_minus_one_upgrade",
                 "routing_recovery",
@@ -26,12 +28,12 @@ class PostgresReleaseEvidenceTest(unittest.TestCase):
         )
 
     def test_destination_topology_runs_both_named_release_boundaries(self) -> None:
-        topology = evidence.GATES[:2]
+        topology = evidence.GATES[2:4]
         self.assertEqual(
             [gate.expected_test for gate in topology],
             [
                 "postgres_topology_is_tenant_isolated_and_fences_delivery",
-                "migration_42_upgrades_41_and_backfills_without_inferring_route_merges",
+                "migration_40_upgrades_39_and_backfills_without_inferring_route_merges",
             ],
         )
         for gate in topology:
@@ -105,6 +107,15 @@ class PostgresReleaseEvidenceTest(unittest.TestCase):
             0,
             f"test {gate.expected_test} ... ok\n"
             "test result: ok. 1 passed; 0 failed\n",
+        )
+
+    def test_ten_passing_tests_are_not_mistaken_for_zero(self) -> None:
+        gate = evidence.GATES[0]
+        evidence.validate_output(
+            gate,
+            0,
+            f"test {gate.expected_test} ... ok\n"
+            "test result: ok. 10 passed; 0 failed\n",
         )
 
     def test_nonzero_command_fails(self) -> None:

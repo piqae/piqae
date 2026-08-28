@@ -107,12 +107,12 @@ describe("settings validation", () => {
 });
 
 describe("template source validation", () => {
-  it("accepts only the bounded business-document envelope", () => {
+  it("accepts only the bounded PrintPacket envelope", () => {
     expect(validateDocumentSource(starterTemplates[0]!.source)).toContain(
-      "piqae.business-document/v1",
+      "printpacket/v1",
     );
-    expect(() => validateDocumentSource('{"schema":"legacy"}')).toThrow(
-      "Legacy templates are not supported",
+    expect(() => validateDocumentSource('{"schema":"unsupported"}')).toThrow(
+      "piqae.shopify-printpacket-template/v1",
     );
     expect(() => validateDocumentSource("not json")).toThrow("valid JSON");
   });
@@ -144,7 +144,7 @@ describe("hybrid template authority", () => {
     expect(index.digest).toMatch(/^[a-f0-9]{64}$/);
   });
 
-  it("accepts the new business-document envelope", () => {
+  it("accepts the new PrintPacket envelope", () => {
     const envelope = parseTemplateEnvelope(starterTemplates[0]!.source);
     expect(envelope.editor.mode).toBe("visual");
     expect(templateDigest(serializeTemplateEnvelope(envelope))).toMatch(

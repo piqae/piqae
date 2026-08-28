@@ -22,6 +22,7 @@ export interface DashboardCustomerOperations {
   destinations: DashboardDestination[];
   routes: DashboardPrinterRoute[];
   routeObservations: DashboardRouteObservation[];
+  runtimeObservations: DashboardNodeRuntimeObservation[];
 }
 
 export interface DashboardCustomerOperationsPage {
@@ -34,8 +35,10 @@ export interface DashboardAgent {
   customer?: DashboardResourceOwner | null;
   id: string;
   name: string;
+  site?: string | null;
+  location?: string | null;
   state: ResourceState;
-  os: 'windows' | 'macos' | 'linux';
+  os: 'windows' | 'macos' | 'linux' | 'ipados';
   architecture: string;
   version: string;
   protocolVersion: string;
@@ -43,6 +46,70 @@ export interface DashboardAgent {
   queueDepth: number;
   printerCount: number;
   labels: string[];
+  printPacket?: {
+    status: 'ready' | 'node_update_required';
+    reasons: string[];
+    supportedPacketVersions: string[];
+    implementationVersion: string | null;
+    directOffline: boolean;
+  };
+}
+
+export type DashboardNodeHostMode =
+  | 'machine_service'
+  | 'user_agent'
+  | 'embedded_application'
+  | 'attached_client';
+
+export type DashboardNodeAvailabilityClass =
+  | 'continuous_while_awake'
+  | 'foreground_only'
+  | 'background_opportunistic'
+  | 'managed_kiosk'
+  | 'wake_relay_capable';
+
+export type DashboardNodeLifecycleState =
+  | 'available'
+  | 'foreground'
+  | 'background'
+  | 'suspending'
+  | 'suspended'
+  | 'waking'
+  | 'unavailable';
+
+export type DashboardNodeWakeMechanism =
+  | 'local_broker'
+  | 'apns_background'
+  | 'bluetooth_accessory'
+  | 'external_accessory'
+  | 'wake_on_lan'
+  | 'manual';
+
+/** Latest authenticated host observation. It is availability evidence, not proof of paper output. */
+export interface DashboardNodeRuntimeObservation {
+  customer?: DashboardResourceOwner | null;
+  nodeId: string;
+  sequence: number;
+  hostMode: DashboardNodeHostMode;
+  availabilityClass: DashboardNodeAvailabilityClass;
+  lifecycleState: DashboardNodeLifecycleState;
+  acceptsCloudJobs: boolean;
+  executionBudgetMs: number | null;
+  wakeMechanisms: DashboardNodeWakeMechanism[];
+  observedAt: string;
+  expiresAt: string;
+  freshness: 'live' | 'recent' | 'stale';
+}
+
+export interface DashboardNodeWakeHint {
+  id: string;
+  nodeId: string;
+  reason: 'job_available' | 'operator_request' | 'inventory_refresh' | 'diagnostics';
+  deliveryChannel: 'connected_session' | 'external_push' | 'local_relay' | 'manual' | null;
+  status: 'pending' | 'observed' | 'expired' | 'cancelled';
+  requestedAt: string;
+  expiresAt: string;
+  observedAt: string | null;
 }
 
 export interface DashboardPrinter {
@@ -98,6 +165,7 @@ export interface DashboardRouteObservation {
   sequence: number;
   printerState: 'online' | 'busy' | 'paused' | 'paper_out' | 'error' | 'offline' | 'unknown';
   acceptingJobs: boolean;
+  queueReported: boolean;
   totalJobs: number;
   activeJobs: number;
   heldJobs: number;
@@ -124,7 +192,7 @@ export interface DashboardPrinterRoute {
   profileRevision: number;
   profileObservedAt: string | null;
   stockObservedAt: string | null;
-  stockState: 'current' | 'stale' | 'unknown';
+  stockState: 'current' | 'stale' | 'not_reported' | 'unknown';
   schedulingAuthorityId: string | null;
   latestObservation: DashboardRouteObservation | null;
   updatedAt: string;

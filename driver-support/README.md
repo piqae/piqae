@@ -6,9 +6,12 @@ commands, native profile blobs, documents, credentials, licensed binaries or
 permission changes.
 
 Follow the cross-platform [contributor workflow](CONTRIBUTING.md), then start
-from [`templates/minimal`](templates/minimal). A contribution must contain:
+from [`templates/minimal`](templates/minimal) for an installed desktop driver or
+[`templates/mobile-adapter`](templates/mobile-adapter) for an adapter compiled
+into an embedding application. A contribution must contain:
 
-- an exact driver-package SHA-256, driver identifier and driver version;
+- an exact driver-package SHA-256, driver identifier and driver version, or an
+  exact reverse-DNS adapter identifier and bundled adapter/SDK version;
 - platform and, where relevant, exact device and firmware constraints;
 - display-safe native capability fixtures with documented redistribution rights;
 - bounded native-choice to semantic-choice mappings;
@@ -20,6 +23,16 @@ Do not infer executable settings from a friendly model name. Names can help an
 operator discover a candidate pack, but Piqae activates a pack only after every
 exact selector matches and its canonical digest is trusted. Multiple matches are
 an error. Install order and version order never establish precedence.
+
+Mobile adapter selectors do not install vendor SDKs or bypass App Store rules.
+The embedding application remains responsible for licensing, entitlements,
+transport permissions and bundling the declared adapter version. Piqae matches
+only display-safe evidence (`adapter_id`, exact `adapter_version`, and optional
+device-family/firmware constraints). Device serials, Bluetooth addresses,
+credentials and executable material are forbidden. Supported iOS transport
+families are AirPrint, local-network adapters, Core Bluetooth Low Energy and
+External Accessory/MFi; transport availability is not a promise that iPadOS can
+wake a suspended application.
 
 ## Trust and distribution
 
@@ -44,7 +57,9 @@ untrusted, malformed or ambiguous pack prevents the affected runtime operation
 from proceeding; packs are never selected by install order. A pack is projected
 only when discovery supplies its exact driver package digest, driver identity,
 driver version and every optional device or firmware predicate declared by the
-selector. Missing evidence produces no semantic facets.
+selector. Embedded applications use the same fail-closed rule for their exact
+adapter identity/version and optional device-family/firmware predicates.
+Missing evidence produces no semantic facets.
 
 Symlinks, traversal paths, oversized packs and sensitive fixture fields are
 rejected before a mapping is usable. A trusted pack still supplies normalized

@@ -1,0 +1,16 @@
+{
+  "protocol": 2,
+  "request_id": "00000000-0000-0000-0000-000000000002",
+  "operation": {
+    "type": "request_authorization",
+    "application": {
+      "application_id": "com.example.pos",
+      "display_name": "Example POS",
+      "signing_identity_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "requested_capabilities": [
+      "observe_printers",
+      "submit_local_jobs"
+    ]
+  }
+}

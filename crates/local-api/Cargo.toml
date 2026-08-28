@@ -13,6 +13,7 @@ serde.workspace = true
 serde_json.workspace = true
 piqae-domain.workspace = true
 piqae-local-ipc = { path = "../local-ipc", version = "0.1.2" }
+piqae-node-runtime = { path = "../node-runtime", version = "0.1.22" }
 thiserror.workspace = true
 tokio.workspace = true
 tower-http.workspace = true

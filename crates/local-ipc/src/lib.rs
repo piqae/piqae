@@ -17,9 +17,299 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
+mod peer_identity;
+#[cfg(windows)]
+mod windows_pipe;
+
+#[cfg(any(test, feature = "test-peer-identity"))]
+#[doc(hidden)]
+pub use peer_identity::deterministic_test_connection;
+#[cfg(unix)]
+pub use peer_identity::verify_unix_peer;
+#[cfg(windows)]
+pub use peer_identity::verify_windows_peer;
+pub use peer_identity::{PeerApplicationEvidence, VerifiedPeerConnection};
+#[cfg(windows)]
+pub use windows_pipe::create_current_user_server as create_current_user_pipe_server;
+
+#[must_use]
+pub fn broker_endpoint_for_data_directory(data_directory: &std::path::Path) -> String {
+    #[cfg(unix)]
+    {
+        data_directory
+            .join("runtime")
+            .join("node.sock")
+            .to_string_lossy()
+            .into_owned()
+    }
+    #[cfg(windows)]
+    {
+        let digest = Sha256::digest(data_directory.as_os_str().to_string_lossy().as_bytes());
+        format!(r"\\.\pipe\piqae-node-{}", hex::encode(&digest[..12]))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = data_directory;
+        "piqae-node".to_owned()
+    }
+}
+
 pub const LOCAL_PROTOCOL_VERSION: u16 = 2;
+pub const BROKER_PROTOCOL_MIN_VERSION: u16 = 1;
+pub const BROKER_PROTOCOL_VERSION: u16 = 4;
+pub const BROKER_PROOF_MAX_SKEW_MS: i64 = 30_000;
 pub const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_NATIVE_CAPTURE_BYTES: usize = 1024 * 1024;
+
+/// Non-sensitive broker discovery result. Presence never reveals an installed
+/// node's tenants, connectors, printers or installation identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrokerPresence {
+    pub protocol_min: u16,
+    pub protocol_max: u16,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrokerCredential {
+    pub application_id: String,
+    pub token: String,
+    /// Exact node-side grants returned with the one-time credential. Older
+    /// peers omit this field; protocol 3 SDK clients fail closed when a
+    /// required grant is absent instead of probing with a live action.
+    #[serde(default)]
+    pub granted_capabilities: Vec<BrokerCapability>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrokerApplicationIdentity {
+    pub application_id: String,
+    pub display_name: String,
+    /// Evidence shown to the operator. A claimed digest never grants access.
+    pub signing_identity_sha256: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrokerAuthorizationHandle {
+    pub authorization_id: Uuid,
+    pub nonce: String,
+    pub expires_unix_ms: i64,
+}
+
+impl std::fmt::Debug for BrokerAuthorizationHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrokerAuthorizationHandle")
+            .field("authorization_id", &self.authorization_id)
+            .field("nonce", &"[REDACTED]")
+            .field("expires_unix_ms", &self.expires_unix_ms)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrokerAuthorizationState {
+    Pending,
+    Approved,
+    Denied,
+    Expired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingBrokerAuthorization {
+    pub authorization_id: Uuid,
+    pub application: BrokerApplicationIdentity,
+    pub requested_capabilities: Vec<BrokerCapability>,
+    pub requested_unix_ms: i64,
+    pub expires_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrokerAuthorizationDecision {
+    pub approved: bool,
+    #[serde(default)]
+    pub granted_capabilities: Vec<BrokerCapability>,
+}
+
+impl std::fmt::Debug for BrokerCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrokerCredential")
+            .field("application_id", &self.application_id)
+            .field("token", &"[REDACTED]")
+            .field("granted_capabilities", &self.granted_capabilities)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrokerCapability {
+    ObserveStatus,
+    ObservePrinters,
+    ObserveJobHistory,
+    ManageProfiles,
+    SubmitLocalJobs,
+    ManageConnectors,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BrokerRequest {
+    pub protocol: u16,
+    pub request_id: Uuid,
+    pub operation: BrokerOperation,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "wire-compatible operation variants are bounded by MAX_MESSAGE_BYTES and boxing would complicate generated SDK schemas"
+)]
+pub enum BrokerOperation {
+    Presence,
+    RequestAuthorization {
+        /// Legacy protocol 2/3 clients supplied a self-asserted identity. It is
+        /// retained only to reject a mismatch; new clients omit it and the
+        /// accepted transport is the sole identity source.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        application: Option<BrokerApplicationIdentity>,
+        requested_capabilities: Vec<BrokerCapability>,
+    },
+    AuthorizationStatus {
+        handle: BrokerAuthorizationHandle,
+    },
+    ExchangeAuthorization {
+        handle: BrokerAuthorizationHandle,
+    },
+    Execute {
+        credential: BrokerCredential,
+        capability: BrokerCapability,
+        operation: LocalOperation,
+    },
+    /// Protocol-v4 execution. The bearer token never crosses IPC: both peers
+    /// derive a proof key as SHA-256(token), while the broker stores only that
+    /// same digest. The nonce is one-time and durably replay protected.
+    ExecuteAuthenticated {
+        application_id: String,
+        capability: BrokerCapability,
+        operation: LocalOperation,
+        nonce: String,
+        issued_unix_ms: i64,
+        proof: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BrokerResponse {
+    pub protocol: u16,
+    pub request_id: Uuid,
+    pub result: Result<BrokerResult, LocalFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<String>,
+}
+
+fn broker_hmac(key: &[u8; 32], fields: &[&[u8]]) -> String {
+    let mut inner_key = [0x36_u8; 64];
+    let mut outer_key = [0x5c_u8; 64];
+    for (index, byte) in key.iter().enumerate() {
+        inner_key[index] ^= byte;
+        outer_key[index] ^= byte;
+    }
+    let mut inner = Sha256::new();
+    inner.update(inner_key);
+    for field in fields {
+        inner.update(u64::try_from(field.len()).unwrap_or(u64::MAX).to_be_bytes());
+        inner.update(field);
+    }
+    let mut outer = Sha256::new();
+    outer.update(outer_key);
+    outer.update(inner.finalize());
+    URL_SAFE_NO_PAD.encode(outer.finalize())
+}
+
+/// Derives the broker proof key held by a protocol-v4 client.
+#[must_use]
+pub fn broker_proof_key(token: &str) -> [u8; 32] {
+    Sha256::digest(token.as_bytes()).into()
+}
+
+/// Canonical request authentication proof for protocol-v4 execution.
+///
+/// # Errors
+///
+/// Fails when the bounded operation cannot be represented as JSON.
+pub fn broker_request_proof(
+    key: &[u8; 32],
+    request_id: Uuid,
+    application_id: &str,
+    capability: BrokerCapability,
+    operation: &LocalOperation,
+    nonce: &str,
+    issued_unix_ms: i64,
+) -> Result<String, serde_json::Error> {
+    let operation = serde_json::to_vec(operation)?;
+    let capability = serde_json::to_string(&capability)?;
+    Ok(broker_hmac(
+        key,
+        &[
+            b"piqae-broker-request-v4",
+            request_id.as_bytes(),
+            application_id.as_bytes(),
+            capability.as_bytes(),
+            &operation,
+            nonce.as_bytes(),
+            &issued_unix_ms.to_be_bytes(),
+        ],
+    ))
+}
+
+/// Authenticates the complete protocol-v4 response, including failures.
+///
+/// # Errors
+///
+/// Fails when the bounded result cannot be represented as JSON.
+pub fn broker_response_proof(
+    key: &[u8; 32],
+    request_id: Uuid,
+    nonce: &str,
+    result: &Result<BrokerResult, LocalFailure>,
+) -> Result<String, serde_json::Error> {
+    let result = serde_json::to_vec(result)?;
+    Ok(broker_hmac(
+        key,
+        &[
+            b"piqae-broker-response-v4",
+            request_id.as_bytes(),
+            nonce.as_bytes(),
+            &result,
+        ],
+    ))
+}
+
+#[must_use]
+pub fn constant_time_proof_eq(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.as_bytes()
+        .iter()
+        .zip(right.as_bytes())
+        .fold(0_u8, |difference, (a, b)| difference | (a ^ b))
+        == 0
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BrokerResult {
+    Presence(BrokerPresence),
+    AuthorizationRequested(BrokerAuthorizationHandle),
+    AuthorizationStatus { state: BrokerAuthorizationState },
+    AuthorizationExchanged(BrokerCredential),
+    Local { result: LocalResult },
+}
 
 /// Generates a one-time 256-bit bearer token and the digest that may be
 /// persisted by the agent. The plaintext token is returned only to the
@@ -49,6 +339,10 @@ pub struct LocalRequest {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the bounded SDK operation remains direct to keep the versioned JSON contract simple"
+)]
 pub enum LocalOperation {
     Status,
     Printers,
@@ -62,6 +356,71 @@ pub enum LocalOperation {
     CancelProfileCapture(CancelProfileCapture),
     ValidateProfile(ValidateProfile),
     ConfirmLoadedMedia(ConfirmLoadedMedia),
+    Sdk { operation: SdkBrokerOperation },
+}
+
+/// One-time connector capability whose debug representation is always
+/// redacted while its JSON representation remains the SDK string contract.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ConnectorInvitationToken(String);
+
+impl ConnectorInvitationToken {
+    #[must_use]
+    pub fn expose_for_exchange(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for ConnectorInvitationToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ConnectorInvitationToken([REDACTED])")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "bounded SDK wire operation keeps the generated schema direct"
+)]
+pub enum SdkBrokerOperation {
+    /// Exchanges a short-lived invitation at its pinned authority. Ownership
+    /// metadata is deliberately absent: it comes only from the authenticated
+    /// preview/enrolment response handled by the node runtime.
+    ConnectInvitation {
+        control_plane_url: String,
+        invitation_token: ConnectorInvitationToken,
+        #[serde(default)]
+        printer_grant: piqae_protocol::agent::PrinterGrant,
+        #[serde(default)]
+        allowed_printer_ids: Vec<String>,
+        node_name: String,
+        hostname: String,
+    },
+    SubmitLocalJob {
+        printer_id: String,
+        title: String,
+        idempotency_key: String,
+        #[serde(default)]
+        profile_id: Option<String>,
+        content_kind: piqae_domain::ContentKind,
+        content_base64: String,
+        #[serde(default)]
+        options: JobOptions,
+        expires_unix_ms: Option<i64>,
+    },
+    Profiles {
+        printer_id: String,
+    },
+    JobHistory {
+        offset: usize,
+        limit: usize,
+    },
+    ConnectorSnapshots,
+    RevokeConnector {
+        connector_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -75,12 +434,23 @@ pub struct LocalResponse {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LocalResult {
     Status(LocalStatus),
-    Printers { printers: Vec<LocalPrinter> },
+    Printers {
+        printers: Vec<LocalPrinter>,
+    },
     Accepted,
-    SupportBundle { path: PathBuf },
+    SupportBundle {
+        path: PathBuf,
+    },
     ProfileCaptureAuthorized(Box<ProfileCaptureAuthorized>),
-    ProfileCaptured { profile: Box<LocalPrinterProfile> },
+    ProfileCaptured {
+        profile: Box<LocalPrinterProfile>,
+    },
     ProfileValidation(ProfileValidationResult),
+    /// Additive SDK result whose inner schema is selected by the matching
+    /// `SdkBrokerOperation`. Secrets remain forbidden from this projection.
+    Sdk {
+        data: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +463,20 @@ pub struct LocalStatus {
     pub active_jobs: u32,
     pub printer_warnings: u32,
     pub paused: bool,
+    /// Operator-visible metadata only. Older nodes omit it during N/N-1.
+    #[serde(default)]
+    pub node_identity: Option<LocalNodeIdentity>,
+    #[serde(default)]
+    pub node_identity_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalNodeIdentity {
+    pub display_name: String,
+    pub site: Option<String>,
+    pub location: Option<String>,
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -556,6 +940,137 @@ mod tests {
             challenge,
             operation: LocalOperation::Status,
         }
+    }
+
+    #[test]
+    fn broker_credentials_are_redacted_from_debug_output() {
+        let credential = BrokerCredential {
+            application_id: "com.example.pos".into(),
+            token: "sensitive-token".into(),
+            granted_capabilities: vec![BrokerCapability::ObserveStatus],
+        };
+        let output = format!("{credential:?}");
+        assert!(output.contains("com.example.pos"));
+        assert!(!output.contains("sensitive-token"));
+    }
+
+    #[test]
+    fn checked_in_broker_presence_fixtures_remain_compatible() {
+        let request: BrokerRequest = serde_json::from_slice(include_bytes!(
+            "../../../contracts/node-sdk/v1/broker-presence-request.json"
+        ))
+        .unwrap();
+        assert!(matches!(request.operation, BrokerOperation::Presence));
+        let response: BrokerResponse = serde_json::from_slice(include_bytes!(
+            "../../../contracts/node-sdk/v1/broker-presence-response.json"
+        ))
+        .unwrap();
+        assert!(matches!(
+            response.result,
+            Ok(BrokerResult::Presence(BrokerPresence {
+                protocol_min: 1,
+                protocol_max: 1
+            }))
+        ));
+    }
+
+    #[test]
+    fn checked_in_broker_consent_fixtures_preserve_legacy_claim_mismatch_checks() {
+        let legacy_request: BrokerRequest = serde_json::from_slice(include_bytes!(
+            "../../../contracts/node-sdk/v1/broker-authorization-request.json"
+        ))
+        .unwrap();
+        assert_eq!(legacy_request.protocol, 2);
+        assert!(matches!(
+            legacy_request.operation,
+            BrokerOperation::RequestAuthorization {
+                application: Some(BrokerApplicationIdentity { ref application_id, .. }),
+                ..
+            } if application_id == "com.example.pos"
+        ));
+        let verified_request: BrokerRequest = serde_json::from_slice(include_bytes!(
+            "../../../contracts/node-sdk/v1/broker-v4-authorization-request.json"
+        ))
+        .unwrap();
+        assert_eq!(verified_request.protocol, 4);
+        assert!(matches!(
+            verified_request.operation,
+            BrokerOperation::RequestAuthorization {
+                application: None,
+                ..
+            }
+        ));
+        let response: BrokerResponse = serde_json::from_slice(include_bytes!(
+            "../../../contracts/node-sdk/v1/broker-authorization-requested-response.json"
+        ))
+        .unwrap();
+        assert!(matches!(
+            response.result,
+            Ok(BrokerResult::AuthorizationRequested(_))
+        ));
+        for fixture in [
+            include_bytes!(
+                "../../../contracts/node-sdk/v1/broker-authorization-status-request.json"
+            )
+            .as_slice(),
+            include_bytes!(
+                "../../../contracts/node-sdk/v1/broker-authorization-exchange-request.json"
+            )
+            .as_slice(),
+        ] {
+            let request: BrokerRequest = serde_json::from_slice(fixture).unwrap();
+            assert_eq!(request.protocol, 2);
+        }
+    }
+
+    #[test]
+    fn checked_in_broker_v4_fixtures_pin_authenticated_execution_without_a_token() {
+        let presence: BrokerRequest = serde_json::from_slice(include_bytes!(
+            "../../../contracts/node-sdk/v1/broker-v4-presence-request.json"
+        ))
+        .unwrap();
+        assert_eq!(presence.protocol, BROKER_PROTOCOL_VERSION);
+        let execute_bytes = include_bytes!(
+            "../../../contracts/node-sdk/v1/broker-v4-authenticated-execute-request.json"
+        );
+        let execute: BrokerRequest = serde_json::from_slice(execute_bytes).unwrap();
+        assert_eq!(execute.protocol, BROKER_PROTOCOL_VERSION);
+        assert!(!String::from_utf8_lossy(execute_bytes).contains("credential"));
+        assert!(matches!(
+            execute.operation,
+            BrokerOperation::ExecuteAuthenticated {
+                ref application_id,
+                capability: BrokerCapability::ObserveStatus,
+                operation: LocalOperation::Status,
+                ..
+            } if application_id == "com.example.pos"
+        ));
+        let response: BrokerResponse = serde_json::from_slice(include_bytes!(
+            "../../../contracts/node-sdk/v1/broker-v4-authenticated-execute-response.json"
+        ))
+        .unwrap();
+        assert_eq!(response.protocol, BROKER_PROTOCOL_VERSION);
+        assert!(response.proof.is_some());
+    }
+
+    #[test]
+    fn connector_invitation_wire_is_direct_but_debug_is_redacted() {
+        let operation: LocalOperation = serde_json::from_value(serde_json::json!({
+            "type": "sdk",
+            "operation": {
+                "type": "connect_invitation",
+                "control_plane_url": "https://api.example.test",
+                "invitation_token": "one-time-secret",
+                "printer_grant": "all_local_printers",
+                "allowed_printer_ids": [],
+                "node_name": "Till",
+                "hostname": "till.local"
+            }
+        }))
+        .unwrap();
+        let encoded = serde_json::to_string(&operation).unwrap();
+        assert!(encoded.contains("one-time-secret"));
+        assert!(!format!("{operation:?}").contains("one-time-secret"));
     }
 
     #[tokio::test]

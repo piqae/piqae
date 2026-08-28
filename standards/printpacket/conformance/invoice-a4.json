@@ -1,0 +1,15 @@
+{
+  "template": {
+    "format": "printpacket/v1",
+    "media": { "kind": "paged", "size": "a4", "orientation": "portrait", "margins": { "top_mm": 12, "right_mm": 12, "bottom_mm": 12, "left_mm": 12 } },
+    "theme": { "font_size_pt": 10, "line_height": 1.25, "text_color": { "red": 0, "green": 0, "blue": 0 } },
+    "body": [
+      { "type": "heading", "level": 1, "content": [{ "type": "text", "value": "Invoice " }, { "type": "value", "value": { "type": "path", "path": ["number"] } }] },
+      { "type": "table", "items": { "type": "path", "path": ["lines"] }, "repeat_header": true, "columns": [
+        { "header": [{ "type": "text", "value": "Description" }], "cell": [{ "type": "value", "value": { "type": "current_path", "path": ["description"] } }], "width": 3 },
+        { "header": [{ "type": "text", "value": "Total" }], "cell": [{ "type": "value", "value": { "type": "current_path", "path": ["total"] } }], "width": 1, "align": "right" }
+      ] }
+    ]
+  },
+  "data": { "number": "INV-1042", "lines": [{ "description": "Consulting", "total": "$125.00" }] }
+}

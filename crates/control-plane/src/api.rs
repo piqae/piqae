@@ -8,9 +8,10 @@
 use crate::{
     AppState,
     authentication::TenantContext,
-    device_auth::authenticate_agent,
+    device_auth::{authenticate_agent, authenticate_agent_for_revocation},
     error::AppError,
     repository::{CreateResult, RepositoryError},
+    request_id,
 };
 use axum::{
     Json,
@@ -32,19 +33,23 @@ use futures::StreamExt;
 use p256::pkcs8::DecodePublicKey as _;
 use piqae_auth::{Environment, Scope, generate_api_key};
 use piqae_domain::{
-    AgentId, ContentKind, ContentSource, EnvironmentId, Job, JobEvent, JobId, JobOptions, JobState,
-    PrinterId, PrinterState, WorkspaceId,
+    AgentId, ContentKind, ContentSource, EnvironmentId, Job, JobEvent, JobFailureReason, JobId,
+    JobOptions, JobState, PrinterId, PrinterState, WorkspaceId,
 };
 use piqae_object_store::{ObjectByteStream, ObjectStoreError, digest_hex};
 use piqae_protocol::agent::{
-    AgentAcceptJobRequest, AgentAcceptJobResponse, AgentReleaseLeaseRequest,
-    AgentRenewLeaseRequest, AgentRenewLeaseResponse, AgentSyncRequest, AgentSyncResponse,
-    ConnectSessionPreview, ConnectSessionPreviewRequest, ContentDescriptor, EnrolRequest,
-    EnrolResponse, JobOffer,
+    AgentAcceptJobRequest, AgentAcceptJobResponse, AgentAcceptanceAbandonResponse,
+    AgentAcceptanceReconciliationResponse, AgentCommand, AgentIdentityUpdateRequest,
+    AgentIdentityUpdateResponse, AgentReleaseLeaseRequest, AgentRenewLeaseRequest,
+    AgentRenewLeaseResponse, AgentSyncRequest, AgentSyncResponse, ConnectSessionPreview,
+    ConnectSessionPreviewRequest, ContentDescriptor, EnrolRequest, EnrolResponse, JobOffer,
+    NodeDisplayIdentity,
 };
 use piqae_storage_postgres::{
-    StoredAgent, StoredApiKey, StoredNodeConnector, StoredPrinter, StoredTargetBinding,
-    StoredUpload, StoredWebhook, StoredWebhookDelivery, SyncedPrinter,
+    JobLease, PreHandoffTransitionOutcome, StoredAgent, StoredApiKey, StoredNodeConnector,
+    StoredPrinter, StoredTargetBinding, StoredUpload, StoredWebhook, StoredWebhookDelivery,
+    SyncedPrinter, acceptance_revocation_webhook_idempotency_key,
+    agent_acceptance_webhook_idempotency_key, preaccept_cancellation_webhook_idempotency_key,
 };
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
@@ -54,6 +59,8 @@ use std::{
     convert::Infallible,
     str::FromStr,
 };
+
+const MAX_CAPABILITY_CANDIDATES_PER_SYNC: i64 = 16;
 
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
@@ -223,9 +230,10 @@ pub async fn list_agents(
 pub async fn get_node(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(node_id): Path<AgentId>,
+    Path(node_id): Path<String>,
 ) -> Result<Json<StoredAgent>, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::AgentsRead).await?;
+    let node_id = node_id.parse().map_err(|_| AppError::not_found())?;
     Ok(Json(
         state
             .repository
@@ -235,32 +243,196 @@ pub async fn get_node(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PatchNodeRequest {
     name: Option<String>,
+    #[serde(default)]
+    site: PatchOptionalString,
+    #[serde(default)]
+    location: PatchOptionalString,
+    labels: Option<Vec<String>>,
+    expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Default)]
+enum PatchOptionalString {
+    #[default]
+    Missing,
+    Clear,
+    Value(String),
+}
+
+impl<'de> Deserialize<'de> for PatchOptionalString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Option::<String>::deserialize(deserializer)?.map_or(Self::Clear, Self::Value))
+    }
+}
+
+#[cfg(test)]
+mod patch_node_tests {
+    use super::*;
+
+    #[test]
+    fn optional_operator_details_distinguish_missing_clear_and_value()
+    -> Result<(), serde_json::Error> {
+        let missing: PatchNodeRequest =
+            serde_json::from_value(serde_json::json!({"name": "Node"}))?;
+        let clear: PatchNodeRequest = serde_json::from_value(serde_json::json!({"site": null}))?;
+        let value: PatchNodeRequest =
+            serde_json::from_value(serde_json::json!({"site": " Warehouse "}))?;
+
+        assert!(matches!(missing.site, PatchOptionalString::Missing));
+        assert!(matches!(clear.site, PatchOptionalString::Clear));
+        assert!(
+            matches!(value.site, PatchOptionalString::Value(ref site) if site == " Warehouse ")
+        );
+        Ok(())
+    }
 }
 
 pub async fn patch_node(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(node_id): Path<AgentId>,
+    Path(node_id): Path<String>,
     Json(request): Json<PatchNodeRequest>,
-) -> Result<Json<StoredAgent>, AppError> {
+) -> Result<Response, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::AgentsWrite).await?;
-    let name = request.name.as_deref().map(str::trim).ok_or_else(|| {
-        AppError::invalid("invalid_node", "A node name is required for this update.")
-    })?;
-    if name.is_empty() || name.chars().count() > 120 {
+    if request.name.is_none()
+        && matches!(request.site, PatchOptionalString::Missing)
+        && matches!(request.location, PatchOptionalString::Missing)
+        && request.labels.is_none()
+    {
         return Err(AppError::invalid(
             "invalid_node",
-            "The node name is outside the supported limits.",
+            "At least one node detail is required for this update.",
         ));
     }
-    let node = state
+    let node_id = node_id.parse().map_err(|_| AppError::not_found())?;
+    let current = state
         .repository
-        .rename_agent(tenant.workspace_id, tenant.environment_id, node_id, name)
+        .get_agent(tenant.workspace_id, tenant.environment_id, node_id)
         .await?;
-    state.publish(tenant, "node.updated", &node).await?;
-    Ok(Json(node))
+    let site = match request.site {
+        PatchOptionalString::Missing => current.site,
+        PatchOptionalString::Clear => None,
+        PatchOptionalString::Value(site) => Some(site),
+    };
+    let location = match request.location {
+        PatchOptionalString::Missing => current.location,
+        PatchOptionalString::Clear => None,
+        PatchOptionalString::Value(location) => Some(location),
+    };
+    let display_name = request.name.unwrap_or(current.name);
+    let identity = validated_node_identity(
+        &display_name,
+        site,
+        location,
+        request.labels.unwrap_or(current.labels),
+    )?;
+    let expected_revision = request
+        .expected_revision
+        .or(Some(current.identity_revision));
+    let node = match state
+        .repository
+        .update_agent_identity(
+            tenant.workspace_id,
+            tenant.environment_id,
+            node_id,
+            expected_revision,
+            &identity,
+        )
+        .await
+    {
+        Ok(node) => node,
+        Err(RepositoryError::NodeIdentityRevisionConflict(revision)) => {
+            return Ok(node_identity_conflict(revision));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    publish_node_identity_update(&state, tenant, &node).await?;
+    Ok(Json(node).into_response())
+}
+
+fn validated_node_identity(
+    display_name: &str,
+    site: Option<String>,
+    location: Option<String>,
+    labels: Vec<String>,
+) -> Result<NodeDisplayIdentity, AppError> {
+    let display_name = display_name.trim().to_owned();
+    let site = site.map(|value| value.trim().to_owned());
+    let location = location.map(|value| value.trim().to_owned());
+    let labels = labels
+        .into_iter()
+        .map(|label| label.trim().to_owned())
+        .collect::<Vec<_>>();
+    let fields_are_valid = !display_name.is_empty()
+        && display_name.len() <= 120
+        && !display_name.chars().any(char::is_control)
+        && site.as_ref().is_none_or(|value| {
+            !value.is_empty() && value.len() <= 120 && !value.chars().any(char::is_control)
+        })
+        && location.as_ref().is_none_or(|value| {
+            !value.is_empty() && value.len() <= 120 && !value.chars().any(char::is_control)
+        });
+    let labels_are_valid = labels.len() <= 16
+        && labels.iter().collect::<BTreeSet<_>>().len() == labels.len()
+        && labels.iter().all(|label| {
+            !label.is_empty()
+                && label.len() <= 64
+                && label.trim() == label
+                && !label.chars().any(char::is_control)
+        });
+    if !fields_are_valid || !labels_are_valid {
+        return Err(AppError::invalid(
+            "invalid_node_identity",
+            "The node display identity is outside the supported limits.",
+        ));
+    }
+    Ok(NodeDisplayIdentity {
+        display_name,
+        site,
+        location,
+        labels,
+    })
+}
+
+fn node_identity_conflict(current_revision: u64) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": {
+                "code": "node_identity_revision_conflict",
+                "message": "The node identity changed; reconcile before saving.",
+                "request_id": request_id::current(),
+                "retryable": false,
+                "details": { "current_revision": current_revision }
+            }
+        })),
+    )
+        .into_response()
+}
+
+async fn publish_acceptance_revocation(
+    state: &AppState,
+    tenant: TenantContext,
+    job: &Job,
+) -> Result<(), AppError> {
+    for event_type in ["job.updated", "job.delivery_uncertain"] {
+        let idempotency_key = acceptance_revocation_webhook_idempotency_key(
+            tenant.workspace_id,
+            tenant.environment_id,
+            job.id,
+            event_type,
+        );
+        state
+            .publish_idempotently(&idempotency_key, tenant, event_type, job)
+            .await?;
+    }
+    Ok(())
 }
 
 pub async fn delete_node(
@@ -269,10 +441,13 @@ pub async fn delete_node(
     Path(node_id): Path<AgentId>,
 ) -> Result<StatusCode, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::AgentsWrite).await?;
-    state
+    let affected_jobs = state
         .repository
         .revoke_agent(tenant.workspace_id, tenant.environment_id, node_id)
         .await?;
+    for job in affected_jobs {
+        publish_acceptance_revocation(&state, tenant, &job).await?;
+    }
     state
         .publish(
             tenant,
@@ -494,7 +669,7 @@ pub async fn revoke_node_connector(
     let tenant = authenticate_native(&state, &headers, Scope::AgentsWrite).await?;
     let node_id = AgentId::from_str(&node_id)
         .map_err(|_| AppError::invalid("invalid_node_id", "The node ID is invalid."))?;
-    state
+    let affected_jobs = state
         .repository
         .revoke_node_connector(
             tenant.workspace_id,
@@ -503,7 +678,38 @@ pub async fn revoke_node_connector(
             &connector_id,
         )
         .await?;
+    for job in affected_jobs {
+        publish_acceptance_revocation(&state, tenant, &job).await?;
+    }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Lets a connector revoke its own server grant with its final signed request.
+///
+/// The exact agent, tenant and connector tuple must match; after commit the
+/// same credential is rejected by all agent-authenticated routes.
+pub async fn revoke_agent_connector(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(connector_id): Path<String>,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let path = format!("/v1/agent/connectors/{connector_id}/revoke");
+    let identity =
+        authenticate_agent_for_revocation(&state, &headers, "POST", &path, &body).await?;
+    let affected_jobs = state
+        .repository
+        .revoke_node_connector(
+            identity.tenant.workspace_id,
+            identity.tenant.environment_id,
+            identity.agent_id,
+            &connector_id,
+        )
+        .await?;
+    for job in affected_jobs {
+        publish_acceptance_revocation(&state, identity.tenant, &job).await?;
+    }
+    Ok(Json(serde_json::json!({"revoked": true})))
 }
 
 #[derive(Debug, Deserialize)]
@@ -874,23 +1080,49 @@ pub async fn enrol_agent(
     }
     let secret_hash = format!("{:x}", Sha256::digest(request.token.as_bytes()));
     validate_connector_printer_grant(&request)?;
-    if let Some(installation_id) = request.installation_id.as_deref() {
-        let existing_key = match state
-            .repository
-            .node_installation_public_key(installation_id)
-            .await
-        {
-            Ok(key) => key,
-            Err(RepositoryError::NotFound) => public_key.clone(),
-            Err(_) => return Err(AppError::unauthorized()),
-        };
-        let proof = request
-            .installation_proof
-            .as_deref()
-            .ok_or_else(AppError::unauthorized)?;
-        let message = connector_proof_for_request(&request, installation_id);
-        verify_connector_proof(&existing_key, proof, &message)?;
+    let installation_public_key = request
+        .installation_public_key
+        .as_deref()
+        .map(decode_agent_public_key)
+        .transpose()?;
+    if installation_public_key
+        .as_ref()
+        .is_some_and(|key| key.len() != 32)
+    {
+        return Err(AppError::invalid(
+            "invalid_installation_public_key",
+            "Installation public key must contain exactly 32 bytes.",
+        ));
     }
+    let verified_installation_key =
+        if let Some(installation_id) = request.installation_id.as_deref() {
+            let existing_key = match state
+                .repository
+                .node_installation_public_key(installation_id)
+                .await
+            {
+                Ok(key) => key,
+                Err(RepositoryError::NotFound) => installation_public_key
+                    .clone()
+                    .ok_or_else(AppError::unauthorized)?,
+                Err(_) => return Err(AppError::unauthorized()),
+            };
+            if installation_public_key
+                .as_ref()
+                .is_some_and(|candidate| candidate != &existing_key)
+            {
+                return Err(AppError::unauthorized());
+            }
+            let proof = request
+                .installation_proof
+                .as_deref()
+                .ok_or_else(AppError::unauthorized)?;
+            let message = connector_proof_for_request(&request, installation_id);
+            verify_connector_proof(&existing_key, proof, &message)?;
+            Some(existing_key)
+        } else {
+            None
+        };
     let enrolled = if let Some(installation_id) = request.installation_id.as_deref() {
         state
             .repository
@@ -905,6 +1137,9 @@ pub async fn enrol_agent(
                 request.protocol_version,
                 state.capabilities.billing.enabled,
                 installation_id,
+                verified_installation_key
+                    .as_deref()
+                    .ok_or_else(AppError::unauthorized)?,
                 match request.printer_grant {
                     piqae_protocol::agent::PrinterGrant::SelectedPrinters => "selected_printers",
                     piqae_protocol::agent::PrinterGrant::AllLocalPrinters => "all_local_printers",
@@ -1228,6 +1463,64 @@ pub struct ContentEncryptionKeyResponse {
     created_at: chrono::DateTime<Utc>,
 }
 
+pub async fn update_agent_identity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, AppError> {
+    let path = "/v1/agent/identity";
+    let authenticated = authenticate_agent(&state, &headers, "PUT", path, &body).await?;
+    let request: AgentIdentityUpdateRequest = serde_json::from_slice(&body)?;
+    let identity = validated_node_identity(
+        &request.display_name,
+        request.site,
+        request.location,
+        request.labels,
+    )?;
+    let node = match state
+        .repository
+        .update_agent_identity(
+            authenticated.tenant.workspace_id,
+            authenticated.tenant.environment_id,
+            authenticated.agent_id,
+            Some(request.expected_revision),
+            &identity,
+        )
+        .await
+    {
+        Ok(node) => node,
+        Err(RepositoryError::NodeIdentityRevisionConflict(revision)) => {
+            return Ok(node_identity_conflict(revision));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    publish_node_identity_update(&state, authenticated.tenant, &node).await?;
+    Ok(Json(AgentIdentityUpdateResponse {
+        revision: node.identity_revision,
+        identity: NodeDisplayIdentity {
+            display_name: node.name,
+            site: node.site,
+            location: node.location,
+            labels: node.labels,
+        },
+    })
+    .into_response())
+}
+
+async fn publish_node_identity_update(
+    state: &AppState,
+    tenant: TenantContext,
+    node: &StoredAgent,
+) -> Result<(), RepositoryError> {
+    let key = format!(
+        "node-identity:{}:{}:{}:{}",
+        tenant.workspace_id, tenant.environment_id, node.id, node.identity_revision
+    );
+    state
+        .publish_idempotently(&key, tenant, "node.updated", node)
+        .await
+}
+
 pub async fn register_agent_content_encryption_key(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1522,6 +1815,9 @@ pub struct CreateJobRequest {
     pub title: String,
     pub source: Option<String>,
     pub content_type: ContentKind,
+    /// Required language/output binding for printer-native bytes. Plain
+    /// `raw` is not a language and is never routed without this descriptor.
+    pub printer_native: Option<piqae_protocol::agent::PrinterNativeJobDescriptor>,
     pub content: ContentSource,
     #[serde(default)]
     pub options: JobOptions,
@@ -1630,6 +1926,8 @@ async fn create_job_impl(
     let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
     validate_create(&request, allow_reserved_metadata)?;
     let destination = resolve_job_destination(&state, tenant, &request).await?;
+    let printer_native_metadata =
+        validate_printer_native_job(&state, tenant, &request, &destination).await?;
     let resolved_ticket = validate_resolved_ticket(&state, tenant, &request, &destination).await?;
     validate_encrypted_job(&state, tenant, &request, &destination).await?;
     let request_bytes = serde_json::to_vec(&request)?;
@@ -1638,6 +1936,7 @@ async fn create_job_impl(
         persist_job_content(&state, tenant, request.content_type, request.content).await?;
     let mut metadata = request.metadata;
     metadata.extend(destination.metadata);
+    metadata.extend(printer_native_metadata);
     if let Some(ticket) = resolved_ticket {
         metadata.insert(
             "piqae.capability_revision".into(),
@@ -1700,6 +1999,22 @@ async fn create_job_impl(
     }
     match created? {
         CreateResult::Existing(existing) => {
+            if let Err(error) = state
+                .repository
+                .ensure_waiting_job_wake_hints(
+                    tenant.workspace_id,
+                    tenant.environment_id,
+                    existing.id,
+                )
+                .await
+            {
+                tracing::warn!(
+                    error.type = "wake_hint_reconciliation",
+                    job_id = %existing.id,
+                    %error,
+                    "durable job wake hint will be repaired by the worker"
+                );
+            }
             Ok((StatusCode::OK, Json(JobResponse::from(existing))).into_response())
         }
         CreateResult::Created(created) => {
@@ -1716,6 +2031,22 @@ async fn create_job_impl(
                     None,
                 )
                 .await?;
+            if let Err(error) = state
+                .repository
+                .ensure_waiting_job_wake_hints(
+                    tenant.workspace_id,
+                    tenant.environment_id,
+                    queued.id,
+                )
+                .await
+            {
+                tracing::warn!(
+                    error.type = "wake_hint_reconciliation",
+                    job_id = %queued.id,
+                    %error,
+                    "durable job wake hint will be repaired by the worker"
+                );
+            }
             state.publish(tenant, "job.updated", &queued).await?;
             Ok((StatusCode::CREATED, Json(JobResponse::from(queued))).into_response())
         }
@@ -2450,7 +2781,22 @@ pub async fn cancel_job(
             parse_job_id(&job_id)?,
         )
         .await?;
-    state.publish(tenant, "job.updated", &job).await?;
+    if job.state == JobState::Cancelled {
+        state
+            .publish_idempotently(
+                &preaccept_cancellation_webhook_idempotency_key(
+                    tenant.workspace_id,
+                    tenant.environment_id,
+                    job.id,
+                ),
+                tenant,
+                "job.updated",
+                &job,
+            )
+            .await?;
+    } else {
+        state.publish(tenant, "job.updated", &job).await?;
+    }
     Ok((StatusCode::ACCEPTED, Json(JobResponse::from(job))).into_response())
 }
 
@@ -2593,6 +2939,8 @@ pub async fn agent_sync(
         .await?;
     let inventory_projection =
         crate::destination_topology::project_agent_topology(&state, tenant, &request).await?;
+    let runtime_admission =
+        crate::destination_topology::record_runtime_availability(&state, tenant, &request).await?;
     if let Some(projection) = inventory_projection.as_ref() {
         let invalidation = serde_json::json!({
             "agent_id": request.agent_id,
@@ -2681,7 +3029,7 @@ pub async fn agent_sync(
             .await?;
         }
     }
-    let command_batch = state
+    let mut command_batch = state
         .repository
         .sync_agent_commands(
             tenant.workspace_id,
@@ -2691,13 +3039,79 @@ pub async fn agent_sync(
             100,
         )
         .await?;
+    let mut deliverable_commands = Vec::with_capacity(command_batch.commands.len());
+    for command in command_batch.commands {
+        let retire = if let AgentCommand::CancelJob { job_id } = &command {
+            state
+                .repository
+                .retire_terminal_absent_local_cancellation(
+                    tenant.workspace_id,
+                    tenant.environment_id,
+                    request.agent_id,
+                    *job_id,
+                )
+                .await?
+        } else {
+            false
+        };
+        if !retire {
+            deliverable_commands.push(command);
+        }
+    }
+    command_batch.commands = deliverable_commands;
     crate::destination_topology::finalize_acknowledged_uncertainty(
         &state,
         tenant,
         request.agent_id,
     )
     .await?;
-    let leases = if request.queue.accepts_jobs {
+    let can_offer = request.queue.accepts_jobs && runtime_admission.eligible_for_offers;
+    if can_offer {
+        // A capability-blocked job is deliberately absent from the ordinary
+        // lease query. Only a fresh authenticated report that satisfies the
+        // complete offer contract may return it to the queue, and this scan is
+        // bounded so a stale backlog cannot dominate sync latency.
+        for blocked in state
+            .repository
+            .list_node_update_required_jobs(
+                tenant.workspace_id,
+                tenant.environment_id,
+                request.agent_id,
+                MAX_CAPABILITY_CANDIDATES_PER_SYNC,
+            )
+            .await?
+        {
+            if blocked_job_capability_is_restored(
+                &state,
+                tenant,
+                &blocked,
+                &request.document_render,
+            )
+            .await
+            {
+                if let Some(transition) = state
+                    .repository
+                    .recover_node_update_required_job(
+                        tenant.workspace_id,
+                        tenant.environment_id,
+                        request.agent_id,
+                        blocked.id,
+                    )
+                    .await?
+                {
+                    state
+                        .publish_idempotently(
+                            &transition.webhook_idempotency_key,
+                            tenant,
+                            "job.updated",
+                            &transition.job,
+                        )
+                        .await?;
+                }
+            }
+        }
+    }
+    let leases = if can_offer {
         state
             .repository
             .claim_jobs(
@@ -2705,27 +3119,246 @@ pub async fn agent_sync(
                 tenant.environment_id,
                 request.agent_id,
                 &format!("{}:{}", request.agent_id, request.agent_version),
-                // The V1 agent materializes offers serially. Claiming a batch
-                // would let later 30-second leases expire before the agent
-                // reaches them, so offer one durable handoff per sync.
-                1,
+                MAX_CAPABILITY_CANDIDATES_PER_SYNC,
             )
             .await?
     } else {
         Vec::new()
     };
-    let mut candidate_jobs = Vec::with_capacity(leases.len());
-    for lease in leases {
-        let route_reservation = match crate::destination_topology::reserve_job_route(
+    let mut selected = None;
+    let mut leases = leases.into_iter();
+    while let Some(lease) = leases.next() {
+        if selected.is_some() {
+            let mut remaining = vec![lease];
+            remaining.extend(leases);
+            if let Err(error) =
+                release_agent_lease_batch(&state, tenant, request.agent_id, remaining).await
+            {
+                let (selected_lease, _) = selected
+                    .take()
+                    .ok_or_else(|| AppError::service_unavailable("selected_agent_lease_missing"))?;
+                let _ = release_agent_lease_batch(
+                    &state,
+                    tenant,
+                    request.agent_id,
+                    vec![selected_lease],
+                )
+                .await;
+                return Err(error.into());
+            }
+            break;
+        }
+        let preparation =
+            match prepare_agent_offer_content(&state, tenant, &lease.job, &request.document_render)
+                .await
+            {
+                Ok(preparation) => preparation,
+                Err(error) => {
+                    // An infrastructure failure still aborts this sync, but only
+                    // after every lease claimed in the batch has been released.
+                    // Do not turn a temporary database/object-store outage into a
+                    // sibling 30-second starvation window.
+                    let mut unreleased = vec![lease];
+                    unreleased.extend(leases);
+                    let _ = release_agent_lease_batch(&state, tenant, request.agent_id, unreleased)
+                        .await;
+                    return Err(error);
+                }
+            };
+        match preparation {
+            AgentOfferPreparation::Ready(content) => selected = Some((lease, content)),
+            AgentOfferPreparation::NodeUpdateRequired => {
+                // Capability drift is durable and recoverable. Blocking it
+                // removes the head-of-line job from ordinary claims without a
+                // retry storm; a later compatible sync can return it once.
+                let transition = state
+                    .repository
+                    .block_agent_lease_for_node_update(
+                        tenant.workspace_id,
+                        tenant.environment_id,
+                        request.agent_id,
+                        lease.job.id,
+                        lease.lease_id,
+                        &lease.lease_token,
+                    )
+                    .await;
+                let transition = match transition {
+                    Ok(PreHandoffTransitionOutcome::Transitioned(transition)) => transition,
+                    Ok(PreHandoffTransitionOutcome::UnsafeLocalResponsibility) => {
+                        let release = state
+                            .repository
+                            .release_agent_lease(
+                                tenant.workspace_id,
+                                tenant.environment_id,
+                                request.agent_id,
+                                lease.job.id,
+                                lease.lease_id,
+                                &lease.lease_token,
+                            )
+                            .await;
+                        if let Err(error) = release {
+                            let mut pending = vec![lease];
+                            pending.extend(leases);
+                            let _ = release_agent_lease_batch(
+                                &state,
+                                tenant,
+                                request.agent_id,
+                                pending,
+                            )
+                            .await;
+                            return Err(error.into());
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        let mut pending = vec![lease];
+                        pending.extend(leases);
+                        let _ =
+                            release_agent_lease_batch(&state, tenant, request.agent_id, pending)
+                                .await;
+                        return Err(error.into());
+                    }
+                };
+                if let Err(error) = state
+                    .publish_idempotently(
+                        &transition.webhook_idempotency_key,
+                        tenant,
+                        "job.updated",
+                        &transition.job,
+                    )
+                    .await
+                {
+                    let pending = leases.collect();
+                    let _ =
+                        release_agent_lease_batch(&state, tenant, request.agent_id, pending).await;
+                    return Err(error.into());
+                }
+            }
+            AgentOfferPreparation::RetryLater => {
+                let release = state
+                    .repository
+                    .release_agent_lease(
+                        tenant.workspace_id,
+                        tenant.environment_id,
+                        request.agent_id,
+                        lease.job.id,
+                        lease.lease_id,
+                        &lease.lease_token,
+                    )
+                    .await;
+                if let Err(error) = release {
+                    let mut pending = vec![lease];
+                    pending.extend(leases);
+                    let _ =
+                        release_agent_lease_batch(&state, tenant, request.agent_id, pending).await;
+                    return Err(error.into());
+                }
+            }
+            AgentOfferPreparation::PermanentFailure { reason, message } => {
+                let transition = state
+                    .repository
+                    .fail_agent_lease_before_handoff(
+                        tenant.workspace_id,
+                        tenant.environment_id,
+                        request.agent_id,
+                        lease.job.id,
+                        lease.lease_id,
+                        &lease.lease_token,
+                        reason,
+                        message,
+                    )
+                    .await;
+                let transition = match transition {
+                    Ok(PreHandoffTransitionOutcome::Transitioned(transition)) => transition,
+                    Ok(PreHandoffTransitionOutcome::UnsafeLocalResponsibility) => {
+                        let release = state
+                            .repository
+                            .release_agent_lease(
+                                tenant.workspace_id,
+                                tenant.environment_id,
+                                request.agent_id,
+                                lease.job.id,
+                                lease.lease_id,
+                                &lease.lease_token,
+                            )
+                            .await;
+                        if let Err(error) = release {
+                            let mut pending = vec![lease];
+                            pending.extend(leases);
+                            let _ = release_agent_lease_batch(
+                                &state,
+                                tenant,
+                                request.agent_id,
+                                pending,
+                            )
+                            .await;
+                            return Err(error.into());
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        let mut pending = vec![lease];
+                        pending.extend(leases);
+                        let _ =
+                            release_agent_lease_batch(&state, tenant, request.agent_id, pending)
+                                .await;
+                        return Err(error.into());
+                    }
+                };
+                if let Err(error) = state
+                    .publish_idempotently(
+                        &transition.webhook_idempotency_key,
+                        tenant,
+                        "job.updated",
+                        &transition.job,
+                    )
+                    .await
+                {
+                    let pending = leases.collect();
+                    let _ =
+                        release_agent_lease_batch(&state, tenant, request.agent_id, pending).await;
+                    return Err(error.into());
+                }
+            }
+        }
+    }
+    let mut candidate_jobs = Vec::with_capacity(usize::from(selected.is_some()));
+    if let Some((lease, content)) = selected {
+        let reservation = match crate::destination_topology::reserve_job_route(
             &state,
             tenant,
             &lease.job,
             lease.lease_until,
         )
-        .await?
+        .await
         {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                let _ =
+                    release_agent_lease_batch(&state, tenant, request.agent_id, vec![lease]).await;
+                return Err(error);
+            }
+        };
+        match reservation {
             crate::destination_topology::JobRouteReservation::Reserved(reservation) => {
-                Some(reservation)
+                candidate_jobs.push(JobOffer {
+                    expected_capability_revision: lease
+                        .job
+                        .metadata
+                        .get("piqae.capability_revision")
+                        .and_then(|revision| revision.parse().ok()),
+                    resolved_ticket_digest: lease
+                        .job
+                        .metadata
+                        .get("piqae.resolved_ticket_digest")
+                        .cloned(),
+                    job: lease.job,
+                    lease_id: lease.lease_id,
+                    lease_token: lease.lease_token,
+                    lease_expires_at: lease.lease_until,
+                    content,
+                    route_reservation: Some(reservation),
+                });
             }
             crate::destination_topology::JobRouteReservation::Busy => {
                 state
@@ -2739,7 +3372,6 @@ pub async fn agent_sync(
                         &lease.lease_token,
                     )
                     .await?;
-                continue;
             }
             crate::destination_topology::JobRouteReservation::ProjectionRequired {
                 destination_id,
@@ -2770,162 +3402,8 @@ pub async fn agent_sync(
                         }),
                     )
                     .await?;
-                continue;
             }
-        };
-        let mut content = match &lease.job.content {
-            ContentSource::Upload { upload_id } => {
-                let upload = state
-                    .repository
-                    .get_upload(tenant.workspace_id, tenant.environment_id, upload_id)
-                    .await?;
-                if upload.state != "complete" {
-                    return Err(AppError::service_unavailable("job_upload_is_not_complete"));
-                }
-                ContentDescriptor::Download {
-                    url: format!("/v1/agent/jobs/{}/content", lease.job.id),
-                    sha256: upload.expected_sha256,
-                    bytes: u64::try_from(upload.expected_bytes).map_err(|_| {
-                        AppError::service_unavailable("invalid_stored_content_length")
-                    })?,
-                }
-            }
-            ContentSource::EncryptedUpload {
-                upload_id,
-                manifest,
-            } => {
-                let upload = state
-                    .repository
-                    .get_upload(tenant.workspace_id, tenant.environment_id, upload_id)
-                    .await?;
-                if upload.state != "complete" {
-                    return Err(AppError::service_unavailable("job_upload_is_not_complete"));
-                }
-                ContentDescriptor::EncryptedDownload {
-                    url: format!("/v1/agent/jobs/{}/content", lease.job.id),
-                    sha256: upload.expected_sha256,
-                    bytes: u64::try_from(upload.expected_bytes).map_err(|_| {
-                        AppError::service_unavailable("invalid_stored_content_length")
-                    })?,
-                    manifest: manifest.clone(),
-                }
-            }
-            ContentSource::Base64 { data } => {
-                let decoded = base64::engine::general_purpose::STANDARD
-                    .decode(data)
-                    .map_err(|_| AppError::service_unavailable("invalid_stored_base64_content"))?;
-                ContentDescriptor::InlineBase64 {
-                    data: data.clone(),
-                    sha256: Some(digest_hex(&decoded)),
-                    bytes: Some(decoded.len() as u64),
-                }
-            }
-            ContentSource::Uri {
-                uri,
-                authentication,
-            } => ContentDescriptor::Uri {
-                uri: uri.clone(),
-                authentication: authentication.clone(),
-                sha256: None,
-                bytes: None,
-            },
-        };
-        if lease
-            .job
-            .metadata
-            .get("piqae.document.render_mode")
-            .is_some_and(|mode| mode == "node_render")
-        {
-            let render_id = lease
-                .job
-                .metadata
-                .get("piqae.document.render_id")
-                .ok_or_else(|| AppError::service_unavailable("document_render_metadata_missing"))?;
-            let policy = match lease
-                .job
-                .metadata
-                .get("piqae.document.render_policy")
-                .map(String::as_str)
-            {
-                Some("cloud_only") => {
-                    piqae_protocol::agent::BusinessDocumentRenderPolicy::CloudOnly
-                }
-                Some("prefer_node") => {
-                    piqae_protocol::agent::BusinessDocumentRenderPolicy::PreferNode
-                }
-                Some("require_node") => {
-                    piqae_protocol::agent::BusinessDocumentRenderPolicy::RequireNode
-                }
-                _ => piqae_protocol::agent::BusinessDocumentRenderPolicy::Automatic,
-            };
-            let fallback_allowed =
-                policy != piqae_protocol::agent::BusinessDocumentRenderPolicy::RequireNode;
-            if matches!(content, ContentDescriptor::EncryptedDownload { .. }) {
-                if !fallback_allowed {
-                    return Err(AppError::service_unavailable(
-                        "node_render_encrypted_content_unsupported",
-                    ));
-                }
-                // Never attach cleartext specification/input beside encrypted
-                // job content. Prefer/automatic keep the encrypted PDF offer.
-                candidate_jobs.push(JobOffer {
-                    expected_capability_revision: lease
-                        .job
-                        .metadata
-                        .get("piqae.capability_revision")
-                        .and_then(|revision| revision.parse().ok()),
-                    resolved_ticket_digest: lease
-                        .job
-                        .metadata
-                        .get("piqae.resolved_ticket_digest")
-                        .cloned(),
-                    job: lease.job,
-                    lease_id: lease.lease_id,
-                    lease_token: lease.lease_token,
-                    lease_expires_at: lease.lease_until,
-                    content,
-                    route_reservation,
-                });
-                continue;
-            }
-            let render = crate::documents::node_render_payload(
-                &state,
-                tenant.workspace_id,
-                tenant.environment_id,
-                render_id,
-            )
-            .await?;
-            content = ContentDescriptor::BusinessDocument {
-                policy,
-                render: Box::new(render),
-                fallback: Box::new(content),
-                fallback_allowed,
-                decision_reason: lease
-                    .job
-                    .metadata
-                    .get("piqae.document.render_decision_reason")
-                    .cloned()
-                    .unwrap_or_else(|| "unspecified".into()),
-            };
         }
-        candidate_jobs.push(JobOffer {
-            expected_capability_revision: lease
-                .job
-                .metadata
-                .get("piqae.capability_revision")
-                .and_then(|revision| revision.parse().ok()),
-            resolved_ticket_digest: lease
-                .job
-                .metadata
-                .get("piqae.resolved_ticket_digest")
-                .cloned(),
-            job: lease.job,
-            lease_id: lease.lease_id,
-            lease_token: lease.lease_token,
-            lease_expires_at: lease.lease_until,
-            content,
-            route_reservation,
-        });
     }
     let has_immediate_work = !request.events.is_empty()
         || request.queue.queued_jobs > 0
@@ -2944,7 +3422,358 @@ pub async fn agent_sync(
         inventory_projection_acknowledgement_supported: true,
         inventory_projection,
         acknowledged_handoff_sequence,
+        wake_hints: runtime_admission.wake_hints,
     }))
+}
+
+/// Releases every lease in a claimed batch and reports the first repository
+/// error only after later siblings have also had a release attempt.
+async fn release_agent_lease_batch(
+    state: &AppState,
+    tenant: TenantContext,
+    agent_id: AgentId,
+    leases: Vec<JobLease>,
+) -> Result<(), RepositoryError> {
+    let mut first_error = None;
+    for lease in leases {
+        if let Err(error) = state
+            .repository
+            .release_agent_lease(
+                tenant.workspace_id,
+                tenant.environment_id,
+                agent_id,
+                lease.job.id,
+                lease.lease_id,
+                &lease.lease_token,
+            )
+            .await
+        {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+/// Materializes an offer only after every capability-sensitive part of the
+/// content contract has been checked.
+enum AgentOfferPreparation {
+    Ready(ContentDescriptor),
+    NodeUpdateRequired,
+    RetryLater,
+    PermanentFailure {
+        reason: JobFailureReason,
+        message: &'static str,
+    },
+}
+
+async fn blocked_job_capability_is_restored(
+    state: &AppState,
+    tenant: TenantContext,
+    job: &Job,
+    capabilities: &piqae_protocol::agent::DocumentRenderCapabilities,
+) -> bool {
+    if job.content_kind == ContentKind::Raw {
+        return supports_printer_native_offer(
+            capabilities,
+            &job.metadata,
+            &job.printer_id.to_string(),
+        );
+    }
+    if job
+        .metadata
+        .get("piqae.document.render_mode")
+        .is_none_or(|mode| mode != "node_render")
+        || job
+            .metadata
+            .get("piqae.document.render_policy")
+            .is_none_or(|policy| policy != "require_node")
+        || matches!(job.content, ContentSource::EncryptedUpload { .. })
+    {
+        return false;
+    }
+    let Some(render_id) = job.metadata.get("piqae.document.render_id") else {
+        return false;
+    };
+    let Ok(render) = crate::documents::node_render_payload(
+        state,
+        tenant.workspace_id,
+        tenant.environment_id,
+        render_id,
+    )
+    .await
+    else {
+        // A malformed or temporarily unavailable blocked artifact must not
+        // abort recovery of later jobs. It remains blocked for inspection.
+        return false;
+    };
+    supports_print_packet_offer(capabilities, &render)
+}
+
+async fn prepare_agent_offer_content(
+    state: &AppState,
+    tenant: TenantContext,
+    job: &Job,
+    capabilities: &piqae_protocol::agent::DocumentRenderCapabilities,
+) -> Result<AgentOfferPreparation, AppError> {
+    if job.content_kind == ContentKind::Raw
+        && !supports_printer_native_offer(capabilities, &job.metadata, &job.printer_id.to_string())
+    {
+        return Ok(AgentOfferPreparation::NodeUpdateRequired);
+    }
+    let content = match &job.content {
+        ContentSource::Upload { upload_id } => {
+            let upload = match state
+                .repository
+                .get_upload(tenant.workspace_id, tenant.environment_id, upload_id)
+                .await
+            {
+                Ok(upload) => upload,
+                Err(RepositoryError::NotFound) => {
+                    return Ok(AgentOfferPreparation::PermanentFailure {
+                        reason: JobFailureReason::ContentUnavailable,
+                        message: "Stored job content is unavailable",
+                    });
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if upload.state != "complete" {
+                return Ok(AgentOfferPreparation::RetryLater);
+            }
+            let Ok(bytes) = u64::try_from(upload.expected_bytes) else {
+                return Ok(AgentOfferPreparation::PermanentFailure {
+                    reason: JobFailureReason::Internal,
+                    message: "Stored job content length is invalid",
+                });
+            };
+            ContentDescriptor::Download {
+                url: format!("/v1/agent/jobs/{}/content", job.id),
+                sha256: upload.expected_sha256,
+                bytes,
+            }
+        }
+        ContentSource::EncryptedUpload {
+            upload_id,
+            manifest,
+        } => {
+            let upload = match state
+                .repository
+                .get_upload(tenant.workspace_id, tenant.environment_id, upload_id)
+                .await
+            {
+                Ok(upload) => upload,
+                Err(RepositoryError::NotFound) => {
+                    return Ok(AgentOfferPreparation::PermanentFailure {
+                        reason: JobFailureReason::ContentUnavailable,
+                        message: "Stored encrypted job content is unavailable",
+                    });
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if upload.state != "complete" {
+                return Ok(AgentOfferPreparation::RetryLater);
+            }
+            let Ok(bytes) = u64::try_from(upload.expected_bytes) else {
+                return Ok(AgentOfferPreparation::PermanentFailure {
+                    reason: JobFailureReason::Internal,
+                    message: "Stored encrypted job content length is invalid",
+                });
+            };
+            ContentDescriptor::EncryptedDownload {
+                url: format!("/v1/agent/jobs/{}/content", job.id),
+                sha256: upload.expected_sha256,
+                bytes,
+                manifest: manifest.clone(),
+            }
+        }
+        ContentSource::Base64 { data } => {
+            let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(data) else {
+                return Ok(AgentOfferPreparation::PermanentFailure {
+                    reason: JobFailureReason::ContentChecksumMismatch,
+                    message: "Stored inline job content is invalid",
+                });
+            };
+            ContentDescriptor::InlineBase64 {
+                data: data.clone(),
+                sha256: Some(digest_hex(&decoded)),
+                bytes: Some(decoded.len() as u64),
+            }
+        }
+        ContentSource::Uri {
+            uri,
+            authentication,
+        } => ContentDescriptor::Uri {
+            uri: uri.clone(),
+            authentication: authentication.clone(),
+            sha256: None,
+            bytes: None,
+        },
+    };
+    if job
+        .metadata
+        .get("piqae.document.render_mode")
+        .is_none_or(|mode| mode != "node_render")
+    {
+        return Ok(AgentOfferPreparation::Ready(content));
+    }
+    let Some(render_id) = job.metadata.get("piqae.document.render_id") else {
+        return Ok(AgentOfferPreparation::PermanentFailure {
+            reason: JobFailureReason::Internal,
+            message: "Stored PrintPacket render metadata is incomplete",
+        });
+    };
+    let policy = match job
+        .metadata
+        .get("piqae.document.render_policy")
+        .map(String::as_str)
+    {
+        Some("cloud_only") => piqae_protocol::agent::PrintPacketRenderPolicy::CloudOnly,
+        Some("prefer_node") => piqae_protocol::agent::PrintPacketRenderPolicy::PreferNode,
+        Some("require_node") => piqae_protocol::agent::PrintPacketRenderPolicy::RequireNode,
+        _ => piqae_protocol::agent::PrintPacketRenderPolicy::Automatic,
+    };
+    let fallback_allowed = policy != piqae_protocol::agent::PrintPacketRenderPolicy::RequireNode;
+    if matches!(content, ContentDescriptor::EncryptedDownload { .. }) {
+        // Never attach cleartext specification/input beside encrypted content.
+        return Ok(if fallback_allowed {
+            AgentOfferPreparation::Ready(content)
+        } else {
+            AgentOfferPreparation::NodeUpdateRequired
+        });
+    }
+    let render = crate::documents::node_render_payload(
+        state,
+        tenant.workspace_id,
+        tenant.environment_id,
+        render_id,
+    )
+    .await?;
+    if !supports_print_packet_offer(capabilities, &render) {
+        return Ok(if fallback_allowed {
+            AgentOfferPreparation::Ready(content)
+        } else {
+            AgentOfferPreparation::NodeUpdateRequired
+        });
+    }
+    Ok(AgentOfferPreparation::Ready(
+        ContentDescriptor::PrintPacket {
+            policy,
+            render: Box::new(render),
+            fallback: Box::new(content),
+            fallback_allowed,
+            decision_reason: job
+                .metadata
+                .get("piqae.document.render_decision_reason")
+                .cloned()
+                .unwrap_or_else(|| "unspecified".into()),
+        },
+    ))
+}
+
+fn supports_print_packet_offer(
+    capabilities: &piqae_protocol::agent::DocumentRenderCapabilities,
+    render: &piqae_protocol::agent::PrintPacketNodeRender,
+) -> bool {
+    let Some(packet) = capabilities.print_packet.as_ref() else {
+        return false;
+    };
+    let input_bytes = serde_json::to_vec(&render.input)
+        .ok()
+        .and_then(|value| u64::try_from(value.len()).ok())
+        .unwrap_or(u64::MAX);
+    let template_bytes = serde_json::to_vec(&render.specification)
+        .ok()
+        .and_then(|value| u64::try_from(value.len()).ok())
+        .unwrap_or(u64::MAX);
+    let resource_count = u32::try_from(render.resources.len()).unwrap_or(u32::MAX);
+    let total_resource_bytes = render.resources.iter().fold(0_u64, |total, resource| {
+        total.saturating_add(resource.byte_length)
+    });
+    render.negotiation_version == 2
+        && render.input.is_object()
+        && render.packet_version == printpacket::DOCUMENT_V1
+        && render.conformance_profile == printpacket::CONFORMANCE_CORE_V1
+        && render.output_profile == printpacket::PDF_BASE14_V1
+        && packet.negotiation_version == render.negotiation_version
+        && packet
+            .supported_packet_versions
+            .contains(&render.packet_version)
+        && render
+            .required_feature_ids
+            .iter()
+            .all(|feature| packet.feature_ids.contains(feature))
+        && packet
+            .conformance_profiles
+            .contains(&render.conformance_profile)
+        && packet.output_profiles.iter().any(|profile| {
+            matches!(
+                profile,
+                piqae_protocol::agent::PrintPacketOutputProfile::Pdf { id, media_type }
+                    if id == &render.output_profile && media_type == "application/pdf"
+            )
+        })
+        && packet.deterministic
+        && capabilities.renderer_abi.as_deref() == Some(render.renderer_abi.as_str())
+        && capabilities.resource_abi.as_deref() == Some(render.resource_abi.as_str())
+        && template_bytes <= packet.limits.max_template_bytes
+        && input_bytes <= packet.limits.max_input_bytes
+        && render.expected_pdf_bytes <= packet.limits.max_output_bytes
+        && render.expected_page_count > 0
+        && render.expected_page_count <= packet.limits.max_pages
+        && resource_count <= packet.limits.max_resource_count
+        && total_resource_bytes <= packet.limits.max_total_resource_bytes
+        && render.resources.iter().all(|resource| {
+            resource.byte_length <= packet.limits.max_resource_bytes
+                && packet.resource_types.contains(&resource.media_type)
+                && capabilities
+                    .image_media_types
+                    .contains(&resource.media_type)
+        })
+}
+
+fn supports_printer_native_offer(
+    capabilities: &piqae_protocol::agent::DocumentRenderCapabilities,
+    metadata: &BTreeMap<String, String>,
+    printer_id: &str,
+) -> bool {
+    let (Some(output_id), Some(language_id), Some(packet)) = (
+        metadata.get("piqae.printer_native.output_profile"),
+        metadata.get("piqae.printer_native.language_profile"),
+        capabilities.print_packet.as_ref(),
+    ) else {
+        return false;
+    };
+    let language = packet.native_language_profiles.iter().find(|profile| {
+        profile.id == *language_id
+            && profile
+                .printer_ids
+                .iter()
+                .any(|supported| supported == printer_id)
+            && metadata.get("piqae.printer_native.language") == Some(&profile.language)
+            && metadata.get("piqae.printer_native.language_version")
+                == Some(&profile.language_version)
+            && metadata.get("piqae.printer_native.profile_version")
+                == Some(&profile.profile_version)
+            && metadata.get("piqae.printer_native.media_type") == Some(&profile.media_type)
+            && metadata.get("piqae.printer_native.driver_fingerprint_sha256")
+                == Some(&profile.driver_fingerprint_sha256)
+            && metadata.get("piqae.printer_native.support_pack_digest_sha256")
+                == Some(&profile.support_pack_digest_sha256)
+            && metadata
+                .get("piqae.printer_native.printer_id")
+                .is_some_and(|stored| stored == printer_id)
+    });
+    packet.output_profiles.iter().any(|profile| {
+        matches!(
+            profile,
+            piqae_protocol::agent::PrintPacketOutputProfile::PrinterNative {
+                id,
+                media_type,
+                language_profile_id,
+            } if id == output_id
+                && language_profile_id == language_id
+                && language.is_some_and(|language| &language.media_type == media_type)
+        )
+    })
 }
 
 fn validate_document_render_capabilities(
@@ -2958,6 +3787,133 @@ fn validate_document_render_capabilities(
     let valid_media = |values: &[String]| {
         values.len() <= 16 && values.iter().all(|v| v.len() <= 64 && v.is_ascii())
     };
+    let valid_id = |value: &str, slash: bool| {
+        !value.is_empty()
+            && value.len() <= 128
+            && value.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || (index > 0 && matches!(byte, b'.' | b'_' | b'-'))
+                    || (slash && index > 0 && byte == b'/')
+            })
+            && value.as_bytes()[0].is_ascii_lowercase()
+    };
+    let valid_packet_version = |value: &str| {
+        value.strip_prefix("printpacket/v").is_some_and(|version| {
+            let mut bytes = version.bytes();
+            bytes
+                .next()
+                .is_some_and(|first| matches!(first, b'1'..=b'9'))
+                && bytes.all(|byte| byte.is_ascii_digit())
+        })
+    };
+    let unique = |values: &[String]| values.iter().collect::<BTreeSet<_>>().len() == values.len();
+    let valid_sha256 = |digest: &str| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    let valid_packet = value.print_packet.as_ref().is_none_or(|packet| {
+        let output_ids = packet
+            .output_profiles
+            .iter()
+            .map(piqae_protocol::agent::PrintPacketOutputProfile::id)
+            .collect::<BTreeSet<_>>();
+        let language_ids = packet
+            .native_language_profiles
+            .iter()
+            .map(|profile| profile.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let language_bindings = packet
+            .native_language_profiles
+            .iter()
+            .flat_map(|profile| {
+                profile
+                    .printer_ids
+                    .iter()
+                    .map(move |printer_id| (profile.id.as_str(), printer_id.as_str()))
+            })
+            .collect::<BTreeSet<_>>();
+        let language_binding_count = packet
+            .native_language_profiles
+            .iter()
+            .map(|profile| profile.printer_ids.len())
+            .sum::<usize>();
+        packet.negotiation_version == 2
+            && (1..=16).contains(&packet.supported_packet_versions.len())
+            && unique(&packet.supported_packet_versions)
+            && packet
+                .supported_packet_versions
+                .iter()
+                .all(|version| valid_packet_version(version))
+            && packet.feature_ids.len() <= 256
+            && unique(&packet.feature_ids)
+            && packet.feature_ids.iter().all(|id| valid_id(id, false))
+            && packet.conformance_profiles.len() <= 32
+            && unique(&packet.conformance_profiles)
+            && packet
+                .conformance_profiles
+                .iter()
+                .all(|id| valid_id(id, true))
+            && (1..=32).contains(&packet.output_profiles.len())
+            && output_ids.len() == packet.output_profiles.len()
+            && packet.output_profiles.iter().all(|profile| match profile {
+                piqae_protocol::agent::PrintPacketOutputProfile::Pdf { id, media_type } => {
+                    valid_id(id, true) && media_type == "application/pdf"
+                }
+                piqae_protocol::agent::PrintPacketOutputProfile::PrinterNative {
+                    id,
+                    media_type,
+                    language_profile_id,
+                } => {
+                    valid_id(id, true)
+                        && valid_media_type(media_type)
+                        && valid_id(language_profile_id, true)
+                        && language_ids.contains(language_profile_id.as_str())
+                }
+            })
+            && packet.limits.max_template_bytes <= 52_428_800
+            && packet.limits.max_template_bytes > 0
+            && packet.limits.max_input_bytes <= 52_428_800
+            && packet.limits.max_input_bytes > 0
+            && packet.limits.max_output_bytes <= 524_288_000
+            && packet.limits.max_output_bytes > 0
+            && (1..=100_000).contains(&packet.limits.max_pages)
+            && packet.limits.max_resource_count <= 1_000
+            && (1..=52_428_800).contains(&packet.limits.max_resource_bytes)
+            && (1..=524_288_000).contains(&packet.limits.max_total_resource_bytes)
+            && packet.limits.max_resource_bytes <= packet.limits.max_total_resource_bytes
+            && packet.resource_types.len() <= 32
+            && unique(&packet.resource_types)
+            && packet
+                .resource_types
+                .iter()
+                .all(|media| media == "image/jpeg")
+            && packet.native_language_profiles.len() <= 32
+            && language_bindings.len() == language_binding_count
+            && packet.native_language_profiles.iter().all(|profile| {
+                valid_id(&profile.id, true)
+                    && valid_id(&profile.language, false)
+                    && !profile.language_version.is_empty()
+                    && profile.language_version.len() <= 64
+                    && profile.language_version.is_ascii()
+                    && !profile.profile_version.is_empty()
+                    && profile.profile_version.len() <= 64
+                    && profile.profile_version.is_ascii()
+                    && valid_media_type(&profile.media_type)
+                    && valid_sha256(&profile.driver_fingerprint_sha256)
+                    && valid_sha256(&profile.support_pack_digest_sha256)
+                    && (1..=256).contains(&profile.printer_ids.len())
+                    && unique(&profile.printer_ids)
+                    && profile.printer_ids.iter().all(|id| {
+                        !id.is_empty() && id.len() <= 128 && id.is_ascii() && id.starts_with("ptr_")
+                    })
+            })
+            && !packet.implementation_version.is_empty()
+            && packet.implementation_version.len() <= 128
+            && packet.implementation_version.is_ascii()
+    });
     if !valid_text(&value.renderer_abi)
         || !valid_text(&value.resource_abi)
         || !valid_media(&value.image_media_types)
@@ -2973,6 +3929,7 @@ fn validate_document_render_capabilities(
                 || !digest.bytes().all(|b| b.is_ascii_hexdigit())
                 || digest != &digest.to_ascii_lowercase()
         })
+        || !valid_packet
     {
         return Err(AppError::invalid(
             "invalid_document_render_capabilities",
@@ -2980,6 +3937,20 @@ fn validate_document_render_capabilities(
         ));
     }
     Ok(value)
+}
+
+fn valid_media_type(value: &str) -> bool {
+    let Some((kind, subtype)) = value.split_once('/') else {
+        return false;
+    };
+    !kind.is_empty()
+        && !subtype.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'/' | b'.' | b'+' | b'-')
+        })
 }
 
 fn adaptive_poll_after_ms(request: &AgentSyncRequest, has_immediate_work: bool) -> u64 {
@@ -3022,19 +3993,79 @@ fn adaptive_poll_with_jitter(uptime_seconds: i64, has_immediate_work: bool, seed
     reason = "adaptive polling tests stay adjacent to the private policy helper"
 )]
 mod adaptive_poll_tests {
-    use super::{adaptive_poll_with_jitter, validate_document_render_capabilities};
-    use piqae_protocol::agent::DocumentRenderCapabilities;
+    use super::{
+        adaptive_poll_with_jitter, supports_print_packet_offer, supports_printer_native_offer,
+        validate_document_render_capabilities,
+    };
+    use piqae_protocol::agent::{
+        DocumentRenderCapabilities, PrintPacketCapabilitiesV2, PrintPacketLimits,
+        PrintPacketNodeRender, PrintPacketOutputProfile, PrintPacketResourceDescriptor,
+        PrinterNativeLanguageProfile,
+    };
 
-    #[test]
-    fn document_renderer_capabilities_are_truthful_and_bounded() {
-        let supported = DocumentRenderCapabilities {
-            renderer_abi: Some("piqae.business-document-pdf/v1".into()),
-            resource_abi: Some("piqae.document-resources/v1".into()),
+    fn packet_capabilities() -> DocumentRenderCapabilities {
+        DocumentRenderCapabilities {
+            renderer_abi: Some("printpacket.pdf-renderer/v1".into()),
+            resource_abi: Some("printpacket.resources/v1".into()),
             persistent_cache: true,
             font_rendering: false,
             image_media_types: vec!["image/jpeg".into()],
             font_media_types: vec![],
             cached_resource_digests: vec!["a".repeat(64)],
+            print_packet: Some(PrintPacketCapabilitiesV2 {
+                negotiation_version: 2,
+                supported_packet_versions: vec!["printpacket/v1".into()],
+                feature_ids: vec!["typography_base14_windows1252".into()],
+                conformance_profiles: vec!["printpacket.conformance/core-v1".into()],
+                output_profiles: vec![
+                    PrintPacketOutputProfile::Pdf {
+                        id: "printpacket.pdf-base14/v1".into(),
+                        media_type: "application/pdf".into(),
+                    },
+                    PrintPacketOutputProfile::PrinterNative {
+                        id: "escpos.generic/v1".into(),
+                        media_type: "application/vnd.escpos".into(),
+                        language_profile_id: "escpos.generic/v1".into(),
+                    },
+                ],
+                deterministic: true,
+                limits: PrintPacketLimits {
+                    max_template_bytes: 1024,
+                    max_input_bytes: 1024,
+                    max_output_bytes: 4096,
+                    max_pages: 2,
+                    max_resource_count: 2,
+                    max_resource_bytes: 1024,
+                    max_total_resource_bytes: 1024,
+                },
+                resource_types: vec!["image/jpeg".into()],
+                direct_offline: true,
+                native_language_profiles: vec![PrinterNativeLanguageProfile {
+                    id: "escpos.generic/v1".into(),
+                    language: "escpos".into(),
+                    language_version: "1".into(),
+                    profile_version: "1.0.0".into(),
+                    media_type: "application/vnd.escpos".into(),
+                    driver_fingerprint_sha256: "b".repeat(64),
+                    support_pack_digest_sha256: "c".repeat(64),
+                    printer_ids: vec!["ptr_fixture".into()],
+                }],
+                implementation_version: "0.1.22".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn document_renderer_capabilities_are_truthful_and_bounded() {
+        let supported = DocumentRenderCapabilities {
+            renderer_abi: Some("printpacket.pdf-renderer/v1".into()),
+            resource_abi: Some("printpacket.resources/v1".into()),
+            persistent_cache: true,
+            font_rendering: false,
+            image_media_types: vec!["image/jpeg".into()],
+            font_media_types: vec![],
+            cached_resource_digests: vec!["a".repeat(64)],
+            print_packet: None,
         };
         assert!(validate_document_render_capabilities(&supported).is_ok());
         let mut unsupported = supported.clone();
@@ -3044,6 +4075,137 @@ mod adaptive_poll_tests {
         let mut unsupported = supported;
         unsupported.image_media_types = vec!["image/png".into()];
         assert!(validate_document_render_capabilities(&unsupported).is_err());
+    }
+
+    #[test]
+    fn print_packet_capabilities_are_exact_bounded_and_printer_scoped() {
+        let supported = packet_capabilities();
+        assert!(validate_document_render_capabilities(&supported).is_ok());
+
+        let metadata = std::collections::BTreeMap::from([
+            (
+                "piqae.printer_native.output_profile".into(),
+                "escpos.generic/v1".into(),
+            ),
+            (
+                "piqae.printer_native.language_profile".into(),
+                "escpos.generic/v1".into(),
+            ),
+            ("piqae.printer_native.language".into(), "escpos".into()),
+            ("piqae.printer_native.language_version".into(), "1".into()),
+            (
+                "piqae.printer_native.profile_version".into(),
+                "1.0.0".into(),
+            ),
+            (
+                "piqae.printer_native.media_type".into(),
+                "application/vnd.escpos".into(),
+            ),
+            (
+                "piqae.printer_native.driver_fingerprint_sha256".into(),
+                "b".repeat(64),
+            ),
+            (
+                "piqae.printer_native.support_pack_digest_sha256".into(),
+                "c".repeat(64),
+            ),
+            (
+                "piqae.printer_native.printer_id".into(),
+                "ptr_fixture".into(),
+            ),
+        ]);
+        assert!(supports_printer_native_offer(
+            &supported,
+            &metadata,
+            "ptr_fixture"
+        ));
+        assert!(!supports_printer_native_offer(
+            &supported,
+            &metadata,
+            "ptr_other"
+        ));
+        let mut stale = supported.clone();
+        let Some(language_profile) = stale
+            .print_packet
+            .as_mut()
+            .and_then(|packet| packet.native_language_profiles.first_mut())
+        else {
+            panic!("native language profile fixture is missing");
+        };
+        language_profile.language_version = "2".into();
+        assert!(!supports_printer_native_offer(
+            &stale,
+            &metadata,
+            "ptr_fixture"
+        ));
+
+        let mut duplicate = supported.clone();
+        if let Some(packet) = &mut duplicate.print_packet {
+            packet.feature_ids = vec![
+                "typography_base14_windows1252".into(),
+                "typography_base14_windows1252".into(),
+            ];
+        }
+        assert!(validate_document_render_capabilities(&duplicate).is_err());
+
+        let mut retired_identifier = supported.clone();
+        if let Some(packet) = &mut retired_identifier.print_packet {
+            packet.supported_packet_versions = vec!["piqae.business-document/v1".into()];
+        }
+        assert!(validate_document_render_capabilities(&retired_identifier).is_err());
+
+        let mut unbound = supported;
+        if let Some(packet) = &mut unbound.print_packet {
+            packet.native_language_profiles.clear();
+        }
+        assert!(validate_document_render_capabilities(&unbound).is_err());
+    }
+
+    #[test]
+    fn print_packet_offer_intersects_template_and_aggregate_resource_limits() {
+        let supported = packet_capabilities();
+        let mut render = PrintPacketNodeRender {
+            negotiation_version: 2,
+            packet_version: "printpacket/v1".into(),
+            required_feature_ids: vec!["typography_base14_windows1252".into()],
+            conformance_profile: "printpacket.conformance/core-v1".into(),
+            output_profile: "printpacket.pdf-base14/v1".into(),
+            renderer_abi: "printpacket.pdf-renderer/v1".into(),
+            resource_abi: "printpacket.resources/v1".into(),
+            specification: serde_json::json!({
+                "format": "printpacket/v1",
+                "media": {"kind": "paged", "size": "a4"},
+                "body": []
+            }),
+            input: serde_json::json!({}),
+            resources: vec![
+                PrintPacketResourceDescriptor {
+                    digest: "a".repeat(64),
+                    media_type: "image/jpeg".into(),
+                    byte_length: 500,
+                },
+                PrintPacketResourceDescriptor {
+                    digest: "b".repeat(64),
+                    media_type: "image/jpeg".into(),
+                    byte_length: 500,
+                },
+            ],
+            expected_pdf_sha256: "c".repeat(64),
+            expected_pdf_bytes: 4096,
+            expected_page_count: 1,
+        };
+        assert!(supports_print_packet_offer(&supported, &render));
+
+        render.input = serde_json::json!(["not", "an", "object"]);
+        assert!(!supports_print_packet_offer(&supported, &render));
+        render.input = serde_json::json!({});
+
+        render.resources[1].byte_length = 600;
+        assert!(!supports_print_packet_offer(&supported, &render));
+
+        render.resources[1].byte_length = 400;
+        render.specification = serde_json::json!({"padding": "x".repeat(1024)});
+        assert!(!supports_print_packet_offer(&supported, &render));
     }
 
     #[test]
@@ -3102,11 +4264,143 @@ pub async fn accept_agent_job(
             },
         )
         .await?;
-    state.publish(identity.tenant, "job.updated", &job).await?;
+    state
+        .publish_idempotently(
+            &agent_acceptance_webhook_idempotency_key(
+                identity.tenant.workspace_id,
+                identity.tenant.environment_id,
+                job.id,
+            ),
+            identity.tenant,
+            "job.updated",
+            &job,
+        )
+        .await?;
     Ok(Json(AgentAcceptJobResponse {
         accepted_at: Utc::now(),
         state: job.state,
     }))
+}
+
+pub async fn reconcile_agent_acceptance(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+    body: Bytes,
+) -> Result<Json<AgentAcceptanceReconciliationResponse>, AppError> {
+    let path = format!("/v1/agent/jobs/{job_id}/acceptance/reconcile");
+    let identity =
+        authenticate_agent_for_revocation(&state, &headers, "POST", &path, &body).await?;
+    let request: AgentAcceptJobRequest = serde_json::from_slice(&body)?;
+    let (Some(route_reservation_id), Some(route_generation), Some(route_fencing_token)) = (
+        request.route_reservation_id,
+        request.route_generation,
+        request.route_fencing_token.as_deref(),
+    ) else {
+        return Err(AppError::conflict(
+            "route_fence_required",
+            "A complete physical-destination reservation proof is required.",
+        ));
+    };
+    let reservation_id = route_reservation_id.to_string();
+    let (accepted, connector_revoked, fenced) = state
+        .repository
+        .reconcile_agent_acceptance(
+            identity.tenant.workspace_id,
+            identity.tenant.environment_id,
+            identity.agent_id,
+            parse_job_id(&job_id)?,
+            request.lease_id,
+            &request.lease_token,
+            &request.content_sha256,
+            request.local_sequence,
+            piqae_storage_postgres::DeliveryAttemptProof {
+                reservation_id: &reservation_id,
+                generation: route_generation,
+                fencing_token: route_fencing_token,
+            },
+        )
+        .await?;
+    if accepted {
+        let job_id = parse_job_id(&job_id)?;
+        let job = state
+            .repository
+            .get_job(
+                identity.tenant.workspace_id,
+                identity.tenant.environment_id,
+                job_id,
+            )
+            .await?;
+        state
+            .publish_idempotently(
+                &agent_acceptance_webhook_idempotency_key(
+                    identity.tenant.workspace_id,
+                    identity.tenant.environment_id,
+                    job_id,
+                ),
+                identity.tenant,
+                "job.updated",
+                &job,
+            )
+            .await?;
+    }
+    Ok(Json(AgentAcceptanceReconciliationResponse {
+        accepted,
+        connector_revoked,
+        fenced,
+    }))
+}
+
+pub async fn abandon_agent_acceptance(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+    body: Bytes,
+) -> Result<Json<AgentAcceptanceAbandonResponse>, AppError> {
+    let path = format!("/v1/agent/jobs/{job_id}/acceptance/abandon");
+    let identity = authenticate_agent(&state, &headers, "POST", &path, &body).await?;
+    let request: AgentAcceptJobRequest = serde_json::from_slice(&body)?;
+    let (Some(route_reservation_id), Some(route_generation), Some(route_fencing_token)) = (
+        request.route_reservation_id,
+        request.route_generation,
+        request.route_fencing_token.as_deref(),
+    ) else {
+        return Err(AppError::conflict(
+            "route_fence_required",
+            "A complete physical-destination reservation proof is required.",
+        ));
+    };
+    let reservation_id = route_reservation_id.to_string();
+    let abandoned = state
+        .repository
+        .abandon_agent_acceptance(
+            identity.tenant.workspace_id,
+            identity.tenant.environment_id,
+            identity.agent_id,
+            parse_job_id(&job_id)?,
+            request.lease_id,
+            &request.lease_token,
+            &request.content_sha256,
+            request.local_sequence,
+            piqae_storage_postgres::DeliveryAttemptProof {
+                reservation_id: &reservation_id,
+                generation: route_generation,
+                fencing_token: route_fencing_token,
+            },
+        )
+        .await?;
+    if abandoned {
+        let job = state
+            .repository
+            .get_job(
+                identity.tenant.workspace_id,
+                identity.tenant.environment_id,
+                parse_job_id(&job_id)?,
+            )
+            .await?;
+        state.publish(identity.tenant, "job.updated", &job).await?;
+    }
+    Ok(Json(AgentAcceptanceAbandonResponse { abandoned }))
 }
 
 pub async fn renew_agent_lease(
@@ -3298,7 +4592,7 @@ pub async fn get_agent_document_resource(
         .ok_or_else(|| {
             AppError::invalid(
                 "resource_not_authorized",
-                "Job does not reference a business document.",
+                "Job does not reference a PrintPacket render.",
             )
         })?;
     let payload = crate::documents::node_render_payload(
@@ -3538,7 +4832,149 @@ fn validate_create(
             "Native RAW jobs cannot include driver options.",
         ));
     }
+    match (request.content_type, request.printer_native.as_ref()) {
+        (ContentKind::Raw, None) => {
+            return Err(AppError::invalid(
+                "printer_native_descriptor_required",
+                "Native RAW jobs require an exact printer-native output and language profile.",
+            ));
+        }
+        (ContentKind::Pdf, Some(_)) => {
+            return Err(AppError::invalid(
+                "printer_native_descriptor_not_allowed",
+                "A printer-native descriptor cannot be attached to a PDF job.",
+            ));
+        }
+        (ContentKind::Raw, Some(_)) | (ContentKind::Pdf, None) => {}
+    }
     Ok(())
+}
+
+async fn validate_printer_native_job(
+    state: &AppState,
+    tenant: TenantContext,
+    request: &CreateJobRequest,
+    destination: &ResolvedJobDestination,
+) -> Result<BTreeMap<String, String>, AppError> {
+    let Some(descriptor) = request.printer_native.as_ref() else {
+        return Ok(BTreeMap::new());
+    };
+    if matches!(request.content, ContentSource::EncryptedUpload { .. }) {
+        return Err(AppError::invalid(
+            "encrypted_printer_native_unsupported",
+            "Encrypted job v3 does not bind printer-native language profiles.",
+        ));
+    }
+    let agent = state
+        .repository
+        .get_agent(
+            tenant.workspace_id,
+            tenant.environment_id,
+            destination.agent_id,
+        )
+        .await?;
+    if !crate::routing::agent_is_connected(&agent) {
+        return Err(AppError::conflict(
+            "printer_native_capability_unavailable",
+            "The destination node must be online with a current printer-native capability report.",
+        ));
+    }
+    let capabilities = match state
+        .repository
+        .document_render_capabilities_for_printer(
+            tenant.workspace_id,
+            tenant.environment_id,
+            destination.printer_id,
+        )
+        .await
+    {
+        Ok(capabilities) => capabilities,
+        Err(RepositoryError::NotFound) => {
+            return Err(AppError::conflict(
+                "printer_native_capability_unavailable",
+                "The destination node must be online with a current printer-native capability report.",
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let packet = capabilities.print_packet.as_ref().ok_or_else(|| {
+        AppError::conflict(
+            "node_update_required",
+            "The destination node must be updated for language-bound printer-native jobs.",
+        )
+    })?;
+    let output = packet
+        .output_profiles
+        .iter()
+        .find_map(|profile| match profile {
+            piqae_protocol::agent::PrintPacketOutputProfile::PrinterNative {
+                id,
+                media_type,
+                language_profile_id,
+            } if id == &descriptor.output_profile_id
+                && language_profile_id == &descriptor.language_profile_id =>
+            {
+                Some(media_type)
+            }
+            _ => None,
+        });
+    let language = packet.native_language_profiles.iter().find(|profile| {
+        profile.id == descriptor.language_profile_id
+            && profile
+                .printer_ids
+                .iter()
+                .any(|printer_id| printer_id == &destination.printer_id.to_string())
+    });
+    let Some(language) = language else {
+        return Err(AppError::conflict(
+            "printer_native_profile_unsupported",
+            "The exact printer/output/language profile is not currently advertised by this destination.",
+        ));
+    };
+    if output != Some(&language.media_type) {
+        return Err(AppError::conflict(
+            "printer_native_profile_unsupported",
+            "The exact printer/output/language profile is not currently advertised by this destination.",
+        ));
+    }
+    Ok(BTreeMap::from([
+        (
+            "piqae.printer_native.output_profile".into(),
+            descriptor.output_profile_id.clone(),
+        ),
+        (
+            "piqae.printer_native.language_profile".into(),
+            descriptor.language_profile_id.clone(),
+        ),
+        (
+            "piqae.printer_native.language".into(),
+            language.language.clone(),
+        ),
+        (
+            "piqae.printer_native.language_version".into(),
+            language.language_version.clone(),
+        ),
+        (
+            "piqae.printer_native.profile_version".into(),
+            language.profile_version.clone(),
+        ),
+        (
+            "piqae.printer_native.media_type".into(),
+            language.media_type.clone(),
+        ),
+        (
+            "piqae.printer_native.driver_fingerprint_sha256".into(),
+            language.driver_fingerprint_sha256.clone(),
+        ),
+        (
+            "piqae.printer_native.support_pack_digest_sha256".into(),
+            language.support_pack_digest_sha256.clone(),
+        ),
+        (
+            "piqae.printer_native.printer_id".into(),
+            destination.printer_id.to_string(),
+        ),
+    ]))
 }
 
 async fn validate_resolved_ticket(

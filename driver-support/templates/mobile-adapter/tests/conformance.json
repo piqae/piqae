@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "name": "known mobile choice maps",
+      "platform": "ios_external_accessory",
+      "native_capability_key": "replace-with-display-safe-key",
+      "native_choice": "replace-with-native-choice",
+      "expected_semantic_facet": "media.sensing",
+      "expected_semantic_choice": "gap"
+    },
+    {
+      "name": "unknown mobile choice stays unsupported",
+      "platform": "ios_external_accessory",
+      "native_capability_key": "replace-with-display-safe-key",
+      "native_choice": "unknown",
+      "expected_error": "unsupported_native_choice"
+    }
+  ]
+}

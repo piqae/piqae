@@ -105,7 +105,7 @@ function buildServices() {
             const client = clientForLink(link);
             for (let attempt = 0; attempt < 20; attempt += 1) {
               const response =
-                await client.businessDocuments.renders.download(renderId);
+                await client.printPackets.renders.download(renderId);
               if (response.ok)
                 return new Uint8Array(await response.arrayBuffer());
               if (response.status !== 409)

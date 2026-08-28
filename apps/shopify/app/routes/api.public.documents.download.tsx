@@ -27,7 +27,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   if (!link) return Response.json({ error: "PDF not found" }, { status: 404 });
   const upstream = await services
     .clientForLink(link)
-    .businessDocuments.renders.download(grant.renderId);
+    .printPackets.renders.download(grant.renderId);
   if (!upstream.ok || !upstream.body)
     return Response.json(
       { error: "PDF unavailable" },

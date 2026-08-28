@@ -1,4 +1,5 @@
 import Foundation
+import PiqaeNodeKit
 
 public struct LocalAPIConfiguration: Equatable, Sendable {
     public static let defaultAPIURL = URL(string: "http://127.0.0.1:39100")!
@@ -96,6 +97,32 @@ public struct LocalStatus: Codable, Equatable, Sendable {
     public let activeJobs: UInt32
     public let printerWarnings: UInt32
     public let paused: Bool
+    public let nodeIdentity: LocalNodeIdentity?
+    public let nodeIdentityRevision: UInt64?
+
+    public init(
+        agentID: String?,
+        workspaceName: String?,
+        version: String,
+        connection: String,
+        queuedJobs: UInt32,
+        activeJobs: UInt32,
+        printerWarnings: UInt32,
+        paused: Bool,
+        nodeIdentity: LocalNodeIdentity? = nil,
+        nodeIdentityRevision: UInt64? = nil
+    ) {
+        self.agentID = agentID
+        self.workspaceName = workspaceName
+        self.version = version
+        self.connection = connection
+        self.queuedJobs = queuedJobs
+        self.activeJobs = activeJobs
+        self.printerWarnings = printerWarnings
+        self.paused = paused
+        self.nodeIdentity = nodeIdentity
+        self.nodeIdentityRevision = nodeIdentityRevision
+    }
 
     enum CodingKeys: String, CodingKey {
         case agentID = "agent_id"
@@ -106,6 +133,22 @@ public struct LocalStatus: Codable, Equatable, Sendable {
         case activeJobs = "active_jobs"
         case printerWarnings = "printer_warnings"
         case paused
+        case nodeIdentity = "node_identity"
+        case nodeIdentityRevision = "node_identity_revision"
+    }
+}
+
+public struct LocalNodeIdentity: Codable, Equatable, Sendable {
+    public let displayName: String
+    public let site: String?
+    public let location: String?
+    public let labels: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case displayName = "display_name"
+        case site
+        case location
+        case labels
     }
 }
 
@@ -190,6 +233,92 @@ public struct LocalJobAccepted: Codable, Equatable, Sendable {
     }
 }
 
+public struct LocalLifecycleSnapshot: Codable, Equatable, Sendable {
+    public let foreground: Bool
+    public let power: String
+    public let network: String
+    public let acceptingCloudLeases: Bool
+    public let shutdownRequested: Bool
+    public let generation: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case foreground
+        case power
+        case network
+        case acceptingCloudLeases = "accepting_cloud_leases"
+        case shutdownRequested = "shutdown_requested"
+        case generation
+    }
+}
+
+public enum LocalBrokerCapability: String, Codable, CaseIterable, Hashable, Sendable {
+    case observeStatus = "observe_status"
+    case observePrinters = "observe_printers"
+    case observeJobHistory = "observe_job_history"
+    case manageProfiles = "manage_profiles"
+    case submitLocalJobs = "submit_local_jobs"
+    case manageConnectors = "manage_connectors"
+
+    public var displayName: String {
+        switch self {
+        case .observeStatus: "View node status"
+        case .observePrinters: "View printers"
+        case .observeJobHistory: "View print history"
+        case .manageProfiles: "Manage print presets"
+        case .submitLocalJobs: "Submit print jobs"
+        case .manageConnectors: "Manage connections"
+        }
+    }
+}
+
+public struct LocalBrokerApplicationIdentity: Codable, Equatable, Sendable {
+    public let applicationID: String
+    public let displayName: String
+    public let signingIdentitySHA256: String?
+
+    enum CodingKeys: String, CodingKey {
+        case applicationID = "application_id"
+        case displayName = "display_name"
+        case signingIdentitySHA256 = "signing_identity_sha256"
+    }
+}
+
+public struct LocalPendingBrokerAuthorization: Codable, Equatable, Identifiable, Sendable {
+    public let authorizationID: UUID
+    public let application: LocalBrokerApplicationIdentity
+    public let requestedCapabilities: [LocalBrokerCapability]
+    public let requestedUnixMS: Int64
+    public let expiresUnixMS: Int64
+
+    public var id: UUID { authorizationID }
+
+    public func isExpired(at date: Date = Date()) -> Bool {
+        expiresUnixMS <= Int64(date.timeIntervalSince1970 * 1_000)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case authorizationID = "authorization_id"
+        case application
+        case requestedCapabilities = "requested_capabilities"
+        case requestedUnixMS = "requested_unix_ms"
+        case expiresUnixMS = "expires_unix_ms"
+    }
+}
+
+private struct LocalLifecycleRequest: Encodable {
+    let event: PiqaeHostLifecycleEvent
+}
+
+private struct LocalBrokerAuthorizationDecision: Encodable {
+    let approved: Bool
+    let grantedCapabilities: [LocalBrokerCapability]
+
+    enum CodingKeys: String, CodingKey {
+        case approved
+        case grantedCapabilities = "granted_capabilities"
+    }
+}
+
 private struct APIMessage: Codable {
     let message: String?
 }
@@ -210,6 +339,27 @@ private struct QueueCollection: Codable {
 
 private struct ExposureUpdate: Encodable {
     let exposed: Bool
+}
+
+private struct NodeIdentityUpdate: Encodable {
+    let expectedRevision: UInt64
+    let displayName: String
+    let site: String?
+    let location: String?
+    let labels: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case expectedRevision = "expected_revision"
+        case displayName = "display_name"
+        case site
+        case location
+        case labels
+    }
+}
+
+public struct LocalNodeIdentityUpdated: Decodable, Equatable, Sendable {
+    public let revision: UInt64
+    public let identity: LocalNodeIdentity
 }
 
 private struct TestPageRequest: Encodable {
@@ -294,7 +444,7 @@ public final class LocalAPIClient: @unchecked Sendable {
     }
 
     public func createDashboardSession(view: String) async throws -> URL {
-        guard ["history", "connections"].contains(view) else {
+        guard ["history", "connections", "node"].contains(view) else {
             throw LocalAPIError.invalidResponse
         }
         let response: DashboardSessionResponse = try await request(
@@ -328,12 +478,86 @@ public final class LocalAPIClient: @unchecked Sendable {
         )
     }
 
+    public func updateNodeIdentity(
+        expectedRevision: UInt64,
+        displayName: String,
+        site: String?,
+        location: String?,
+        labels: [String] = []
+    ) async throws -> LocalNodeIdentityUpdated {
+        let cleanName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanSite = site?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanLocation = location?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanLabels = labels.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard !cleanName.isEmpty, cleanName.utf8.count <= 120,
+              cleanName.rangeOfCharacter(from: .controlCharacters) == nil,
+              cleanSite.map({ !$0.isEmpty && $0.utf8.count <= 120 && $0.rangeOfCharacter(from: .controlCharacters) == nil }) ?? true,
+              cleanLocation.map({ !$0.isEmpty && $0.utf8.count <= 120 && $0.rangeOfCharacter(from: .controlCharacters) == nil }) ?? true,
+              cleanLabels.count <= 16,
+              Set(cleanLabels).count == cleanLabels.count,
+              cleanLabels.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 64 && $0.rangeOfCharacter(from: .controlCharacters) == nil })
+        else { throw LocalAPIError.invalidConfiguration("Node identity is outside supported limits.") }
+        return try await request(
+            method: "PUT",
+            path: "/v1/local/node/identity",
+            body: try encoder.encode(
+                NodeIdentityUpdate(
+                    expectedRevision: expectedRevision,
+                    displayName: cleanName,
+                    site: cleanSite,
+                    location: cleanLocation,
+                    labels: cleanLabels
+                )
+            )
+        )
+    }
+
     public func pause() async throws {
         try await sendWithoutResponse(method: "POST", path: "/v1/local/pause")
     }
 
     public func resume() async throws {
         try await sendWithoutResponse(method: "POST", path: "/v1/local/resume")
+    }
+
+    public func reportLifecycle(
+        _ event: PiqaeHostLifecycleEvent
+    ) async throws -> LocalLifecycleSnapshot {
+        try await request(
+            method: "POST",
+            path: "/v1/local/lifecycle",
+            body: try encoder.encode(LocalLifecycleRequest(event: event))
+        )
+    }
+
+    public func pendingBrokerAuthorizations() async throws
+        -> [LocalPendingBrokerAuthorization]
+    {
+        try await request(path: "/v1/local/broker/authorization-requests")
+    }
+
+    public func decideBrokerAuthorization(
+        authorizationID: UUID,
+        approved: Bool,
+        grantedCapabilities: [LocalBrokerCapability]
+    ) async throws {
+        let uniqueCapabilities = Array(Set(grantedCapabilities)).sorted { $0.rawValue < $1.rawValue }
+        guard approved || uniqueCapabilities.isEmpty else {
+            throw LocalAPIError.invalidConfiguration(
+                "Denied application access cannot include granted capabilities."
+            )
+        }
+        try await sendWithoutResponse(
+            method: "POST",
+            path: "/v1/local/broker/authorization-requests/"
+                + "\(try pathComponent(authorizationID.uuidString.lowercased()))/decision",
+            body: try encoder.encode(
+                LocalBrokerAuthorizationDecision(
+                    approved: approved,
+                    grantedCapabilities: uniqueCapabilities
+                )
+            )
+        )
     }
 
     public func submitDriverTest(
@@ -522,5 +746,17 @@ public final class LocalAPIClient: @unchecked Sendable {
                 "Cannot read the local node token. Check PIQAE_LOCAL_TOKEN_FILE."
             )
         }
+    }
+}
+
+public struct PiqaeLocalAPIHostLifecycleReporter: PiqaeHostLifecycleReporter {
+    private let client: LocalAPIClient
+
+    public init(client: LocalAPIClient) {
+        self.client = client
+    }
+
+    public func report(_ event: PiqaeHostLifecycleEvent) async throws {
+        _ = try await client.reportLifecycle(event)
     }
 }

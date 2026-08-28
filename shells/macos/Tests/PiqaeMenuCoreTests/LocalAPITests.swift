@@ -1,4 +1,5 @@
 import Foundation
+import PiqaeNodeKit
 import XCTest
 @testable import PiqaeMenuCore
 
@@ -183,7 +184,14 @@ final class LocalAPITests: XCTestCase {
               "queued_jobs": 2,
               "active_jobs": 1,
               "printer_warnings": 0,
-              "paused": false
+              "paused": false,
+              "node_identity": {
+                "display_name": "Dispatch Mac mini",
+                "site": "Warehouse",
+                "location": "Dispatch desk",
+                "labels": ["shipping"]
+              },
+              "node_identity_revision": 4
             }
             """.utf8
         )
@@ -192,6 +200,8 @@ final class LocalAPITests: XCTestCase {
         XCTAssertEqual(status.connection, "connected")
         XCTAssertEqual(status.queuedJobs, 2)
         XCTAssertEqual(status.activeJobs, 1)
+        XCTAssertEqual(status.nodeIdentity?.displayName, "Dispatch Mac mini")
+        XCTAssertEqual(status.nodeIdentityRevision, 4)
     }
 
     func testPerPrinterRoutesAndAuthentication() async throws {
@@ -257,6 +267,33 @@ final class LocalAPITests: XCTestCase {
         try await client.setExposure(printerID: "prn_test", exposed: true)
 
         StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "PUT")
+            XCTAssertEqual(request.url?.path, "/v1/local/node/identity")
+            let body = try XCTUnwrap(
+                try JSONSerialization.jsonObject(with: try Self.body(of: request))
+                    as? [String: Any]
+            )
+            XCTAssertEqual(body["expected_revision"] as? Int, 4)
+            XCTAssertEqual(body["display_name"] as? String, "Dispatch Mac mini")
+            XCTAssertEqual(body["site"] as? String, "Warehouse")
+            XCTAssertEqual(body["location"] as? String, "Dispatch desk")
+            return Self.response(
+                for: request,
+                body: """
+                {"revision":5,"identity":{"display_name":"Dispatch Mac mini","site":"Warehouse","location":"Dispatch desk","labels":[]}}
+                """
+            )
+        }
+        let identity = try await client.updateNodeIdentity(
+            expectedRevision: 4,
+            displayName: "Dispatch Mac mini",
+            site: "Warehouse",
+            location: "Dispatch desk"
+        )
+        XCTAssertEqual(identity.revision, 5)
+        XCTAssertEqual(identity.identity.location, "Dispatch desk")
+
+        StubURLProtocol.handler = { request in
             XCTAssertEqual(request.httpMethod, "POST")
             XCTAssertEqual(request.url?.path, "/v1/local/printers/prn_test/test-page")
             let body = try XCTUnwrap(
@@ -293,6 +330,121 @@ final class LocalAPITests: XCTestCase {
             URLComponents(url: dashboardURL, resolvingAgainstBaseURL: false)?
                 .queryItems?.first(where: { $0.name == "handoff" })?.value,
             "once"
+        )
+    }
+
+    func testLifecycleRouteUsesAuthenticatedSharedEventContract() async throws {
+        let tokenFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("piqae-lifecycle-\(UUID().uuidString).token")
+        try Data("lifecycle-secret\n".utf8).write(to: tokenFile, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: tokenFile) }
+
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [StubURLProtocol.self]
+        let client = LocalAPIClient(
+            configuration: try LocalAPIConfiguration(
+                baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:39100")),
+                tokenFile: tokenFile
+            ),
+            session: URLSession(configuration: sessionConfiguration)
+        )
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.path, "/v1/local/lifecycle")
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "Authorization"),
+                "Bearer lifecycle-secret"
+            )
+            XCTAssertEqual(
+                try JSONSerialization.jsonObject(with: try Self.body(of: request))
+                    as? [String: String],
+                ["event": "suspend_imminent"]
+            )
+            return Self.response(
+                for: request,
+                body: """
+                {
+                  "foreground":true,
+                  "power":"suspending",
+                  "network":"available",
+                  "accepting_cloud_leases":false,
+                  "shutdown_requested":false,
+                  "generation":9
+                }
+                """
+            )
+        }
+
+        let snapshot = try await client.reportLifecycle(.suspendImminent)
+        XCTAssertEqual(snapshot.power, "suspending")
+        XCTAssertEqual(snapshot.generation, 9)
+        XCTAssertFalse(snapshot.acceptingCloudLeases)
+    }
+
+    func testBrokerAuthorizationRoutesNeverGrantOnDenial() async throws {
+        let tokenFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("piqae-broker-\(UUID().uuidString).token")
+        try Data("broker-secret".utf8).write(to: tokenFile, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: tokenFile) }
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [StubURLProtocol.self]
+        let client = LocalAPIClient(
+            configuration: try LocalAPIConfiguration(
+                baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:39100")),
+                tokenFile: tokenFile
+            ),
+            session: URLSession(configuration: sessionConfiguration)
+        )
+        let authorizationID = try XCTUnwrap(UUID(uuidString: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"))
+
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/v1/local/broker/authorization-requests")
+            return Self.response(
+                for: request,
+                body: """
+                [{
+                  "authorization_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                  "application":{
+                    "application_id":"com.example.shipping",
+                    "display_name":"Shipping Desk",
+                    "signing_identity_sha256":"sha256:example"
+                  },
+                  "requested_capabilities":["observe_printers","submit_local_jobs"],
+                  "requested_unix_ms":1000,
+                  "expires_unix_ms":9999999999999
+                }]
+                """
+            )
+        }
+        let pending = try await client.pendingBrokerAuthorizations()
+        XCTAssertEqual(pending.first?.application.displayName, "Shipping Desk")
+        XCTAssertEqual(
+            pending.first?.requestedCapabilities,
+            [.observePrinters, .submitLocalJobs]
+        )
+        let request = try XCTUnwrap(pending.first)
+        XCTAssertFalse(request.isExpired(at: Date(timeIntervalSince1970: 9_999_999_998)))
+        XCTAssertTrue(request.isExpired(at: Date(timeIntervalSince1970: 10_000_000_000)))
+
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(
+                request.url?.path,
+                "/v1/local/broker/authorization-requests/"
+                    + "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/decision"
+            )
+            let body = try XCTUnwrap(
+                try JSONSerialization.jsonObject(with: try Self.body(of: request))
+                    as? [String: Any]
+            )
+            XCTAssertEqual(body["approved"] as? Bool, false)
+            XCTAssertEqual(body["granted_capabilities"] as? [String], [])
+            return Self.response(for: request, body: "{}")
+        }
+        try await client.decideBrokerAuthorization(
+            authorizationID: authorizationID,
+            approved: false,
+            grantedCapabilities: []
         )
     }
 
@@ -542,7 +694,12 @@ final class LocalAPITests: XCTestCase {
 }
 
 private final class StubURLProtocol: URLProtocol {
-    static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+    typealias Handler = (URLRequest) throws -> (HTTPURLResponse, Data)
+    private static let storage = StubURLProtocolHandlerStorage()
+    static var handler: Handler? {
+        get { storage.load() }
+        set { storage.store(newValue) }
+    }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -559,4 +716,17 @@ private final class StubURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+}
+
+private final class StubURLProtocolHandlerStorage: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: StubURLProtocol.Handler?
+
+    func load() -> StubURLProtocol.Handler? {
+        lock.withLock { handler }
+    }
+
+    func store(_ handler: StubURLProtocol.Handler?) {
+        lock.withLock { self.handler = handler }
+    }
 }

@@ -30,6 +30,29 @@ adds authentication server-side, forwards `Last-Event-ID`, disables buffering,
 and streams bytes without placing credentials in the URL. The dashboard
 throttles event-driven data invalidation to avoid request storms.
 
+### Node availability and queue privacy
+
+The Nodes view combines three deliberately separate signals:
+
+- the node heartbeat describes control-plane connectivity;
+- the latest authenticated runtime observation describes host mode, lifecycle,
+  execution budget, freshness, and whether cloud leasing is currently allowed;
+- route observations expose only partitioned queue counts (Piqae-owned,
+  external, and unknown), never another connection's titles, filenames, users,
+  native job IDs, or document content.
+
+An operator **Request refresh** creates an advisory wake hint. A
+`connected_session` delivery proves only that an already-awake node observed it
+on signed sync; the dashboard must not describe that as remote wake. Runtime
+endpoint failures remain an explicit partial-data warning instead of hiding the
+rest of Operations. Platform aggregate rows inherit customer attribution only
+from their immutable containing row.
+
+Node removal is available only after Operations is scoped to the owner's own
+workspace or one managed customer. It requires the node name, revokes the cloud
+identity, and removes the server projection. It does not uninstall the local
+application, erase its durable queue, or alter operating-system printers.
+
 ### Release downloads
 
 `/downloads` is rendered from a server-only, schema-versioned artifact

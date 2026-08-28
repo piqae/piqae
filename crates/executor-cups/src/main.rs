@@ -123,12 +123,9 @@ mod platform {
     pub fn execute(operation: ExecutorOperation) -> Result<ExecutorResult, ExecutorError> {
         match operation {
             ExecutorOperation::DiscoverPrinters => discover(),
-            ExecutorOperation::GetPrinterState { native_printer_id } => {
-                ensure_printer(&native_printer_id)?;
-                Ok(ExecutorResult::State {
-                    state: PrinterState::Unknown,
-                })
-            }
+            ExecutorOperation::GetPrinterState { native_printer_id } => Ok(ExecutorResult::State {
+                state: printer_state(&native_printer_id)?,
+            }),
             ExecutorOperation::GetPrinterCapabilities { native_printer_id } => {
                 ensure_printer(&native_printer_id)?;
                 let (capabilities, native_options) = capability_profile(&native_printer_id);
@@ -485,6 +482,45 @@ mod platform {
             5 => PrinterState::Paused,
             _ => PrinterState::Unknown,
         }
+    }
+
+    fn printer_state(native_id: &str) -> Result<PrinterState, ExecutorError> {
+        // SAFETY: CUPS owns the destination array. The exact queue name and
+        // state option are copied while the allocation is live and the array
+        // is released exactly once on every successful enumeration path.
+        let state = unsafe {
+            let mut destinations: *mut CupsDest = ptr::null_mut();
+            let count = cups_get_dests(&mut destinations);
+            if count < 0 {
+                return Err(last_error("cups_discovery_failed", false));
+            }
+            let length =
+                usize::try_from(count).map_err(|_| last_error("cups_discovery_failed", false))?;
+            let records = records_or_empty(destinations, length)
+                .ok_or_else(|| last_error("cups_discovery_failed", false))?;
+            let state = records.iter().find_map(|destination| {
+                if destination.name.is_null()
+                    || CStr::from_ptr(destination.name).to_bytes() != native_id.as_bytes()
+                {
+                    return None;
+                }
+                Some(
+                    destination_option(destination, "printer-state")
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .map_or(PrinterState::Unknown, cups_printer_state),
+                )
+            });
+            if !destinations.is_null() {
+                cups_free_dests(count, destinations);
+            }
+            state
+        };
+        state.ok_or_else(|| ExecutorError {
+            code: "printer_not_found".into(),
+            message: format!("CUPS destination {native_id} was not found"),
+            retryable: false,
+            handoff_may_have_succeeded: false,
+        })
     }
 
     fn capability_profile(
@@ -1646,6 +1682,14 @@ mod platform {
             assert_eq!(cups_observation(8).state, NativeJobState::Failed);
             assert_eq!(cups_observation(42).state, NativeJobState::Unknown);
             assert_eq!(missing_observation().state, NativeJobState::Missing);
+        }
+
+        #[test]
+        fn cups_printer_states_map_without_claiming_delivery() {
+            assert_eq!(cups_printer_state(3), PrinterState::Online);
+            assert_eq!(cups_printer_state(4), PrinterState::Busy);
+            assert_eq!(cups_printer_state(5), PrinterState::Paused);
+            assert_eq!(cups_printer_state(99), PrinterState::Unknown);
         }
 
         #[test]

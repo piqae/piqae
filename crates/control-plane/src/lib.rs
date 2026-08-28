@@ -14,6 +14,7 @@ pub mod document_render_worker;
 pub mod documents;
 pub mod error;
 pub mod identity;
+pub mod job_expiry;
 pub mod pairing;
 pub mod platform;
 pub mod print_intents;
@@ -22,6 +23,7 @@ pub mod repository;
 pub mod request_id;
 pub mod routing;
 pub mod updates;
+pub mod wake_hint_worker;
 pub mod webhook_worker;
 pub mod workos_identity;
 
@@ -127,9 +129,12 @@ impl AppState {
         object_store: Arc<dyn ObjectStore>,
     ) -> Self {
         let (events, _) = broadcast::channel(1_024);
+        let destination_topology = repository
+            .memory_destination_topology()
+            .unwrap_or_else(|| Arc::new(MemoryDestinationTopologyRepository::default()));
         Self {
             repository,
-            destination_topology: Arc::new(MemoryDestinationTopologyRepository::default()),
+            destination_topology,
             // Tests deliberately use an explicit non-production fixture key.
             // Production replaces it from PIQAE_DESTINATION_IDENTITY_KEY.
             destination_identity_key: [0; 32],
@@ -229,6 +234,41 @@ impl AppState {
         let id = self
             .repository
             .enqueue_webhook_event(
+                tenant.workspace_id,
+                tenant.environment_id,
+                event_type,
+                &data,
+            )
+            .await?;
+        let _ = self.events.send(PublishedEvent {
+            id,
+            tenant,
+            event_type: event_type.into(),
+            data,
+        });
+        Ok(())
+    }
+
+    /// Persists an idempotent tenant event and broadcasts its time-sortable ID
+    /// to live subscribers. Transactional repository paths use the same key to
+    /// replay an already-committed outbox event without a duplicate delivery.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the event cannot be serialized or persisted.
+    pub async fn publish_idempotently(
+        &self,
+        idempotency_key: &str,
+        tenant: TenantContext,
+        event_type: &str,
+        data: &(impl Serialize + Sync),
+    ) -> Result<(), repository::RepositoryError> {
+        let data = serde_json::to_value(data)
+            .map_err(|error| repository::RepositoryError::Persistence(error.to_string()))?;
+        let id = self
+            .repository
+            .enqueue_webhook_event_idempotently(
+                idempotency_key,
                 tenant.workspace_id,
                 tenant.environment_id,
                 event_type,
@@ -457,6 +497,10 @@ pub fn router(state: AppState) -> Router {
             axum::routing::put(api::register_agent_content_encryption_key),
         )
         .route(
+            "/v1/agent/identity",
+            axum::routing::put(api::update_agent_identity),
+        )
+        .route(
             "/v1/agent/content-encryption-key/{key_id}",
             axum::routing::delete(api::revoke_agent_content_encryption_key),
         )
@@ -500,8 +544,20 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/events/stream", get(api::stream_events))
         .route("/v1/agent/sync", post(api::agent_sync))
         .route(
+            "/v1/agent/connectors/{connector_id}/revoke",
+            post(api::revoke_agent_connector),
+        )
+        .route(
             "/v1/agent/jobs/{job_id}/accept",
             post(api::accept_agent_job),
+        )
+        .route(
+            "/v1/agent/jobs/{job_id}/acceptance/reconcile",
+            post(api::reconcile_agent_acceptance),
+        )
+        .route(
+            "/v1/agent/jobs/{job_id}/acceptance/abandon",
+            post(api::abandon_agent_acceptance),
         )
         .route(
             "/v1/agent/jobs/{job_id}/lease",
@@ -606,6 +662,10 @@ fn node_operator_router() -> Router<AppState> {
     Router::new()
         .route("/v1/nodes", get(api::list_agents))
         .route(
+            "/v1/nodes/runtime-observations",
+            get(destination_topology::list_node_runtime_observations),
+        )
+        .route(
             "/v1/nodes/{node_id}",
             get(api::get_node)
                 .patch(api::patch_node)
@@ -613,6 +673,15 @@ fn node_operator_router() -> Router<AppState> {
         )
         .route("/v1/nodes/{node_id}/pause", post(api::pause_node))
         .route("/v1/nodes/{node_id}/resume", post(api::resume_node))
+        .route(
+            "/v1/nodes/{node_id}/runtime",
+            get(destination_topology::get_node_runtime),
+        )
+        .route(
+            "/v1/nodes/{node_id}/wake-hints",
+            get(destination_topology::list_node_wake_hints)
+                .post(destination_topology::create_node_wake_hint),
+        )
         .route(
             "/v1/nodes/{node_id}/diagnostics",
             get(api::list_node_diagnostics).post(api::request_node_diagnostics),
@@ -706,7 +775,9 @@ mod tests {
     use piqae_object_store::{ObjectStoreError, StoredObject};
     use piqae_protocol::agent::{
         AgentAcceptJobRequest, AgentCommand, AgentHealth, AgentSyncRequest, AgentSyncResponse,
-        PrinterProfileSnapshot, PrinterRouteSnapshot, PrinterSnapshot, QueueSnapshot,
+        NodeAvailability, NodeAvailabilityClass, NodeHostMode, NodeRuntimeObservation,
+        PrinterProfileSnapshot, PrinterRouteSnapshot, PrinterSnapshot, PrivacySafeQueueObservation,
+        QueueSnapshot, RouteObservation as AgentRouteObservation,
     };
     use rand::rngs::OsRng;
     use sha2::{Digest, Sha256};
@@ -928,6 +999,181 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one route test proves validation, CAS, idempotency, tenant isolation, and event repair"
+    )]
+    async fn connector_identity_update_is_revision_fenced_idempotent_and_operator_safe() {
+        let application = application().await;
+        let oversized = serde_json::to_vec(&serde_json::json!({
+            "expected_revision": 1,
+            "display_name": "Dispatch Mac",
+            "site": "é".repeat(61),
+            "location": null,
+            "labels": []
+        }))
+        .expect("oversized identity body");
+        let rejected = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                &application,
+                "PUT",
+                "/v1/agent/identity",
+                oversized,
+            ))
+            .await
+            .expect("invalid identity response");
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        let rejected: serde_json::Value = serde_json::from_slice(
+            &rejected
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("invalid identity JSON");
+        assert_eq!(rejected["error"]["code"], "invalid_node_identity");
+
+        let first = serde_json::json!({
+            "expected_revision": 1,
+            "display_name": "Dispatch Mac",
+            "site": "Warehouse",
+            "location": "Desk 2",
+            "labels": ["shipping"]
+        });
+        let first_body = serde_json::to_vec(&first).expect("identity body");
+        let response = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                &application,
+                "PUT",
+                "/v1/agent/identity",
+                first_body.clone(),
+            ))
+            .await
+            .expect("identity response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("identity JSON");
+        assert_eq!(body["revision"], 2);
+
+        let replay = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                &application,
+                "PUT",
+                "/v1/agent/identity",
+                first_body,
+            ))
+            .await
+            .expect("identity replay response");
+        assert_eq!(replay.status(), StatusCode::OK);
+        let persisted = application
+            .repository
+            .get_agent(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+            )
+            .await
+            .expect("agent");
+        assert_eq!(persisted.identity_revision, 2);
+        let events = application
+            .repository
+            .list_tenant_events(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                None,
+                100,
+            )
+            .await
+            .expect("tenant events");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    event.event_type == "node.updated"
+                        && event.payload["identity_revision"] == serde_json::json!(2)
+                })
+                .count(),
+            1,
+            "an exact connector replay repairs a missing publish without duplicating the event"
+        );
+
+        let operator = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "PATCH",
+                &format!("/v1/nodes/{}", application.agent_id),
+                "piq_test_integration",
+                Some(
+                    &serde_json::json!({
+                        "name": "Operator override",
+                        "site": "Warehouse",
+                        "location": "Desk 3",
+                        "labels": ["shipping"],
+                        "expected_revision": 2
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .expect("operator response");
+        let operator_status = operator.status();
+        let operator_body = operator.into_body().collect().await.expect("operator body");
+        assert_eq!(
+            operator_status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&operator_body.to_bytes())
+        );
+
+        let stale = serde_json::to_vec(&serde_json::json!({
+            "expected_revision": 2,
+            "display_name": "Stale local name",
+            "site": null,
+            "location": null,
+            "labels": []
+        }))
+        .expect("stale body");
+        let conflict = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                &application,
+                "PUT",
+                "/v1/agent/identity",
+                stale,
+            ))
+            .await
+            .expect("conflict response");
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let conflict: serde_json::Value = serde_json::from_slice(
+            &conflict
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("conflict JSON");
+        assert_eq!(conflict["error"]["code"], "node_identity_revision_conflict");
+        assert_eq!(conflict["error"]["details"]["current_revision"], 3);
+    }
+
+    #[tokio::test]
     async fn a_node_with_a_drifting_clock_is_tolerated_then_told_the_server_time() {
         let application = application().await;
         let now = Utc::now();
@@ -959,6 +1205,7 @@ mod tests {
             route_observations: Vec::new(),
             topology_changes: Vec::new(),
             native_handoffs: Vec::new(),
+            runtime: None,
         })
         .expect("sync body");
 
@@ -1017,6 +1264,288 @@ mod tests {
         assert!(
             (server_time - Utc::now().timestamp_millis()).abs() < 60_000,
             "server time {server_time} is not the current server clock"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the end-to-end assertion keeps wake, stale admission, fencing, and the public projection in one scenario"
+    )]
+    async fn wake_hint_never_leases_until_embedded_host_is_fresh_and_eligible() {
+        let application = application().await;
+        let created = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "POST",
+                "/v1/jobs",
+                "piq_test_integration",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "title": "Wake-gated job",
+                        "content_type": "pdf",
+                        "content": {"type": "base64", "data": "cHJpbnQ="}
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .expect("create wake-gated job");
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let wake_worker = crate::wake_hint_worker::WakeHintWorker::new(application.state.clone());
+        assert_eq!(
+            wake_worker
+                .run_once(10)
+                .await
+                .expect("publish automatic external wake"),
+            1
+        );
+
+        let sync = |sequence, lifecycle_state, accepts_cloud_jobs| {
+            let now = Utc::now();
+            AgentSyncRequest {
+                agent_id: application.agent_id,
+                protocol_version: 1,
+                agent_version: "embedded-test".into(),
+                printer_revision: sequence,
+                acknowledged_command_cursor: None,
+                event_cursor: None,
+                queue: QueueSnapshot {
+                    queued_jobs: 0,
+                    active_jobs: 0,
+                    content_bytes: 0,
+                    accepts_jobs: true,
+                },
+                health: AgentHealth {
+                    started_at: now,
+                    observed_at: now,
+                    sqlite_integrity_ok: true,
+                    executor_crashes: 0,
+                    last_error_code: None,
+                },
+                printers: Some(vec![profiled_printer_snapshot(application.printer_id)]),
+                events: Vec::new(),
+                diagnostics: Vec::new(),
+                document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
+                capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
+                route_observations: vec![live_route_observation(application.printer_id, sequence)],
+                topology_changes: Vec::new(),
+                native_handoffs: Vec::new(),
+                runtime: Some(NodeRuntimeObservation {
+                    sequence,
+                    host_mode: NodeHostMode::EmbeddedApplication,
+                    availability_class: NodeAvailabilityClass::ForegroundOnly,
+                    lifecycle_state,
+                    accepts_cloud_jobs,
+                    observed_at: now,
+                    fresh_until: now + chrono::Duration::minutes(1),
+                    execution_budget_ms: None,
+                    wake_mechanisms: Vec::new(),
+                }),
+            }
+        };
+        let suspended = sync(1, NodeAvailability::Suspended, false);
+        let suspended_response = sync_agent_request(&application, &suspended).await;
+        assert!(suspended_response.candidate_jobs.is_empty());
+        assert!(suspended_response.wake_hints.is_empty());
+
+        let mut stale = sync(2, NodeAvailability::Foreground, true);
+        if let Some(runtime) = &mut stale.runtime {
+            runtime.observed_at = Utc::now() - chrono::Duration::minutes(2);
+            runtime.fresh_until = Utc::now() - chrono::Duration::minutes(1);
+        }
+        let stale_response = sync_agent_request(&application, &stale).await;
+        assert!(stale_response.candidate_jobs.is_empty());
+        assert_eq!(stale_response.wake_hints.len(), 1);
+        assert_eq!(
+            stale_response.wake_hints[0].delivery_channel,
+            piqae_protocol::agent::WakeDeliveryChannel::ExternalPush
+        );
+
+        let unsafe_suspended = sync(3, NodeAvailability::Suspended, true);
+        let unsafe_suspended_response = sync_agent_request(&application, &unsafe_suspended).await;
+        assert!(unsafe_suspended_response.candidate_jobs.is_empty());
+
+        let mut foreground = sync(4, NodeAvailability::Foreground, true);
+        foreground
+            .runtime
+            .as_mut()
+            .expect("runtime fixture")
+            .availability_class = NodeAvailabilityClass::WakeRelayCapable;
+        let foreground_response = sync_agent_request(&application, &foreground).await;
+        assert_eq!(foreground_response.candidate_jobs.len(), 1);
+        assert!(foreground_response.wake_hints.is_empty());
+
+        let runtime = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "GET",
+                &format!("/v1/nodes/{}/runtime", application.agent_id),
+                "piq_test_integration",
+                None,
+            ))
+            .await
+            .expect("read runtime projection");
+        assert_eq!(runtime.status(), StatusCode::OK);
+        let runtime_page = json_response(
+            &application.router,
+            api_request(
+                "GET",
+                "/v1/nodes/runtime-observations?limit=1",
+                "piq_test_integration",
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(runtime_page["data"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            runtime_page["data"][0]["node_id"],
+            application.agent_id.to_string()
+        );
+        assert_eq!(
+            runtime_page["data"][0]["availability_class"], "wake_relay_capable",
+            "relay capability is persisted as telemetry without creating a trusted relay"
+        );
+        let cross_tenant_runtime = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "GET",
+                &format!("/v1/nodes/{}/runtime", application.agent_id),
+                "piq_test_other",
+                None,
+            ))
+            .await
+            .expect("cross-tenant runtime probe");
+        assert_eq!(cross_tenant_runtime.status(), StatusCode::NOT_FOUND);
+        let cross_tenant_page = json_response(
+            &application.router,
+            api_request(
+                "GET",
+                "/v1/nodes/runtime-observations",
+                "piq_test_other",
+                None,
+            ),
+        )
+        .await;
+        assert!(
+            cross_tenant_page["data"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the HTTP idempotency and content-free event assertions share one durable job fixture"
+    )]
+    async fn waiting_job_dispatches_one_content_free_wake_hint_across_idempotent_retries() {
+        let application = application().await;
+        let body = serde_json::json!({
+            "printer_id": application.printer_id,
+            "title": "private wake title",
+            "content_type": "pdf",
+            "content": {"type": "base64", "data": "cHJpbnQ="}
+        })
+        .to_string();
+        let create = || {
+            idempotent_api_request(
+                "POST",
+                "/v1/jobs",
+                "piq_test_integration",
+                "automatic-wake-test-0001",
+                Some(&body),
+            )
+        };
+        let first = application
+            .router
+            .clone()
+            .oneshot(create())
+            .await
+            .expect("first create response");
+        assert_eq!(first.status(), StatusCode::CREATED);
+
+        let worker = crate::wake_hint_worker::WakeHintWorker::new(application.state.clone());
+        assert_eq!(worker.run_once(10).await.expect("first wake dispatch"), 1);
+        let events = application
+            .repository
+            .list_tenant_events(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                None,
+                100,
+            )
+            .await
+            .expect("tenant events");
+        let wakes = events
+            .iter()
+            .filter(|event| event.event_type == "node.wake_hint.requested")
+            .collect::<Vec<_>>();
+        assert_eq!(wakes.len(), 1);
+        let wake = wakes[0].payload.as_object().expect("wake object");
+        assert_eq!(
+            wake.get("reason"),
+            Some(&serde_json::json!("job_available"))
+        );
+        assert_eq!(
+            wake.get("delivery_channel"),
+            Some(&serde_json::json!("external_push"))
+        );
+        assert_eq!(
+            wake.get("node_id"),
+            Some(&serde_json::json!(application.agent_id.to_string()))
+        );
+        assert_eq!(
+            wake.keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                "delivery_channel",
+                "expires_at",
+                "id",
+                "node_id",
+                "observed_at",
+                "reason",
+                "requested_at",
+                "status",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        );
+        assert!(!wakes[0].payload.to_string().contains("private wake title"));
+        assert!(!wake.contains_key("job_id"));
+        assert!(!wake.contains_key("title"));
+        assert!(!wake.contains_key("content"));
+
+        let retry = application
+            .router
+            .clone()
+            .oneshot(create())
+            .await
+            .expect("idempotent retry response");
+        assert_eq!(retry.status(), StatusCode::OK);
+        assert_eq!(worker.run_once(10).await.expect("retry wake dispatch"), 0);
+        let events = application
+            .repository
+            .list_tenant_events(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                None,
+                100,
+            )
+            .await
+            .expect("tenant events after retry");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "node.wake_hint.requested")
+                .count(),
+            1
         );
     }
 
@@ -1235,24 +1764,139 @@ mod tests {
         serde_json::from_slice(&body).expect("JSON body")
     }
 
+    async fn sync_virtual_document_node(
+        application: &TestApplication,
+        document_render: piqae_protocol::agent::DocumentRenderCapabilities,
+        observe_route: bool,
+    ) -> AgentSyncResponse {
+        let now = Utc::now();
+        let sync = AgentSyncRequest {
+            agent_id: application.agent_id,
+            protocol_version: 1,
+            agent_version: "virtual-document-node".into(),
+            printer_revision: 1,
+            acknowledged_command_cursor: None,
+            event_cursor: None,
+            queue: QueueSnapshot {
+                queued_jobs: 0,
+                active_jobs: 0,
+                content_bytes: 0,
+                accepts_jobs: true,
+            },
+            health: AgentHealth {
+                started_at: now,
+                observed_at: now,
+                sqlite_integrity_ok: true,
+                executor_crashes: 0,
+                last_error_code: None,
+            },
+            printers: Some(vec![profiled_printer_snapshot(application.printer_id)]),
+            events: Vec::new(),
+            diagnostics: Vec::new(),
+            document_render,
+            capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
+            route_observations: observe_route
+                .then(|| live_route_observation(application.printer_id, 1))
+                .into_iter()
+                .collect(),
+            topology_changes: Vec::new(),
+            native_handoffs: Vec::new(),
+            runtime: None,
+        };
+        let response = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                application,
+                "POST",
+                "/v1/agent/sync",
+                serde_json::to_vec(&sync).expect("virtual node sync JSON"),
+            ))
+            .await
+            .expect("virtual node sync response");
+        let status = response.status();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("virtual node sync body")
+            .to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "virtual sync failed: {}",
+            String::from_utf8_lossy(&body)
+        );
+        serde_json::from_slice(&body).expect("virtual node sync response JSON")
+    }
+
+    fn virtual_print_packet_capabilities() -> piqae_protocol::agent::DocumentRenderCapabilities {
+        let neutral = printpacket::RendererCapabilities::reference_pdf();
+        piqae_protocol::agent::DocumentRenderCapabilities {
+            renderer_abi: Some("printpacket.pdf-renderer/v1".into()),
+            resource_abi: Some("printpacket.resources/v1".into()),
+            persistent_cache: true,
+            image_media_types: vec!["image/jpeg".into()],
+            print_packet: Some(piqae_protocol::agent::PrintPacketCapabilitiesV2 {
+                negotiation_version: 2,
+                supported_packet_versions: vec![printpacket::DOCUMENT_V1.into()],
+                feature_ids: neutral
+                    .features
+                    .iter()
+                    .map(|feature| {
+                        serde_json::to_value(feature)
+                            .expect("feature JSON")
+                            .as_str()
+                            .expect("feature string")
+                            .to_owned()
+                    })
+                    .collect(),
+                conformance_profiles: vec![printpacket::CONFORMANCE_CORE_V1.into()],
+                output_profiles: vec![piqae_protocol::agent::PrintPacketOutputProfile::Pdf {
+                    id: printpacket::PDF_BASE14_V1.into(),
+                    media_type: "application/pdf".into(),
+                }],
+                deterministic: true,
+                limits: piqae_protocol::agent::PrintPacketLimits {
+                    max_template_bytes: neutral.limits.max_template_bytes,
+                    max_input_bytes: neutral.limits.max_data_bytes,
+                    max_output_bytes: neutral.limits.max_output_bytes,
+                    max_pages: neutral.limits.max_pages,
+                    max_resource_count: neutral.limits.max_resources,
+                    max_resource_bytes: neutral.limits.max_resource_bytes,
+                    max_total_resource_bytes: neutral.limits.max_total_resource_bytes,
+                },
+                resource_types: vec!["image/jpeg".into()],
+                direct_offline: true,
+                native_language_profiles: Vec::new(),
+                implementation_version: "virtual-printpacket-v2".into(),
+            }),
+            ..Default::default()
+        }
+    }
+
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
-    async fn document_template_publish_and_render_is_tenant_scoped_end_to_end() {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the virtual end-to-end flow keeps setup, offer, fallback, and fail-closed assertions together"
+    )]
+    async fn node_render_selection_fallback_and_requirement_are_end_to_end() {
         let application = application().await;
+        let specification = serde_json::json!({
+            "format": "printpacket/v1",
+            "media": {"kind": "paged", "size": "a4"},
+            "body": [{"type": "paragraph", "content": [{"type": "text", "value": "Virtual"}]}]
+        });
         let template = json_response(
             &application.router,
             idempotent_api_request(
                 "POST",
-                "/v1/business-document-templates",
+                "/v1/printpacket/templates",
                 "piq_test_integration",
-                "template-receipt-v1",
+                "node-render-template",
                 Some(
-                    &serde_json::json!({
-                        "name": "Receipt",
-                        "specification": {"format":"piqae.business-document/v1","media":{"kind":"paged","size":"a4"},
-                            "body":[{"type":"paragraph","content":[{"type":"value","value":{"type":"path","path":["number"]}}]}]}
-                    })
-                    .to_string(),
+                    &serde_json::json!({"name": "Node render", "specification": specification})
+                        .to_string(),
                 ),
             ),
         )
@@ -1262,7 +1906,277 @@ mod tests {
             &application.router,
             idempotent_api_request(
                 "POST",
-                &format!("/v1/business-document-templates/{template_id}/publish"),
+                &format!("/v1/printpacket/templates/{template_id}/publish"),
+                "piq_test_integration",
+                "node-render-publish",
+                Some(&serde_json::json!({"specification": specification}).to_string()),
+            ),
+        )
+        .await;
+        let render = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                "/v1/printpacket/renders",
+                "piq_test_integration",
+                "node-render-register",
+                Some(
+                    &serde_json::json!({
+                        "template_revision_id": revision["id"],
+                        "input": {}
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        let render_id = render["id"].as_str().expect("render id");
+        let worker = crate::document_render_worker::DocumentRenderWorker::new(
+            application.state.clone(),
+            "virtual-node-render-worker",
+        );
+        assert_eq!(worker.run_once(1).await.expect("render"), 1);
+        let completed = json_response(
+            &application.router,
+            api_request(
+                "GET",
+                &format!("/v1/printpacket/renders/{render_id}"),
+                "piq_test_integration",
+                None,
+            ),
+        )
+        .await;
+        let page_count = completed["page_count"].as_u64().expect("completed pages");
+
+        let supported = virtual_print_packet_capabilities();
+        assert!(
+            sync_virtual_document_node(&application, supported.clone(), false)
+                .await
+                .candidate_jobs
+                .is_empty()
+        );
+        let readiness = json_response(
+            &application.router,
+            api_request(
+                "POST",
+                &format!("/v1/printpacket/renders/{render_id}/readiness"),
+                "piq_test_integration",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "render_policy": "prefer_node"
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(readiness["selected_mode"], "node_render");
+        assert_eq!(readiness["status"], "ready");
+        assert_eq!(readiness["destination"]["ready"], true);
+
+        for (label, incompatible) in [
+            ("determinism", {
+                let mut value = supported.clone();
+                value
+                    .print_packet
+                    .as_mut()
+                    .expect("PrintPacket capability")
+                    .deterministic = false;
+                value
+            }),
+            ("renderer ABI", {
+                let mut value = supported.clone();
+                value.renderer_abi = Some("printpacket.pdf-renderer/v2".into());
+                value
+            }),
+        ] {
+            let _ = sync_virtual_document_node(&application, incompatible, false).await;
+            let incompatible_readiness = json_response(
+                &application.router,
+                api_request(
+                    "POST",
+                    &format!("/v1/printpacket/renders/{render_id}/readiness"),
+                    "piq_test_integration",
+                    Some(
+                        &serde_json::json!({
+                            "printer_id": application.printer_id,
+                            "render_policy": "prefer_node"
+                        })
+                        .to_string(),
+                    ),
+                ),
+            )
+            .await;
+            assert_eq!(
+                incompatible_readiness["status"], "node_update_required",
+                "{label} incompatibility must request a node update"
+            );
+            assert_eq!(incompatible_readiness["selected_mode"], "cloud_pdf");
+        }
+        let _ = sync_virtual_document_node(&application, supported.clone(), false).await;
+
+        let required = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                &format!("/v1/printpacket/renders/{render_id}/print"),
+                "piq_test_integration",
+                "node-render-required",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "title": "Required node render",
+                        "render_policy": "require_node"
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        let required_job: JobId = required["id"]
+            .as_str()
+            .expect("required job id")
+            .parse()
+            .expect("typed job id");
+        let incompatible_required = sync_virtual_document_node(
+            &application,
+            piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            true,
+        )
+        .await;
+        assert!(incompatible_required.candidate_jobs.is_empty());
+        assert_eq!(
+            application
+                .repository
+                .get_job(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    required_job,
+                )
+                .await
+                .expect("blocked require_node job")
+                .state,
+            JobState::Blocked
+        );
+        assert_eq!(
+            application
+                .repository
+                .list_job_events(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    required_job,
+                )
+                .await
+                .expect("require_node block events")
+                .iter()
+                .filter(|event| {
+                    event.reason == Some(piqae_domain::JobFailureReason::NodeUpdateRequired)
+                })
+                .count(),
+            1
+        );
+        let offer = sync_virtual_document_node(&application, supported, false)
+            .await
+            .candidate_jobs
+            .into_iter()
+            .find(|offer| offer.job.id == required_job)
+            .expect("required node-render offer");
+        let piqae_protocol::agent::ContentDescriptor::PrintPacket {
+            policy,
+            render,
+            fallback_allowed,
+            ..
+        } = offer.content
+        else {
+            panic!("require_node must produce a PrintPacket offer");
+        };
+        assert_eq!(
+            policy,
+            piqae_protocol::agent::PrintPacketRenderPolicy::RequireNode
+        );
+        assert!(!fallback_allowed);
+        assert_eq!(u64::from(render.expected_page_count), page_count);
+
+        let _ = sync_virtual_document_node(
+            &application,
+            piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            false,
+        )
+        .await;
+        let preferred = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                &format!("/v1/printpacket/renders/{render_id}/print"),
+                "piq_test_integration",
+                "node-render-preferred-fallback",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "title": "Preferred fallback",
+                        "render_policy": "prefer_node"
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(
+            preferred["metadata"]["piqae.document.render_mode"],
+            "cloud_pdf"
+        );
+        let unavailable = application
+            .router
+            .clone()
+            .oneshot(idempotent_api_request(
+                "POST",
+                &format!("/v1/printpacket/renders/{render_id}/print"),
+                "piq_test_integration",
+                "node-render-required-unavailable",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "title": "Required unavailable",
+                        "render_policy": "require_node"
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .expect("require_node unavailable response");
+        assert_eq!(unavailable.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn document_template_publish_and_render_is_tenant_scoped_end_to_end() {
+        let application = application().await;
+        let template = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                "/v1/printpacket/templates",
+                "piq_test_integration",
+                "template-receipt-v1",
+                Some(
+                    &serde_json::json!({
+                        "name": "Receipt",
+                        "specification": {"format":"printpacket/v1","media":{"kind":"paged","size":"a4"},
+                            "body":[{"type":"paragraph","content":[{"type":"value","value":{"type":"path","path":["number"]}}]}]}
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(template["specification"]["format"], "printpacket/v1");
+        let template_id = template["id"].as_str().expect("template id");
+        let revision = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                &format!("/v1/printpacket/templates/{template_id}/publish"),
                 "piq_test_integration",
                 "publish-receipt-v1",
                 Some(&serde_json::json!({"specification": template["specification"]}).to_string()),
@@ -1274,7 +2188,7 @@ mod tests {
             &application.router,
             idempotent_api_request(
                 "POST",
-                &format!("/v1/business-document-templates/{template_id}/publish"),
+                &format!("/v1/printpacket/templates/{template_id}/publish"),
                 "piq_test_integration",
                 "publish-receipt-v1",
                 Some(&serde_json::json!({"specification": template["specification"]}).to_string()),
@@ -1287,12 +2201,12 @@ mod tests {
             .clone()
             .oneshot(idempotent_api_request(
                 "POST",
-                &format!("/v1/business-document-templates/{template_id}/publish"),
+                &format!("/v1/printpacket/templates/{template_id}/publish"),
                 "piq_test_integration",
                 "publish-receipt-v1",
                 Some(
                     &serde_json::json!({"specification": {
-                        "format":"piqae.business-document/v1","media":{"kind":"paged","size":"a4"},
+                        "format":"printpacket/v1","media":{"kind":"paged","size":"a4"},
                         "body":[{"type":"paragraph","content":[{"type":"text","value":"different"}]}]
                     }})
                     .to_string(),
@@ -1301,11 +2215,29 @@ mod tests {
             .await
             .expect("mismatched replay response");
         assert_eq!(mismatch.status(), StatusCode::CONFLICT);
+        let scalar_input = application
+            .router
+            .clone()
+            .oneshot(idempotent_api_request(
+                "POST",
+                "/v1/printpacket/renders",
+                "piq_test_integration",
+                "render-invalid-scalar",
+                Some(
+                    &serde_json::json!({
+                        "template_revision_id": revision_id, "input":["not", "an", "object"],
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .expect("scalar render input response");
+        assert_eq!(scalar_input.status(), StatusCode::BAD_REQUEST);
         let render = json_response(
             &application.router,
             idempotent_api_request(
                 "POST",
-                "/v1/business-document-renders",
+                "/v1/printpacket/renders",
                 "piq_test_integration",
                 "render-receipt-1042",
                 Some(
@@ -1334,7 +2266,7 @@ mod tests {
             .clone()
             .oneshot(idempotent_api_request(
                 "POST",
-                "/v1/business-document-renders",
+                "/v1/printpacket/renders",
                 "piq_test_integration",
                 "render-receipt-1042",
                 Some(
@@ -1353,7 +2285,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/business-document-renders/{}/artifact",
+                    "/v1/printpacket/renders/{}/artifact",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
@@ -1372,7 +2304,7 @@ mod tests {
             api_request(
                 "GET",
                 &format!(
-                    "/v1/business-document-renders/{}",
+                    "/v1/printpacket/renders/{}",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
@@ -1401,7 +2333,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/business-document-renders/{}/artifact",
+                    "/v1/printpacket/renders/{}/artifact",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
@@ -1417,7 +2349,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/business-document-renders/{}/artifact",
+                    "/v1/printpacket/renders/{}/artifact",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
@@ -1472,7 +2404,7 @@ mod tests {
             idempotent_api_request(
                 "POST",
                 &format!(
-                    "/v1/business-document-renders/{}/previews",
+                    "/v1/printpacket/renders/{}/previews",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
@@ -1488,7 +2420,7 @@ mod tests {
             .clone()
             .oneshot(api_request(
                 "GET",
-                &format!("/v1/business-document-previews/{preview_id}/artifact"),
+                &format!("/v1/printpacket/previews/{preview_id}/artifact"),
                 "piq_test_integration",
                 None,
             ))
@@ -1510,7 +2442,7 @@ mod tests {
             &application.router,
             idempotent_api_request(
                 "POST",
-                &format!("/v1/business-document-previews/{preview_id}/approve"),
+                &format!("/v1/printpacket/previews/{preview_id}/approve"),
                 "piq_test_integration",
                 &approval_key,
                 Some(
@@ -1531,7 +2463,7 @@ mod tests {
             &application.router,
             idempotent_api_request(
                 "POST",
-                &format!("/v1/business-document-previews/{preview_id}/approve"),
+                &format!("/v1/printpacket/previews/{preview_id}/approve"),
                 "piq_test_integration",
                 &approval_key,
                 Some(
@@ -1603,9 +2535,10 @@ mod tests {
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
             capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
-            route_observations: Vec::new(),
+            route_observations: vec![live_route_observation(application.printer_id, 1)],
             topology_changes: Vec::new(),
             native_handoffs: Vec::new(),
+            runtime: None,
         };
         let sync_response = application
             .router
@@ -1652,7 +2585,7 @@ mod tests {
             ..
         } = &offer.content
         else {
-            panic!("business-document print must use immutable download content");
+            panic!("PrintPacket print must use immutable download content");
         };
         assert_eq!(offered_sha256, &artifact_upload.expected_sha256);
         let reservation = offer
@@ -1699,7 +2632,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/business-document-renders/{}",
+                    "/v1/printpacket/renders/{}",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_other",
@@ -1714,7 +2647,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/business-document-renders/{}/artifact",
+                    "/v1/printpacket/renders/{}/artifact",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_other",
@@ -1739,7 +2672,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/business-document-renders/{}/artifact",
+                    "/v1/printpacket/renders/{}/artifact",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
@@ -1760,7 +2693,7 @@ mod tests {
             .oneshot(api_request(
                 "GET",
                 &format!(
-                    "/v1/business-document-renders/{}/artifact",
+                    "/v1/printpacket/renders/{}/artifact",
                     render["id"].as_str().expect("render id")
                 ),
                 "piq_test_integration",
@@ -1947,6 +2880,29 @@ mod tests {
         assert_eq!(ready.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
+    async fn sync_agent_request(
+        application: &TestApplication,
+        request: &AgentSyncRequest,
+    ) -> AgentSyncResponse {
+        let body = serde_json::to_vec(request).expect("sync JSON");
+        let response = application
+            .router
+            .clone()
+            .oneshot(signed_request(application, "POST", "/v1/agent/sync", body))
+            .await
+            .expect("sync response");
+        assert_eq!(response.status(), StatusCode::OK);
+        serde_json::from_slice(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("sync body")
+                .to_bytes(),
+        )
+        .expect("sync response JSON")
+    }
+
     async fn sync_test_agent(
         application: &TestApplication,
         acknowledged_command_cursor: Option<String>,
@@ -1980,24 +2936,9 @@ mod tests {
             route_observations: Vec::new(),
             topology_changes: Vec::new(),
             native_handoffs: Vec::new(),
+            runtime: None,
         };
-        let body = serde_json::to_vec(&request).expect("sync JSON");
-        let response = application
-            .router
-            .clone()
-            .oneshot(signed_request(application, "POST", "/v1/agent/sync", body))
-            .await
-            .expect("sync response");
-        assert_eq!(response.status(), StatusCode::OK);
-        serde_json::from_slice(
-            &response
-                .into_body()
-                .collect()
-                .await
-                .expect("sync body")
-                .to_bytes(),
-        )
-        .expect("sync response JSON")
+        sync_agent_request(application, &request).await
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2112,6 +3053,24 @@ mod tests {
         }
     }
 
+    fn live_route_observation(printer_id: PrinterId, sequence: u64) -> AgentRouteObservation {
+        AgentRouteObservation {
+            local_route_key: format!(
+                "rte_{}",
+                &format!("{:x}", Sha256::digest(printer_id.to_string().as_bytes()))[..32]
+            ),
+            sequence,
+            observed_at: Utc::now(),
+            inventory_revision: 1,
+            state: PrinterState::Online,
+            accepts_jobs: true,
+            state_reasons: Vec::new(),
+            queue: Some(PrivacySafeQueueObservation::default()),
+            profile_observed_at: Some(Utc::now()),
+            stock_observed_at: Some(Utc::now()),
+        }
+    }
+
     fn stored_profiled_printer(printer_id: PrinterId) -> piqae_storage_postgres::SyncedPrinter {
         let printer = profiled_printer_snapshot(printer_id);
         piqae_storage_postgres::SyncedPrinter {
@@ -2182,9 +3141,10 @@ mod tests {
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
             capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
-            route_observations: Vec::new(),
+            route_observations: vec![live_route_observation(printer_id, 1)],
             topology_changes: Vec::new(),
             native_handoffs: Vec::new(),
+            runtime: None,
         };
         let body = serde_json::to_vec(&request).expect("sync JSON");
         let sync = application
@@ -2356,9 +3316,10 @@ mod tests {
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
             capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
-            route_observations: Vec::new(),
+            route_observations: vec![live_route_observation(printer_id, 1)],
             topology_changes: Vec::new(),
             native_handoffs: Vec::new(),
+            runtime: None,
         };
         let body = serde_json::to_vec(&sync_request).expect("sync JSON");
         let response = application
@@ -2536,9 +3497,10 @@ mod tests {
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
             capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
-            route_observations: Vec::new(),
+            route_observations: vec![live_route_observation(printer_id, 2)],
             topology_changes: Vec::new(),
             native_handoffs: Vec::new(),
+            runtime: None,
         };
         let reconnect_body = serde_json::to_vec(&reconnect).expect("reconnect JSON");
         let reconnect_response = application
@@ -2743,6 +3705,751 @@ mod tests {
             .expect("stored jobs");
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].state, piqae_domain::JobState::WaitingForAgent);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn printer_native_jobs_require_a_current_exact_printer_language_binding() {
+        let application = application().await;
+        let request = |key: &str, printer_native: serde_json::Value| {
+            idempotent_api_request(
+                "POST",
+                "/v1/jobs",
+                "piq_test_integration",
+                key,
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "title": "Virtual receipt",
+                        "content_type": "raw",
+                        "printer_native": printer_native,
+                        "content": {"type": "base64", "data": "G0BmaXh0dXJl"}
+                    })
+                    .to_string(),
+                ),
+            )
+        };
+
+        let missing = application
+            .router
+            .clone()
+            .oneshot(idempotent_api_request(
+                "POST",
+                "/v1/jobs",
+                "piq_test_integration",
+                "raw-missing-binding",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "title": "Unbound receipt",
+                        "content_type": "raw",
+                        "content": {"type": "base64", "data": "G0BmaXh0dXJl"}
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .expect("missing binding response");
+        assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+
+        let mut capabilities = virtual_print_packet_capabilities();
+        let packet = capabilities
+            .print_packet
+            .as_mut()
+            .expect("PrintPacket capability");
+        packet.output_profiles.push(
+            piqae_protocol::agent::PrintPacketOutputProfile::PrinterNative {
+                id: "escpos.generic/v1".into(),
+                media_type: "application/vnd.escpos".into(),
+                language_profile_id: "escpos.generic/v1".into(),
+            },
+        );
+        packet
+            .native_language_profiles
+            .push(piqae_protocol::agent::PrinterNativeLanguageProfile {
+                id: "escpos.generic/v1".into(),
+                language: "escpos".into(),
+                language_version: "1".into(),
+                profile_version: "1.0.0".into(),
+                media_type: "application/vnd.escpos".into(),
+                driver_fingerprint_sha256: "b".repeat(64),
+                support_pack_digest_sha256: "c".repeat(64),
+                printer_ids: vec![application.printer_id.to_string()],
+            });
+        let _ = sync_virtual_document_node(&application, capabilities.clone(), false).await;
+
+        let wrong = application
+            .router
+            .clone()
+            .oneshot(request(
+                "raw-wrong-binding",
+                serde_json::json!({
+                    "output_profile_id": "zpl.generic/v1",
+                    "language_profile_id": "zpl.generic/v1"
+                }),
+            ))
+            .await
+            .expect("wrong binding response");
+        assert_eq!(wrong.status(), StatusCode::CONFLICT);
+
+        let accepted = application
+            .router
+            .clone()
+            .oneshot(request(
+                "raw-exact-binding",
+                serde_json::json!({
+                    "output_profile_id": "escpos.generic/v1",
+                    "language_profile_id": "escpos.generic/v1"
+                }),
+            ))
+            .await
+            .expect("exact binding response");
+        assert_eq!(accepted.status(), StatusCode::CREATED);
+        let accepted: serde_json::Value = serde_json::from_slice(
+            &accepted
+                .into_body()
+                .collect()
+                .await
+                .expect("exact binding body")
+                .to_bytes(),
+        )
+        .expect("exact binding JSON");
+        assert_eq!(
+            accepted["metadata"]["piqae.printer_native.language_profile"],
+            "escpos.generic/v1"
+        );
+        assert_eq!(
+            accepted["metadata"]["piqae.printer_native.language"],
+            "escpos"
+        );
+        assert_eq!(
+            accepted["metadata"]["piqae.printer_native.language_version"],
+            "1"
+        );
+        assert_eq!(
+            accepted["metadata"]["piqae.printer_native.profile_version"],
+            "1.0.0"
+        );
+        assert_eq!(
+            accepted["metadata"]["piqae.printer_native.driver_fingerprint_sha256"],
+            "b".repeat(64)
+        );
+        assert_eq!(
+            accepted["metadata"]["piqae.printer_native.support_pack_digest_sha256"],
+            "c".repeat(64)
+        );
+        assert_eq!(
+            accepted["metadata"]["piqae.printer_native.printer_id"],
+            application.printer_id.to_string()
+        );
+
+        let mut changed = capabilities.clone();
+        changed
+            .print_packet
+            .as_mut()
+            .and_then(|packet| packet.native_language_profiles.first_mut())
+            .expect("native language profile")
+            .language_version = "2".into();
+        let withheld = sync_virtual_document_node(&application, changed, false).await;
+        assert!(withheld.candidate_jobs.is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn incompatible_oldest_job_blocks_once_while_later_compatible_job_is_offered() {
+        use piqae_storage_postgres::destination_topology::TenantScope;
+
+        let application = application().await;
+        let mut raw_capabilities = virtual_print_packet_capabilities();
+        let packet = raw_capabilities
+            .print_packet
+            .as_mut()
+            .expect("PrintPacket capability");
+        packet.output_profiles.push(
+            piqae_protocol::agent::PrintPacketOutputProfile::PrinterNative {
+                id: "escpos.generic/v1".into(),
+                media_type: "application/vnd.escpos".into(),
+                language_profile_id: "escpos.generic/v1".into(),
+            },
+        );
+        packet
+            .native_language_profiles
+            .push(piqae_protocol::agent::PrinterNativeLanguageProfile {
+                id: "escpos.generic/v1".into(),
+                language: "escpos".into(),
+                language_version: "1".into(),
+                profile_version: "1.0.0".into(),
+                media_type: "application/vnd.escpos".into(),
+                driver_fingerprint_sha256: "b".repeat(64),
+                support_pack_digest_sha256: "c".repeat(64),
+                printer_ids: vec![application.printer_id.to_string()],
+            });
+        assert!(
+            sync_virtual_document_node(&application, raw_capabilities, false)
+                .await
+                .candidate_jobs
+                .is_empty()
+        );
+        let mut raw_jobs = Vec::new();
+        for index in 0..17 {
+            let raw = json_response(
+                &application.router,
+                idempotent_api_request(
+                    "POST",
+                    "/v1/jobs",
+                    "piq_test_integration",
+                    &format!("raw-capability-drift-{index}"),
+                    Some(
+                        &serde_json::json!({
+                            "printer_id": application.printer_id,
+                            "title": format!("Old native receipt {index}"),
+                            "content_type": "raw",
+                            "printer_native": {
+                                "output_profile_id": "escpos.generic/v1",
+                                "language_profile_id": "escpos.generic/v1"
+                            },
+                            "content": {"type": "base64", "data": "G0BmaXh0dXJl"}
+                        })
+                        .to_string(),
+                    ),
+                ),
+            )
+            .await;
+            raw_jobs.push(
+                raw["id"]
+                    .as_str()
+                    .expect("raw job id")
+                    .parse::<JobId>()
+                    .expect("typed raw job id"),
+            );
+        }
+        let raw_job = raw_jobs[0];
+        let pdf = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                "/v1/jobs",
+                "piq_test_integration",
+                "pdf-after-capability-drift",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "title": "Later PDF",
+                        "content_type": "pdf",
+                        "content": {"type": "base64", "data": "JVBERi0="}
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        let pdf_job: JobId = pdf["id"]
+            .as_str()
+            .expect("PDF job id")
+            .parse()
+            .expect("typed PDF job id");
+
+        let drifted = sync_virtual_document_node(
+            &application,
+            piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            false,
+        )
+        .await;
+        assert!(
+            drifted.candidate_jobs.is_empty(),
+            "the bounded first scan must not skip beyond sixteen incompatible jobs"
+        );
+        let blocked_after_first = application
+            .repository
+            .list_jobs(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                None,
+                100,
+            )
+            .await
+            .expect("jobs after bounded scan")
+            .into_iter()
+            .filter(|job| job.state == JobState::Blocked)
+            .count();
+        assert_eq!(blocked_after_first, 16);
+        let drifted = sync_virtual_document_node(
+            &application,
+            piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            true,
+        )
+        .await;
+        assert_eq!(drifted.candidate_jobs.len(), 1);
+        assert_eq!(drifted.candidate_jobs[0].job.id, pdf_job);
+        assert_eq!(
+            application
+                .repository
+                .get_job(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    raw_job,
+                )
+                .await
+                .expect("blocked raw job")
+                .state,
+            JobState::Blocked
+        );
+        let job_events = application
+            .repository
+            .list_job_events(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                raw_job,
+            )
+            .await
+            .expect("raw job events");
+        assert_eq!(
+            job_events
+                .iter()
+                .filter(|event| {
+                    event.reason == Some(piqae_domain::JobFailureReason::NodeUpdateRequired)
+                })
+                .count(),
+            1
+        );
+        let tenant_events = application
+            .repository
+            .list_tenant_events(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                None,
+                500,
+            )
+            .await
+            .expect("tenant events");
+        assert_eq!(
+            tenant_events
+                .iter()
+                .filter(|event| {
+                    event.event_type == "job.updated"
+                        && event.payload["id"] == raw_job.as_ulid().to_string()
+                        && event.payload["state"] == "blocked"
+                })
+                .count(),
+            1
+        );
+        let reservations = application
+            .state
+            .destination_topology
+            .list_route_reservations(
+                TenantScope {
+                    workspace_id: application.tenant.workspace_id,
+                    environment_id: application.tenant.environment_id,
+                },
+                100,
+            )
+            .await
+            .expect("route reservations");
+        assert!(
+            reservations.iter().all(|reservation| !raw_jobs
+                .iter()
+                .any(|job| job.to_string() == reservation.job_id)),
+            "the incompatible job must be blocked before any route reservation"
+        );
+
+        let retry = sync_virtual_document_node(
+            &application,
+            piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            false,
+        )
+        .await;
+        assert!(retry.candidate_jobs.is_empty());
+        assert_eq!(
+            application
+                .repository
+                .list_job_events(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    raw_job,
+                )
+                .await
+                .expect("raw events after retry")
+                .iter()
+                .filter(|event| {
+                    event.reason == Some(piqae_domain::JobFailureReason::NodeUpdateRequired)
+                })
+                .count(),
+            1,
+            "an unchanged capability report must not create a retry storm"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn capability_recovery_pages_past_sixteen_incompatible_jobs() {
+        let application = application().await;
+        assert!(
+            sync_virtual_document_node(
+                &application,
+                piqae_protocol::agent::DocumentRenderCapabilities::default(),
+                false,
+            )
+            .await
+            .candidate_jobs
+            .is_empty()
+        );
+        let mut live_events = application.state.events.subscribe();
+        let mut job_ids = Vec::new();
+        let base_time = Utc::now() - chrono::Duration::minutes(1);
+        for index in 0..17 {
+            let profile = if index < 16 {
+                "zpl.generic/v1"
+            } else {
+                "escpos.generic/v1"
+            };
+            let language = if index < 16 { "zpl" } else { "escpos" };
+            let media_type = if index < 16 {
+                "application/vnd.zebra-zpl"
+            } else {
+                "application/vnd.escpos"
+            };
+            let job = piqae_domain::Job {
+                id: JobId::new(),
+                workspace_id: application.tenant.workspace_id,
+                environment_id: application.tenant.environment_id,
+                printer_id: application.printer_id,
+                title: format!("Paged native job {index}"),
+                source: None,
+                content_kind: piqae_domain::ContentKind::Raw,
+                content: piqae_domain::ContentSource::Base64 {
+                    data: "G0BmaXh0dXJl".into(),
+                },
+                options: piqae_domain::JobOptions::default(),
+                metadata: std::collections::BTreeMap::from([
+                    ("piqae.printer_native.output_profile".into(), profile.into()),
+                    (
+                        "piqae.printer_native.language_profile".into(),
+                        profile.into(),
+                    ),
+                    ("piqae.printer_native.language".into(), language.into()),
+                    ("piqae.printer_native.language_version".into(), "1".into()),
+                    (
+                        "piqae.printer_native.profile_version".into(),
+                        "1.0.0".into(),
+                    ),
+                    ("piqae.printer_native.media_type".into(), media_type.into()),
+                    (
+                        "piqae.printer_native.driver_fingerprint_sha256".into(),
+                        "b".repeat(64),
+                    ),
+                    (
+                        "piqae.printer_native.support_pack_digest_sha256".into(),
+                        "c".repeat(64),
+                    ),
+                    (
+                        "piqae.printer_native.printer_id".into(),
+                        application.printer_id.to_string(),
+                    ),
+                ]),
+                deliveries: 1,
+                state: JobState::WaitingForAgent,
+                created_at: base_time + chrono::Duration::milliseconds(i64::from(index)),
+                expires_at: Utc::now() + chrono::Duration::hours(1),
+                delivery_uncertain_since: None,
+            };
+            job_ids.push(job.id);
+            application
+                .repository
+                .create_job(&job, application.agent_id, None, job.title.as_bytes())
+                .await
+                .expect("create paged capability job");
+        }
+
+        let first = sync_virtual_document_node(
+            &application,
+            piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            false,
+        )
+        .await;
+        assert!(first.candidate_jobs.is_empty());
+        let second = sync_virtual_document_node(
+            &application,
+            piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            false,
+        )
+        .await;
+        assert!(second.candidate_jobs.is_empty());
+        let mut block_broadcasts = 0;
+        while let Ok(event) = live_events.try_recv() {
+            if event.event_type == "job.updated" && event.data["state"] == "blocked" {
+                block_broadcasts += 1;
+            }
+        }
+        assert_eq!(block_broadcasts, 17);
+
+        let mut restored = virtual_print_packet_capabilities();
+        let packet = restored
+            .print_packet
+            .as_mut()
+            .expect("PrintPacket capability");
+        packet.output_profiles.push(
+            piqae_protocol::agent::PrintPacketOutputProfile::PrinterNative {
+                id: "escpos.generic/v1".into(),
+                media_type: "application/vnd.escpos".into(),
+                language_profile_id: "escpos.generic/v1".into(),
+            },
+        );
+        packet
+            .native_language_profiles
+            .push(piqae_protocol::agent::PrinterNativeLanguageProfile {
+                id: "escpos.generic/v1".into(),
+                language: "escpos".into(),
+                language_version: "1".into(),
+                profile_version: "1.0.0".into(),
+                media_type: "application/vnd.escpos".into(),
+                driver_fingerprint_sha256: "b".repeat(64),
+                support_pack_digest_sha256: "c".repeat(64),
+                printer_ids: vec![application.printer_id.to_string()],
+            });
+        let recovered = sync_virtual_document_node(&application, restored, true).await;
+        assert_eq!(recovered.candidate_jobs.len(), 1);
+        assert_eq!(recovered.candidate_jobs[0].job.id, job_ids[16]);
+        let recovery_broadcasts = std::iter::from_fn(|| live_events.try_recv().ok())
+            .filter(|event| {
+                event.event_type == "job.updated"
+                    && event.data["id"] == job_ids[16].as_ulid().to_string()
+                    && event.data["state"] == "waiting_for_agent"
+            })
+            .count();
+        assert_eq!(recovery_broadcasts, 1);
+        for job_id in &job_ids[..16] {
+            assert_eq!(
+                application
+                    .repository
+                    .get_job(
+                        application.tenant.workspace_id,
+                        application.tenant.environment_id,
+                        *job_id,
+                    )
+                    .await
+                    .expect("permanently incompatible job")
+                    .state,
+                JobState::Blocked
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn poisoned_oldest_job_fails_durably_without_holding_later_leases() {
+        let application = application().await;
+        assert!(
+            sync_virtual_document_node(
+                &application,
+                piqae_protocol::agent::DocumentRenderCapabilities::default(),
+                false,
+            )
+            .await
+            .candidate_jobs
+            .is_empty()
+        );
+        let mut live_events = application.state.events.subscribe();
+        let poisoned_job = piqae_domain::Job {
+            id: JobId::new(),
+            workspace_id: application.tenant.workspace_id,
+            environment_id: application.tenant.environment_id,
+            printer_id: application.printer_id,
+            title: "Poisoned inline content".into(),
+            source: None,
+            content_kind: piqae_domain::ContentKind::Pdf,
+            content: piqae_domain::ContentSource::Base64 {
+                data: "not-valid-base64".into(),
+            },
+            options: piqae_domain::JobOptions::default(),
+            metadata: std::collections::BTreeMap::new(),
+            deliveries: 1,
+            state: JobState::WaitingForAgent,
+            created_at: Utc::now() - chrono::Duration::seconds(1),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            delivery_uncertain_since: None,
+        };
+        application
+            .repository
+            .create_job(
+                &poisoned_job,
+                application.agent_id,
+                None,
+                b"poisoned virtual fixture",
+            )
+            .await
+            .expect("create poisoned fixture");
+        let later = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                "/v1/jobs",
+                "piq_test_integration",
+                "later-after-poison",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "title": "Later valid PDF",
+                        "content_type": "pdf",
+                        "content": {"type": "base64", "data": "JVBERi0="}
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        let later_id: JobId = later["id"]
+            .as_str()
+            .expect("later job id")
+            .parse()
+            .expect("typed later job id");
+        let sync = sync_virtual_document_node(
+            &application,
+            piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            true,
+        )
+        .await;
+        assert_eq!(sync.candidate_jobs.len(), 1);
+        assert_eq!(sync.candidate_jobs[0].job.id, later_id);
+        assert_eq!(
+            application
+                .repository
+                .get_job(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    poisoned_job.id,
+                )
+                .await
+                .expect("failed poison job")
+                .state,
+            JobState::FailedTerminal
+        );
+        let poison_events = application
+            .repository
+            .list_job_events(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                poisoned_job.id,
+            )
+            .await
+            .expect("poison events");
+        assert_eq!(
+            poison_events.last().and_then(|event| event.reason.clone()),
+            Some(piqae_domain::JobFailureReason::ContentChecksumMismatch)
+        );
+        assert_eq!(
+            poison_events.last().and_then(|event| event.agent_id),
+            None,
+            "server content validation must not blame the assigned node"
+        );
+        let failure_broadcasts = std::iter::from_fn(|| live_events.try_recv().ok())
+            .filter(|event| {
+                event.event_type == "job.updated"
+                    && event.data["id"] == poisoned_job.id.as_ulid().to_string()
+                    && event.data["state"] == "failed_terminal"
+            })
+            .count();
+        assert_eq!(failure_broadcasts, 1);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_local_responsibility_does_not_block_later_candidates() {
+        let application = application().await;
+        assert!(
+            sync_virtual_document_node(
+                &application,
+                piqae_protocol::agent::DocumentRenderCapabilities::default(),
+                false,
+            )
+            .await
+            .candidate_jobs
+            .is_empty()
+        );
+        let oldest = piqae_domain::Job {
+            id: JobId::new(),
+            workspace_id: application.tenant.workspace_id,
+            environment_id: application.tenant.environment_id,
+            printer_id: application.printer_id,
+            title: "Locally admitted retry".into(),
+            source: None,
+            content_kind: piqae_domain::ContentKind::Raw,
+            content: piqae_domain::ContentSource::Base64 {
+                data: "G0BmaXh0dXJl".into(),
+            },
+            options: piqae_domain::JobOptions::default(),
+            metadata: std::collections::BTreeMap::from([
+                (
+                    "piqae.printer_native.output_profile".into(),
+                    "escpos.generic/v1".into(),
+                ),
+                (
+                    "piqae.printer_native.language_profile".into(),
+                    "escpos.generic/v1".into(),
+                ),
+            ]),
+            deliveries: 1,
+            state: JobState::WaitingForAgent,
+            created_at: Utc::now() - chrono::Duration::seconds(2),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            delivery_uncertain_since: None,
+        };
+        let later = piqae_domain::Job {
+            id: JobId::new(),
+            title: "Later compatible PDF".into(),
+            content_kind: piqae_domain::ContentKind::Pdf,
+            content: piqae_domain::ContentSource::Base64 {
+                data: "JVBERi0=".into(),
+            },
+            created_at: Utc::now() - chrono::Duration::seconds(1),
+            ..oldest.clone()
+        };
+        for job in [&oldest, &later] {
+            application
+                .repository
+                .create_job(job, application.agent_id, None, job.title.as_bytes())
+                .await
+                .expect("create scheduling fixture");
+        }
+        application
+            .repository
+            .mark_local_responsibility_for_test(oldest.id, application.agent_id)
+            .await;
+
+        let response = sync_virtual_document_node(
+            &application,
+            piqae_protocol::agent::DocumentRenderCapabilities::default(),
+            true,
+        )
+        .await;
+        assert_eq!(response.candidate_jobs.len(), 1);
+        assert_eq!(response.candidate_jobs[0].job.id, later.id);
+        assert_eq!(
+            application
+                .repository
+                .get_job(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    oldest.id,
+                )
+                .await
+                .expect("locally owned job")
+                .state,
+            JobState::FailedRetryable
+        );
+        assert!(
+            application
+                .repository
+                .list_job_events(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    oldest.id,
+                )
+                .await
+                .expect("locally owned events")
+                .iter()
+                .all(|event| {
+                    event.reason != Some(piqae_domain::JobFailureReason::NodeUpdateRequired)
+                })
+        );
     }
 
     #[tokio::test]
@@ -3359,7 +5066,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
-    async fn cancellation_is_redelivered_until_the_agent_acknowledges_its_cursor() {
+    async fn preaccept_cancellation_is_terminal_and_stale_n_minus_one_command_is_retired() {
         let application = application().await;
         let created = application
             .router
@@ -3402,17 +5109,19 @@ mod tests {
                 .await,
             Err(crate::repository::RepositoryError::NotFound)
         ));
-        let rerouted_agent = AgentId::new();
-        application
+        let direct_job_updated_before = application
             .repository
-            .add_printer(
+            .list_tenant_events(
                 application.tenant.workspace_id,
                 application.tenant.environment_id,
-                application.printer_id,
-                rerouted_agent,
+                None,
+                500,
             )
-            .await;
-
+            .await
+            .expect("tenant events before direct cancellation")
+            .into_iter()
+            .filter(|event| event.event_type == "job.updated")
+            .count();
         let cancelled = application
             .router
             .clone()
@@ -3427,71 +5136,262 @@ mod tests {
             .await
             .expect("cancel response");
         assert_eq!(cancelled.status(), StatusCode::ACCEPTED);
+        let direct_job_updated_after = application
+            .repository
+            .list_tenant_events(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                None,
+                500,
+            )
+            .await
+            .expect("tenant events after direct cancellation")
+            .into_iter()
+            .filter(|event| event.event_type == "job.updated")
+            .count();
+        assert_eq!(direct_job_updated_after, direct_job_updated_before + 1);
 
         let first = sync_test_agent(&application, None).await;
-        assert!(matches!(
-            first.commands.as_slice(),
-            [AgentCommand::CancelJob { job_id: command_job_id }] if *command_job_id == job_id
-        ));
-        let cursor = first.command_cursor.expect("command cursor");
-        let rerouted = application
-            .repository
-            .sync_agent_commands(
-                application.tenant.workspace_id,
-                application.tenant.environment_id,
-                rerouted_agent,
-                None,
-                100,
-            )
-            .await
-            .expect("rerouted agent command batch");
-        assert!(rerouted.commands.is_empty());
-
-        let retry = sync_test_agent(&application, None).await;
-        assert_eq!(retry.command_cursor.as_deref(), Some(cursor.as_str()));
-        assert_eq!(retry.commands.len(), 1);
-
-        let acknowledged = sync_test_agent(&application, Some(cursor.clone())).await;
-        assert!(acknowledged.commands.is_empty());
-        assert!(acknowledged.command_cursor.is_none());
-
-        application
-            .repository
-            .transition_job(
-                application.tenant.workspace_id,
-                application.tenant.environment_id,
-                job_id,
-                JobState::Cancelled,
-                None,
-                Some("Cancellation completed".into()),
-                Some(application.agent_id),
-                None,
-            )
-            .await
-            .expect("terminal cancellation");
-        assert!(matches!(
+        assert!(first.commands.is_empty());
+        assert_eq!(
             application
                 .repository
-                .request_job_cancellation(
+                .get_job(
                     application.tenant.workspace_id,
                     application.tenant.environment_id,
                     job_id,
                 )
-                .await,
-            Err(crate::repository::RepositoryError::InvalidTransition)
-        ));
-        let after_rejected_cancel = application
+                .await
+                .expect("cancelled job")
+                .state,
+            JobState::Cancelled
+        );
+
+        // Simulate a cancellation stored by an N-1 server before the direct
+        // pre-accept terminalization existed. The current server proves the
+        // exact tenant/node job was never accepted and retires it without
+        // relying on a new command shape the old node would ignore.
+        application
+            .repository
+            .enqueue_agent_command(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                &AgentCommand::CancelJob { job_id },
+            )
+            .await
+            .expect("legacy command");
+        let repaired = sync_test_agent(&application, None).await;
+        assert!(repaired.commands.is_empty());
+        assert!(repaired.command_cursor.is_some());
+        let after_repair = application
             .repository
             .sync_agent_commands(
                 application.tenant.workspace_id,
                 application.tenant.environment_id,
                 application.agent_id,
-                Some(&cursor),
+                None,
                 100,
             )
             .await
-            .expect("no command after rejected cancellation");
-        assert!(after_rejected_cancel.commands.is_empty());
+            .expect("retired command");
+        assert!(after_repair.commands.is_empty());
+
+        // Model the narrower N-1 crash window: CancelRequested and its command
+        // committed, but the server did not yet complete the pre-accept
+        // cancellation. Retrying the repair must create exactly one durable
+        // tenant event while still retiring the command on every replay.
+        let repair_created = application
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/jobs")
+                    .header("authorization", "Bearer piq_test_integration")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"printer_id":"{}","title":"Repair cancel","content_type":"pdf","content":{{"type":"base64","data":"cHJpbnQ="}}}}"#,
+                        application.printer_id
+                    )))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("repair create response");
+        let repair_body: serde_json::Value = serde_json::from_slice(
+            &repair_created
+                .into_body()
+                .collect()
+                .await
+                .expect("repair create body")
+                .to_bytes(),
+        )
+        .expect("repair create JSON");
+        let repair_job_id = JobId::from_str(repair_body["id"].as_str().expect("repair job ID"))
+            .expect("typed repair job ID");
+        application
+            .repository
+            .transition_job(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                repair_job_id,
+                JobState::CancelRequested,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("legacy cancel-requested state");
+        application
+            .repository
+            .enqueue_agent_command(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                &AgentCommand::CancelJob {
+                    job_id: repair_job_id,
+                },
+            )
+            .await
+            .expect("legacy repair command");
+        let job_updated_before = application
+            .repository
+            .list_tenant_events(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                None,
+                500,
+            )
+            .await
+            .expect("tenant events before repair")
+            .into_iter()
+            .filter(|event| event.event_type == "job.updated")
+            .count();
+        for _ in 0..2 {
+            assert!(
+                application
+                    .repository
+                    .retire_terminal_absent_local_cancellation(
+                        application.tenant.workspace_id,
+                        application.tenant.environment_id,
+                        application.agent_id,
+                        repair_job_id,
+                    )
+                    .await
+                    .expect("idempotent repair")
+            );
+        }
+        let job_updated_after = application
+            .repository
+            .list_tenant_events(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                None,
+                500,
+            )
+            .await
+            .expect("tenant events")
+            .into_iter()
+            .filter(|event| event.event_type == "job.updated")
+            .count();
+        assert_eq!(job_updated_after, job_updated_before + 1);
+
+        let accepted_created = application
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/jobs")
+                    .header("authorization", "Bearer piq_test_integration")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"printer_id":"{}","title":"Accepted cancel","content_type":"pdf","content":{{"type":"base64","data":"cHJpbnQ="}}}}"#,
+                        application.printer_id
+                    )))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("create accepted response");
+        let accepted_body: serde_json::Value = serde_json::from_slice(
+            &accepted_created
+                .into_body()
+                .collect()
+                .await
+                .expect("accepted create body")
+                .to_bytes(),
+        )
+        .expect("accepted create JSON");
+        let accepted_job_id =
+            JobId::from_str(accepted_body["id"].as_str().expect("accepted job ID"))
+                .expect("typed accepted job ID");
+        let lease = application
+            .repository
+            .claim_jobs(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                "accepted-cancel-test",
+                1,
+            )
+            .await
+            .expect("claim accepted job")
+            .into_iter()
+            .find(|lease| lease.job.id == accepted_job_id)
+            .expect("accepted job lease");
+        application
+            .repository
+            .accept_agent_job(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                accepted_job_id,
+                lease.lease_id,
+                &lease.lease_token,
+                None,
+                1,
+            )
+            .await
+            .expect("durable acceptance");
+        application
+            .repository
+            .request_job_cancellation(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                accepted_job_id,
+            )
+            .await
+            .expect("accepted cancellation request");
+        assert!(
+            !application
+                .repository
+                .retire_terminal_absent_local_cancellation(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    application.agent_id,
+                    accepted_job_id,
+                )
+                .await
+                .expect("accepted proof")
+        );
+        assert!(
+            !application
+                .repository
+                .retire_terminal_absent_local_cancellation(
+                    application.tenant.workspace_id,
+                    application.tenant.environment_id,
+                    AgentId::new(),
+                    accepted_job_id,
+                )
+                .await
+                .expect("wrong-agent proof")
+        );
+        let accepted_command = sync_test_agent(&application, None).await;
+        assert!(matches!(
+            accepted_command.commands.as_slice(),
+            [AgentCommand::CancelJob { job_id: candidate }] if *candidate == accepted_job_id
+        ));
     }
 
     #[tokio::test]
@@ -3587,9 +5487,10 @@ mod tests {
             diagnostics: Vec::new(),
             document_render: piqae_protocol::agent::DocumentRenderCapabilities::default(),
             capabilities: piqae_protocol::agent::AgentProtocolCapabilities::default(),
-            route_observations: Vec::new(),
+            route_observations: vec![live_route_observation(application.printer_id, 1)],
             topology_changes: Vec::new(),
             native_handoffs: Vec::new(),
+            runtime: None,
         };
         let sync_body = serde_json::to_vec(&sync).expect("sync JSON");
         let sync_response = application
@@ -3659,6 +5560,32 @@ mod tests {
             .await
             .expect("retry accept response");
         assert_eq!(retry.status(), StatusCode::OK);
+        let mut mismatched_route = accept.clone();
+        mismatched_route.route_reservation_id = Some(uuid::Uuid::new_v4());
+        let route_rejected = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                &application,
+                "POST",
+                &path,
+                serde_json::to_vec(&mismatched_route).expect("mismatched route accept JSON"),
+            ))
+            .await
+            .expect("mismatched route response");
+        assert_eq!(route_rejected.status(), StatusCode::CONFLICT);
+        let exact_after_route_conflict = application
+            .router
+            .clone()
+            .oneshot(signed_request(
+                &application,
+                "POST",
+                &path,
+                serde_json::to_vec(&accept).expect("exact accept JSON"),
+            ))
+            .await
+            .expect("exact accept after route conflict");
+        assert_eq!(exact_after_route_conflict.status(), StatusCode::OK);
         let mut mismatched = accept.clone();
         mismatched.lease_token.push('x');
         let rejected = application
@@ -3699,5 +5626,92 @@ mod tests {
             .await
             .expect("accepted job");
         assert_eq!(stored.state, piqae_domain::JobState::AgentAccepted);
+        let reservation_id = accept
+            .route_reservation_id
+            .expect("accepted route reservation")
+            .to_string();
+        let generation = accept.route_generation.expect("accepted route generation");
+        let fencing_token = accept
+            .route_fencing_token
+            .as_deref()
+            .expect("accepted route fence");
+        let before_revoke = application
+            .repository
+            .reconcile_agent_acceptance(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                offer.job.id,
+                accept.lease_id,
+                &accept.lease_token,
+                &accept.content_sha256,
+                accept.local_sequence,
+                piqae_storage_postgres::DeliveryAttemptProof {
+                    reservation_id: &reservation_id,
+                    generation,
+                    fencing_token,
+                },
+            )
+            .await
+            .expect("memory acceptance reconciliation");
+        assert_eq!(before_revoke, (true, false, false));
+        application
+            .repository
+            .revoke_node_connector(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                &format!("ncon_{}", application.agent_id),
+            )
+            .await
+            .expect("memory connector revoke");
+        application
+            .repository
+            .reactivate_connector_for_test(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+            )
+            .await;
+        let after_reactivation = application
+            .repository
+            .reconcile_agent_acceptance(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                application.agent_id,
+                offer.job.id,
+                accept.lease_id,
+                &accept.lease_token,
+                &accept.content_sha256,
+                accept.local_sequence,
+                piqae_storage_postgres::DeliveryAttemptProof {
+                    reservation_id: &reservation_id,
+                    generation,
+                    fencing_token,
+                },
+            )
+            .await
+            .expect("memory reactivated reconciliation");
+        assert_eq!(after_reactivation, (false, false, true));
+        let foreign_scope = application
+            .repository
+            .reconcile_agent_acceptance(
+                WorkspaceId::new(),
+                EnvironmentId::new(),
+                application.agent_id,
+                offer.job.id,
+                accept.lease_id,
+                &accept.lease_token,
+                &accept.content_sha256,
+                accept.local_sequence,
+                piqae_storage_postgres::DeliveryAttemptProof {
+                    reservation_id: &reservation_id,
+                    generation,
+                    fencing_token,
+                },
+            )
+            .await
+            .expect("cross-tenant reconciliation is privacy safe");
+        assert_eq!(foreign_scope, (false, false, false));
     }
 }

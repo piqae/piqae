@@ -17,6 +17,20 @@ agent over bounded standard input rather than command-line arguments.
 The legacy `piqae://connect` scheme is deprecated compatibility and is not
 emitted for new sessions.
 
+The standalone node stores a revisioned local display identity separately from
+its cryptographic installation identity. On first start it uses the macOS
+Computer Name when available, never the account username. **This Node → Rename
+& Set Location…** edits the display name and optional site/location. Existing
+cloud workspaces may keep their own node-name override; renaming either surface
+does not rotate keys, recreate printers, or change connector ownership.
+
+The installed node remains the common, user-managed host for zero to many
+connections. An embedded macOS SDK app should prefer the authenticated local
+broker, so an approved app uses connector-isolated state inside the shared
+runtime instead of starting a second competing runtime. Physical handoff stays
+serialized. Explicit isolated-app mode remains available for
+applications which intentionally need a separate installation.
+
 Cloud document-decryption keys are stored in the current user's macOS login
 Keychain. P-256 key material is verified before a legacy file is removed. The agent refuses cloud
 startup when Keychain access or migration fails; it does not silently replace a

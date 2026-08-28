@@ -23,6 +23,8 @@ export const agents: DashboardAgent[] = [
     lastSeenAt: ago(0),
     queueDepth: 4,
     printerCount: 3,
+    site: 'Main warehouse',
+    location: 'Packing desk',
     labels: ['warehouse', 'labels']
   },
   {

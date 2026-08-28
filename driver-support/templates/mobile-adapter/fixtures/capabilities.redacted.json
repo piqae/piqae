@@ -1,0 +1,6 @@
+{
+  "adapter_id": "org.example.printer-adapter",
+  "adapter_version": "1.0.0",
+  "device_family": "Replace with exact documented family",
+  "options": ["replace-with-native-choice"]
+}

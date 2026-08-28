@@ -8,7 +8,7 @@
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use piqae_domain::{
-    AgentId, EnvironmentId, EventId, Job, JobEvent, JobId, JobOptions, JobState,
+    AgentId, EnvironmentId, EventId, Job, JobEvent, JobFailureReason, JobId, JobOptions, JobState,
     NativePrinterOption, PrinterCapabilities, PrinterId, PrinterState, WorkspaceId,
     validate_transition,
 };
@@ -54,9 +54,140 @@ const PRO_PLAN: PlanDefaults = PlanDefaults {
 };
 const PRO_ANNUAL_INCLUDED_JOBS: i64 = 300_000;
 
+#[derive(Debug)]
+struct AppliedMigration {
+    version: i64,
+    description: String,
+    success: bool,
+    checksum: Vec<u8>,
+}
+
+fn applied_history_is_current_prefix(
+    rows: &[AppliedMigration],
+    migrator: &sqlx::migrate::Migrator,
+) -> bool {
+    if rows.len() > migrator.iter().count() {
+        return false;
+    }
+    rows.iter().zip(migrator.iter()).all(|(applied, current)| {
+        let checksum_matches = applied.checksum.as_slice() == current.checksum.as_ref();
+        applied.success
+            && applied.version == current.version
+            && applied.description == current.description
+            && checksum_matches
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct PostgresStore {
     pool: PgPool,
+}
+
+/// Returns the stable outbox idempotency key used when connector revocation
+/// fences an accepted job.
+///
+/// The persisted event keeps a normal time-sortable `EventId`; retries recover
+/// that ID through this key instead of creating a second durable event.
+#[must_use]
+pub fn acceptance_revocation_webhook_idempotency_key(
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+    event_type: &str,
+) -> String {
+    let digest = Sha256::digest(
+        format!("{workspace_id}\n{environment_id}\n{job_id}\n{event_type}").as_bytes(),
+    );
+    format!("acceptance-revocation:{digest:x}")
+}
+
+/// Returns the stable outbox key for the durable `AgentAccepted` transition.
+///
+/// The event row is committed in the same transaction as the acceptance, so a
+/// lost HTTP response or process crash cannot leave tenant consumers behind.
+#[must_use]
+pub fn agent_acceptance_webhook_idempotency_key(
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+) -> String {
+    let digest = Sha256::digest(format!("{workspace_id}\n{environment_id}\n{job_id}").as_bytes());
+    format!("agent-acceptance:{digest:x}")
+}
+
+/// Returns the stable outbox key for cancellation completed before acceptance.
+///
+/// Agent sync can retry this repair after a lost response; the durable tenant
+/// event must still be emitted exactly once.
+#[must_use]
+pub fn preaccept_cancellation_webhook_idempotency_key(
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+) -> String {
+    let digest = Sha256::digest(format!("{workspace_id}\n{environment_id}\n{job_id}").as_bytes());
+    format!("preaccept-cancellation:{digest:x}")
+}
+
+/// Returns the stable outbox key for a capability rejection before handoff.
+///
+/// Capability drift can be observed repeatedly by sync retries. The job state,
+/// lifecycle event, and tenant webhook are committed once under this key.
+#[must_use]
+pub fn node_update_required_webhook_idempotency_key(
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+    sequence: u64,
+) -> String {
+    let digest = Sha256::digest(
+        format!("{workspace_id}\n{environment_id}\n{job_id}\n{sequence}").as_bytes(),
+    );
+    format!("node-update-required:{digest:x}")
+}
+
+/// Returns the stable outbox key for the server-side transition that returns a
+/// capability-blocked job to the queue after a compatible authenticated sync.
+#[must_use]
+pub fn node_capability_recovered_webhook_idempotency_key(
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+    sequence: u64,
+) -> String {
+    let digest = Sha256::digest(
+        format!("{workspace_id}\n{environment_id}\n{job_id}\n{sequence}").as_bytes(),
+    );
+    format!("node-capability-recovered:{digest:x}")
+}
+
+/// Returns the stable outbox key for a permanent pre-handoff content failure.
+#[must_use]
+pub fn prehandoff_failure_webhook_idempotency_key(
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+    sequence: u64,
+) -> String {
+    let digest = Sha256::digest(
+        format!("{workspace_id}\n{environment_id}\n{job_id}\n{sequence}").as_bytes(),
+    );
+    format!("prehandoff-failure:{digest:x}")
+}
+
+/// Returns the stable outbox key for a server-side expiry before node
+/// responsibility was accepted.
+#[must_use]
+pub fn prehandoff_expiry_webhook_idempotency_key(
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+    sequence: u64,
+) -> String {
+    let digest = Sha256::digest(
+        format!("{workspace_id}\n{environment_id}\n{job_id}\n{sequence}").as_bytes(),
+    );
+    format!("prehandoff-expiry:{digest:x}")
 }
 
 #[derive(Clone, Debug)]
@@ -73,8 +204,51 @@ pub struct JobLease {
     pub lease_until: DateTime<Utc>,
 }
 
+/// A job transition committed atomically with its durable outbox row.
+///
+/// The caller reuses this key to broadcast the same event to live subscribers
+/// without creating a second durable webhook event.
 #[derive(Clone, Debug)]
-pub struct ExpiredBusinessDocumentResource {
+pub struct DurableJobTransition {
+    pub job: Job,
+    pub webhook_idempotency_key: String,
+}
+
+/// Tenant-scoped expiry transition returned to the worker for advisory live
+/// publication after the durable job event and webhook outbox have committed.
+#[derive(Clone, Debug)]
+pub struct ExpiredJobTransition {
+    pub workspace_id: WorkspaceId,
+    pub environment_id: EnvironmentId,
+    pub transition: DurableJobTransition,
+}
+
+/// Result of a server-side pre-handoff transition. Local responsibility is a
+/// non-error scheduling outcome: the job remains fenced and later candidates
+/// in the same bounded claim batch may still progress.
+#[derive(Clone, Debug)]
+pub enum PreHandoffTransitionOutcome {
+    Transitioned(Box<DurableJobTransition>),
+    UnsafeLocalResponsibility,
+}
+
+/// A claimed, content-free wake notification waiting to be projected into the
+/// tenant event/webhook stream.
+///
+/// A crash may cause this item to be claimed and published again; `hint.id`
+/// remains stable across every attempt.
+#[derive(Clone, Debug)]
+pub struct PendingWakeHintDispatch {
+    pub outbox_id: String,
+    pub workspace_id: WorkspaceId,
+    pub environment_id: EnvironmentId,
+    pub hint: destination_topology::NodeWakeHint,
+    pub idempotency_key: String,
+    pub attempt: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExpiredPrintPacketResource {
     pub workspace_id: WorkspaceId,
     pub environment_id: EnvironmentId,
     pub digest: String,
@@ -389,6 +563,10 @@ pub struct StoredApiKey {
 pub struct StoredAgent {
     pub id: AgentId,
     pub name: String,
+    pub site: Option<String>,
+    pub location: Option<String>,
+    pub labels: Vec<String>,
+    pub identity_revision: u64,
     pub platform: String,
     pub state: String,
     pub version: String,
@@ -398,6 +576,7 @@ pub struct StoredAgent {
     pub sqlite_integrity_ok: Option<bool>,
     pub executor_crashes: u64,
     pub last_error_code: Option<String>,
+    pub document_render: piqae_protocol::agent::DocumentRenderCapabilities,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -839,12 +1018,18 @@ pub enum StorageError {
     NodeQuotaExceeded,
     #[error("platform mode is already enabled")]
     PlatformAlreadyEnabled,
+    #[error("node identity revision conflict; current revision is {0}")]
+    NodeIdentityRevisionConflict(u64),
     #[error("stored data is invalid: {0}")]
     InvalidData(String),
     #[error("database operation failed: {0}")]
     Database(#[from] sqlx::Error),
     #[error("database migration failed: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
+    #[error(
+        "database migration history is incompatible with the fresh-only v0.1.22 PostgreSQL baseline; follow docs/operations/upgrades.md#v0122-fresh-postgresql-baseline"
+    )]
+    UnsupportedDatabaseBaseline,
     #[error("serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
 }
@@ -869,9 +1054,52 @@ impl PostgresStore {
     }
 
     pub async fn migrate(&self) -> Result<(), StorageError> {
-        sqlx::migrate!("../../migrations/postgres")
-            .run(&self.pool)
+        let migrator = sqlx::migrate!("../../migrations/postgres");
+        self.refuse_incompatible_prerelease_baseline(&migrator)
             .await?;
+        migrator.run(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn refuse_incompatible_prerelease_baseline(
+        &self,
+        migrator: &sqlx::migrate::Migrator,
+    ) -> Result<(), StorageError> {
+        let migration_table_exists: bool = sqlx::query_scalar(
+            "SELECT to_regclass(format('%I.%I', current_schema(), '_sqlx_migrations')) IS NOT NULL",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        if !migration_table_exists {
+            return Ok(());
+        }
+
+        let applied_limit = i64::try_from(migrator.iter().count())
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        // One extra row detects a history ahead of this binary while keeping a
+        // corrupted or attacker-controlled migration table bounded.
+        let rows = sqlx::query(
+            "SELECT version, description, success, checksum
+             FROM _sqlx_migrations
+             ORDER BY version
+             LIMIT $1",
+        )
+        .bind(applied_limit)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|row| AppliedMigration {
+            version: row.get("version"),
+            description: row.get("description"),
+            success: row.get("success"),
+            checksum: row.get("checksum"),
+        })
+        .collect::<Vec<_>>();
+
+        if !applied_history_is_current_prefix(&rows, migrator) {
+            return Err(StorageError::UnsupportedDatabaseBaseline);
+        }
         Ok(())
     }
 
@@ -3021,6 +3249,47 @@ impl PostgresStore {
         agent_id: AgentId,
     ) -> Result<AgentAuthenticationRecord, StorageError> {
         let row = sqlx::query(
+            "SELECT agent.workspace_id, agent.environment_id, agent.public_key
+             FROM agents agent
+             WHERE agent.id = $1 AND agent.revoked_at IS NULL
+               AND (
+                 NOT EXISTS (
+                   SELECT 1 FROM node_connectors connector
+                   WHERE connector.agent_id = agent.id
+                 )
+                 OR EXISTS (
+                   SELECT 1 FROM node_connectors connector
+                   WHERE connector.agent_id = agent.id
+                     AND connector.workspace_id = agent.workspace_id
+                     AND connector.environment_id = agent.environment_id
+                     AND connector.revoked_at IS NULL
+                 )
+               )",
+        )
+        .bind(agent_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let workspace_id: String = row.try_get("workspace_id")?;
+        let environment_id: String = row.try_get("environment_id")?;
+        Ok(AgentAuthenticationRecord {
+            workspace_id: workspace_id.parse().map_err(|error| {
+                StorageError::InvalidData(format!("workspace id `{workspace_id}`: {error}"))
+            })?,
+            environment_id: environment_id.parse().map_err(|error| {
+                StorageError::InvalidData(format!("environment id `{environment_id}`: {error}"))
+            })?,
+            public_key: row
+                .try_get::<Option<Vec<u8>>, _>("public_key")?
+                .ok_or_else(|| StorageError::InvalidData("agent has no public key".into()))?,
+        })
+    }
+
+    pub async fn agent_for_revocation_authentication(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<AgentAuthenticationRecord, StorageError> {
+        let row = sqlx::query(
             "SELECT workspace_id, environment_id, public_key
              FROM agents WHERE id = $1 AND revoked_at IS NULL",
         )
@@ -3127,7 +3396,7 @@ impl PostgresStore {
         agent_id: AgentId,
         version: &str,
         health: &piqae_protocol::agent::AgentHealth,
-        document_render: &piqae_protocol::agent::DocumentRenderCapabilities,
+        printpacket_render: &piqae_protocol::agent::DocumentRenderCapabilities,
         printers: Option<&[SyncedPrinter]>,
     ) -> Result<(), StorageError> {
         let mut transaction = self.pool.begin().await?;
@@ -3135,7 +3404,7 @@ impl PostgresStore {
             "UPDATE agents SET state = 'connected', version = $4, last_seen_at = now(),
                  health_started_at = $5, health_observed_at = $6,
                  sqlite_integrity_ok = $7, executor_crashes = $8,
-                 last_error_code = $9, document_render_capabilities = $10
+                 last_error_code = $9, printpacket_render_capabilities = $10
              WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
                AND revoked_at IS NULL
                AND (
@@ -3148,7 +3417,7 @@ impl PostgresStore {
                  OR last_error_code IS DISTINCT FROM $9
                  OR last_seen_at IS NULL
                  OR last_seen_at < now() - interval '55 seconds'
-                 OR document_render_capabilities IS DISTINCT FROM $10
+                 OR printpacket_render_capabilities IS DISTINCT FROM $10
                  OR $11::boolean
                )",
         )
@@ -3163,8 +3432,8 @@ impl PostgresStore {
             StorageError::InvalidData(format!("executor crash count overflow: {error}"))
         })?)
         .bind(&health.last_error_code)
-        .bind(serde_json::to_value(document_render).map_err(|error| {
-            StorageError::InvalidData(format!("invalid document render capabilities: {error}"))
+        .bind(serde_json::to_value(printpacket_render).map_err(|error| {
+            StorageError::InvalidData(format!("invalid PrintPacket render capabilities: {error}"))
         })?)
         .bind(printers.is_some())
         .execute(&mut *transaction)
@@ -3236,14 +3505,14 @@ impl PostgresStore {
         Ok(())
     }
 
-    pub async fn document_render_capabilities_for_printer(
+    pub async fn printpacket_render_capabilities_for_printer(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         printer_id: PrinterId,
     ) -> Result<piqae_protocol::agent::DocumentRenderCapabilities, StorageError> {
         let value: serde_json::Value = sqlx::query_scalar(
-            "SELECT agent.document_render_capabilities
+            "SELECT agent.printpacket_render_capabilities
              FROM printers printer
              JOIN agents agent ON agent.id=printer.agent_id
                AND agent.workspace_id=printer.workspace_id
@@ -3259,11 +3528,11 @@ impl PostgresStore {
         .await?
         .ok_or(StorageError::NotFound)?;
         serde_json::from_value(value).map_err(|error| {
-            StorageError::InvalidData(format!("invalid document render capabilities: {error}"))
+            StorageError::InvalidData(format!("invalid PrintPacket render capabilities: {error}"))
         })
     }
 
-    pub async fn register_business_document_resource(
+    pub async fn register_printpacket_resource(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
@@ -3272,13 +3541,13 @@ impl PostgresStore {
         byte_length: i64,
     ) -> Result<(), StorageError> {
         let result = sqlx::query(
-            "INSERT INTO business_document_resources(workspace_id,environment_id,digest,media_type,byte_length)
+            "INSERT INTO printpacket_resources(workspace_id,environment_id,digest,media_type,byte_length)
              VALUES($1,$2,$3,$4,$5)
              ON CONFLICT(workspace_id,environment_id,digest) DO UPDATE SET
-               last_used_at=now(), expires_at=GREATEST(business_document_resources.expires_at,now()+interval '30 days'),
+               last_used_at=now(), expires_at=GREATEST(printpacket_resources.expires_at,now()+interval '30 days'),
                cleanup_state='active', cleanup_lease_until=NULL, cleanup_lease_token=NULL
-             WHERE business_document_resources.media_type=EXCLUDED.media_type
-               AND business_document_resources.byte_length=EXCLUDED.byte_length",
+             WHERE printpacket_resources.media_type=EXCLUDED.media_type
+               AND printpacket_resources.byte_length=EXCLUDED.byte_length",
         )
         .bind(workspace_id.to_string()).bind(environment_id.to_string()).bind(digest)
         .bind(media_type).bind(byte_length).execute(&self.pool).await?;
@@ -3289,7 +3558,7 @@ impl PostgresStore {
         }
     }
 
-    pub async fn link_business_document_render_resources(
+    pub async fn link_printpacket_render_resources(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
@@ -3299,12 +3568,12 @@ impl PostgresStore {
         let mut transaction = self.pool.begin().await?;
         for digest in digests {
             sqlx::query(
-                "INSERT INTO business_document_resource_references(workspace_id,environment_id,render_id,resource_digest)
+                "INSERT INTO printpacket_resource_references(workspace_id,environment_id,render_id,resource_digest)
                  VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING",
             ).bind(workspace_id.to_string()).bind(environment_id.to_string()).bind(render_id)
                 .bind(digest).execute(&mut *transaction).await?;
             sqlx::query(
-                "UPDATE business_document_resources SET last_used_at=now(),expires_at=GREATEST(expires_at,now()+interval '30 days'),
+                "UPDATE printpacket_resources SET last_used_at=now(),expires_at=GREATEST(expires_at,now()+interval '30 days'),
                    cleanup_state='active',cleanup_lease_until=NULL,cleanup_lease_token=NULL
                  WHERE workspace_id=$1 AND environment_id=$2 AND digest=$3",
             ).bind(workspace_id.to_string()).bind(environment_id.to_string()).bind(digest)
@@ -3314,13 +3583,13 @@ impl PostgresStore {
         Ok(())
     }
 
-    pub async fn claim_expired_business_document_resources(
+    pub async fn claim_expired_printpacket_resources(
         &self,
         limit: i64,
-    ) -> Result<Vec<ExpiredBusinessDocumentResource>, StorageError> {
+    ) -> Result<Vec<ExpiredPrintPacketResource>, StorageError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query(
-            "DELETE FROM business_document_resource_references reference
+            "DELETE FROM printpacket_resource_references reference
              USING document_renders render
              WHERE reference.render_id=render.id AND reference.workspace_id=render.workspace_id
                AND reference.environment_id=render.environment_id AND render.state='expired'",
@@ -3328,13 +3597,13 @@ impl PostgresStore {
         .execute(&mut *transaction)
         .await?;
         let rows = sqlx::query(
-            "UPDATE business_document_resources resource SET cleanup_state='expiring',cleanup_lease_until=now()+interval '5 minutes',cleanup_lease_token=gen_random_uuid()
+            "UPDATE printpacket_resources resource SET cleanup_state='expiring',cleanup_lease_until=now()+interval '5 minutes',cleanup_lease_token=gen_random_uuid()
              WHERE (resource.workspace_id,resource.environment_id,resource.digest) IN (
                SELECT candidate.workspace_id,candidate.environment_id,candidate.digest
-               FROM business_document_resources candidate
+               FROM printpacket_resources candidate
                WHERE candidate.expires_at < now()
                  AND (candidate.cleanup_state='active' OR candidate.cleanup_lease_until < now())
-                 AND NOT EXISTS (SELECT 1 FROM business_document_resource_references reference
+                 AND NOT EXISTS (SELECT 1 FROM printpacket_resource_references reference
                    WHERE reference.workspace_id=candidate.workspace_id
                      AND reference.environment_id=candidate.environment_id
                      AND reference.resource_digest=candidate.digest)
@@ -3347,7 +3616,7 @@ impl PostgresStore {
         transaction.commit().await?;
         rows.into_iter()
             .map(|row| {
-                Ok(ExpiredBusinessDocumentResource {
+                Ok(ExpiredPrintPacketResource {
                     workspace_id: row.try_get::<String, _>("workspace_id")?.parse().map_err(
                         |error| StorageError::InvalidData(format!("invalid workspace id: {error}")),
                     )?,
@@ -3364,11 +3633,11 @@ impl PostgresStore {
             .collect()
     }
 
-    pub async fn complete_expired_business_document_resource(
+    pub async fn complete_expired_printpacket_resource(
         &self,
-        resource: &ExpiredBusinessDocumentResource,
+        resource: &ExpiredPrintPacketResource,
     ) -> Result<(), StorageError> {
-        let result = sqlx::query("DELETE FROM business_document_resources resource WHERE workspace_id=$1 AND environment_id=$2 AND digest=$3 AND cleanup_state='expiring' AND cleanup_lease_token=$4 AND NOT EXISTS (SELECT 1 FROM business_document_resource_references reference WHERE reference.workspace_id=resource.workspace_id AND reference.environment_id=resource.environment_id AND reference.resource_digest=resource.digest)")
+        let result = sqlx::query("DELETE FROM printpacket_resources resource WHERE workspace_id=$1 AND environment_id=$2 AND digest=$3 AND cleanup_state='expiring' AND cleanup_lease_token=$4 AND NOT EXISTS (SELECT 1 FROM printpacket_resource_references reference WHERE reference.workspace_id=resource.workspace_id AND reference.environment_id=resource.environment_id AND reference.resource_digest=resource.digest)")
             .bind(resource.workspace_id.to_string()).bind(resource.environment_id.to_string()).bind(&resource.digest)
             .bind(resource.cleanup_lease_token).execute(&self.pool).await?;
         if result.rows_affected() == 1 {
@@ -3574,9 +3843,10 @@ impl PostgresStore {
         environment_id: EnvironmentId,
     ) -> Result<Vec<StoredAgent>, StorageError> {
         let rows = sqlx::query(
-            "SELECT id, name, os, state, version, COALESCE(last_seen_at, created_at) AS last_seen_at,
+            "SELECT id, name, identity_site, identity_location, identity_labels,
+                    identity_revision, os, state, version, COALESCE(last_seen_at, created_at) AS last_seen_at,
                     health_started_at, health_observed_at, sqlite_integrity_ok,
-                    executor_crashes, last_error_code
+                    executor_crashes, last_error_code, printpacket_render_capabilities
              FROM agents
              WHERE workspace_id = $1 AND environment_id = $2 AND revoked_at IS NULL
              ORDER BY created_at DESC, id DESC",
@@ -3595,9 +3865,10 @@ impl PostgresStore {
         agent_id: AgentId,
     ) -> Result<StoredAgent, StorageError> {
         let row = sqlx::query(
-            "SELECT id, name, os, state, version, COALESCE(last_seen_at, created_at) AS last_seen_at,
+            "SELECT id, name, identity_site, identity_location, identity_labels,
+                    identity_revision, os, state, version, COALESCE(last_seen_at, created_at) AS last_seen_at,
                     health_started_at, health_observed_at, sqlite_integrity_ok,
-                    executor_crashes, last_error_code
+                    executor_crashes, last_error_code, printpacket_render_capabilities
              FROM agents
              WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
                AND revoked_at IS NULL",
@@ -3611,29 +3882,58 @@ impl PostgresStore {
         agent_from_row(&row)
     }
 
-    pub async fn rename_agent(
+    pub async fn update_agent_identity(
         &self,
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         agent_id: AgentId,
-        name: &str,
+        expected_revision: Option<u64>,
+        identity: &piqae_protocol::agent::NodeDisplayIdentity,
     ) -> Result<StoredAgent, StorageError> {
-        sqlx::query(
-            "UPDATE agents SET name = $4
+        let labels = serde_json::to_value(&identity.labels)?;
+        let updated = sqlx::query(
+            "UPDATE agents
+             SET name = $4, identity_site = $5, identity_location = $6,
+                 identity_labels = $7, identity_revision = identity_revision + 1
              WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
-               AND revoked_at IS NULL",
+               AND revoked_at IS NULL
+               AND ($8::bigint IS NULL OR identity_revision = $8)
+             RETURNING id, name, identity_site, identity_location, identity_labels,
+                       identity_revision, os, state, version,
+                       COALESCE(last_seen_at, created_at) AS last_seen_at,
+                       health_started_at, health_observed_at, sqlite_integrity_ok,
+                       executor_crashes, last_error_code, printpacket_render_capabilities",
         )
         .bind(agent_id.to_string())
         .bind(workspace_id.to_string())
         .bind(environment_id.to_string())
-        .bind(name)
-        .execute(&self.pool)
-        .await?
-        .rows_affected()
-        .eq(&1)
-        .then_some(())
-        .ok_or(StorageError::NotFound)?;
-        self.get_agent(workspace_id, environment_id, agent_id).await
+        .bind(&identity.display_name)
+        .bind(&identity.site)
+        .bind(&identity.location)
+        .bind(labels)
+        .bind(expected_revision.map(|revision| i64::try_from(revision).unwrap_or(i64::MAX)))
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(updated) = updated {
+            return agent_from_row(&updated);
+        }
+        {
+            let current = self
+                .get_agent(workspace_id, environment_id, agent_id)
+                .await?;
+            if expected_revision.and_then(|revision| revision.checked_add(1))
+                == Some(current.identity_revision)
+                && current.name == identity.display_name
+                && current.site == identity.site
+                && current.location == identity.location
+                && current.labels == identity.labels
+            {
+                return Ok(current);
+            }
+            Err(StorageError::NodeIdentityRevisionConflict(
+                current.identity_revision,
+            ))
+        }
     }
 
     pub async fn revoke_agent(
@@ -3641,8 +3941,185 @@ impl PostgresStore {
         workspace_id: WorkspaceId,
         environment_id: EnvironmentId,
         agent_id: AgentId,
-    ) -> Result<(), StorageError> {
+    ) -> Result<Vec<Job>, StorageError> {
+        let connector_ids = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM node_connectors
+             WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3
+               AND revoked_at IS NULL ORDER BY created_at,id",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        let mut acceptance_affected_jobs = Vec::new();
+        for connector_id in connector_ids {
+            acceptance_affected_jobs.extend(
+                self.revoke_node_connector(workspace_id, environment_id, agent_id, &connector_id)
+                    .await?,
+            );
+        }
         let mut transaction = self.pool.begin().await?;
+        // Revocation is the serialization boundary for every topology write
+        // made on behalf of this node. Route projection takes a key-share lock
+        // on the same row, so either the projection commits first and is
+        // included below, or it observes the revocation and fails closed.
+        let active_agent: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM agents
+             WHERE id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND revoked_at IS NULL
+             FOR UPDATE",
+        )
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if active_agent.is_none() {
+            return Err(StorageError::NotFound);
+        }
+        acceptance_affected_jobs.extend(
+            terminalize_agent_acceptances(&mut transaction, workspace_id, environment_id, agent_id)
+                .await?,
+        );
+        let route_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM printer_routes
+             WHERE agent_id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND retired_at IS NULL
+             FOR UPDATE",
+        )
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_all(&mut *transaction)
+        .await?;
+        if !route_ids.is_empty() {
+            let route_leased_attempts: Vec<String> = sqlx::query_scalar(
+                "SELECT id FROM delivery_attempts
+                 WHERE workspace_id = $1 AND environment_id = $2
+                   AND route_id = ANY($3) AND state = 'route_leased'
+                   AND final_at IS NULL
+                 FOR UPDATE",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(&route_ids)
+            .fetch_all(&mut *transaction)
+            .await?;
+            if !route_leased_attempts.is_empty() {
+                // A route lease has not crossed node acceptance, so it is the
+                // only delivery attempt that can be safely released during
+                // node revocation. Every later attempt remains durable for
+                // explicit delivery-uncertain recovery.
+                sqlx::query(
+                    "UPDATE route_reservations
+                     SET state = 'superseded', released_at = now(), updated_at = now()
+                     WHERE workspace_id = $1 AND environment_id = $2
+                       AND attempt_id = ANY($3) AND state = 'active'",
+                )
+                .bind(workspace_id.to_string())
+                .bind(environment_id.to_string())
+                .bind(&route_leased_attempts)
+                .execute(&mut *transaction)
+                .await?;
+                sqlx::query(
+                    "UPDATE delivery_attempts
+                     SET state = 'superseded', final_at = now(), updated_at = now()
+                     WHERE workspace_id = $1 AND environment_id = $2
+                       AND id = ANY($3) AND state = 'route_leased'
+                       AND final_at IS NULL",
+                )
+                .bind(workspace_id.to_string())
+                .bind(environment_id.to_string())
+                .bind(&route_leased_attempts)
+                .execute(&mut *transaction)
+                .await?;
+            }
+            sqlx::query(
+                "UPDATE printer_routes
+                 SET state = 'retired', role = 'disabled', enabled = false,
+                     retired_at = now(), updated_at = now()
+                 WHERE workspace_id = $1 AND environment_id = $2
+                   AND id = ANY($3) AND retired_at IS NULL",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(&route_ids)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE physical_destinations destination
+                 SET state = CASE
+                         WHEN destination.state = 'attention' THEN destination.state
+                         ELSE 'unavailable'
+                     END,
+                     updated_at = now()
+                 WHERE destination.workspace_id = $1
+                   AND destination.environment_id = $2
+                   AND destination.retired_at IS NULL
+                   AND destination.id IN (
+                       SELECT DISTINCT route.destination_id
+                       FROM printer_routes route
+                       WHERE route.workspace_id = destination.workspace_id
+                         AND route.environment_id = destination.environment_id
+                         AND route.id = ANY($3)
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM printer_routes route
+                       WHERE route.workspace_id = destination.workspace_id
+                         AND route.environment_id = destination.environment_id
+                         AND route.destination_id = destination.id
+                         AND route.enabled AND route.retired_at IS NULL
+                   )",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(&route_ids)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        sqlx::query(
+            "UPDATE site_coordinator_memberships
+             SET state = 'revoked', revoked_at = now()
+             WHERE agent_id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND state <> 'revoked'",
+        )
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE node_wake_hints
+             SET status = 'cancelled'
+             WHERE agent_id = $1 AND workspace_id = $2 AND environment_id = $3
+               AND status = 'pending'",
+        )
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE routing_outbox outbox
+             SET processed_at = COALESCE(processed_at, now()), claimed_until = NULL
+             WHERE outbox.workspace_id = $1 AND outbox.environment_id = $2
+               AND outbox.aggregate_type = 'node_wake_hint'
+               AND outbox.event_type = 'node.wake_hint.requested'
+               AND EXISTS (
+                   SELECT 1 FROM node_wake_hints hint
+                   WHERE hint.workspace_id = outbox.workspace_id
+                     AND hint.environment_id = outbox.environment_id
+                     AND hint.id = outbox.aggregate_id
+                     AND hint.agent_id = $3
+                     AND hint.status = 'cancelled'
+               )",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
         sqlx::query(
             "UPDATE node_connectors SET revoked_at = now(), updated_at = now()
              WHERE agent_id = $1 AND workspace_id = $2 AND environment_id = $3
@@ -3665,9 +4142,7 @@ impl PostgresStore {
         .execute(&mut *transaction)
         .await?
         .rows_affected();
-        if affected != 1 {
-            return Err(StorageError::NotFound);
-        }
+        debug_assert_eq!(affected, 1, "the active agent row is locked above");
         sqlx::query(
             "UPDATE jobs
              SET state = 'waiting_for_agent', lease_owner = NULL, lease_until = NULL,
@@ -3682,7 +4157,7 @@ impl PostgresStore {
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
-        Ok(())
+        Ok(acceptance_affected_jobs)
     }
 
     pub async fn list_node_connectors(
@@ -3711,8 +4186,11 @@ impl PostgresStore {
         environment_id: EnvironmentId,
         agent_id: AgentId,
         connector_id: &str,
-    ) -> Result<(), StorageError> {
+    ) -> Result<Vec<Job>, StorageError> {
         let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT set_config('piqae.acceptance_aware_revoke','on',true)")
+            .execute(&mut *transaction)
+            .await?;
         let affected = sqlx::query(
             "UPDATE node_connectors SET revoked_at = now(), updated_at = now()
              WHERE id = $1 AND agent_id = $2 AND workspace_id = $3
@@ -3726,10 +4204,28 @@ impl PostgresStore {
         .await?
         .rows_affected();
         if affected != 1 {
-            return Err(StorageError::NotFound);
+            let already_revoked = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                    SELECT 1 FROM node_connectors
+                    WHERE id = $1 AND agent_id = $2 AND workspace_id = $3
+                      AND environment_id = $4 AND revoked_at IS NOT NULL
+                 )",
+            )
+            .bind(connector_id)
+            .bind(agent_id.to_string())
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+            if !already_revoked {
+                return Err(StorageError::NotFound);
+            }
         }
+        let affected_jobs =
+            terminalize_agent_acceptances(&mut transaction, workspace_id, environment_id, agent_id)
+                .await?;
         transaction.commit().await?;
-        Ok(())
+        Ok(affected_jobs)
     }
 
     pub async fn get_node_update(
@@ -5055,6 +5551,7 @@ impl PostgresStore {
             protocol_version,
             enforce_cloud_billing,
             None,
+            None,
             "selected_printers",
             &[],
         )
@@ -5074,6 +5571,7 @@ impl PostgresStore {
         protocol_version: u16,
         enforce_cloud_billing: bool,
         physical_installation_id: Option<&str>,
+        installation_public_key: Option<&[u8]>,
         printer_grant: &str,
         allowed_printer_ids: &[String],
     ) -> Result<EnrolledAgent, StorageError> {
@@ -5197,7 +5695,7 @@ impl PostgresStore {
             let connector_id = upsert_node_connector(
                 &mut transaction,
                 &installation_id,
-                public_key,
+                installation_public_key.unwrap_or(public_key),
                 workspace_id,
                 environment_id,
                 &existing,
@@ -5252,7 +5750,7 @@ impl PostgresStore {
         let connector_id = upsert_node_connector(
             &mut transaction,
             &installation_id,
-            public_key,
+            installation_public_key.unwrap_or(public_key),
             workspace_id,
             environment_id,
             &agent_id.to_string(),
@@ -5425,55 +5923,37 @@ impl PostgresStore {
         payload: &serde_json::Value,
     ) -> Result<String, StorageError> {
         let mut transaction = self.pool.begin().await?;
-        let event_id = EventId::new().to_string();
-        sqlx::query(
-            "INSERT INTO webhook_events (
-                id, workspace_id, environment_id, event_type, payload, occurred_at
-             ) VALUES ($1,$2,$3,$4,$5,now())",
+        let event_id = enqueue_webhook_event_in_transaction(
+            &mut transaction,
+            None,
+            workspace_id,
+            environment_id,
+            event_type,
+            payload,
         )
-        .bind(&event_id)
-        .bind(workspace_id.to_string())
-        .bind(environment_id.to_string())
-        .bind(event_type)
-        .bind(payload)
-        .execute(&mut *transaction)
         .await?;
-        let endpoints = sqlx::query(
-            // A trailing `.*` subscribes to a family, which is what the
-            // dashboard has always offered. Matching was exact, so every
-            // endpoint created there received nothing at all. `starts_with`
-            // rather than LIKE, so an underscore in an event name cannot act
-            // as a wildcard and over-match.
-            "SELECT id, url FROM webhook_endpoints
-             WHERE workspace_id = $1 AND environment_id = $2 AND enabled = true
-               AND (
-                 $3 = ANY(subscribed_events)
-                 OR EXISTS (
-                   SELECT 1 FROM unnest(subscribed_events) AS pattern
-                   WHERE pattern LIKE '%.*'
-                     AND starts_with($3, left(pattern, length(pattern) - 1))
-                 )
-               )
-             FOR SHARE",
+        transaction.commit().await?;
+        Ok(event_id)
+    }
+
+    pub async fn enqueue_webhook_event_idempotently(
+        &self,
+        idempotency_key: &str,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        event_type: &str,
+        payload: &serde_json::Value,
+    ) -> Result<String, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let event_id = enqueue_webhook_event_in_transaction(
+            &mut transaction,
+            Some(idempotency_key),
+            workspace_id,
+            environment_id,
+            event_type,
+            payload,
         )
-        .bind(workspace_id.to_string())
-        .bind(environment_id.to_string())
-        .bind(event_type)
-        .fetch_all(&mut *transaction)
         .await?;
-        for endpoint in endpoints {
-            sqlx::query(
-                "INSERT INTO webhook_deliveries (
-                    id, endpoint_id, event_id, destination_url, next_attempt_at
-                 ) VALUES ($1,$2,$3,$4,now())",
-            )
-            .bind(format!("whd_{}", ulid::Ulid::new()))
-            .bind(endpoint.try_get::<String, _>("id")?)
-            .bind(&event_id)
-            .bind(endpoint.try_get::<String, _>("url")?)
-            .execute(&mut *transaction)
-            .await?;
-        }
         transaction.commit().await?;
         Ok(event_id)
     }
@@ -5512,6 +5992,52 @@ impl PostgresStore {
         &self,
         limit: i64,
     ) -> Result<Vec<WebhookDeliveryWork>, StorageError> {
+        let limit = limit.clamp(1, WEBHOOK_MAX_CLAIM_BATCH);
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "WITH missing_deliveries AS MATERIALIZED (
+                SELECT endpoint.id AS endpoint_id, event.id AS event_id,
+                       endpoint.url AS destination_url
+                FROM webhook_events AS event
+                JOIN webhook_endpoints AS endpoint
+                 ON endpoint.workspace_id = event.workspace_id
+                 AND endpoint.environment_id = event.environment_id
+                 AND endpoint.enabled = true
+                 AND event.occurred_at >= endpoint.created_at
+                 AND (
+                   event.event_type = ANY(endpoint.subscribed_events)
+                   OR EXISTS (
+                     SELECT 1 FROM unnest(endpoint.subscribed_events) AS pattern
+                     WHERE pattern LIKE '%.*'
+                       AND starts_with(
+                         event.event_type,
+                         left(pattern, length(pattern) - 1)
+                       )
+                   )
+                 )
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM webhook_deliveries AS existing
+                    WHERE existing.endpoint_id = endpoint.id
+                      AND existing.event_id = event.id
+                )
+                ORDER BY event.occurred_at, event.id, endpoint.id
+                LIMIT $1
+             ), materialized AS (
+                INSERT INTO webhook_deliveries (
+                    id, endpoint_id, event_id, destination_url, next_attempt_at
+                )
+                SELECT 'whd_0' || substring(
+                           md5(endpoint_id || ':' || event_id) from 1 for 25
+                       ), endpoint_id, event_id, destination_url, now()
+                FROM missing_deliveries
+                ON CONFLICT (id) DO NOTHING
+                RETURNING id
+             )
+             SELECT count(*) FROM materialized",
+        )
+        .bind(limit)
+        .fetch_one(&mut *transaction)
+        .await?;
         let rows = sqlx::query(
             "WITH candidates AS (
                 SELECT id FROM webhook_deliveries
@@ -5531,11 +6057,12 @@ impl PostgresStore {
                        delivery.attempt, endpoint.secret_ciphertext,
                        event.event_type, event.payload, event.occurred_at",
         )
-        .bind(limit.clamp(1, WEBHOOK_MAX_CLAIM_BATCH))
+        .bind(limit)
         .bind(WEBHOOK_CLAIM_TTL_SECONDS)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *transaction)
         .await?;
-        rows.into_iter()
+        let result = rows
+            .into_iter()
             .map(|row| {
                 Ok(WebhookDeliveryWork {
                     id: row.try_get("id")?,
@@ -5548,7 +6075,9 @@ impl PostgresStore {
                     attempt: row.try_get("attempt")?,
                 })
             })
-            .collect()
+            .collect();
+        transaction.commit().await?;
+        result
     }
 
     pub async fn record_webhook_attempt(
@@ -7034,6 +7563,18 @@ impl PostgresStore {
         .execute(&mut *transaction)
         .await?;
 
+        if event.state == JobState::WaitingForAgent {
+            ensure_waiting_job_wake_hints_in_transaction(
+                &mut transaction,
+                workspace_id,
+                environment_id,
+                event.job_id,
+                event.sequence,
+                event.occurred_at,
+            )
+            .await?;
+        }
+
         if event.state == JobState::CompletedReported {
             record_reported_complete_usage(
                 &mut transaction,
@@ -7047,6 +7588,250 @@ impl PostgresStore {
 
         transaction.commit().await?;
         Ok(job)
+    }
+
+    /// Repairs an N-1 or interrupted API request after the job itself already
+    /// reached `waiting_for_agent`. Inserts are idempotent for the exact state
+    /// transition, so an idempotent job retry cannot create another hint.
+    pub async fn ensure_waiting_job_wake_hints(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        job_id: JobId,
+    ) -> Result<usize, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT state,state_sequence FROM jobs
+             WHERE workspace_id=$1 AND environment_id=$2 AND id=$3
+             FOR UPDATE",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(job_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        if row.try_get::<String, _>("state")? != "waiting_for_agent" {
+            transaction.commit().await?;
+            return Ok(0);
+        }
+        let sequence = u64::try_from(row.try_get::<i64, _>("state_sequence")?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let count = ensure_waiting_job_wake_hints_in_transaction(
+            &mut transaction,
+            workspace_id,
+            environment_id,
+            job_id,
+            sequence,
+            Utc::now(),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(count)
+    }
+
+    /// Finds waiting transitions produced by an N-1 server or interrupted
+    /// repair and recreates their bounded content-free wake outbox atomically.
+    pub async fn repair_waiting_job_wake_hints(&self, limit: i64) -> Result<usize, StorageError> {
+        let jobs = sqlx::query(
+            "SELECT job.workspace_id,job.environment_id,job.id
+             FROM jobs job
+             LEFT JOIN job_wake_reconciliations reconciliation
+               ON reconciliation.workspace_id=job.workspace_id
+              AND reconciliation.environment_id=job.environment_id
+              AND reconciliation.job_id=job.id
+              AND reconciliation.state_sequence=job.state_sequence
+             WHERE job.state='waiting_for_agent' AND job.final_at IS NULL
+               AND job.expires_at>now() AND reconciliation.job_id IS NULL
+             ORDER BY job.updated_at,job.id LIMIT $1",
+        )
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut repaired = 0_usize;
+        for row in jobs {
+            let workspace_id = WorkspaceId::from_str(&row.try_get::<String, _>("workspace_id")?)
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            let environment_id =
+                EnvironmentId::from_str(&row.try_get::<String, _>("environment_id")?)
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            let job_id = JobId::from_str(&row.try_get::<String, _>("id")?)
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            repaired = repaired.saturating_add(
+                self.ensure_waiting_job_wake_hints(workspace_id, environment_id, job_id)
+                    .await?,
+            );
+        }
+        Ok(repaired)
+    }
+
+    /// Claims the provider-neutral webhook outbox. Claim expiry deliberately
+    /// permits duplicate publication after worker failure; the opaque hint ID
+    /// is unchanged, so receivers can deduplicate without seeing job metadata.
+    pub async fn claim_wake_hint_dispatches(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<PendingWakeHintDispatch>, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        // Terminal hints are never dispatchable. Mark their outbox rows
+        // complete before claiming so cancellation/observation that won a race
+        // cannot later emit a stale wake request.
+        sqlx::query(
+            "UPDATE routing_outbox outbox
+             SET processed_at = COALESCE(processed_at, now()), claimed_until = NULL
+             FROM node_wake_hints hint
+             WHERE outbox.aggregate_type='node_wake_hint'
+               AND outbox.event_type='node.wake_hint.requested'
+               AND outbox.processed_at IS NULL
+               AND hint.workspace_id=outbox.workspace_id
+               AND hint.environment_id=outbox.environment_id
+               AND hint.id=outbox.aggregate_id
+               AND (hint.status<>'pending' OR hint.expires_at<=now())",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE node_wake_hints SET status='expired'
+             WHERE status='pending' AND expires_at<=now()",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE routing_outbox outbox SET processed_at=COALESCE(processed_at,now()),claimed_until=NULL
+             FROM node_wake_hints hint
+             WHERE outbox.aggregate_type='node_wake_hint'
+               AND outbox.event_type='node.wake_hint.requested'
+               AND outbox.workspace_id=hint.workspace_id
+               AND outbox.environment_id=hint.environment_id
+               AND outbox.aggregate_id=hint.id
+               AND outbox.processed_at IS NULL AND hint.expires_at<=now()",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "DELETE FROM routing_outbox
+             WHERE aggregate_type='node_wake_hint'
+               AND event_type='node.wake_hint.requested'
+               AND processed_at < now() - interval '7 days'",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "DELETE FROM routing_outbox outbox
+             WHERE outbox.aggregate_type='node_wake_hint'
+               AND outbox.event_type='node.wake_hint.requested'
+               AND NOT EXISTS (
+                   SELECT 1 FROM node_wake_hints hint
+                   WHERE hint.workspace_id=outbox.workspace_id
+                     AND hint.environment_id=outbox.environment_id
+                     AND hint.id=outbox.aggregate_id
+               )",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "DELETE FROM node_wake_hints
+             WHERE status<>'pending' AND expires_at < now() - interval '7 days'",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        let rows = sqlx::query(
+            "WITH selected AS (
+                 SELECT outbox.id
+                 FROM routing_outbox outbox
+                 JOIN node_wake_hints hint
+                   ON hint.workspace_id=outbox.workspace_id
+                  AND hint.environment_id=outbox.environment_id
+                  AND hint.id=outbox.aggregate_id
+                 WHERE outbox.aggregate_type='node_wake_hint'
+                   AND outbox.event_type='node.wake_hint.requested'
+                   AND outbox.processed_at IS NULL
+                   AND outbox.available_at<=now()
+                   AND (outbox.claimed_until IS NULL OR outbox.claimed_until<=now())
+                   AND hint.status='pending'
+                   AND hint.expires_at>now()
+                 ORDER BY outbox.available_at,outbox.created_at,outbox.id
+                 FOR UPDATE OF outbox SKIP LOCKED LIMIT $1
+             ), claimed AS (
+                 UPDATE routing_outbox outbox
+                 SET attempts=attempts+1,claimed_until=now()+interval '30 seconds'
+                 FROM selected WHERE outbox.id=selected.id
+                 RETURNING outbox.id,outbox.workspace_id,outbox.environment_id,
+                           outbox.aggregate_id,outbox.attempts
+             )
+             SELECT claimed.id,claimed.workspace_id,claimed.environment_id,claimed.attempts,
+                    hint.id AS hint_id,hint.agent_id,hint.idempotency_key,hint.reason,
+                    hint.delivery_channel,hint.status,hint.requested_at,hint.expires_at,
+                    hint.observed_at
+             FROM claimed JOIN node_wake_hints hint
+               ON hint.workspace_id=claimed.workspace_id
+              AND hint.environment_id=claimed.environment_id
+              AND hint.id=claimed.aggregate_id
+             ORDER BY claimed.id",
+        )
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut work = Vec::with_capacity(rows.len());
+        for row in rows {
+            work.push(PendingWakeHintDispatch {
+                outbox_id: row.try_get("id")?,
+                workspace_id: WorkspaceId::from_str(&row.try_get::<String, _>("workspace_id")?)
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+                environment_id: EnvironmentId::from_str(
+                    &row.try_get::<String, _>("environment_id")?,
+                )
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+                hint: destination_topology::NodeWakeHint {
+                    id: row.try_get("hint_id")?,
+                    agent_id: row.try_get("agent_id")?,
+                    reason: row.try_get("reason")?,
+                    delivery_channel: row.try_get("delivery_channel")?,
+                    status: row.try_get("status")?,
+                    requested_at: row.try_get("requested_at")?,
+                    expires_at: row.try_get("expires_at")?,
+                    observed_at: row.try_get("observed_at")?,
+                },
+                idempotency_key: row.try_get("idempotency_key")?,
+                attempt: u32::try_from(row.try_get::<i32, _>("attempts")?)
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+            });
+        }
+        transaction.commit().await?;
+        Ok(work)
+    }
+
+    pub async fn complete_wake_hint_dispatch(&self, outbox_id: &str) -> Result<(), StorageError> {
+        let result = sqlx::query(
+            "UPDATE routing_outbox SET processed_at=now(),claimed_until=NULL
+             WHERE id=$1 AND aggregate_type='node_wake_hint'
+               AND event_type='node.wake_hint.requested' AND processed_at IS NULL",
+        )
+        .bind(outbox_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        Ok(())
+    }
+
+    pub async fn retry_wake_hint_dispatch(
+        &self,
+        outbox_id: &str,
+        delay: Duration,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE routing_outbox
+             SET available_at=now()+($2 * interval '1 millisecond'),claimed_until=NULL
+             WHERE id=$1 AND aggregate_type='node_wake_hint'
+               AND event_type='node.wake_hint.requested' AND processed_at IS NULL",
+        )
+        .bind(outbox_id)
+        .bind(i64::try_from(delay.as_millis()).unwrap_or(i64::MAX))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn request_job_cancellation(
@@ -7099,6 +7884,87 @@ impl PostgresStore {
         })?)
         .execute(&mut *transaction)
         .await?;
+        let accepted: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM job_acceptances
+             WHERE job_id=$1 AND workspace_id=$2 AND environment_id=$3)",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !accepted {
+            let now = Utc::now();
+            let cancelled_sequence = sequence.saturating_add(1);
+            job.state = JobState::Cancelled;
+            insert_event(
+                &mut transaction,
+                &job,
+                &JobEvent {
+                    id: EventId::new(),
+                    job_id,
+                    sequence: cancelled_sequence,
+                    state: JobState::Cancelled,
+                    reason: Some(piqae_domain::JobFailureReason::CancelledByUser),
+                    message: Some("Cancellation completed before node acceptance".into()),
+                    agent_id: None,
+                    native_job_id: None,
+                    occurred_at: now,
+                },
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE jobs SET payload=$2,state='cancelled',state_sequence=$3,
+                    final_at=COALESCE(final_at,$4),lease_owner=NULL,lease_id=NULL,
+                    lease_token_hash=NULL,lease_until=NULL,updated_at=now()
+                 WHERE id=$1 AND workspace_id=$5 AND environment_id=$6",
+            )
+            .bind(job_id.to_string())
+            .bind(serde_json::to_value(&job)?)
+            .bind(i64::try_from(cancelled_sequence).map_err(|error| {
+                StorageError::InvalidData(format!("event sequence overflow: {error}"))
+            })?)
+            .bind(now)
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE delivery_attempts SET state='cancelled',final_at=COALESCE(final_at,$4),updated_at=$4
+                 WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND final_at IS NULL",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(job_id.to_string())
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE route_reservations SET state='cancelled',released_at=COALESCE(released_at,$4),updated_at=$4
+                 WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND state='active'",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(job_id.to_string())
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+            enqueue_webhook_event_in_transaction(
+                &mut transaction,
+                Some(&preaccept_cancellation_webhook_idempotency_key(
+                    workspace_id,
+                    environment_id,
+                    job_id,
+                )),
+                workspace_id,
+                environment_id,
+                "job.updated",
+                &serde_json::to_value(&job)?,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(job);
+        }
         sqlx::query(
             "INSERT INTO agent_commands (workspace_id, environment_id, agent_id, command)
              VALUES ($1,$2,$3,$4)",
@@ -7111,6 +7977,135 @@ impl PostgresStore {
         .await?;
         transaction.commit().await?;
         Ok(job)
+    }
+
+    /// Retires a stale cancellation only when the exact tenant job belongs to
+    /// this node and has never been accepted by any route. This is deliberately
+    /// server-side so N-1 nodes stop receiving a command they cannot classify.
+    pub async fn retire_terminal_absent_local_cancellation(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+    ) -> Result<bool, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let Some(row) = sqlx::query(
+            "SELECT payload,state,state_sequence,agent_id FROM jobs
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 FOR UPDATE",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        else {
+            transaction.commit().await?;
+            return Ok(false);
+        };
+        if row.try_get::<String, _>("agent_id")? != agent_id.to_string() {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+        let state: String = row.try_get("state")?;
+        let mut job = job_from_row(row.try_get("payload")?, &state)?;
+        let accepted: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM job_acceptances
+             WHERE job_id=$1 AND workspace_id=$2 AND environment_id=$3)",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if accepted || (!job.state.is_terminal() && job.state != JobState::CancelRequested) {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+        if !job.state.is_terminal() {
+            let now = Utc::now();
+            let sequence = row.try_get::<i64, _>("state_sequence")? + 1;
+            job.state = JobState::Cancelled;
+            insert_event(
+                &mut transaction,
+                &job,
+                &JobEvent {
+                    id: EventId::new(),
+                    job_id,
+                    sequence: u64::try_from(sequence)
+                        .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+                    state: JobState::Cancelled,
+                    reason: Some(piqae_domain::JobFailureReason::CancelledByUser),
+                    message: Some("Cancellation completed before node acceptance".into()),
+                    agent_id: Some(agent_id),
+                    native_job_id: None,
+                    occurred_at: now,
+                },
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE jobs SET payload=$2,state='cancelled',state_sequence=$3,
+                    final_at=COALESCE(final_at,$4),lease_owner=NULL,lease_id=NULL,
+                    lease_token_hash=NULL,lease_until=NULL,updated_at=now()
+                 WHERE id=$1 AND workspace_id=$5 AND environment_id=$6 AND agent_id=$7",
+            )
+            .bind(job_id.to_string())
+            .bind(serde_json::to_value(&job)?)
+            .bind(sequence)
+            .bind(now)
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(agent_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE delivery_attempts SET state='cancelled',final_at=COALESCE(final_at,$4),updated_at=$4
+                 WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND final_at IS NULL",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(job_id.to_string())
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE route_reservations SET state='cancelled',released_at=COALESCE(released_at,$4),updated_at=$4
+                 WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND state='active'",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(job_id.to_string())
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+            enqueue_webhook_event_in_transaction(
+                &mut transaction,
+                Some(&preaccept_cancellation_webhook_idempotency_key(
+                    workspace_id,
+                    environment_id,
+                    job_id,
+                )),
+                workspace_id,
+                environment_id,
+                "job.updated",
+                &serde_json::to_value(&job)?,
+            )
+            .await?;
+        }
+        sqlx::query(
+            "UPDATE agent_commands SET acknowledged_at=COALESCE(acknowledged_at,now())
+             WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3
+               AND ((command->>'type'='cancel_job' AND command->>'job_id'=$4)
+                    OR command->'cancel_job'->>'job_id'=$4)",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(job_id.as_ulid().to_string())
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(true)
     }
 
     pub async fn claim_jobs(
@@ -7351,6 +8346,442 @@ impl PostgresStore {
         Ok(())
     }
 
+    /// Atomically blocks a leased pre-handoff job whose exact node capability
+    /// contract is no longer satisfied.
+    ///
+    /// The lifecycle event and tenant outbox row commit with the state change,
+    /// so a sync retry cannot create an alert storm or leave the lease live.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn block_agent_lease_for_node_update(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+    ) -> Result<PreHandoffTransitionOutcome, StorageError> {
+        let token_hash = Sha256::digest(lease_token.as_bytes()).to_vec();
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT payload,state,state_sequence FROM jobs
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4
+               AND lease_id=$5 AND lease_token_hash=$6 AND lease_until>now()
+               AND state IN ('waiting_for_agent','failed_retryable')
+             FOR UPDATE",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(lease_id)
+        .bind(token_hash)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::ConcurrentStateChange)?;
+        let current_state: String = row.try_get("state")?;
+        let mut job = job_from_row(row.try_get("payload")?, &current_state)?;
+        if !supersede_pre_handoff_delivery_attempts(
+            &mut transaction,
+            workspace_id,
+            environment_id,
+            job_id,
+        )
+        .await?
+        {
+            transaction.commit().await?;
+            return Ok(PreHandoffTransitionOutcome::UnsafeLocalResponsibility);
+        }
+        let sequence = row.try_get::<i64, _>("state_sequence")? + 1;
+        let sequence_u64 = u64::try_from(sequence)
+            .map_err(|error| StorageError::InvalidData(format!("event sequence: {error}")))?;
+        let now = Utc::now();
+        job.state = JobState::Blocked;
+        insert_event(
+            &mut transaction,
+            &job,
+            &JobEvent {
+                id: EventId::new(),
+                job_id,
+                sequence: sequence_u64,
+                state: JobState::Blocked,
+                reason: Some(JobFailureReason::NodeUpdateRequired),
+                message: Some(
+                    "Assigned node requires an update for this job's exact print capabilities"
+                        .into(),
+                ),
+                // `None` is server provenance. Agent events are always stored
+                // with their authenticated agent ID and can never authorize
+                // the narrow Blocked -> Waiting recovery below.
+                agent_id: None,
+                native_job_id: None,
+                occurred_at: now,
+            },
+        )
+        .await?;
+        let updated = sqlx::query(
+            "UPDATE jobs SET payload=$7,state='blocked',state_sequence=$8,
+                    lease_owner=NULL,lease_id=NULL,lease_token_hash=NULL,lease_until=NULL,
+                    updated_at=$9
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4
+               AND lease_id=$5 AND lease_token_hash=$6",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(lease_id)
+        .bind(Sha256::digest(lease_token.as_bytes()).to_vec())
+        .bind(serde_json::to_value(&job)?)
+        .bind(sequence)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        sqlx::query(
+            "INSERT INTO node_capability_recovery_checks (
+                 workspace_id,environment_id,agent_id,job_id,next_check_at,checked_at,updated_at
+             ) VALUES ($1,$2,$3,$4,$5,NULL,$5)
+             ON CONFLICT (workspace_id,environment_id,agent_id,job_id)
+             DO UPDATE SET next_check_at=EXCLUDED.next_check_at,
+                           checked_at=NULL,updated_at=EXCLUDED.updated_at",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(job_id.to_string())
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        let webhook_idempotency_key = node_update_required_webhook_idempotency_key(
+            workspace_id,
+            environment_id,
+            job_id,
+            sequence_u64,
+        );
+        enqueue_webhook_event_in_transaction(
+            &mut transaction,
+            Some(&webhook_idempotency_key),
+            workspace_id,
+            environment_id,
+            "job.updated",
+            &serde_json::to_value(&job)?,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(PreHandoffTransitionOutcome::Transitioned(Box::new(
+            DurableJobTransition {
+                job,
+                webhook_idempotency_key,
+            },
+        )))
+    }
+
+    /// Atomically terminalizes malformed durable content before any native
+    /// handoff. This is reserved for stored jobs that cannot become valid by
+    /// retrying; incomplete but potentially recoverable content is released.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn fail_agent_lease_before_handoff(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        reason: JobFailureReason,
+        message: &str,
+    ) -> Result<PreHandoffTransitionOutcome, StorageError> {
+        let token_hash = Sha256::digest(lease_token.as_bytes()).to_vec();
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT payload,state,state_sequence FROM jobs
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4
+               AND lease_id=$5 AND lease_token_hash=$6 AND lease_until>now()
+               AND state IN ('waiting_for_agent','failed_retryable')
+             FOR UPDATE",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(lease_id)
+        .bind(&token_hash)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::ConcurrentStateChange)?;
+        let current_state: String = row.try_get("state")?;
+        let mut job = job_from_row(row.try_get("payload")?, &current_state)?;
+        if !supersede_pre_handoff_delivery_attempts(
+            &mut transaction,
+            workspace_id,
+            environment_id,
+            job_id,
+        )
+        .await?
+        {
+            transaction.commit().await?;
+            return Ok(PreHandoffTransitionOutcome::UnsafeLocalResponsibility);
+        }
+        let sequence = row.try_get::<i64, _>("state_sequence")? + 1;
+        let sequence_u64 = u64::try_from(sequence)
+            .map_err(|error| StorageError::InvalidData(format!("event sequence: {error}")))?;
+        let now = Utc::now();
+        job.state = JobState::FailedTerminal;
+        insert_event(
+            &mut transaction,
+            &job,
+            &JobEvent {
+                id: EventId::new(),
+                job_id,
+                sequence: sequence_u64,
+                state: JobState::FailedTerminal,
+                reason: Some(reason),
+                message: Some(message.to_owned()),
+                // Stored-content validation is performed by the server. The
+                // assigned node did not report this failure.
+                agent_id: None,
+                native_job_id: None,
+                occurred_at: now,
+            },
+        )
+        .await?;
+        let updated = sqlx::query(
+            "UPDATE jobs SET payload=$7,state='failed_terminal',state_sequence=$8,final_at=$9,
+                    lease_owner=NULL,lease_id=NULL,lease_token_hash=NULL,lease_until=NULL,
+                    updated_at=$9
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4
+               AND lease_id=$5 AND lease_token_hash=$6",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(lease_id)
+        .bind(token_hash)
+        .bind(serde_json::to_value(&job)?)
+        .bind(sequence)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        sqlx::query(
+            "DELETE FROM node_capability_recovery_checks
+             WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 AND job_id=$4",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(job_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        let webhook_idempotency_key = prehandoff_failure_webhook_idempotency_key(
+            workspace_id,
+            environment_id,
+            job_id,
+            sequence_u64,
+        );
+        enqueue_webhook_event_in_transaction(
+            &mut transaction,
+            Some(&webhook_idempotency_key),
+            workspace_id,
+            environment_id,
+            "job.updated",
+            &serde_json::to_value(&job)?,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(PreHandoffTransitionOutcome::Transitioned(Box::new(
+            DurableJobTransition {
+                job,
+                webhook_idempotency_key,
+            },
+        )))
+    }
+
+    /// Lists only jobs blocked by the server for a missing node capability.
+    /// The ordered bound prevents a stale fleet backlog from dominating sync.
+    pub async fn list_node_update_required_jobs(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        limit: i64,
+    ) -> Result<Vec<Job>, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let rows = sqlx::query(
+            "SELECT job.payload,job.state,job.id FROM jobs AS job
+             JOIN node_capability_recovery_checks AS recovery
+               ON recovery.workspace_id=job.workspace_id
+              AND recovery.environment_id=job.environment_id
+              AND recovery.agent_id=job.agent_id
+              AND recovery.job_id=job.id
+             WHERE job.workspace_id=$1 AND job.environment_id=$2 AND job.agent_id=$3
+               AND job.state='blocked' AND job.expires_at>now()
+               AND recovery.next_check_at<=now()
+               AND (
+                 SELECT event.payload->>'reason'='node_update_required'
+                        AND event.payload->>'agent_id' IS NULL
+                 FROM job_events AS event
+                 WHERE event.workspace_id=job.workspace_id
+                   AND event.environment_id=job.environment_id
+                   AND event.job_id=job.id
+                 ORDER BY event.sequence DESC LIMIT 1
+               )=TRUE
+             ORDER BY recovery.next_check_at,job.created_at,job.id
+             LIMIT $4 FOR UPDATE OF recovery SKIP LOCKED",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&mut *transaction)
+        .await?;
+        let job_ids = rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("id"))
+            .collect::<Result<Vec<_>, _>>()?;
+        if !job_ids.is_empty() {
+            sqlx::query(
+                "UPDATE node_capability_recovery_checks
+                 SET checked_at=now(),next_check_at=now()+interval '30 seconds',updated_at=now()
+                 WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3
+                   AND job_id=ANY($4)",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(agent_id.to_string())
+            .bind(&job_ids)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        let jobs = rows
+            .into_iter()
+            .map(|row| {
+                job_from_row(
+                    row.try_get("payload")?,
+                    row.try_get::<String, _>("state")?.as_str(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        transaction.commit().await?;
+        Ok(jobs)
+    }
+
+    /// Returns a capability-blocked job to the queue exactly once after the
+    /// caller has evaluated the current authenticated capability report.
+    pub async fn recover_node_update_required_job(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+    ) -> Result<Option<DurableJobTransition>, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT job.payload,job.state,job.state_sequence FROM jobs AS job
+             WHERE job.id=$1 AND job.workspace_id=$2 AND job.environment_id=$3
+               AND job.agent_id=$4 AND job.state='blocked' AND job.expires_at>now()
+               AND (
+                 SELECT event.payload->>'reason'='node_update_required'
+                        AND event.payload->>'agent_id' IS NULL
+                 FROM job_events AS event
+                 WHERE event.workspace_id=job.workspace_id
+                   AND event.environment_id=job.environment_id
+                   AND event.job_id=job.id
+                 ORDER BY event.sequence DESC LIMIT 1
+               )=TRUE
+             FOR UPDATE",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let state: String = row.try_get("state")?;
+        let mut job = job_from_row(row.try_get("payload")?, &state)?;
+        let sequence = row.try_get::<i64, _>("state_sequence")? + 1;
+        let sequence_u64 = u64::try_from(sequence)
+            .map_err(|error| StorageError::InvalidData(format!("event sequence: {error}")))?;
+        let now = Utc::now();
+        // This recovery is deliberately narrower than the public agent state
+        // machine: only the server-created node_update_required block above is
+        // eligible to return to a pre-handoff queue state.
+        job.state = JobState::WaitingForAgent;
+        insert_event(
+            &mut transaction,
+            &job,
+            &JobEvent {
+                id: EventId::new(),
+                job_id,
+                sequence: sequence_u64,
+                state: JobState::WaitingForAgent,
+                reason: None,
+                message: Some("Node print capabilities restored; job returned to queue".into()),
+                agent_id: None,
+                native_job_id: None,
+                occurred_at: now,
+            },
+        )
+        .await?;
+        let updated = sqlx::query(
+            "UPDATE jobs SET payload=$5,state='waiting_for_agent',state_sequence=$6,updated_at=$7
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4
+               AND state='blocked'",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(serde_json::to_value(&job)?)
+        .bind(sequence)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        sqlx::query(
+            "DELETE FROM node_capability_recovery_checks
+             WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 AND job_id=$4",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(job_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        let webhook_idempotency_key = node_capability_recovered_webhook_idempotency_key(
+            workspace_id,
+            environment_id,
+            job_id,
+            sequence_u64,
+        );
+        enqueue_webhook_event_in_transaction(
+            &mut transaction,
+            Some(&webhook_idempotency_key),
+            workspace_id,
+            environment_id,
+            "job.updated",
+            &serde_json::to_value(&job)?,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(Some(DurableJobTransition {
+            job,
+            webhook_idempotency_key,
+        }))
+    }
+
     pub async fn validate_agent_lease(
         &self,
         workspace_id: WorkspaceId,
@@ -7532,7 +8963,11 @@ impl PostgresStore {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::cognitive_complexity,
+        clippy::too_many_arguments,
+        reason = "acceptance keeps lease, route, connector, job, and tenant-outbox locks in one auditable transaction"
+    )]
     async fn accept_agent_job_transactional(
         &self,
         workspace_id: WorkspaceId,
@@ -7546,6 +8981,36 @@ impl PostgresStore {
         delivery_proof: Option<DeliveryAttemptProof<'_>>,
     ) -> Result<Job, StorageError> {
         let mut transaction = self.pool.begin().await?;
+        let active_agent: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM agents
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3
+               AND revoked_at IS NULL
+             FOR UPDATE",
+        )
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if active_agent.is_none() {
+            return Err(StorageError::NotFound);
+        }
+        let connector_generation: i64 = sqlx::query_scalar(
+            "SELECT COALESCE((
+               SELECT CASE WHEN revoked_at IS NULL THEN admission_generation ELSE 0 END
+               FROM node_connectors
+               WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3
+               ORDER BY created_at DESC LIMIT 1 FOR UPDATE
+             ), 1)",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if connector_generation <= 0 {
+            return Err(StorageError::NotFound);
+        }
         let token_hash = Sha256::digest(lease_token.as_bytes()).to_vec();
         let destination_id: Option<String> = sqlx::query_scalar(
             "SELECT destination_id FROM jobs
@@ -7613,7 +9078,9 @@ impl PostgresStore {
             return Err(StorageError::ConcurrentStateChange);
         }
         if let Some(row) = sqlx::query(
-            "SELECT lease_id, lease_token_hash, content_sha256, local_sequence
+            "SELECT lease_id, lease_token_hash, content_sha256, local_sequence,
+                    route_reservation_id, route_generation, route_fencing_token_hash,
+                    connector_generation
              FROM job_acceptances
              WHERE job_id = $1 AND workspace_id = $2 AND environment_id = $3 AND agent_id = $4
              FOR UPDATE",
@@ -7629,9 +9096,31 @@ impl PostgresStore {
             let stored_sequence: i64 = row.try_get("local_sequence")?;
             let stored_lease_id: Uuid = row.try_get("lease_id")?;
             let stored_token_hash: Option<Vec<u8>> = row.try_get("lease_token_hash")?;
+            let stored_reservation_id: Option<String> = row.try_get("route_reservation_id")?;
+            let stored_generation: Option<i64> = row.try_get("route_generation")?;
+            let stored_fence_hash: Option<Vec<u8>> = row.try_get("route_fencing_token_hash")?;
+            let stored_connector_generation: Option<i64> = row.try_get("connector_generation")?;
             if stored_lease_id != lease_id
                 || stored_sha.as_deref() != content_sha256
                 || stored_sequence != i64::try_from(local_sequence).unwrap_or(i64::MAX)
+            {
+                return Err(StorageError::IdempotencyConflict);
+            }
+            let expected_reservation_id = delivery_proof
+                .as_ref()
+                .map(|proof| proof.reservation_id.to_owned());
+            let expected_generation = delivery_proof
+                .as_ref()
+                .map(|proof| i64::try_from(proof.generation))
+                .transpose()
+                .map_err(|_| StorageError::ConcurrentStateChange)?;
+            let expected_fence_hash = delivery_proof
+                .as_ref()
+                .map(|proof| Sha256::digest(proof.fencing_token.as_bytes()).to_vec());
+            if stored_reservation_id != expected_reservation_id
+                || stored_generation != expected_generation
+                || stored_fence_hash != expected_fence_hash
+                || stored_connector_generation != Some(connector_generation)
             {
                 return Err(StorageError::IdempotencyConflict);
             }
@@ -7667,6 +9156,29 @@ impl PostgresStore {
             {
                 return Err(StorageError::IdempotencyConflict);
             }
+            let payload: serde_json::Value = sqlx::query_scalar(
+                "SELECT payload FROM jobs
+                 WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4",
+            )
+            .bind(job_id.to_string())
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(agent_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+            enqueue_webhook_event_in_transaction(
+                &mut transaction,
+                Some(&agent_acceptance_webhook_idempotency_key(
+                    workspace_id,
+                    environment_id,
+                    job_id,
+                )),
+                workspace_id,
+                environment_id,
+                "job.updated",
+                &payload,
+            )
+            .await?;
             transaction.commit().await?;
             return self.get_job(workspace_id, environment_id, job_id).await;
         }
@@ -7750,11 +9262,24 @@ impl PostgresStore {
         .bind(sequence)
         .execute(&mut *transaction)
         .await?;
+        let route_reservation_id = delivery_proof
+            .as_ref()
+            .map(|proof| proof.reservation_id.to_owned());
+        let route_generation = delivery_proof
+            .as_ref()
+            .map(|proof| i64::try_from(proof.generation))
+            .transpose()
+            .map_err(|_| StorageError::ConcurrentStateChange)?;
+        let route_fencing_token_hash = delivery_proof
+            .as_ref()
+            .map(|proof| Sha256::digest(proof.fencing_token.as_bytes()).to_vec());
         sqlx::query(
             "INSERT INTO job_acceptances (
                 job_id, workspace_id, environment_id, agent_id, lease_id,
-                lease_token_hash, content_sha256, local_sequence
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                lease_token_hash, content_sha256, local_sequence,
+                route_reservation_id, route_generation, route_fencing_token_hash
+                , connector_generation
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
         )
         .bind(job_id.to_string())
         .bind(workspace_id.to_string())
@@ -7766,6 +9291,10 @@ impl PostgresStore {
         .bind(i64::try_from(local_sequence).map_err(|error| {
             StorageError::InvalidData(format!("local sequence overflow: {error}"))
         })?)
+        .bind(route_reservation_id)
+        .bind(route_generation)
+        .bind(route_fencing_token_hash)
+        .bind(connector_generation)
         .execute(&mut *transaction)
         .await?;
         if let Some(attempt_id) = delivery_attempt_id {
@@ -7784,8 +9313,360 @@ impl PostgresStore {
                 return Err(StorageError::ConcurrentStateChange);
             }
         }
+        enqueue_webhook_event_in_transaction(
+            &mut transaction,
+            Some(&agent_acceptance_webhook_idempotency_key(
+                workspace_id,
+                environment_id,
+                job_id,
+            )),
+            workspace_id,
+            environment_id,
+            "job.updated",
+            &serde_json::to_value(&job)?,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(job)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn reconcile_agent_acceptance(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        content_sha256: &str,
+        local_sequence: u64,
+        proof: DeliveryAttemptProof<'_>,
+    ) -> Result<(bool, bool, bool), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        // Full-node revoke and connectorless legacy agents serialize on the
+        // agent row. Without this lock, reconciliation could report an
+        // acceptance as runnable after full-node revocation had committed.
+        let agent = sqlx::query_scalar::<_, bool>(
+            "SELECT revoked_at IS NOT NULL
+             FROM agents
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3
+             FOR UPDATE",
+        )
+        .bind(agent_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(agent_revoked) = agent else {
+            transaction.commit().await?;
+            return Ok((false, false, false));
+        };
+        let connector = sqlx::query(
+            "SELECT revoked_at IS NOT NULL AS revoked, admission_generation
+             FROM node_connectors
+             WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3
+             ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let connector_revoked = agent_revoked
+            || connector
+                .as_ref()
+                .is_some_and(|row| row.get::<bool, _>("revoked"));
+        let current_connector_generation = connector
+            .as_ref()
+            .map_or(1, |row| row.get::<i64, _>("admission_generation"));
+        let generation =
+            i64::try_from(proof.generation).map_err(|_| StorageError::ConcurrentStateChange)?;
+        let token_hash = Sha256::digest(lease_token.as_bytes()).to_vec();
+        let fence_hash = Sha256::digest(proof.fencing_token.as_bytes()).to_vec();
+        let sequence =
+            i64::try_from(local_sequence).map_err(|_| StorageError::ConcurrentStateChange)?;
+        let legacy_acceptance = sqlx::query_scalar::<_, i32>(
+            "SELECT 1 FROM job_acceptances
+             WHERE job_id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4
+               AND lease_id=$5 AND lease_token_hash=$6
+               AND content_sha256=$7 AND local_sequence=$8
+               AND route_reservation_id IS NULL AND route_generation IS NULL
+               AND route_fencing_token_hash IS NULL
+               AND (connector_generation IS NULL OR connector_generation=$9)
+             FOR UPDATE",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(lease_id)
+        .bind(&token_hash)
+        .bind(content_sha256)
+        .bind(sequence)
+        .bind(current_connector_generation)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .is_some();
+        if legacy_acceptance {
+            let topology_proves_route = sqlx::query_scalar::<_, i32>(
+                "SELECT 1
+                   FROM jobs AS job
+                   JOIN delivery_attempts AS attempt
+                     ON attempt.workspace_id=job.workspace_id
+                    AND attempt.environment_id=job.environment_id
+                    AND attempt.job_id=job.id
+                   JOIN route_reservations AS reservation
+                     ON reservation.workspace_id=attempt.workspace_id
+                    AND reservation.environment_id=attempt.environment_id
+                    AND reservation.attempt_id=attempt.id
+                   JOIN printer_routes AS route
+                     ON route.workspace_id=attempt.workspace_id
+                    AND route.environment_id=attempt.environment_id
+                    AND route.id=attempt.route_id
+                  WHERE job.id=$1 AND job.workspace_id=$2 AND job.environment_id=$3
+                    AND job.agent_id=$4 AND job.state='agent_accepted'
+                    AND reservation.id=$5 AND reservation.generation=$6
+                    AND reservation.fencing_token_hash=$7 AND reservation.state='active'
+                    AND attempt.generation=$6 AND attempt.fencing_token_hash=$7
+                    AND attempt.state IN ('accepted_by_node','queued_local')
+                    AND route.agent_id=$4
+                  FOR UPDATE OF job,attempt,reservation",
+            )
+            .bind(job_id.to_string())
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(agent_id.to_string())
+            .bind(proof.reservation_id)
+            .bind(generation)
+            .bind(format!(
+                "{:x}",
+                Sha256::digest(proof.fencing_token.as_bytes())
+            ))
+            .fetch_optional(&mut *transaction)
+            .await?
+            .is_some();
+            if topology_proves_route {
+                sqlx::query(
+                    "UPDATE job_acceptances
+                     SET route_reservation_id=$9, route_generation=$10,
+                         route_fencing_token_hash=$11, connector_generation=$12
+                     WHERE job_id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4
+                       AND lease_id=$5 AND lease_token_hash=$6
+                       AND content_sha256=$7 AND local_sequence=$8
+                       AND route_reservation_id IS NULL AND route_generation IS NULL
+                       AND route_fencing_token_hash IS NULL
+                       AND (connector_generation IS NULL OR connector_generation=$12)",
+                )
+                .bind(job_id.to_string())
+                .bind(workspace_id.to_string())
+                .bind(environment_id.to_string())
+                .bind(agent_id.to_string())
+                .bind(lease_id)
+                .bind(&token_hash)
+                .bind(content_sha256)
+                .bind(sequence)
+                .bind(proof.reservation_id)
+                .bind(generation)
+                .bind(&fence_hash)
+                .bind(current_connector_generation)
+                .execute(&mut *transaction)
+                .await?;
+            }
+        }
+        let evidence = sqlx::query(
+            "SELECT acceptance.connector_generation, job.state
+               FROM job_acceptances AS acceptance
+               JOIN jobs AS job
+                 ON job.id=acceptance.job_id
+                AND job.workspace_id=acceptance.workspace_id
+                AND job.environment_id=acceptance.environment_id
+               WHERE acceptance.job_id=$1 AND acceptance.workspace_id=$2
+                 AND acceptance.environment_id=$3 AND acceptance.agent_id=$4
+                 AND acceptance.lease_id=$5 AND acceptance.lease_token_hash=$6
+                 AND acceptance.content_sha256=$7 AND acceptance.local_sequence=$8
+                 AND acceptance.route_reservation_id=$9 AND acceptance.route_generation=$10
+                 AND acceptance.route_fencing_token_hash=$11
+             ",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(lease_id)
+        .bind(token_hash)
+        .bind(content_sha256)
+        .bind(sequence)
+        .bind(proof.reservation_id)
+        .bind(generation)
+        .bind(fence_hash)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let accepted = !agent_revoked
+            && evidence.as_ref().is_some_and(|row| {
+                row.get::<Option<i64>, _>("connector_generation")
+                    == Some(current_connector_generation)
+                    && row.get::<String, _>("state") == "agent_accepted"
+            });
+        let fenced = evidence.is_some() && !accepted;
+        transaction.commit().await?;
+        Ok((accepted, connector_revoked, fenced))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn abandon_agent_acceptance(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        agent_id: AgentId,
+        job_id: JobId,
+        lease_id: Uuid,
+        lease_token: &str,
+        content_sha256: &str,
+        local_sequence: u64,
+        proof: DeliveryAttemptProof<'_>,
+    ) -> Result<bool, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let connector_active: bool = sqlx::query_scalar(
+            "SELECT COALESCE((
+               SELECT revoked_at IS NULL FROM node_connectors
+               WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3
+               ORDER BY created_at DESC LIMIT 1 FOR UPDATE
+             ), true)",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !connector_active {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        let exact: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+               SELECT 1 FROM job_acceptances
+               WHERE job_id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4
+                 AND lease_id=$5 AND lease_token_hash=$6
+                 AND content_sha256=$7 AND local_sequence=$8
+                 AND route_reservation_id=$9 AND route_generation=$10
+                 AND route_fencing_token_hash=$11
+             )",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(lease_id)
+        .bind(Sha256::digest(lease_token.as_bytes()).to_vec())
+        .bind(content_sha256)
+        .bind(i64::try_from(local_sequence).map_err(|_| StorageError::ConcurrentStateChange)?)
+        .bind(proof.reservation_id)
+        .bind(i64::try_from(proof.generation).map_err(|_| StorageError::ConcurrentStateChange)?)
+        .bind(Sha256::digest(proof.fencing_token.as_bytes()).to_vec())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !exact {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+        let row = sqlx::query(
+            "SELECT payload,state,state_sequence FROM jobs
+             WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND agent_id=$4
+             FOR UPDATE",
+        )
+        .bind(job_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let state: String = row.try_get("state")?;
+        if state == "cancelled" {
+            transaction.commit().await?;
+            return Ok(true);
+        }
+        if !matches!(state.as_str(), "agent_accepted" | "cancel_requested") {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        let mut job = job_from_row(row.try_get("payload")?, &state)?;
+        let now = Utc::now();
+        let current_sequence = row.try_get::<i64, _>("state_sequence")?;
+        let sequence = if state == "agent_accepted" {
+            let requested_sequence = current_sequence + 1;
+            job.state = JobState::CancelRequested;
+            insert_event(
+                &mut transaction,
+                &job,
+                &JobEvent {
+                    id: EventId::new(),
+                    job_id,
+                    sequence: u64::try_from(requested_sequence).map_err(|error| {
+                        StorageError::InvalidData(format!("event sequence overflow: {error}"))
+                    })?,
+                    state: JobState::CancelRequested,
+                    reason: None,
+                    message: Some("Connector requested pre-activation compensation".into()),
+                    agent_id: Some(agent_id),
+                    native_job_id: None,
+                    occurred_at: now,
+                },
+            )
+            .await?;
+            requested_sequence + 1
+        } else {
+            current_sequence + 1
+        };
+        job.state = JobState::Cancelled;
+        let event = JobEvent {
+            id: EventId::new(),
+            job_id,
+            sequence: u64::try_from(sequence).map_err(|error| {
+                StorageError::InvalidData(format!("event sequence overflow: {error}"))
+            })?,
+            state: JobState::Cancelled,
+            reason: Some(piqae_domain::JobFailureReason::CancelledByUser),
+            message: Some("Connector disconnected before local queue activation".into()),
+            agent_id: Some(agent_id),
+            native_job_id: None,
+            occurred_at: now,
+        };
+        insert_event(&mut transaction, &job, &event).await?;
+        sqlx::query(
+            "UPDATE jobs SET payload=$2,state='cancelled',state_sequence=$3,
+                final_at=COALESCE(final_at,$4),updated_at=now()
+             WHERE id=$1 AND workspace_id=$5 AND environment_id=$6",
+        )
+        .bind(job_id.to_string())
+        .bind(serde_json::to_value(&job)?)
+        .bind(sequence)
+        .bind(now)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE delivery_attempts SET state='cancelled',final_at=COALESCE(final_at,$4),updated_at=$4
+             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND final_at IS NULL",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(job_id.to_string())
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE route_reservations SET state='cancelled',released_at=COALESCE(released_at,$4),updated_at=$4
+             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND state='active'",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(job_id.to_string())
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(true)
     }
 
     pub async fn create_document_template(
@@ -7934,7 +9815,7 @@ impl PostgresStore {
         let row = sqlx::query(
             "INSERT INTO document_template_revisions
              (id,workspace_id,environment_id,template_id,revision,spec_ciphertext,spec_sha256,renderer_profile)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,'piqae.business-document/v1') RETURNING *",
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'printpacket/v1') RETURNING *",
         ).bind(revision_id).bind(workspace_id.to_string()).bind(environment_id.to_string())
         .bind(template_id).bind(revision).bind(template.try_get::<Vec<u8>, _>("draft_ciphertext")?)
         .bind(template.try_get::<String, _>("draft_sha256")?).fetch_one(&mut *transaction).await?;
@@ -8627,15 +10508,159 @@ impl PostgresStore {
         rows.iter().map(stuck_uncertain_from_row).collect()
     }
 
-    pub async fn release_expired_jobs(&self) -> Result<u64, StorageError> {
-        let result = sqlx::query(
-            "UPDATE jobs SET state = 'expired', final_at = now(), updated_at = now()
-             WHERE final_at IS NULL AND expires_at <= now()
-               AND state NOT IN ('spool_intent','accepted_by_spooler','spooling','printing')",
+    /// Atomically expires a bounded batch which has never crossed node
+    /// acceptance or a physical handoff boundary.
+    ///
+    /// The job event, tenant webhook outbox, lease cleanup, capability-recovery
+    /// cleanup, and pre-handoff route release commit together. Jobs with an
+    /// acceptance proof or an attempt later than `route_leased` are skipped:
+    /// their node may still print and expiry must not create a second route.
+    pub async fn expire_jobs_before_handoff(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<ExpiredJobTransition>, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let rows = sqlx::query(
+            "SELECT job.id,job.workspace_id,job.environment_id,job.payload,
+                    job.state,job.state_sequence
+             FROM jobs AS job
+             WHERE job.final_at IS NULL AND job.expires_at<=now()
+               AND job.state IN (
+                 'registered','content_pending','waiting_for_agent',
+                 'failed_retryable','blocked'
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM job_acceptances AS acceptance
+                 WHERE acceptance.workspace_id=job.workspace_id
+                   AND acceptance.environment_id=job.environment_id
+                   AND acceptance.job_id=job.id
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM delivery_attempts AS attempt
+                 WHERE attempt.workspace_id=job.workspace_id
+                   AND attempt.environment_id=job.environment_id
+                   AND attempt.job_id=job.id AND attempt.final_at IS NULL
+                   AND attempt.state<>'route_leased'
+               )
+               AND (
+                 job.state<>'blocked' OR EXISTS (
+                   SELECT 1 FROM node_capability_recovery_checks AS recovery
+                   WHERE recovery.workspace_id=job.workspace_id
+                     AND recovery.environment_id=job.environment_id
+                     AND recovery.agent_id=job.agent_id
+                     AND recovery.job_id=job.id
+                     AND (
+                       SELECT event.payload->>'reason'='node_update_required'
+                              AND event.payload->>'agent_id' IS NULL
+                       FROM job_events AS event
+                       WHERE event.workspace_id=job.workspace_id
+                         AND event.environment_id=job.environment_id
+                         AND event.job_id=job.id
+                       ORDER BY event.sequence DESC LIMIT 1
+                     )=TRUE
+                 )
+               )
+             ORDER BY job.expires_at,job.created_at,job.id
+             LIMIT $1 FOR UPDATE OF job SKIP LOCKED",
         )
-        .execute(&self.pool)
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&mut *transaction)
         .await?;
-        Ok(result.rows_affected())
+        let mut expired = Vec::with_capacity(rows.len());
+        for row in rows {
+            let workspace_id = WorkspaceId::from_str(&row.try_get::<String, _>("workspace_id")?)
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            let environment_id =
+                EnvironmentId::from_str(&row.try_get::<String, _>("environment_id")?)
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            let job_id = JobId::from_str(&row.try_get::<String, _>("id")?)
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            if !supersede_pre_handoff_delivery_attempts(
+                &mut transaction,
+                workspace_id,
+                environment_id,
+                job_id,
+            )
+            .await?
+            {
+                continue;
+            }
+            let current_state: String = row.try_get("state")?;
+            let mut job = job_from_row(row.try_get("payload")?, &current_state)?;
+            let sequence = row.try_get::<i64, _>("state_sequence")? + 1;
+            let sequence_u64 = u64::try_from(sequence)
+                .map_err(|error| StorageError::InvalidData(format!("event sequence: {error}")))?;
+            let now = Utc::now();
+            job.state = JobState::Expired;
+            insert_event(
+                &mut transaction,
+                &job,
+                &JobEvent {
+                    id: EventId::new(),
+                    job_id,
+                    sequence: sequence_u64,
+                    state: JobState::Expired,
+                    reason: Some(JobFailureReason::Expired),
+                    message: Some("Job expired before node or native handoff".into()),
+                    agent_id: None,
+                    native_job_id: None,
+                    occurred_at: now,
+                },
+            )
+            .await?;
+            let updated = sqlx::query(
+                "UPDATE jobs SET payload=$4,state='expired',state_sequence=$5,
+                        final_at=$6,lease_owner=NULL,lease_id=NULL,
+                        lease_token_hash=NULL,lease_until=NULL,updated_at=$6
+                 WHERE id=$1 AND workspace_id=$2 AND environment_id=$3
+                   AND final_at IS NULL",
+            )
+            .bind(job_id.to_string())
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(serde_json::to_value(&job)?)
+            .bind(sequence)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+            if updated.rows_affected() != 1 {
+                return Err(StorageError::ConcurrentStateChange);
+            }
+            sqlx::query(
+                "DELETE FROM node_capability_recovery_checks
+                 WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(job_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+            let webhook_idempotency_key = prehandoff_expiry_webhook_idempotency_key(
+                workspace_id,
+                environment_id,
+                job_id,
+                sequence_u64,
+            );
+            enqueue_webhook_event_in_transaction(
+                &mut transaction,
+                Some(&webhook_idempotency_key),
+                workspace_id,
+                environment_id,
+                "job.updated",
+                &serde_json::to_value(&job)?,
+            )
+            .await?;
+            expired.push(ExpiredJobTransition {
+                workspace_id,
+                environment_id,
+                transition: DurableJobTransition {
+                    job,
+                    webhook_idempotency_key,
+                },
+            });
+        }
+        transaction.commit().await?;
+        Ok(expired)
     }
 
     pub async fn readiness(&self) -> Result<(), StorageError> {
@@ -9737,6 +11762,219 @@ fn workos_workspace_slug(organization_id: &str, workspace_id: &str) -> String {
     )
 }
 
+const MAX_AUTOMATIC_WAKE_CANDIDATES: usize = 16;
+
+async fn ensure_waiting_job_wake_hints_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+    state_sequence: u64,
+    requested_at: DateTime<Utc>,
+) -> Result<usize, StorageError> {
+    let sequence = i64::try_from(state_sequence)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    if let Some(count) = sqlx::query_scalar::<_, i32>(
+        "SELECT candidate_count FROM job_wake_reconciliations
+         WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND state_sequence=$4",
+    )
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(job_id.to_string())
+    .bind(sequence)
+    .fetch_optional(&mut **transaction)
+    .await?
+    {
+        return usize::try_from(count)
+            .map_err(|error| StorageError::InvalidData(error.to_string()));
+    }
+
+    let job = sqlx::query(
+        "SELECT agent_id,destination_id FROM jobs
+         WHERE workspace_id=$1 AND environment_id=$2 AND id=$3
+           AND state='waiting_for_agent' AND state_sequence=$4
+         FOR UPDATE",
+    )
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(job_id.to_string())
+    .bind(sequence)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(StorageError::ConcurrentStateChange)?;
+    let assigned_agent: String = job.try_get("agent_id")?;
+    let destination_id: Option<String> = job.try_get("destination_id")?;
+    let mut candidate_agents = Vec::new();
+    if let Some(destination_id) = destination_id {
+        let routes = sqlx::query_scalar::<_, String>(
+            "SELECT route.agent_id FROM printer_routes route
+             JOIN agents agent
+               ON agent.workspace_id=route.workspace_id
+              AND agent.environment_id=route.environment_id
+              AND agent.id=route.agent_id
+             WHERE route.workspace_id=$1 AND route.environment_id=$2
+               AND route.destination_id=$3 AND route.enabled
+               AND route.role<>'disabled'
+               AND route.retired_at IS NULL
+               AND route.state IN ('unknown','available','unavailable','stale')
+               AND agent.revoked_at IS NULL
+             GROUP BY route.agent_id
+             ORDER BY CASE WHEN route.agent_id=$4 THEN 0 ELSE 1 END,
+                      min(CASE route.role WHEN 'primary' THEN 0 ELSE 1 END),
+                      min(route.priority),route.agent_id
+             LIMIT $5",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(destination_id)
+        .bind(&assigned_agent)
+        .bind(i64::try_from(MAX_AUTOMATIC_WAKE_CANDIDATES).unwrap_or(16))
+        .fetch_all(&mut **transaction)
+        .await?;
+        candidate_agents.extend(routes);
+    } else if sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+             SELECT 1 FROM agents
+             WHERE workspace_id=$1 AND environment_id=$2 AND id=$3
+               AND revoked_at IS NULL
+         )",
+    )
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(&assigned_agent)
+    .fetch_one(&mut **transaction)
+    .await?
+    {
+        candidate_agents.push(assigned_agent);
+    }
+
+    let expires_at = requested_at + chrono::Duration::minutes(5);
+    for agent_id in &candidate_agents {
+        let digest = Sha256::digest(
+            format!("{workspace_id}:{environment_id}:{job_id}:{state_sequence}:{agent_id}")
+                .as_bytes(),
+        );
+        let idempotency_key = format!("automatic-wake:{digest:x}");
+        let proposed_id = format!("wkh_{}", ulid::Ulid::new());
+        let row = sqlx::query(
+            "INSERT INTO node_wake_hints
+                (workspace_id,environment_id,id,agent_id,idempotency_key,reason,
+                 delivery_channel,status,requested_at,expires_at,observed_at)
+             VALUES ($1,$2,$3,$4,$5,'job_available','external_push','pending',$6,$7,NULL)
+             ON CONFLICT (workspace_id,environment_id,agent_id,idempotency_key)
+             DO UPDATE SET idempotency_key=EXCLUDED.idempotency_key
+             RETURNING id,agent_id,reason,delivery_channel,status,requested_at,expires_at,observed_at",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(proposed_id)
+        .bind(agent_id)
+        .bind(&idempotency_key)
+        .bind(requested_at)
+        .bind(expires_at)
+        .fetch_one(&mut **transaction)
+        .await?;
+        let hint_id: String = row.try_get("id")?;
+        let payload = serde_json::json!({
+            "id": hint_id,
+            "node_id": row.try_get::<String, _>("agent_id")?,
+            "reason": row.try_get::<String, _>("reason")?,
+            "delivery_channel": row.try_get::<String, _>("delivery_channel")?,
+            "status": row.try_get::<String, _>("status")?,
+            "requested_at": row.try_get::<DateTime<Utc>, _>("requested_at")?,
+            "expires_at": row.try_get::<DateTime<Utc>, _>("expires_at")?,
+            "observed_at": row.try_get::<Option<DateTime<Utc>>, _>("observed_at")?,
+        });
+        sqlx::query(
+            "INSERT INTO routing_outbox
+                (id,workspace_id,environment_id,aggregate_type,aggregate_id,event_type,payload)
+             VALUES ($1,$2,$3,'node_wake_hint',$4,'node.wake_hint.requested',$5)
+             ON CONFLICT (workspace_id,environment_id,event_type,aggregate_id)
+                 WHERE aggregate_type='node_wake_hint'
+                   AND event_type='node.wake_hint.requested'
+             DO NOTHING",
+        )
+        .bind(EventId::new().to_string())
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(hint_id)
+        .bind(payload)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    let candidate_count = i32::try_from(candidate_agents.len())
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    sqlx::query(
+        "INSERT INTO job_wake_reconciliations
+            (workspace_id,environment_id,job_id,state_sequence,candidate_count,reconciled_at)
+         VALUES ($1,$2,$3,$4,$5,now()) ON CONFLICT DO NOTHING",
+    )
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(job_id.to_string())
+    .bind(sequence)
+    .bind(candidate_count)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(candidate_agents.len())
+}
+
+/// Finalizes only a server-side route lease that provably precedes durable
+/// node admission. `accepted_by_node`, `queued_local`, `handing_to_spooler`,
+/// and every later state remain fenced because local work may still run and a
+/// replay could otherwise duplicate a physical print.
+async fn supersede_pre_handoff_delivery_attempts(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    job_id: JobId,
+) -> Result<bool, StorageError> {
+    let attempts: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id,state FROM delivery_attempts
+         WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND final_at IS NULL
+         FOR UPDATE",
+    )
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(job_id.to_string())
+    .fetch_all(&mut **transaction)
+    .await?;
+    if attempts.iter().any(|(_, state)| state != "route_leased") {
+        return Ok(false);
+    }
+    let attempt_ids = attempts.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+    if attempt_ids.is_empty() {
+        return Ok(true);
+    }
+    let now = Utc::now();
+    sqlx::query(
+        "UPDATE delivery_attempts
+         SET state='superseded',final_at=$4,updated_at=$4
+         WHERE workspace_id=$1 AND environment_id=$2 AND id=ANY($3)
+           AND state='route_leased'
+           AND final_at IS NULL",
+    )
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(&attempt_ids)
+    .bind(now)
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE route_reservations
+         SET state='superseded',released_at=$4,updated_at=$4
+         WHERE workspace_id=$1 AND environment_id=$2 AND attempt_id=ANY($3)
+           AND state='active'",
+    )
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(&attempt_ids)
+    .bind(now)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(true)
+}
+
 async fn insert_event(
     transaction: &mut Transaction<'_, Postgres>,
     job: &Job,
@@ -9763,6 +12001,185 @@ async fn insert_event(
     .execute(&mut **transaction)
     .await?;
     Ok(())
+}
+
+async fn enqueue_webhook_event_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    idempotency_key: Option<&str>,
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    event_type: &str,
+    payload: &serde_json::Value,
+) -> Result<String, StorageError> {
+    let proposed_event_id = EventId::new().to_string();
+    let inserted = sqlx::query_scalar::<_, String>(
+        "INSERT INTO webhook_events (
+            id, workspace_id, environment_id, event_type, payload, occurred_at,
+            idempotency_key
+         ) VALUES ($1,$2,$3,$4,$5,now(),$6)
+         ON CONFLICT (workspace_id, environment_id, idempotency_key)
+             WHERE idempotency_key IS NOT NULL DO NOTHING
+         RETURNING id",
+    )
+    .bind(&proposed_event_id)
+    .bind(workspace_id.to_string())
+    .bind(environment_id.to_string())
+    .bind(event_type)
+    .bind(payload)
+    .bind(idempotency_key)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(event_id) = inserted else {
+        let idempotency_key = idempotency_key.ok_or_else(|| {
+            StorageError::InvalidData("non-idempotent webhook event conflicted".into())
+        })?;
+        return sqlx::query_scalar(
+            "SELECT id FROM webhook_events
+             WHERE workspace_id=$1 AND environment_id=$2 AND idempotency_key=$3",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(idempotency_key)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(Into::into);
+    };
+    Ok(event_id)
+}
+
+async fn terminalize_agent_acceptances(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
+    environment_id: EnvironmentId,
+    agent_id: AgentId,
+) -> Result<Vec<Job>, StorageError> {
+    let mut affected_jobs = Vec::new();
+    loop {
+        let rows = sqlx::query(
+            "SELECT job.id,job.payload,job.state,job.state_sequence
+             FROM jobs AS job
+             JOIN job_acceptances AS acceptance
+               ON acceptance.job_id=job.id
+              AND acceptance.workspace_id=job.workspace_id
+              AND acceptance.environment_id=job.environment_id
+              AND acceptance.agent_id=$3
+             WHERE job.workspace_id=$1 AND job.environment_id=$2 AND job.agent_id=$3
+               AND job.final_at IS NULL
+             ORDER BY job.created_at,job.id LIMIT 256 FOR UPDATE OF job",
+        )
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_all(&mut **transaction)
+        .await?;
+        if rows.is_empty() {
+            break;
+        }
+        for row in rows {
+            let job_id_text: String = row.try_get("id")?;
+            let job_id: JobId = job_id_text.parse().map_err(|error| {
+                StorageError::InvalidData(format!("invalid accepted job id: {error}"))
+            })?;
+            let state: String = row.try_get("state")?;
+            let mut job = job_from_row(row.try_get("payload")?, &state)?;
+            let now = Utc::now();
+            let sequence = row.try_get::<i64, _>("state_sequence")? + 1;
+            job.state = JobState::DeliveryUncertain;
+            job.delivery_uncertain_since = Some(now);
+            insert_event(
+                transaction,
+                &job,
+                &JobEvent {
+                    id: EventId::new(),
+                    job_id,
+                    sequence: u64::try_from(sequence).map_err(|error| {
+                        StorageError::InvalidData(format!("event sequence overflow: {error}"))
+                    })?,
+                    state: JobState::DeliveryUncertain,
+                    reason: Some(piqae_domain::JobFailureReason::AmbiguousHandoff),
+                    message: Some(
+                        "Node access revoked with accepted work and unreported delivery".into(),
+                    ),
+                    agent_id: Some(agent_id),
+                    native_job_id: None,
+                    occurred_at: now,
+                },
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE jobs SET payload=$2,state='delivery_uncertain',state_sequence=$3,
+                final_at=$4,delivery_uncertain_since=COALESCE(delivery_uncertain_since,$4),
+                updated_at=$4 WHERE id=$1 AND workspace_id=$5 AND environment_id=$6",
+            )
+            .bind(&job_id_text)
+            .bind(serde_json::to_value(&job)?)
+            .bind(sequence)
+            .bind(now)
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .execute(&mut **transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE physical_destinations SET state='attention',updated_at=$4
+             WHERE workspace_id=$1 AND environment_id=$2 AND id IN (
+               SELECT destination_id FROM delivery_attempts
+               WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND final_at IS NULL
+             )",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(&job_id_text)
+            .bind(now)
+            .execute(&mut **transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE delivery_attempts SET state='delivery_uncertain',final_at=$4,updated_at=$4
+             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND final_at IS NULL",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(&job_id_text)
+            .bind(now)
+            .execute(&mut **transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE route_reservations SET state='released',released_at=$4,updated_at=$4
+             WHERE workspace_id=$1 AND environment_id=$2 AND job_id=$3 AND state='active'",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(&job_id_text)
+            .bind(now)
+            .execute(&mut **transaction)
+            .await?;
+            let payload = serde_json::to_value(&job)?;
+            for event_type in ["job.updated", "job.delivery_uncertain"] {
+                let idempotency_key = acceptance_revocation_webhook_idempotency_key(
+                    workspace_id,
+                    environment_id,
+                    job_id,
+                    event_type,
+                );
+                enqueue_webhook_event_in_transaction(
+                    transaction,
+                    Some(&idempotency_key),
+                    workspace_id,
+                    environment_id,
+                    event_type,
+                    &payload,
+                )
+                .await?;
+            }
+            // Live publication is advisory; durable job events are the source
+            // of truth and webhook events above are the durable tenant outbox.
+            // Bound response memory so a hostile backlog cannot prevent
+            // credential revocation from committing.
+            if affected_jobs.len() < 256 {
+                affected_jobs.push(job);
+            }
+        }
+    }
+    Ok(affected_jobs)
 }
 
 fn stuck_uncertain_from_row(row: &PgRow) -> Result<StuckUncertainJob, StorageError> {
@@ -9886,6 +12303,7 @@ async fn upsert_node_connector(
          VALUES ($1,$2,$3)
          ON CONFLICT (installation_key) DO UPDATE
          SET updated_at = node_installations.updated_at
+         WHERE node_installations.public_key = EXCLUDED.public_key
          RETURNING id",
     )
     .bind(installation_id)
@@ -9899,7 +12317,13 @@ async fn upsert_node_connector(
              (id, installation_id, workspace_id, environment_id, agent_id)
          VALUES ($1,$2,$3,$4,$5)
          ON CONFLICT (workspace_id, environment_id, agent_id) DO UPDATE
-         SET installation_id = EXCLUDED.installation_id, revoked_at = NULL, updated_at = now()
+         SET installation_id = EXCLUDED.installation_id, revoked_at = NULL,
+             admission_generation = CASE
+                 WHEN node_connectors.revoked_at IS NOT NULL
+                 THEN node_connectors.admission_generation + 1
+                 ELSE node_connectors.admission_generation
+             END,
+             updated_at = now()
          RETURNING id",
     )
     .bind(connector_id)
@@ -9919,6 +12343,11 @@ fn agent_from_row(row: &PgRow) -> Result<StoredAgent, StorageError> {
             .parse()
             .map_err(|error| StorageError::InvalidData(format!("agent id `{id}`: {error}")))?,
         name: row.try_get("name")?,
+        site: row.try_get("identity_site")?,
+        location: row.try_get("identity_location")?,
+        labels: serde_json::from_value(row.try_get("identity_labels")?)?,
+        identity_revision: u64::try_from(row.try_get::<i64, _>("identity_revision")?)
+            .map_err(|error| StorageError::InvalidData(format!("identity revision: {error}")))?,
         platform: row.try_get("os")?,
         state: normalize_agent_state(&row.try_get::<String, _>("state")?),
         version: row.try_get("version")?,
@@ -9929,6 +12358,7 @@ fn agent_from_row(row: &PgRow) -> Result<StoredAgent, StorageError> {
         executor_crashes: u64::try_from(row.try_get::<i64, _>("executor_crashes")?)
             .map_err(|error| StorageError::InvalidData(format!("executor crash count: {error}")))?,
         last_error_code: row.try_get("last_error_code")?,
+        document_render: serde_json::from_value(row.try_get("printpacket_render_capabilities")?)?,
     })
 }
 
@@ -10252,5 +12682,30 @@ mod tests {
         assert!(!valid_external_installation_id("short"));
         assert!(!valid_external_installation_id("install/../../other"));
         assert!(!valid_external_installation_id(&"x".repeat(129)));
+    }
+
+    #[test]
+    fn migration_preflight_accepts_only_an_exact_current_prefix() {
+        let migrator = sqlx::migrate!("../../migrations/postgres");
+        let rows = migrator
+            .iter()
+            .take(2)
+            .map(|migration| AppliedMigration {
+                version: migration.version,
+                description: migration.description.to_string(),
+                success: true,
+                checksum: migration.checksum.to_vec(),
+            })
+            .collect::<Vec<_>>();
+        assert!(applied_history_is_current_prefix(&[], &migrator));
+        assert!(applied_history_is_current_prefix(&rows, &migrator));
+
+        let second_checksum = rows[1].checksum.clone();
+        let mut changed = rows;
+        changed[1].checksum[0] ^= 1;
+        assert!(!applied_history_is_current_prefix(&changed, &migrator));
+        changed[1].checksum = second_checksum;
+        changed[1].success = false;
+        assert!(!applied_history_is_current_prefix(&changed, &migrator));
     }
 }

@@ -11,9 +11,15 @@ use axum::{
     routing::{get, post, put},
 };
 use piqae_local_ipc::{
-    ConfirmLoadedMedia, LocalPrinter, LocalPrinterProfile, LocalPrinterQueue, LocalStatus,
-    NativeProfileCapturePayload, ProfileCaptureAuthorized, ProfileValidationResult,
+    BrokerAuthorizationDecision, ConfirmLoadedMedia, NativeProfileCapturePayload,
     SessionAuthenticator,
+};
+pub use piqae_node_runtime::command::{
+    CommandFailure as ControlFailure, ConfirmLoadedMediaRequest, DeleteProfileQuery,
+    ExposureUpdate, HostLifecycleRequest, LocalConnectorDetail, LocalContent, LocalCreateJob,
+    LocalHistoryJob, LocalJobAccepted, LocalJobHistory, NodeIdentityUpdate, NodeIdentityUpdated,
+    ProfileCaptureBeginRequest, ProfileCreate, ProfileUpdate, RuntimeCommand as ControlRequest,
+    TestPageRequest, ValidateProfileRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -26,191 +32,6 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tower_http::limit::RequestBodyLimitLayer;
 
-#[derive(Debug)]
-pub enum ControlRequest {
-    Status {
-        respond_to: oneshot::Sender<LocalStatus>,
-    },
-    Printers {
-        respond_to: oneshot::Sender<Vec<LocalPrinter>>,
-    },
-    SetPrinterExposure {
-        printer_id: String,
-        exposed: bool,
-        respond_to: oneshot::Sender<Result<LocalPrinter, ControlFailure>>,
-    },
-    Profiles {
-        printer_id: String,
-        respond_to: oneshot::Sender<Result<Vec<LocalPrinterProfile>, ControlFailure>>,
-    },
-    CreateProfile {
-        printer_id: String,
-        request: ProfileCreate,
-        respond_to: oneshot::Sender<Result<LocalPrinterProfile, ControlFailure>>,
-    },
-    UpdateProfile {
-        printer_id: String,
-        profile_id: String,
-        request: ProfileUpdate,
-        respond_to: oneshot::Sender<Result<LocalPrinterProfile, ControlFailure>>,
-    },
-    DeleteProfile {
-        printer_id: String,
-        profile_id: String,
-        expected_revision: u64,
-        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
-    },
-    BeginProfileCapture {
-        printer_id: String,
-        request: ProfileCaptureBeginRequest,
-        respond_to: oneshot::Sender<Result<ProfileCaptureAuthorized, ControlFailure>>,
-    },
-    CommitProfileCapture {
-        session_id: String,
-        capture_token: String,
-        capture: Box<NativeProfileCapturePayload>,
-        respond_to: oneshot::Sender<Result<LocalPrinterProfile, ControlFailure>>,
-    },
-    CancelProfileCapture {
-        session_id: String,
-        capture_token: String,
-        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
-    },
-    ValidateProfile {
-        profile_id: String,
-        revision: u64,
-        respond_to: oneshot::Sender<Result<ProfileValidationResult, ControlFailure>>,
-    },
-    ConfirmLoadedMedia {
-        request: ConfirmLoadedMedia,
-        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
-    },
-    PrinterQueue {
-        printer_id: String,
-        respond_to: oneshot::Sender<Result<LocalPrinterQueue, ControlFailure>>,
-    },
-    JobHistory {
-        offset: usize,
-        limit: usize,
-        respond_to: oneshot::Sender<Result<LocalJobHistory, ControlFailure>>,
-    },
-    ReprintJob {
-        job_id: String,
-        idempotency_key: String,
-        confirmed: bool,
-        respond_to: oneshot::Sender<Result<LocalJobAccepted, ControlFailure>>,
-    },
-    ConnectorDetails {
-        respond_to: oneshot::Sender<Result<Vec<LocalConnectorDetail>, ControlFailure>>,
-    },
-    TestPage {
-        printer_id: String,
-        profile_id: String,
-        confirmed: bool,
-        respond_to: oneshot::Sender<Result<LocalJobAccepted, ControlFailure>>,
-    },
-    Pause {
-        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
-    },
-    Resume {
-        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
-    },
-    ReloadConnectors {
-        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
-    },
-    RevokeConnector {
-        connector_id: String,
-        respond_to: oneshot::Sender<Result<(), ControlFailure>>,
-    },
-    SubmitJob {
-        request: Box<LocalCreateJob>,
-        respond_to: oneshot::Sender<Result<LocalJobAccepted, ControlFailure>>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ControlFailure {
-    pub code: String,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct LocalCreateJob {
-    pub printer_id: String,
-    #[serde(default)]
-    pub printer_native_id: Option<String>,
-    pub title: String,
-    pub content_kind: piqae_domain::ContentKind,
-    pub content: LocalContent,
-    #[serde(default)]
-    pub options: piqae_domain::JobOptions,
-    pub expires_unix_ms: Option<i64>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum LocalContent {
-    Base64 { data: String },
-    Uri { uri: String },
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct LocalJobAccepted {
-    pub job_id: String,
-    pub state: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct LocalJobHistory {
-    pub jobs: Vec<LocalHistoryJob>,
-    pub next_offset: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct LocalHistoryJob {
-    pub job_id: String,
-    pub printer_id: String,
-    pub title: String,
-    pub state: String,
-    pub native_job_id: Option<String>,
-    pub can_reprint: bool,
-    pub created_unix_ms: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct LocalConnectorDetail {
-    pub connector_id: String,
-    pub display_name: String,
-    pub workspace_name: Option<String>,
-    pub authorization_type: Option<String>,
-    pub workspace_id: Option<String>,
-    pub environment_id: Option<String>,
-    pub requesting_service_account_id: Option<String>,
-    pub endpoint: String,
-    pub connection: String,
-    pub permission: String,
-    pub allowed_printer_ids: Vec<String>,
-    pub selected_printer_count: usize,
-    /// Redacted connector health only. This may contain a stable protocol
-    /// error code, but never response bodies, credentials, or request data.
-    pub last_sync_error_code: Option<String>,
-    /// Number of queues currently present in the node-owned inventory.
-    pub local_printer_count: usize,
-    /// Number of present queues permitted by this connector's grant.
-    pub eligible_printer_count: usize,
-    /// Latest inventory revision prepared by this connector for cloud sync.
-    pub inventory_revision: u64,
-    /// True when a local inventory change still needs a sync attempt.
-    pub inventory_refresh_pending: bool,
-    /// True only when this connector can reach a locally coordinated physical
-    /// destination also granted to a different control-plane origin. No
-    /// origin, route key, job identity, or reservation proof is exposed.
-    pub cross_authority_route_warning: bool,
-    /// Present only when connector enrolment records an authenticated,
-    /// operator-safe management destination. Never guess provider paths.
-    pub manage_url: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 struct ReprintRequest {
     idempotency_key: String,
@@ -222,68 +43,6 @@ struct ReprintRequest {
 struct DashboardSessionCreated {
     url: String,
     expires_in_seconds: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ExposureUpdate {
-    pub exposed: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProfileCreate {
-    pub name: String,
-    #[serde(default)]
-    pub is_default: bool,
-    #[serde(default)]
-    pub options: piqae_domain::JobOptions,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProfileUpdate {
-    pub expected_revision: u64,
-    pub name: String,
-    #[serde(default)]
-    pub is_default: bool,
-    #[serde(default)]
-    pub options: piqae_domain::JobOptions,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct DeleteProfileQuery {
-    pub expected_revision: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct TestPageRequest {
-    pub profile_id: String,
-    /// A local driver test may address an installed printer before it is
-    /// exposed to cloud/API jobs, but only after an explicit user action.
-    #[serde(default)]
-    pub confirmed: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProfileCaptureBeginRequest {
-    pub operation: piqae_domain::ProfileCaptureOperation,
-    pub profile_id: Option<String>,
-    pub expected_revision: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ValidateProfileRequest {
-    pub revision: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConfirmLoadedMediaRequest {
-    pub stock_id: Option<String>,
-    pub confidence: piqae_domain::LoadedMediaConfidence,
-    pub confirmed_by: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -336,6 +95,16 @@ pub fn router(state: LocalApiState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/local/status", get(status))
+        .route("/v1/local/node/identity", put(update_node_identity))
+        .route("/v1/local/lifecycle", post(apply_host_lifecycle))
+        .route(
+            "/v1/local/broker/authorization-requests",
+            get(pending_broker_authorizations),
+        )
+        .route(
+            "/v1/local/broker/authorization-requests/{authorization_id}/decision",
+            post(decide_broker_authorization),
+        )
         .route("/v1/local/printers", get(printers))
         .route(
             "/v1/local/printers/{printer_id}/exposure",
@@ -374,6 +143,12 @@ pub fn router(state: LocalApiState) -> Router {
             "/v1/local/dashboard-sessions",
             post(create_dashboard_session),
         )
+        .route(
+            "/v1/local/dashboard-sessions/{view}",
+            post(create_dashboard_session_for_view),
+        )
+        .route("/local/node", get(open_dashboard))
+        .route("/local/node/identity", put(dashboard_update_node_identity))
         .route("/local/history", get(open_dashboard))
         .route("/local/connections", get(open_dashboard))
         // Keep the pre-split URL alive so bookmarks and an older macOS shell
@@ -434,6 +209,7 @@ async fn create_dashboard_session(
         .and_then(|value| value.to_str().ok())
     {
         Some("connections") => "connections",
+        Some("node") => "node",
         _ => "history",
     };
     Json(DashboardSessionCreated {
@@ -441,6 +217,22 @@ async fn create_dashboard_session(
         expires_in_seconds: HANDOFF_LIFETIME.as_secs(),
     })
     .into_response()
+}
+
+async fn create_dashboard_session_for_view(
+    State(state): State<LocalApiState>,
+    Path(view): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !matches!(view.as_str(), "history" | "connections" | "node") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Ok(value) = HeaderValue::from_str(&view) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let mut headers = headers;
+    headers.insert("x-piqae-dashboard-view", value);
+    create_dashboard_session(State(state), headers).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -478,10 +270,10 @@ async fn open_dashboard(
         .sessions
         .insert(session.clone(), Instant::now() + BROWSER_SESSION_LIFETIME);
     drop(sessions);
-    let path = if uri.path() == "/local/connections" {
-        "/local/connections"
-    } else {
-        "/local/history"
+    let path = match uri.path() {
+        "/local/connections" => "/local/connections",
+        "/local/node" => "/local/node",
+        _ => "/local/history",
     };
     let mut response = Redirect::to(path).into_response();
     set_dashboard_cookie(&mut response, &session);
@@ -533,14 +325,59 @@ async fn dashboard_data(
     {
         return unavailable();
     }
-    match (history_receive.await, connector_receive.await) {
-        (Ok(Ok(history)), Ok(Ok(connectors))) => {
-            Json(serde_json::json!({"history": history, "connectors": connectors})).into_response()
-        }
-        (Ok(Err(failure)), _) | (_, Ok(Err(failure))) => {
+    let (status_send, status_receive) = oneshot::channel();
+    if state
+        .control
+        .send(ControlRequest::Status {
+            respond_to: status_send,
+        })
+        .await
+        .is_err()
+    {
+        return unavailable();
+    }
+    match (
+        history_receive.await,
+        connector_receive.await,
+        status_receive.await,
+    ) {
+        (Ok(Ok(history)), Ok(Ok(connectors)), Ok(status)) => Json(
+            serde_json::json!({"history": history, "connectors": connectors, "status": status}),
+        )
+        .into_response(),
+        (Ok(Err(failure)), _, _) | (_, Ok(Err(failure)), _) => {
             (failure_status(&failure.code), Json(failure)).into_response()
         }
         _ => unavailable(),
+    }
+}
+
+async fn dashboard_update_node_identity(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<NodeIdentityUpdate>,
+) -> Response {
+    if !dashboard_authenticated(&state, &headers).await
+        || headers.get("x-piqae-local-action").is_none()
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let (send, receive) = oneshot::channel();
+    if state
+        .control
+        .send(ControlRequest::UpdateNodeIdentity {
+            request,
+            respond_to: send,
+        })
+        .await
+        .is_err()
+    {
+        return unavailable();
+    }
+    match receive.await {
+        Ok(Ok(updated)) => Json(updated).into_response(),
+        Ok(Err(failure)) => (failure_status(&failure.code), Json(failure)).into_response(),
+        Err(_) => unavailable(),
     }
 }
 
@@ -675,6 +512,85 @@ async fn status(State(state): State<LocalApiState>, headers: HeaderMap) -> Respo
     receive
         .await
         .map_or_else(|_| unavailable(), |status| Json(status).into_response())
+}
+
+async fn update_node_identity(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<NodeIdentityUpdate>,
+) -> Response {
+    request_response(
+        state,
+        headers,
+        |respond_to| ControlRequest::UpdateNodeIdentity {
+            request,
+            respond_to,
+        },
+        StatusCode::OK,
+    )
+    .await
+}
+
+async fn apply_host_lifecycle(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<HostLifecycleRequest>,
+) -> Response {
+    if !authenticate(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let (send, receive) = oneshot::channel();
+    if state
+        .control
+        .send(ControlRequest::ApplyHostLifecycle {
+            event: request.event,
+            respond_to: send,
+        })
+        .await
+        .is_err()
+    {
+        return unavailable();
+    }
+    receive
+        .await
+        .map_or_else(|_| unavailable(), |snapshot| Json(snapshot).into_response())
+}
+
+async fn pending_broker_authorizations(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Response {
+    if !authenticate(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let (send, receive) = oneshot::channel();
+    if state
+        .control
+        .send(ControlRequest::PendingBrokerAuthorizations { respond_to: send })
+        .await
+        .is_err()
+    {
+        return unavailable();
+    }
+    receive
+        .await
+        .map_or_else(|_| unavailable(), |pending| Json(pending).into_response())
+}
+
+async fn decide_broker_authorization(
+    State(state): State<LocalApiState>,
+    Path(authorization_id): Path<uuid::Uuid>,
+    headers: HeaderMap,
+    Json(decision): Json<BrokerAuthorizationDecision>,
+) -> Response {
+    control_action(state, headers, |respond_to| {
+        ControlRequest::DecideBrokerAuthorization {
+            authorization_id,
+            decision,
+            respond_to,
+        }
+    })
+    .await
 }
 
 async fn printers(State(state): State<LocalApiState>, headers: HeaderMap) -> Response {
@@ -819,6 +735,7 @@ async fn commit_profile_capture(
             Json(ControlFailure {
                 code: "capture_token_required".into(),
                 message: "X-Piqae-Capture-Token is required".into(),
+                current_revision: None,
             }),
         )
             .into_response();
@@ -851,6 +768,7 @@ async fn cancel_profile_capture(
             Json(ControlFailure {
                 code: "capture_token_required".into(),
                 message: "X-Piqae-Capture-Token is required".into(),
+                current_revision: None,
             }),
         )
             .into_response();
@@ -1071,10 +989,11 @@ async fn request_response<T: Serialize>(
 
 fn failure_status(code: &str) -> StatusCode {
     match code {
-        "printer_not_found" | "profile_not_found" | "profile_capture_not_found" => {
-            StatusCode::NOT_FOUND
-        }
-        "profile_revision_conflict" => StatusCode::CONFLICT,
+        "printer_not_found"
+        | "profile_not_found"
+        | "profile_capture_not_found"
+        | "broker_authorization_not_found" => StatusCode::NOT_FOUND,
+        "profile_revision_conflict" | "node_identity_revision_conflict" => StatusCode::CONFLICT,
         "profile_capture_token_invalid" => StatusCode::UNAUTHORIZED,
         "profile_capture_timed_out"
         | "profile_capture_cancelled"
@@ -1111,6 +1030,7 @@ fn unavailable() -> Response {
         Json(ControlFailure {
             code: "agent_control_unavailable".into(),
             message: "the agent control loop is unavailable".into(),
+            current_revision: None,
         }),
     )
         .into_response()
@@ -1123,6 +1043,13 @@ mod tests {
     use axum::{
         body::{Body, to_bytes},
         http::Request,
+    };
+    use piqae_local_ipc::{
+        BrokerApplicationIdentity, BrokerCapability, LocalPrinterProfile, LocalStatus,
+        PendingBrokerAuthorization,
+    };
+    use piqae_node_runtime::{
+        LifecycleEvent, LifecycleSnapshot, NetworkAvailability, PowerAvailability,
     };
     use tower::ServiceExt;
 
@@ -1151,6 +1078,14 @@ mod tests {
         assert!(html.contains("prefers-color-scheme:dark"));
         assert!(html.contains("type=\"datetime-local\""));
         assert!(html.contains("aria-label=\"Search print history\""));
+        assert!(
+            html.contains(
+                "Standalone node · user-managed · multiple isolated connections supported."
+            )
+        );
+        assert!(html.contains("Piqae does not infer your account name or address."));
+        assert!(html.contains("Updated node details are stored locally and will retry"));
+        assert!(html.contains("Open the owner to reconcile the local and cloud values"));
         assert!(html.contains(
             "Multiple scheduling authorities; local handoffs serialized; automatic cross-server failover disabled."
         ));
@@ -1176,6 +1111,9 @@ mod tests {
             eligible_printer_count: 3,
             inventory_revision: 1,
             inventory_refresh_pending: true,
+            identity_sync_status: "conflict".into(),
+            identity_server_revision: Some(4),
+            identity_conflict_revision: Some(5),
             cross_authority_route_warning: true,
             manage_url: Some("https://shop.example/settings".into()),
         };
@@ -1187,6 +1125,9 @@ mod tests {
         assert_eq!(encoded["requesting_service_account_id"], "svc_shopify");
         assert_eq!(encoded["manage_url"], "https://shop.example/settings");
         assert_eq!(encoded["cross_authority_route_warning"], true);
+        assert_eq!(encoded["identity_sync_status"], "conflict");
+        assert_eq!(encoded["identity_server_revision"], 4);
+        assert_eq!(encoded["identity_conflict_revision"], 5);
         assert!(encoded.get("device_key").is_none());
         assert!(encoded.get("token").is_none());
         assert!(encoded.get("identity_evidence").is_none());
@@ -1244,6 +1185,8 @@ mod tests {
                     active_jobs: 0,
                     printer_warnings: 0,
                     paused: false,
+                    node_identity: None,
+                    node_identity_revision: None,
                 });
             }
         });
@@ -1259,6 +1202,154 @@ mod tests {
             .expect("response");
         responder.await.expect("responder");
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn authenticated_identity_update_is_revision_checked_by_the_agent() {
+        let (state, mut receive) = test_state();
+        let responder = tokio::spawn(async move {
+            if let Some(ControlRequest::UpdateNodeIdentity {
+                request,
+                respond_to,
+            }) = receive.recv().await
+            {
+                assert_eq!(request.expected_revision, 4);
+                assert_eq!(request.display_name, "Dispatch PC");
+                assert_eq!(request.site.as_deref(), Some("Warehouse"));
+                let _ = respond_to.send(Ok(NodeIdentityUpdated {
+                    revision: 5,
+                    identity: piqae_local_ipc::LocalNodeIdentity {
+                        display_name: request.display_name,
+                        site: request.site,
+                        location: request.location,
+                        labels: request.labels,
+                    },
+                }));
+            }
+        });
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/local/node/identity")
+                    .header("authorization", "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"expected_revision":4,"display_name":"Dispatch PC","site":"Warehouse","location":null,"labels":[]}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        responder.await.expect("responder");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 4096).await.expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["revision"], 5);
+        assert_eq!(json["identity"]["display_name"], "Dispatch PC");
+    }
+
+    #[tokio::test]
+    async fn authenticated_lifecycle_event_is_dispatched_to_the_durable_host() {
+        let (state, mut receive) = test_state();
+        let responder = tokio::spawn(async move {
+            if let Some(ControlRequest::ApplyHostLifecycle { event, respond_to }) =
+                receive.recv().await
+            {
+                assert_eq!(event, LifecycleEvent::Sleeping);
+                let _ = respond_to.send(LifecycleSnapshot {
+                    foreground: false,
+                    power: PowerAvailability::Sleeping,
+                    network: NetworkAvailability::Unknown,
+                    accepting_cloud_leases: false,
+                    shutdown_requested: false,
+                    generation: 2,
+                });
+            }
+        });
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/local/lifecycle")
+                    .header("authorization", "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"event":"sleeping"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        responder.await.expect("responder");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn broker_consent_listing_and_decision_require_local_auth_and_dispatch() {
+        let (state, mut receive) = test_state();
+        let authorization_id = uuid::Uuid::new_v4();
+        let responder = tokio::spawn(async move {
+            if let Some(ControlRequest::PendingBrokerAuthorizations { respond_to }) =
+                receive.recv().await
+            {
+                let _ = respond_to.send(vec![PendingBrokerAuthorization {
+                    authorization_id,
+                    application: BrokerApplicationIdentity {
+                        application_id: "com.example.pos".into(),
+                        display_name: "Example POS".into(),
+                        signing_identity_sha256: Some("a".repeat(64)),
+                    },
+                    requested_capabilities: vec![BrokerCapability::ObservePrinters],
+                    requested_unix_ms: 1,
+                    expires_unix_ms: 2,
+                }]);
+            }
+            if let Some(ControlRequest::DecideBrokerAuthorization {
+                authorization_id: received,
+                decision,
+                respond_to,
+            }) = receive.recv().await
+            {
+                assert_eq!(received, authorization_id);
+                assert!(decision.approved);
+                assert_eq!(
+                    decision.granted_capabilities,
+                    vec![BrokerCapability::ObservePrinters]
+                );
+                let _ = respond_to.send(Ok(()));
+            }
+        });
+        let pending = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/local/broker/authorization-requests")
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(pending.status(), StatusCode::OK);
+        let pending_body = to_bytes(pending.into_body(), 4096).await.expect("body");
+        assert!(!String::from_utf8_lossy(&pending_body).contains("nonce"));
+
+        let decided = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/local/broker/authorization-requests/{authorization_id}/decision"
+                    ))
+                    .header("authorization", "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"approved":true,"granted_capabilities":["observe_printers"]}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        responder.await.expect("responder");
+        assert_eq!(decided.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]

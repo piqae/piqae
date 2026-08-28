@@ -1,0 +1,11 @@
+{
+  "type": "enqueue_local_job",
+  "adapter_id": "com.example.pos.airprint",
+  "idempotency_key": "order-42-label-1",
+  "printer_id": "ptr_fixture",
+  "title": "Order 42",
+  "content_kind": "pdf",
+  "content_base64": "JVBERiBmYWtlIGZpeHR1cmU=",
+  "options_json": "{}",
+  "expires_unix_ms": null
+}

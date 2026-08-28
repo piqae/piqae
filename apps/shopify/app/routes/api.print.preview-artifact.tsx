@@ -16,10 +16,10 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   const link = await services.repository.get(session.shop);
   if (!link) return new Response(null, { status: 404 });
   const client = services.clientForLink(link);
-  const preview = await client.businessDocuments.previews.retrieve(previewId);
+  const preview = await client.printPackets.previews.retrieve(previewId);
   if (preview.render_id !== renderId)
     return new Response(null, { status: 404 });
-  const artifact = await client.businessDocuments.previews.download(previewId);
+  const artifact = await client.printPackets.previews.download(previewId);
   if (!artifact.ok || !artifact.body)
     return new Response(null, { status: artifact.status });
   return cors(

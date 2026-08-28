@@ -1,0 +1,160 @@
+# Piqae.Node for .NET
+
+`Piqae.Node` provides two explicit modes:
+
+- `PiqaeNode` embeds an application-scoped runtime and exposes lifecycle
+  delivery. State is resolved below the current user's private Piqae SDK data
+  root; the relative directory never depends on the process working directory.
+- `PiqaeBrokerClient` attaches to an installed Windows node. Applications
+  request bounded capabilities, wait for explicit approval in the node UI, and
+  exchange the approval once. The capability is stored in Windows Credential
+  Manager, not a configuration file.
+
+Installed-node consent never accepts an application name or signing claim from
+the SDK. The broker derives the package family or verified Authenticode signer
+and canonical executable identity from the accepted named-pipe client. Stored
+credentials are slotted by that executable and are rejected after the verified
+principal changes.
+
+Upgrading from a caller-claimed broker credential requires one fresh consent.
+After the verified credential is stored successfully, the SDK removes only the
+matching legacy application-ID credential entry.
+
+Cloud-capable embedded hosts must install a connector-key provider before the
+runtime starts:
+
+```csharp
+var host = new HostConfiguration(
+    NodeHostProduct.Embedded,
+    "com.example.shipping",
+    new NodeIdentityConfiguration("Shipping workstation", site: "Main warehouse"),
+    InstalledHostPolicy.IsolatedApplication,
+    new ConnectionPolicy(ConnectionManagement.UserManaged));
+var options = new PiqaeNodeOptions(
+    HostMode.EmbeddedApplication,
+    AvailabilityClass.ContinuousWhileAwake,
+    LocalOnly: false,
+    ApplicationId: "com.example.shipping",
+    DataDirectory: "node-runtime",
+    HostConfiguration: host);
+var keys = new WindowsCredentialConnectorKeyProvider(options.ApplicationId);
+using var node = new PiqaeNode(options, keys);
+node.Start();
+
+// Revision-fenced display metadata is durable locally and reconciles to every
+// connector independently. It never rotates credentials, routes, or queues.
+var renamed = node.UpdateNodeIdentity(
+    expectedRevision: 1,
+    identity: new NodeIdentityConfiguration("Dispatch PC", site: "Main warehouse"));
+
+// The embedding host forwards real Windows resume/network facts. This asks
+// every configured connector for one immediate bounded sync; it does not wake
+// Windows and grants no print authority.
+node.ApplyLifecycle(LifecycleEvent.Woke);
+node.ApplyLifecycle(LifecycleEvent.NetworkAvailable);
+var reconciliation = await node.ReconcileCloudAsync(
+    TimeSpan.FromSeconds(5),
+    CancellationToken.None);
+// LoopCompleted is not sufficient by itself: inspect FailedCount, Retryable,
+// and FailureClass. Counts/classes contain no connector or tenant identity.
+
+var prepared = node.PrepareConnectorInvitation();
+// Send prepared.PublicKeyBase64 to the trusted UI that issued the invitation,
+// then redeem only the authority-issued token and the prepared opaque handle.
+string invitationToken = "<authority-issued, single-use invitation token>";
+var connector = node.Connect(new PiqaeConnectorInvitation(
+    new Uri("https://api.piqae.com"),
+    invitationToken,
+    prepared.KeyHandle,
+    PiqaePrinterGrant.AllLocalPrinters,
+    Array.Empty<string>(),
+    Environment.MachineName,
+    Environment.MachineName));
+```
+
+The same embedded runtime exposes typed, offline PrintPacket validation and
+durable submission. It defaults to the portable PDF profile and does not create
+a managed renderer or a second queue:
+
+```csharp
+var packet = PrintPacket.Parse(templateJson, orderJson, new Dictionary<string, byte[]>
+{
+    ["logo.png"] = logoBytes,
+});
+var capabilities = node.GetPrintPacketCapabilities();
+var validation = node.ValidatePrintPacket(packet);
+var submission = node.EnqueuePrintPacket(
+    adapterId: printerAdapterId,
+    idempotencyKey: "order-1042-label-1",
+    printerId: printerId,
+    title: "Order 1042",
+    packet: packet);
+```
+
+Validation has no queue side effect. Enqueue renders with the shared bounded
+native PrintPacket implementation and durably stores the output before native
+handoff. Retrying the same content with the same idempotency key returns the
+existing job. A `PrinterNative` target fails closed until its exact language and
+profile renderer is available and certified.
+
+Native runtime contract 2 is a hard pre-release cut with no contract-1 fallback.
+It reports the exact `printpacket/v1` contract, renderer/resource ABIs,
+renderer build, conformance/cache profiles, supported features and output
+targets, resource media types, and hard limits before work is attempted. An
+incompatible ABI fails at startup; an explicit
+`printpacket_core_update_required` response maps to
+`native_core_update_required`. Invalid packet/data/resource, unsupported
+feature/target, limit, and render failures have distinct redacted native codes.
+The SDK never starts another renderer or queue as a fallback.
+
+If the user abandons the flow, call
+`CancelPreparedConnectorInvitation(prepared.KeyHandle)`. Pending-key expiry,
+cancel cleanup, and deletion retry are durable native-runtime operations. The
+SDK does not maintain a second enrollment state machine. `Connect` accepts no
+connector record: ownership, workspace identity, agent identity, and management
+URLs come only from the verified response at the exact HTTPS invitation origin.
+
+The provider returns only opaque handles, public keys, and signatures to the
+native runtime. Connector records and application configuration never contain
+private key bytes. A stable installation key is isolated from invitation keys;
+connector revocation cannot delete the installation identity. Connector-key
+deletion is idempotent so durable cleanup can safely retry after a crash.
+
+The supported Windows baseline does not provide a documented persistent,
+non-exporting CNG Ed25519 signing contract. `Piqae.Node` therefore uses the
+explicit fallback: a 32-byte Ed25519 seed held as a current-user generic secret
+in Windows Credential Manager and copied only for bounded signing calls. The
+managed and unmanaged copies are zeroed after use. This is protected at rest,
+not a hardware-backed/non-exporting-key claim. See Microsoft guidance for
+[Credential Manager and DPAPI](https://learn.microsoft.com/windows/win32/secbp/threat-mitigation-techniques)
+and the [`CredWrite` lifecycle](https://learn.microsoft.com/windows/win32/api/wincred/nf-wincred-credwritew).
+
+No API treats a claimed application ID or signing digest as authorization.
+Installed-node SDK operations use the native Rust protocol-v4 client. The .NET
+process passes the credential only into that in-process ABI; the bearer token is
+never sent through the named pipe. Rust owns canonicalization, request and
+response proofs, replay rejection, and downgrade rejection, and returns data
+only after authentication succeeds.
+The SDK does not claim background execution or physical-print support merely
+because the native library loads. Modern Standby, wake timers, and Wake-on-LAN
+remain hardware, driver, power-policy, network, and service-topology dependent.
+Embedding applications must forward suspend/resume and network changes from the
+actual Windows host; the tray is not a durable lifecycle authority.
+
+The product release candidate is `Piqae.Node.<version>.nupkg`. Its only native
+RID is currently `win-x64`, and the package pins
+`BouncyCastle.Cryptography` 2.6.2 exactly. The release gate restores that exact
+NuGet and dependency from an isolated local feed into a new consumer, publishes
+for `win-x64`, executes the packaged native ABI, requires ABI 1/contract 2, and
+checks the PrintPacket capability response, managed facade, dependency, and
+runtime DLL in the output. The NuGet and native C archives each contain the
+repository LICENSE and NOTICE and a regenerated locked target-specific
+`THIRD_PARTY_LICENSES.json`; the NuGet report also includes the pinned managed
+dependency. Each archive has exact-file SPDX checksum and
+containment evidence. The native C archive SBOM also contains the locked
+`x86_64-pc-windows-msvc` Cargo dependency graph with package sources, purls,
+checksums, declared licences, and exact `DEPENDS_ON` relationships; its
+aggregate concluded licence remains `NOASSERTION`. These unsigned candidates
+remain engineering evidence rather than a public NuGet publication promise.
+The staged `PiqaeNode.windows-sdk-artifact.json` binds both archives and their
+SBOMs to ABI 1, native contract 2, and the PrintPacket capability response.

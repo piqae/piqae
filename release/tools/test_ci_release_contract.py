@@ -1,0 +1,56 @@
+from pathlib import Path
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class CiReleaseContractTest(unittest.TestCase):
+    def test_postgres_evidence_checkout_includes_release_tags(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        postgres = workflow.split("\n  rust-postgres:", 1)[1].split("\n  rust-macos:", 1)[0]
+        self.assertIn("fetch-depth: 0", postgres)
+        self.assertIn("fetch-tags: true", postgres)
+
+    def test_apple_app_and_sdk_share_one_explicit_linked_artifact(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        apple = workflow.split("\n  macos-shell:", 1)[1].split("\n  rust-windows:", 1)[0]
+        build = apple.index("sdk/apple/scripts/build-xcframework.sh --replace")
+        linked = apple.index("test_apple_node_sdk_linked.sh use-existing")
+        app = apple.index("test_apple_node_app.sh")
+        self.assertLess(build, linked)
+        self.assertLess(linked, app)
+
+    def test_project_validation_uses_the_complete_app_tree(self) -> None:
+        script = (ROOT / "release/tools/test_apple_node_app.sh").read_text(encoding="utf-8")
+        self.assertIn("for source in Config Resources Sources Tests", script)
+        self.assertIn("project-only|linked-simulator", script)
+
+    def test_native_sdk_archives_generate_licence_evidence_before_packaging(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        windows = workflow.split("\n  windows_sdk:", 1)[1].split("\n  linux:", 1)[0]
+        self.assertLess(
+            windows.index("generate-license-report"),
+            windows.index("Compress-Archive"),
+        )
+
+        apple = (ROOT / "sdk/apple/scripts/build-xcframework.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertLess(
+            apple.index("generate-license-report"),
+            apple.index('zip -X -q "$archive"'),
+        )
+
+        windows_pack = (ROOT / "release/tools/test_windows_node_sdk.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertLess(
+            windows_pack.index("generate-third-party-licenses"),
+            windows_pack.index("dotnet pack"),
+        )
+        self.assertIn("/p:PiqaeThirdPartyLicenses=", windows_pack)
+
+
+if __name__ == "__main__":
+    unittest.main()

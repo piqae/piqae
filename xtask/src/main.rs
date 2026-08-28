@@ -222,7 +222,7 @@ fn test_changed(root: &Path) -> TaskResult {
         {
             javascript = true;
         }
-        if file.starts_with("shells/macos") {
+        if file.starts_with("shells/macos") || file.starts_with("sdk/apple") {
             macos = true;
         }
     }
@@ -363,6 +363,16 @@ fn test_macos(root: &Path) -> TaskResult {
         root,
         "swift",
         ["test", "--package-path", "shells/macos"],
+    ))?;
+    run(command(
+        root,
+        "release/tools/test_apple_node_sdk.sh",
+        std::iter::empty::<&str>(),
+    ))?;
+    run(command(
+        root,
+        "release/tools/test_apple_node_sdk_linked.sh",
+        std::iter::empty::<&str>(),
     ))
 }
 
@@ -381,6 +391,11 @@ fn fixture_reset(root: &Path) -> TaskResult {
 }
 
 fn release_check(root: &Path) -> TaskResult {
+    run(command(
+        root,
+        "python3",
+        ["release/tools/check_printpacket_source_policy.py"],
+    ))?;
     run(command(
         root,
         "python3",
@@ -638,6 +653,10 @@ const CHECKS: &[Check] = &[
             &["ruby", "release/tools/test_release_policy.rb"],
             &["python3", "release/tools/check_security_exceptions.py"],
             &["python3", "release/tools/check_competitor_mentions.py"],
+            &[
+                "python3",
+                "release/tools/check_printpacket_source_policy.py",
+            ],
         ],
     },
     Check {
@@ -792,12 +811,21 @@ const CHECKS: &[Check] = &[
         scopes: &["macos_shell"],
         job: "CI / macOS menu shell",
         needs: &[Need::Os("macos"), Need::Tool("swift")],
-        steps: &[&["swift", "test", "--package-path", "shells/macos"]],
+        steps: &[
+            &["swift", "test", "--package-path", "shells/macos"],
+            &["release/tools/test_apple_node_sdk.sh"],
+            &["release/tools/test_apple_node_sdk_linked.sh"],
+        ],
     },
     Check {
         scopes: &["windows_rust"],
         job: "CI / Rust (windows-latest)",
-        needs: &[Need::Os("windows"), Need::Tool("cargo")],
+        needs: &[
+            Need::Os("windows"),
+            Need::Tool("cargo"),
+            Need::Tool("pwsh"),
+            Need::Tool("dotnet"),
+        ],
         steps: &[
             &[
                 "cargo",
@@ -814,6 +842,16 @@ const CHECKS: &[Check] = &[
                 "piqae-executor-windows",
                 "-p",
                 "piqae-shell-windows",
+                "-p",
+                "piqae-local-ipc",
+                "-p",
+                "piqae-node-host-api",
+                "-p",
+                "piqae-node-runtime",
+                "-p",
+                "piqae-node-client",
+                "-p",
+                "piqae-node-ffi",
                 "--",
                 "-D",
                 "warnings",
@@ -832,6 +870,22 @@ const CHECKS: &[Check] = &[
                 "piqae-executor-windows",
                 "-p",
                 "piqae-shell-windows",
+                "-p",
+                "piqae-local-ipc",
+                "-p",
+                "piqae-node-host-api",
+                "-p",
+                "piqae-node-runtime",
+                "-p",
+                "piqae-node-client",
+                "-p",
+                "piqae-node-ffi",
+            ],
+            &[
+                "pwsh",
+                "-NoProfile",
+                "-File",
+                "release/tools/test_windows_node_sdk.ps1",
             ],
         ],
     },
@@ -869,6 +923,12 @@ const CHECKS: &[Check] = &[
             &["pnpm", "--filter", "@piqae/sdk", "generate:check"],
             &["pnpm", "--filter", "@piqae/sdk", "check"],
             &["pnpm", "--filter", "@piqae/sdk", "test"],
+            &["pnpm", "--filter", "@printpacket/core", "generate:check"],
+            &["pnpm", "--filter", "@printpacket/core", "check"],
+            &["pnpm", "--filter", "@printpacket/core", "test"],
+            &["pnpm", "--filter", "@printpacket/core", "build"],
+            &["pnpm", "--filter", "@printpacket/core", "lint"],
+            &["pnpm", "--filter", "@printpacket/core", "smoke:package"],
             &["pnpm", "--filter", "@piqae/sdk", "build"],
             &["pnpm", "--filter", "@piqae/sdk", "lint"],
             &["pnpm", "--filter", "@piqae/sdk", "smoke:package"],
@@ -1218,6 +1278,13 @@ mod tests {
                         .steps
                         .iter()
                         .any(|step| *step == ["ruby", "release/tools/test_release_policy.rb"])
+                    && check.steps.iter().any(|step| {
+                        *step
+                            == [
+                                "python3",
+                                "release/tools/check_printpacket_source_policy.py",
+                            ]
+                    })
             }),
             "release policy check must reproduce CI"
         );

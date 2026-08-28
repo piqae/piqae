@@ -17,14 +17,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const link = await services.repository.get(grant.shop);
   if (!link) return new Response(null, { status: 404 });
   const client = services.clientForLink(link);
-  const preview = await client.businessDocuments.previews.retrieve(
-    grant.previewId,
-  );
+  const preview = await client.printPackets.previews.retrieve(grant.previewId);
   if (preview.render_id !== grant.renderId)
     return new Response(null, { status: 404 });
-  const artifact = await client.businessDocuments.previews.download(
-    grant.previewId,
-  );
+  const artifact = await client.printPackets.previews.download(grant.previewId);
   if (!artifact.ok || !artifact.body)
     return new Response(null, { status: artifact.status });
   return new Response(artifact.body, {

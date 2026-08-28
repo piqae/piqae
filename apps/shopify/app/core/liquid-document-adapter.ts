@@ -1,9 +1,4 @@
-import type {
-  Block,
-  BusinessDocument,
-  Expression,
-  Inline,
-} from "./template-model";
+import type { Block, PrintPacket, Expression, Inline } from "./template-model";
 export type LiquidDiagnostic = {
   code: string;
   line: number;
@@ -13,7 +8,7 @@ export type LiquidDiagnostic = {
 export type LiquidConversion =
   | {
       ok: true;
-      document: BusinessDocument;
+      document: PrintPacket;
       normalizedSource: string;
       diagnostics: [];
     }
@@ -29,7 +24,7 @@ type Frame = {
 };
 export function liquidToCanonical(
   source: string,
-  base?: BusinessDocument | BusinessDocument["media"],
+  base?: PrintPacket | PrintPacket["media"],
 ): LiquidConversion {
   if (new TextEncoder().encode(source).byteLength > 65_536)
     return fail(source, 0, "source_too_large", "Liquid source exceeds 64 KiB");
@@ -38,7 +33,7 @@ export function liquidToCanonical(
       source,
       source.search(/<[a-z!/]/i),
       "html_unsupported",
-      "HTML and CSS are not part of the business-document profile",
+      "HTML and CSS are not part of the PrintPacket profile",
     );
   const root: Block[] = [];
   const stack: Frame[] = [{ kind: "root", blocks: root }];
@@ -234,11 +229,11 @@ export function liquidToCanonical(
       `Unclosed ${stack.at(-1)!.kind} block`,
     );
   const media = base && "format" in base ? base.media : base;
-  const document: BusinessDocument = {
+  const document: PrintPacket = {
     ...(base && "format" in base
       ? base
       : {
-          format: "piqae.business-document/v1" as const,
+          format: "printpacket/v1" as const,
           theme: {
             font_size_pt: 10,
             line_height: 1.35,
@@ -246,7 +241,7 @@ export function liquidToCanonical(
           },
           resources: {},
         }),
-    format: "piqae.business-document/v1",
+    format: "printpacket/v1",
     media: media ?? {
       kind: "paged",
       size: "a4",
@@ -262,7 +257,7 @@ export function liquidToCanonical(
     diagnostics: [],
   };
 }
-export function canonicalToLiquid(document: BusinessDocument) {
+export function canonicalToLiquid(document: PrintPacket) {
   const lines: string[] = [];
   const inline = (items: Inline[]) =>
     items

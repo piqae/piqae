@@ -1,0 +1,13 @@
+{
+  "template": {
+    "format": "printpacket/v1",
+    "media": { "kind": "label", "width_mm": 100, "height_mm": 50, "margins": { "top_mm": 3, "right_mm": 3, "bottom_mm": 3, "left_mm": 3 } },
+    "theme": { "font_size_pt": 10, "line_height": 1.2, "text_color": { "red": 0, "green": 0, "blue": 0 } },
+    "body": [
+      { "type": "heading", "level": 2, "content": [{ "type": "value", "value": { "type": "path", "path": ["product"] } }] },
+      { "type": "paragraph", "content": [{ "type": "text", "value": "Batch: " }, { "type": "value", "value": { "type": "path", "path": ["batch"] } }] },
+      { "type": "barcode", "symbology": "code128", "value": { "type": "path", "path": ["sku"] }, "width_mm": 70, "height_mm": 12, "human_readable": true }
+    ]
+  },
+  "data": { "product": "House Espresso 1 kg", "batch": "B-240827", "sku": "9412345678901" }
+}

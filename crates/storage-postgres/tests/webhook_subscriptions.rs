@@ -127,6 +127,11 @@ async fn a_family_subscription_receives_its_events_without_swallowing_others() {
         )
         .await
         .expect("enqueue");
+    let claimed = store
+        .claim_webhook_deliveries(25)
+        .await
+        .expect("materialize subscribed deliveries");
+    assert_eq!(claimed.len(), 2, "fan-out remains bounded and exact");
 
     assert_eq!(
         delivered_to(&pool, &family).await,

@@ -61,10 +61,14 @@ agent.
 
 ## Upgrades
 
-Run migrations as an explicit pre-deployment operation. Keep the previous
-container digest until health, compatibility, and queue recovery checks pass.
-Server schema changes remain compatible across the declared N/N-1 application
-rollout window, but that is not a blanket node-handoff compatibility promise.
+v0.1.22 requires the fresh PostgreSQL and object-store procedure in
+[`upgrades.md`](upgrades.md#v0122-fresh-postgresql-baseline); its migration
+command deterministically refuses an in-place upgrade from v0.1.21. For later
+releases, run migrations as an explicit pre-deployment operation and keep the
+previous container digest until health, compatibility, and queue recovery
+checks pass. Those later server schema changes remain compatible across the
+declared N/N-1 application rollout window, but that is not a blanket
+node-handoff compatibility promise.
 
 For releases that introduce destination-route fencing, deploy the migration and
 server (with the stable destination identity key) before nodes. Older nodes may

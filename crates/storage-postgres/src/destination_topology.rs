@@ -27,6 +27,9 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+const MAX_RUNTIME_OBSERVATIONS_PER_AGENT: usize = 64;
+const WAKE_HINT_RETENTION_DAYS: i64 = 7;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TenantScope {
     pub workspace_id: WorkspaceId,
@@ -185,6 +188,33 @@ pub struct RouteObservation {
     pub stock_state: serde_json::Value,
     pub observed_at: DateTime<Utc>,
     pub fresh_until: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NodeRuntimeObservation {
+    pub id: String,
+    pub agent_id: String,
+    pub sequence: u64,
+    pub host_mode: String,
+    pub availability_class: String,
+    pub lifecycle_state: String,
+    pub accepts_cloud_jobs: bool,
+    pub execution_budget_ms: Option<u64>,
+    pub wake_mechanisms: Vec<String>,
+    pub observed_at: DateTime<Utc>,
+    pub fresh_until: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NodeWakeHint {
+    pub id: String,
+    pub agent_id: String,
+    pub reason: String,
+    pub delivery_channel: String,
+    pub status: String,
+    pub requested_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub observed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -455,6 +485,41 @@ pub trait DestinationTopologyRepository: Send + Sync {
         route_id: &str,
         limit: u32,
     ) -> Result<Vec<RouteObservation>, StorageError>;
+    async fn record_node_runtime_observation(
+        &self,
+        scope: TenantScope,
+        observation: &NodeRuntimeObservation,
+    ) -> Result<(), StorageError>;
+    async fn latest_node_runtime_observation(
+        &self,
+        scope: TenantScope,
+        agent_id: &str,
+    ) -> Result<NodeRuntimeObservation, StorageError>;
+    async fn list_latest_node_runtime_observations(
+        &self,
+        scope: TenantScope,
+        after_agent_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<NodeRuntimeObservation>, StorageError>;
+    async fn create_node_wake_hint(
+        &self,
+        scope: TenantScope,
+        hint: &NodeWakeHint,
+        idempotency_key: &str,
+    ) -> Result<NodeWakeHint, StorageError>;
+    async fn list_node_wake_hints(
+        &self,
+        scope: TenantScope,
+        agent_id: &str,
+        limit: u32,
+    ) -> Result<Vec<NodeWakeHint>, StorageError>;
+    async fn observe_pending_node_wake_hints(
+        &self,
+        scope: TenantScope,
+        agent_id: &str,
+        observed_at: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<NodeWakeHint>, StorageError>;
     async fn acknowledge_projection(
         &self,
         scope: TenantScope,
@@ -768,6 +833,55 @@ fn route_observations_semantically_equal(
     canonical == *submitted
 }
 
+fn map_runtime_observation(
+    row: &sqlx::postgres::PgRow,
+) -> Result<NodeRuntimeObservation, StorageError> {
+    Ok(NodeRuntimeObservation {
+        id: row.try_get("id")?,
+        agent_id: row.try_get("agent_id")?,
+        sequence: i64_to_u64(row.try_get("sequence")?, "runtime observation sequence")?,
+        host_mode: row.try_get("host_mode")?,
+        availability_class: row.try_get("availability_class")?,
+        lifecycle_state: row.try_get("lifecycle_state")?,
+        accepts_cloud_jobs: row.try_get("accepts_cloud_jobs")?,
+        execution_budget_ms: row
+            .try_get::<Option<i64>, _>("execution_budget_ms")?
+            .map(|value| i64_to_u64(value, "execution_budget_ms"))
+            .transpose()?,
+        wake_mechanisms: row.try_get("wake_mechanisms")?,
+        observed_at: row.try_get("observed_at")?,
+        fresh_until: row.try_get("fresh_until")?,
+    })
+}
+
+fn runtime_observations_semantically_equal(
+    stored: &NodeRuntimeObservation,
+    submitted: &NodeRuntimeObservation,
+) -> bool {
+    let mut canonical = stored.clone();
+    canonical.id.clone_from(&submitted.id);
+    let observed_at_equal =
+        canonical.observed_at.timestamp_micros() == submitted.observed_at.timestamp_micros();
+    let fresh_until_equal =
+        canonical.fresh_until.timestamp_micros() == submitted.fresh_until.timestamp_micros();
+    canonical.observed_at = submitted.observed_at;
+    canonical.fresh_until = submitted.fresh_until;
+    observed_at_equal && fresh_until_equal && canonical == *submitted
+}
+
+fn map_wake_hint(row: &sqlx::postgres::PgRow) -> Result<NodeWakeHint, StorageError> {
+    Ok(NodeWakeHint {
+        id: row.try_get("id")?,
+        agent_id: row.try_get("agent_id")?,
+        reason: row.try_get("reason")?,
+        delivery_channel: row.try_get("delivery_channel")?,
+        status: row.try_get("status")?,
+        requested_at: row.try_get("requested_at")?,
+        expires_at: row.try_get("expires_at")?,
+        observed_at: row.try_get("observed_at")?,
+    })
+}
+
 fn map_projection_acknowledgement(
     row: &sqlx::postgres::PgRow,
 ) -> Result<ProjectionAcknowledgement, StorageError> {
@@ -944,8 +1058,24 @@ impl DestinationTopologyRepository for PostgresStore {
         let profiles = i64::try_from(route.profile_revision).map_err(|_| {
             StorageError::InvalidData("profile revision exceeds PostgreSQL bigint".into())
         })?;
+        let mut transaction = self.pool().begin().await?;
+        let active_agent: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM agents
+             WHERE workspace_id=$1 AND environment_id=$2 AND id=$3
+               AND revoked_at IS NULL
+             FOR KEY SHARE",
+        )
+        .bind(scope.workspace_id.to_string())
+        .bind(scope.environment_id.to_string())
+        .bind(&route.agent_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if active_agent.is_none() {
+            return Err(StorageError::NotFound);
+        }
         sqlx::query("INSERT INTO printer_routes (workspace_id,environment_id,id,destination_id,printer_id,agent_id,native_queue_id,local_route_key,state,role,priority,enabled,capability_revision,profile_revision,last_seen_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT (workspace_id,environment_id,printer_id,agent_id) DO UPDATE SET destination_id=EXCLUDED.destination_id,native_queue_id=EXCLUDED.native_queue_id,local_route_key=COALESCE(EXCLUDED.local_route_key,printer_routes.local_route_key),state=EXCLUDED.state,role=EXCLUDED.role,priority=EXCLUDED.priority,enabled=EXCLUDED.enabled,capability_revision=EXCLUDED.capability_revision,profile_revision=EXCLUDED.profile_revision,last_seen_at=EXCLUDED.last_seen_at,updated_at=EXCLUDED.updated_at")
-            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&route.id).bind(&route.destination_id).bind(&route.printer_id).bind(&route.agent_id).bind(&route.native_queue_id).bind(&route.local_route_key).bind(&route.state).bind(&route.role).bind(route.priority).bind(route.enabled).bind(capabilities).bind(profiles).bind(route.last_seen_at).bind(route.updated_at).execute(self.pool()).await?;
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&route.id).bind(&route.destination_id).bind(&route.printer_id).bind(&route.agent_id).bind(&route.native_queue_id).bind(&route.local_route_key).bind(&route.state).bind(&route.role).bind(route.priority).bind(route.enabled).bind(capabilities).bind(profiles).bind(route.last_seen_at).bind(route.updated_at).execute(&mut *transaction).await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -1092,6 +1222,170 @@ impl DestinationTopologyRepository for PostgresStore {
         rows.iter().map(map_observation).collect()
     }
 
+    async fn record_node_runtime_observation(
+        &self,
+        scope: TenantScope,
+        observation: &NodeRuntimeObservation,
+    ) -> Result<(), StorageError> {
+        let mut tx = self.pool().begin().await?;
+        sqlx::query("SELECT id FROM agents WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 FOR UPDATE")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&observation.agent_id)
+            .fetch_optional(&mut *tx).await?.ok_or(StorageError::NotFound)?;
+        let sequence = i64::try_from(observation.sequence).map_err(|_| {
+            StorageError::InvalidData("runtime observation sequence exceeds bigint".into())
+        })?;
+        if let Some(existing) = sqlx::query("SELECT id,agent_id,sequence,host_mode,availability_class,lifecycle_state,accepts_cloud_jobs,execution_budget_ms,wake_mechanisms,observed_at,fresh_until FROM node_runtime_observations WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 AND sequence=$4")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&observation.agent_id).bind(sequence)
+            .fetch_optional(&mut *tx).await? {
+            let stored = map_runtime_observation(&existing)?;
+            return if runtime_observations_semantically_equal(&stored, observation) {
+                tx.commit().await?;
+                Ok(())
+            } else {
+                Err(StorageError::IdempotencyConflict)
+            };
+        }
+        let latest: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(sequence),0) FROM node_runtime_observations WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&observation.agent_id)
+            .fetch_one(&mut *tx).await?;
+        if sequence <= latest {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        sqlx::query("INSERT INTO node_runtime_observations (workspace_id,environment_id,id,agent_id,sequence,host_mode,availability_class,lifecycle_state,accepts_cloud_jobs,execution_budget_ms,wake_mechanisms,observed_at,fresh_until) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&observation.id).bind(&observation.agent_id).bind(sequence)
+            .bind(&observation.host_mode).bind(&observation.availability_class).bind(&observation.lifecycle_state)
+            .bind(observation.accepts_cloud_jobs)
+            .bind(observation.execution_budget_ms.map(i64::try_from).transpose().map_err(|_| StorageError::InvalidData("execution budget exceeds bigint".into()))?)
+            .bind(&observation.wake_mechanisms).bind(observation.observed_at).bind(observation.fresh_until)
+            .execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM node_runtime_observations WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 AND sequence < COALESCE((SELECT sequence FROM node_runtime_observations WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 ORDER BY sequence DESC OFFSET $4 LIMIT 1),-1)")
+            .bind(scope.workspace_id.to_string())
+            .bind(scope.environment_id.to_string())
+            .bind(&observation.agent_id)
+            .bind(i64::try_from(MAX_RUNTIME_OBSERVATIONS_PER_AGENT.saturating_sub(1)).map_err(|_| StorageError::InvalidData("runtime observation retention exceeds bigint".into()))?)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn latest_node_runtime_observation(
+        &self,
+        scope: TenantScope,
+        agent_id: &str,
+    ) -> Result<NodeRuntimeObservation, StorageError> {
+        let row = sqlx::query("SELECT id,agent_id,sequence,host_mode,availability_class,lifecycle_state,accepts_cloud_jobs,execution_budget_ms,wake_mechanisms,observed_at,fresh_until FROM node_runtime_observations WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 ORDER BY sequence DESC LIMIT 1")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(agent_id)
+            .fetch_optional(self.pool()).await?.ok_or(StorageError::NotFound)?;
+        map_runtime_observation(&row)
+    }
+
+    async fn list_latest_node_runtime_observations(
+        &self,
+        scope: TenantScope,
+        after_agent_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<NodeRuntimeObservation>, StorageError> {
+        let rows = sqlx::query("SELECT DISTINCT ON (agent_id) id,agent_id,sequence,host_mode,availability_class,lifecycle_state,accepts_cloud_jobs,execution_budget_ms,wake_mechanisms,observed_at,fresh_until FROM node_runtime_observations WHERE workspace_id=$1 AND environment_id=$2 AND ($3::text IS NULL OR agent_id>$3) ORDER BY agent_id,sequence DESC LIMIT $4")
+            .bind(scope.workspace_id.to_string())
+            .bind(scope.environment_id.to_string())
+            .bind(after_agent_id)
+            .bind(i64::from(limit.clamp(1, 1_001)))
+            .fetch_all(self.pool())
+            .await?;
+        rows.iter().map(map_runtime_observation).collect()
+    }
+
+    async fn create_node_wake_hint(
+        &self,
+        scope: TenantScope,
+        hint: &NodeWakeHint,
+        idempotency_key: &str,
+    ) -> Result<NodeWakeHint, StorageError> {
+        let mut tx = self.pool().begin().await?;
+        sqlx::query("UPDATE node_wake_hints SET status='expired' WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 AND status='pending' AND expires_at<=now()")
+            .bind(scope.workspace_id.to_string())
+            .bind(scope.environment_id.to_string())
+            .bind(&hint.agent_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM node_wake_hints WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 AND status<>'pending' AND expires_at < now() - ($4 * interval '1 day')")
+            .bind(scope.workspace_id.to_string())
+            .bind(scope.environment_id.to_string())
+            .bind(&hint.agent_id)
+            .bind(WAKE_HINT_RETENTION_DAYS)
+            .execute(&mut *tx)
+            .await?;
+        let row = sqlx::query("INSERT INTO node_wake_hints (workspace_id,environment_id,id,agent_id,idempotency_key,reason,delivery_channel,status,requested_at,expires_at,observed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (workspace_id,environment_id,agent_id,idempotency_key) DO UPDATE SET idempotency_key=EXCLUDED.idempotency_key RETURNING id,agent_id,reason,delivery_channel,status,requested_at,expires_at,observed_at")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&hint.id).bind(&hint.agent_id).bind(idempotency_key).bind(&hint.reason).bind(&hint.delivery_channel).bind(&hint.status).bind(hint.requested_at).bind(hint.expires_at).bind(hint.observed_at)
+            .fetch_one(&mut *tx).await?;
+        let stored = map_wake_hint(&row)?;
+        if stored.reason != hint.reason
+            || stored.delivery_channel != hint.delivery_channel
+            || stored.expires_at - stored.requested_at != hint.expires_at - hint.requested_at
+        {
+            return Err(StorageError::IdempotencyConflict);
+        }
+        tx.commit().await?;
+        Ok(stored)
+    }
+
+    async fn list_node_wake_hints(
+        &self,
+        scope: TenantScope,
+        agent_id: &str,
+        limit: u32,
+    ) -> Result<Vec<NodeWakeHint>, StorageError> {
+        let rows = sqlx::query("SELECT id,agent_id,reason,delivery_channel,CASE WHEN status='pending' AND expires_at<=now() THEN 'expired' ELSE status END AS status,requested_at,expires_at,observed_at FROM node_wake_hints WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 ORDER BY requested_at DESC,id DESC LIMIT $4")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(agent_id).bind(i64::from(limit.clamp(1, 100)))
+            .fetch_all(self.pool()).await?;
+        rows.iter().map(map_wake_hint).collect()
+    }
+
+    async fn observe_pending_node_wake_hints(
+        &self,
+        scope: TenantScope,
+        agent_id: &str,
+        observed_at: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<NodeWakeHint>, StorageError> {
+        let mut tx = self.pool().begin().await?;
+        sqlx::query("UPDATE node_wake_hints SET status='expired' WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 AND status='pending' AND expires_at<=$4")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(agent_id).bind(observed_at).execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM node_wake_hints WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 AND status<>'pending' AND expires_at < $4 - ($5 * interval '1 day')")
+            .bind(scope.workspace_id.to_string())
+            .bind(scope.environment_id.to_string())
+            .bind(agent_id)
+            .bind(observed_at)
+            .bind(WAKE_HINT_RETENTION_DAYS)
+            .execute(&mut *tx)
+            .await?;
+        let rows = sqlx::query("WITH selected AS (SELECT id FROM node_wake_hints WHERE workspace_id=$1 AND environment_id=$2 AND agent_id=$3 AND status='pending' AND expires_at>$4 ORDER BY requested_at,id FOR UPDATE SKIP LOCKED LIMIT $5) UPDATE node_wake_hints hint SET status='observed',observed_at=$4 FROM selected WHERE hint.workspace_id=$1 AND hint.environment_id=$2 AND hint.id=selected.id RETURNING hint.id,hint.agent_id,hint.reason,hint.delivery_channel,hint.status,hint.requested_at,hint.expires_at,hint.observed_at")
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(agent_id).bind(observed_at).bind(i64::from(limit.clamp(1, 100)))
+            .fetch_all(&mut *tx).await?;
+        sqlx::query(
+            "UPDATE routing_outbox outbox
+             SET processed_at=COALESCE(processed_at,$4),claimed_until=NULL
+             FROM node_wake_hints hint
+             WHERE outbox.workspace_id=$1 AND outbox.environment_id=$2
+               AND outbox.aggregate_type='node_wake_hint'
+               AND outbox.event_type='node.wake_hint.requested'
+               AND hint.workspace_id=outbox.workspace_id
+               AND hint.environment_id=outbox.environment_id
+               AND hint.id=outbox.aggregate_id
+               AND hint.agent_id=$3
+               AND hint.status<>'pending'",
+        )
+        .bind(scope.workspace_id.to_string())
+        .bind(scope.environment_id.to_string())
+        .bind(agent_id)
+        .bind(observed_at)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        rows.iter().map(map_wake_hint).collect()
+    }
+
     async fn acknowledge_projection(
         &self,
         scope: TenantScope,
@@ -1132,8 +1426,26 @@ impl DestinationTopologyRepository for PostgresStore {
         membership: &SiteCoordinatorMembership,
     ) -> Result<(), StorageError> {
         let revoked_at = (membership.state == "revoked").then(Utc::now);
+        let mut transaction = self.pool().begin().await?;
+        if membership.state != "revoked" {
+            let active_agent: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM agents
+                 WHERE workspace_id=$1 AND environment_id=$2 AND id=$3
+                   AND revoked_at IS NULL
+                 FOR KEY SHARE",
+            )
+            .bind(scope.workspace_id.to_string())
+            .bind(scope.environment_id.to_string())
+            .bind(&membership.agent_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if active_agent.is_none() {
+                return Err(StorageError::NotFound);
+            }
+        }
         sqlx::query("INSERT INTO site_coordinator_memberships (workspace_id,environment_id,authority_id,agent_id,site_id,state,last_seen_at,revoked_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (workspace_id,environment_id,authority_id,agent_id) DO UPDATE SET site_id=EXCLUDED.site_id,state=EXCLUDED.state,last_seen_at=EXCLUDED.last_seen_at,revoked_at=EXCLUDED.revoked_at")
-            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&membership.authority_id).bind(&membership.agent_id).bind(&membership.site_id).bind(&membership.state).bind(membership.last_seen_at).bind(revoked_at).execute(self.pool()).await?;
+            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(&membership.authority_id).bind(&membership.agent_id).bind(&membership.site_id).bind(&membership.state).bind(membership.last_seen_at).bind(revoked_at).execute(&mut *transaction).await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -1143,33 +1455,9 @@ impl DestinationTopologyRepository for PostgresStore {
         request: NewDeliveryAttempt<'_>,
     ) -> Result<StartedDeliveryAttempt, StorageError> {
         let mut tx = self.pool().begin().await?;
-        let job = sqlx::query(
-            "SELECT id,destination_id FROM jobs WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 FOR UPDATE",
-        )
-        .bind(scope.workspace_id.to_string())
-        .bind(scope.environment_id.to_string())
-        .bind(request.job_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(StorageError::NotFound)?;
-        let job_destination: Option<String> = job.try_get("destination_id")?;
-        if job_destination
-            .as_deref()
-            .is_some_and(|id| id != request.destination_id)
-        {
-            return Err(StorageError::ConcurrentStateChange);
-        }
-        let route_matches_destination: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM printer_routes WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 AND destination_id=$4 AND enabled AND retired_at IS NULL)")
-            .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(request.route_id).bind(request.destination_id).fetch_one(&mut *tx).await?;
-        if !route_matches_destination {
-            return Err(StorageError::NotFound);
-        }
-        if job_destination.is_none() {
-            sqlx::query("UPDATE jobs SET destination_id=$4,route_id=$5,updated_at=now() WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 AND destination_id IS NULL")
-                .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(request.job_id).bind(request.destination_id).bind(request.route_id).execute(&mut *tx).await?;
-        }
-        // Serialize schedulers at the physical destination boundary, including
-        // schedulers choosing different node routes for the same printer.
+        // Serialize every scheduler at the physical destination before
+        // validating its current route. Agent, route, then job is the same lock
+        // order used by node revocation and avoids a job/agent deadlock.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!(
                 "{}:{}:{}",
@@ -1177,6 +1465,89 @@ impl DestinationTopologyRepository for PostgresStore {
             ))
             .execute(&mut *tx)
             .await?;
+        let route_agent: Option<String> = sqlx::query_scalar(
+            "SELECT agent_id FROM printer_routes
+             WHERE workspace_id=$1 AND environment_id=$2
+               AND id=$3 AND destination_id=$4",
+        )
+        .bind(scope.workspace_id.to_string())
+        .bind(scope.environment_id.to_string())
+        .bind(request.route_id)
+        .bind(request.destination_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(route_agent) = route_agent else {
+            return Err(StorageError::NotFound);
+        };
+        let active_agent: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM agents
+             WHERE workspace_id=$1 AND environment_id=$2 AND id=$3
+               AND revoked_at IS NULL
+             FOR KEY SHARE",
+        )
+        .bind(scope.workspace_id.to_string())
+        .bind(scope.environment_id.to_string())
+        .bind(&route_agent)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if active_agent.is_none() {
+            return Err(StorageError::NotFound);
+        }
+        let route_matches_destination: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM printer_routes
+             WHERE workspace_id=$1 AND environment_id=$2
+               AND id=$3 AND destination_id=$4 AND agent_id=$5
+               AND enabled AND retired_at IS NULL
+             FOR KEY SHARE",
+        )
+        .bind(scope.workspace_id.to_string())
+        .bind(scope.environment_id.to_string())
+        .bind(request.route_id)
+        .bind(request.destination_id)
+        .bind(&route_agent)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if route_matches_destination.is_none() {
+            return Err(StorageError::NotFound);
+        }
+        let job = sqlx::query(
+            "SELECT id,destination_id,state,final_at,expires_at>now() AS unexpired
+             FROM jobs
+             WHERE workspace_id=$1 AND environment_id=$2 AND id=$3
+             FOR UPDATE",
+        )
+        .bind(scope.workspace_id.to_string())
+        .bind(scope.environment_id.to_string())
+        .bind(request.job_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+        let job_state: String = job.try_get("state")?;
+        let job_final_at: Option<DateTime<Utc>> = job.try_get("final_at")?;
+        let job_unexpired: bool = job.try_get("unexpired")?;
+        if job_final_at.is_some()
+            || !job_unexpired
+            || !matches!(
+                job_state.as_str(),
+                "registered" | "content_pending" | "waiting_for_agent" | "failed_retryable"
+            )
+        {
+            // The scheduler selected its candidate before acquiring this row
+            // lock. Revalidate after the lock so an expiry or responsibility
+            // transition that won the race cannot be followed by a new route.
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        let job_destination: Option<String> = job.try_get("destination_id")?;
+        if job_destination
+            .as_deref()
+            .is_some_and(|id| id != request.destination_id)
+        {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        if job_destination.is_none() {
+            sqlx::query("UPDATE jobs SET destination_id=$4,route_id=$5,updated_at=now() WHERE workspace_id=$1 AND environment_id=$2 AND id=$3 AND destination_id IS NULL")
+                .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(request.job_id).bind(request.destination_id).bind(request.route_id).execute(&mut *tx).await?;
+        }
         let unresolved: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM delivery_attempts attempt WHERE attempt.workspace_id=$1 AND attempt.environment_id=$2 AND attempt.destination_id=$3 AND attempt.state='delivery_uncertain' AND NOT EXISTS (SELECT 1 FROM delivery_uncertainty_resolutions resolution WHERE resolution.workspace_id=attempt.workspace_id AND resolution.environment_id=attempt.environment_id AND resolution.attempt_id=attempt.id))")
             .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).bind(request.destination_id).fetch_one(&mut *tx).await?;
         if unresolved {
@@ -1992,8 +2363,11 @@ struct MemoryState {
     decisions: HashMap<(TenantScope, String), IdentityDecision>,
     decision_snapshots: HashMap<(TenantScope, String), MemoryDecisionSnapshot>,
     observations: HashMap<(TenantScope, String), Vec<RouteObservation>>,
+    runtime_observations: HashMap<(TenantScope, String), Vec<NodeRuntimeObservation>>,
+    wake_hints: HashMap<(TenantScope, String), (NodeWakeHint, String)>,
     acknowledgements: HashMap<(TenantScope, String, String), ProjectionAcknowledgement>,
     memberships: HashMap<(TenantScope, String, String), SiteCoordinatorMembership>,
+    revoked_agents: HashSet<(TenantScope, String)>,
     attempts: HashMap<(TenantScope, String), (DeliveryAttempt, String)>,
     reservations: HashMap<(TenantScope, String), RouteReservation>,
     uncertainty_resolutions: HashMap<(TenantScope, String), DeliveryUncertaintyResolution>,
@@ -2025,6 +2399,88 @@ fn write_state(
         .state
         .write()
         .map_err(|_| StorageError::InvalidData("memory topology lock poisoned".into()))
+}
+
+impl MemoryDestinationTopologyRepository {
+    /// Retires every route for a revoked node and records a tombstone so stale
+    /// inventory projection cannot recreate an eligible execution path.
+    pub fn revoke_agent_topology(
+        &self,
+        scope: TenantScope,
+        agent_id: &str,
+    ) -> Result<(), StorageError> {
+        let mut state = write_state(self)?;
+        state.revoked_agents.insert((scope, agent_id.to_owned()));
+        let affected = state
+            .routes
+            .iter()
+            .filter(|((tenant, _), route)| *tenant == scope && route.agent_id == agent_id)
+            .map(|((_, route_id), route)| (route_id.clone(), route.destination_id.clone()))
+            .collect::<Vec<_>>();
+        let affected_routes = affected
+            .iter()
+            .map(|(route_id, _)| route_id.clone())
+            .collect::<HashSet<_>>();
+        let affected_destinations = affected
+            .into_iter()
+            .map(|(_, destination_id)| destination_id)
+            .collect::<HashSet<_>>();
+        let now = Utc::now();
+        for ((tenant, route_id), route) in &mut state.routes {
+            if *tenant == scope && affected_routes.contains(route_id) {
+                route.enabled = false;
+                route.state = "retired".into();
+                route.role = "disabled".into();
+                route.updated_at = now;
+            }
+        }
+        for ((tenant, _, membership_agent), membership) in &mut state.memberships {
+            if *tenant == scope && membership_agent == agent_id {
+                membership.state = "revoked".into();
+            }
+        }
+        for ((tenant, _), (hint, _)) in &mut state.wake_hints {
+            if *tenant == scope && hint.agent_id == agent_id && hint.status == "pending" {
+                hint.status = "cancelled".into();
+            }
+        }
+        for ((tenant, _), (attempt, _)) in &mut state.attempts {
+            if *tenant == scope
+                && affected_routes.contains(&attempt.route_id)
+                && attempt.state == DeliveryAttemptState::RouteLeased
+            {
+                attempt.state = DeliveryAttemptState::Superseded;
+                attempt.final_at = Some(now);
+                attempt.updated_at = now;
+            }
+        }
+        for ((tenant, _), reservation) in &mut state.reservations {
+            if *tenant == scope
+                && affected_routes.contains(&reservation.route_id)
+                && reservation.state == "active"
+            {
+                reservation.state = "superseded".into();
+                reservation.released_at = Some(now);
+            }
+        }
+        let destinations_with_routes = state
+            .routes
+            .iter()
+            .filter(|((tenant, _), route)| *tenant == scope && route.enabled)
+            .map(|(_, route)| route.destination_id.clone())
+            .collect::<HashSet<_>>();
+        for destination_id in affected_destinations {
+            if !destinations_with_routes.contains(&destination_id)
+                && let Some(destination) = state.destinations.get_mut(&(scope, destination_id))
+            {
+                if destination.state != "attention" {
+                    destination.state = "unavailable".into();
+                }
+                destination.updated_at = now;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -2082,6 +2538,12 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
         route: &StoredPrinterRoute,
     ) -> Result<(), StorageError> {
         let state = read_state(self)?;
+        if state
+            .revoked_agents
+            .contains(&(scope, route.agent_id.clone()))
+        {
+            return Err(StorageError::NotFound);
+        }
         if !state
             .destinations
             .contains_key(&(scope, route.destination_id.clone()))
@@ -2522,6 +2984,175 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
         items.truncate(usize::try_from(limit.clamp(1, 1_000)).unwrap_or(1_000));
         Ok(items)
     }
+    async fn record_node_runtime_observation(
+        &self,
+        scope: TenantScope,
+        observation: &NodeRuntimeObservation,
+    ) -> Result<(), StorageError> {
+        let mut state = write_state(self)?;
+        let items = state
+            .runtime_observations
+            .entry((scope, observation.agent_id.clone()))
+            .or_default();
+        if let Some(existing) = items
+            .iter()
+            .find(|item| item.sequence == observation.sequence)
+        {
+            return if runtime_observations_semantically_equal(existing, observation) {
+                Ok(())
+            } else {
+                Err(StorageError::IdempotencyConflict)
+            };
+        }
+        if items
+            .iter()
+            .map(|item| item.sequence)
+            .max()
+            .is_some_and(|latest| observation.sequence <= latest)
+        {
+            return Err(StorageError::ConcurrentStateChange);
+        }
+        items.push(observation.clone());
+        if items.len() > MAX_RUNTIME_OBSERVATIONS_PER_AGENT {
+            let remove = items.len() - MAX_RUNTIME_OBSERVATIONS_PER_AGENT;
+            items.drain(..remove);
+        }
+        Ok(())
+    }
+    async fn latest_node_runtime_observation(
+        &self,
+        scope: TenantScope,
+        agent_id: &str,
+    ) -> Result<NodeRuntimeObservation, StorageError> {
+        read_state(self)?
+            .runtime_observations
+            .get(&(scope, agent_id.to_owned()))
+            .and_then(|items| items.iter().max_by_key(|item| item.sequence))
+            .cloned()
+            .ok_or(StorageError::NotFound)
+    }
+    async fn list_latest_node_runtime_observations(
+        &self,
+        scope: TenantScope,
+        after_agent_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<NodeRuntimeObservation>, StorageError> {
+        let mut observations = read_state(self)?
+            .runtime_observations
+            .iter()
+            .filter(|((tenant, agent_id), _)| {
+                *tenant == scope && after_agent_id.is_none_or(|after| agent_id.as_str() > after)
+            })
+            .filter_map(|(_, items)| items.iter().max_by_key(|item| item.sequence).cloned())
+            .collect::<Vec<_>>();
+        observations.sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
+        observations.truncate(usize::try_from(limit.clamp(1, 1_001)).unwrap_or(1_001));
+        Ok(observations)
+    }
+    async fn create_node_wake_hint(
+        &self,
+        scope: TenantScope,
+        hint: &NodeWakeHint,
+        idempotency_key: &str,
+    ) -> Result<NodeWakeHint, StorageError> {
+        let mut state = write_state(self)?;
+        let now = Utc::now();
+        state.wake_hints.retain(|(tenant, _), (stored, _)| {
+            if *tenant == scope && stored.agent_id == hint.agent_id {
+                if stored.status == "pending" && stored.expires_at <= now {
+                    stored.status = "expired".into();
+                }
+                return stored.status == "pending"
+                    || stored.expires_at >= now - chrono::Duration::days(WAKE_HINT_RETENTION_DAYS);
+            }
+            true
+        });
+        if let Some((stored, _)) = state
+            .wake_hints
+            .iter()
+            .find(|((tenant, _), (stored, key))| {
+                *tenant == scope && stored.agent_id == hint.agent_id && key == idempotency_key
+            })
+            .map(|(_, value)| value)
+        {
+            return if stored.reason == hint.reason
+                && stored.delivery_channel == hint.delivery_channel
+                && stored.expires_at - stored.requested_at == hint.expires_at - hint.requested_at
+            {
+                Ok(stored.clone())
+            } else {
+                Err(StorageError::IdempotencyConflict)
+            };
+        }
+        state.wake_hints.insert(
+            (scope, hint.id.clone()),
+            (hint.clone(), idempotency_key.into()),
+        );
+        Ok(hint.clone())
+    }
+    async fn list_node_wake_hints(
+        &self,
+        scope: TenantScope,
+        agent_id: &str,
+        limit: u32,
+    ) -> Result<Vec<NodeWakeHint>, StorageError> {
+        let now = Utc::now();
+        let mut hints = read_state(self)?
+            .wake_hints
+            .iter()
+            .filter(|((tenant, _), (hint, _))| *tenant == scope && hint.agent_id == agent_id)
+            .map(|(_, (hint, _))| {
+                let mut hint = hint.clone();
+                if hint.status == "pending" && hint.expires_at <= now {
+                    hint.status = "expired".into();
+                }
+                hint
+            })
+            .collect::<Vec<_>>();
+        hints.sort_by_key(|hint| std::cmp::Reverse((hint.requested_at, hint.id.clone())));
+        hints.truncate(usize::try_from(limit.clamp(1, 100)).unwrap_or(100));
+        Ok(hints)
+    }
+    async fn observe_pending_node_wake_hints(
+        &self,
+        scope: TenantScope,
+        agent_id: &str,
+        observed_at: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<NodeWakeHint>, StorageError> {
+        let mut state = write_state(self)?;
+        state.wake_hints.retain(|(tenant, _), (hint, _)| {
+            *tenant != scope
+                || hint.agent_id != agent_id
+                || hint.status == "pending"
+                || hint.expires_at >= observed_at - chrono::Duration::days(WAKE_HINT_RETENTION_DAYS)
+        });
+        let mut keys = state
+            .wake_hints
+            .iter()
+            .filter(|((tenant, _), (hint, _))| {
+                *tenant == scope && hint.agent_id == agent_id && hint.status == "pending"
+            })
+            .map(|(key, (hint, _))| (key.clone(), hint.requested_at, hint.id.clone()))
+            .collect::<Vec<_>>();
+        keys.sort_by_key(|(_, requested_at, id)| (*requested_at, id.clone()));
+        let mut observed = Vec::new();
+        for (key, _, _) in keys
+            .into_iter()
+            .take(usize::try_from(limit.clamp(1, 100)).unwrap_or(100))
+        {
+            if let Some((hint, _)) = state.wake_hints.get_mut(&key) {
+                if hint.expires_at <= observed_at {
+                    hint.status = "expired".into();
+                } else {
+                    hint.status = "observed".into();
+                    hint.observed_at = Some(observed_at);
+                    observed.push(hint.clone());
+                }
+            }
+        }
+        Ok(observed)
+    }
     async fn acknowledge_projection(
         &self,
         scope: TenantScope,
@@ -2572,7 +3203,15 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
         scope: TenantScope,
         membership: &SiteCoordinatorMembership,
     ) -> Result<(), StorageError> {
-        write_state(self)?.memberships.insert(
+        let mut state = write_state(self)?;
+        if membership.state != "revoked"
+            && state
+                .revoked_agents
+                .contains(&(scope, membership.agent_id.clone()))
+        {
+            return Err(StorageError::NotFound);
+        }
+        state.memberships.insert(
             (
                 scope,
                 membership.authority_id.clone(),
@@ -2592,7 +3231,13 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
         if !state
             .routes
             .get(&(scope, request.route_id.to_owned()))
-            .is_some_and(|route| route.destination_id == request.destination_id && route.enabled)
+            .is_some_and(|route| {
+                route.destination_id == request.destination_id
+                    && route.enabled
+                    && !state
+                        .revoked_agents
+                        .contains(&(scope, route.agent_id.clone()))
+            })
         {
             return Err(StorageError::NotFound);
         }
@@ -3916,5 +4561,201 @@ mod tests {
                 .await,
             Err(StorageError::IdempotencyConflict)
         ));
+    }
+
+    #[tokio::test]
+    async fn runtime_and_wake_state_are_tenant_scoped_idempotent_and_advisory() {
+        let repository = MemoryDestinationTopologyRepository::default();
+        let first = scope();
+        let second = scope();
+        let observed_at = Utc::now();
+        let runtime = NodeRuntimeObservation {
+            id: "nro_first".into(),
+            agent_id: "agt_shared".into(),
+            sequence: 1,
+            host_mode: "embedded_application".into(),
+            availability_class: "background_opportunistic".into(),
+            lifecycle_state: "background".into(),
+            accepts_cloud_jobs: true,
+            execution_budget_ms: Some(30_000),
+            wake_mechanisms: vec!["apns_background".into()],
+            observed_at,
+            fresh_until: observed_at + chrono::Duration::minutes(1),
+        };
+        repository
+            .record_node_runtime_observation(first, &runtime)
+            .await
+            .unwrap();
+        repository
+            .record_node_runtime_observation(first, &runtime)
+            .await
+            .unwrap();
+        assert!(matches!(
+            repository
+                .latest_node_runtime_observation(second, "agt_shared")
+                .await,
+            Err(StorageError::NotFound)
+        ));
+        let first_runtime_page = repository
+            .list_latest_node_runtime_observations(first, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(first_runtime_page.len(), 1);
+        assert_eq!(first_runtime_page[0].agent_id, "agt_shared");
+        assert!(
+            repository
+                .list_latest_node_runtime_observations(second, None, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let expired = NodeWakeHint {
+            id: "wkh_expired".into(),
+            agent_id: "agt_shared".into(),
+            reason: "job_available".into(),
+            delivery_channel: "connected_session".into(),
+            status: "pending".into(),
+            requested_at: observed_at - chrono::Duration::days(8),
+            expires_at: observed_at - chrono::Duration::days(8) + chrono::Duration::minutes(5),
+            observed_at: None,
+        };
+        repository
+            .create_node_wake_hint(first, &expired, "wake-key-expired")
+            .await
+            .unwrap();
+
+        let hint = NodeWakeHint {
+            id: "wkh_first".into(),
+            agent_id: "agt_shared".into(),
+            reason: "job_available".into(),
+            delivery_channel: "external_push".into(),
+            status: "pending".into(),
+            requested_at: observed_at,
+            expires_at: observed_at + chrono::Duration::minutes(5),
+            observed_at: None,
+        };
+        let stored = repository
+            .create_node_wake_hint(first, &hint, "wake-key-first")
+            .await
+            .unwrap();
+        assert_eq!(stored.status, "pending");
+        assert_eq!(
+            repository
+                .list_node_wake_hints(first, "agt_shared", 100)
+                .await
+                .unwrap()
+                .iter()
+                .map(|value| value.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["wkh_first"]
+        );
+        let mut second_hint = hint.clone();
+        second_hint.id = "wkh_second".into();
+        let second_stored = repository
+            .create_node_wake_hint(second, &second_hint, "wake-key-first")
+            .await
+            .unwrap();
+        assert_eq!(second_stored.id, "wkh_second");
+        let second_hints = repository
+            .list_node_wake_hints(second, "agt_shared", 100)
+            .await
+            .unwrap();
+        assert_eq!(second_hints.len(), 1);
+        assert_eq!(second_hints[0].id, "wkh_second");
+        assert!(
+            repository
+                .list_node_wake_hints(second, "agt_other", 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let observed = repository
+            .observe_pending_node_wake_hints(
+                first,
+                "agt_shared",
+                observed_at + chrono::Duration::seconds(1),
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].status, "observed");
+        assert_eq!(observed[0].delivery_channel, "external_push");
+        assert!(
+            repository
+                .observe_pending_node_wake_hints(first, "agt_shared", Utc::now(), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_history_is_bounded_without_reopening_pruned_sequences() {
+        let repository = MemoryDestinationTopologyRepository::default();
+        let tenant = scope();
+        let observed_at = Utc::now();
+        for sequence in 1..=80 {
+            repository
+                .record_node_runtime_observation(
+                    tenant,
+                    &NodeRuntimeObservation {
+                        id: format!("nro_{sequence}"),
+                        agent_id: "agt_bounded".into(),
+                        sequence,
+                        host_mode: "embedded_application".into(),
+                        availability_class: "foreground_only".into(),
+                        lifecycle_state: "foreground".into(),
+                        accepts_cloud_jobs: true,
+                        execution_budget_ms: None,
+                        wake_mechanisms: Vec::new(),
+                        observed_at,
+                        fresh_until: observed_at + chrono::Duration::minutes(1),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        {
+            let repository_state = read_state(&repository).unwrap();
+            assert_eq!(
+                repository_state
+                    .runtime_observations
+                    .get(&(tenant, "agt_bounded".into()))
+                    .unwrap()
+                    .len(),
+                MAX_RUNTIME_OBSERVATIONS_PER_AGENT
+            );
+        }
+
+        let replayed = NodeRuntimeObservation {
+            id: "nro_replayed".into(),
+            agent_id: "agt_bounded".into(),
+            sequence: 1,
+            host_mode: "embedded_application".into(),
+            availability_class: "foreground_only".into(),
+            lifecycle_state: "foreground".into(),
+            accepts_cloud_jobs: true,
+            execution_budget_ms: None,
+            wake_mechanisms: Vec::new(),
+            observed_at,
+            fresh_until: observed_at + chrono::Duration::minutes(1),
+        };
+        assert!(matches!(
+            repository
+                .record_node_runtime_observation(tenant, &replayed)
+                .await,
+            Err(StorageError::ConcurrentStateChange)
+        ));
+        assert_eq!(
+            repository
+                .latest_node_runtime_observation(tenant, "agt_bounded")
+                .await
+                .unwrap()
+                .sequence,
+            80
+        );
     }
 }

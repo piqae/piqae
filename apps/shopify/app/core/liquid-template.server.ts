@@ -1,8 +1,8 @@
 import { liquidToCanonical } from "./liquid-document-adapter";
-import type { BusinessDocument } from "./template-model";
+import type { PrintPacket } from "./template-model";
 export interface LiquidResult {
   output: string;
-  document: BusinessDocument;
+  document: PrintPacket;
   diagnostics: { code: string; severity: "warning"; message: string }[];
 }
 /** Compatibility helper for text-only callers. Publishing uses the structural compiler directly. */
@@ -27,7 +27,7 @@ export async function renderShopifyLiquid(
     document: compiled.document,
     diagnostics: [
       {
-        code: "SHOPIFY_LIQUID_BUSINESS_DOCUMENT_PROFILE",
+        code: "SHOPIFY_LIQUID_PRINTPACKET_PROFILE",
         severity: "warning",
         message:
           "Only bounded data, formatting, conditions and iteration are supported.",

@@ -235,10 +235,10 @@ pub(crate) async fn create_print_job(
     let printer_id = printer.id;
     let agent_id = printer.agent_id;
     let (content_kind, content) = compatibility_content(&request)?;
-    if content_kind == ContentKind::Raw && profile.is_some() {
+    if content_kind == ContentKind::Raw {
         return Err(AppError::invalid(
-            "InvalidPrinter",
-            "Rendered print profiles cannot be used for RAW jobs.",
+            "RawLanguageProfileRequired",
+            "Compatibility RAW input has no printer-language profile and is rejected. Use the native Piqae API with printer_native binding.",
         )
         .compatibility());
     }
@@ -266,9 +266,7 @@ pub(crate) async fn create_print_job(
         source: request.source,
         content_kind,
         content: persisted.source,
-        options: if content_kind == ContentKind::Raw {
-            JobOptions::default()
-        } else if let Some(profile) = &profile {
+        options: if let Some(profile) = &profile {
             merge_profile_options(profile, &request.options)?
         } else {
             request.options

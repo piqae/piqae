@@ -77,14 +77,14 @@ export class ManagedPiqaeAccountService {
       const digest = createHash("sha256")
         .update(`${shop}\0${starter.id}`)
         .digest("hex");
-      const template = await client.businessDocuments.templates.create(
+      const template = await client.printPackets.templates.create(
         {
           name: `Shopify ${starter.name}`,
           specification: starter.specification,
         },
         `shopify-managed-template-${digest}`,
       );
-      const revision = await client.businessDocuments.templates.publish(
+      const revision = await client.printPackets.templates.publish(
         template.id,
         starter.specification,
         `shopify-managed-publish-${digest}`,

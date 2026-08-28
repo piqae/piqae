@@ -184,7 +184,9 @@ The `Piqae release` workflow is the sole `v*` tag trigger:
 1. Resolve and validate the version, build number, tag, and membership of the
    source commit in `main`.
 2. Build and audit platforms enabled by `release/support-matrix.yaml`; a
-   Disabled platform is skipped and cannot block an enabled platform.
+   Disabled desktop platform is skipped and cannot block an enabled platform.
+   Build the Apple and Windows embedded-node SDK candidates independently of
+   the desktop support tier so their ABI/package checks cannot be skipped.
 3. Require complete signing credentials for tagged native candidates.
 4. Pause at the protected `native-release` environment.
 5. Publish immutable packages before signed appcasts and promote the shared
@@ -194,9 +196,15 @@ The `Piqae release` workflow is the sole `v*` tag trigger:
    stage succeeds.
 
 The platform `v*` release is a coordinated unit: server, web, migration image,
-native applications, manifest, and appcasts are all built from the same commit
-and version by `release.yml`. A consumer requiring a new API must not be
-released before that platform tag completes. The TypeScript SDK and MCP server
+native applications, embedded-node SDK candidates, manifest, and appcasts are
+all built from the same commit and version by `release.yml`. SDK candidates
+include checksums, SPDX SBOMs, and build provenance. They remain unsigned
+Preview artifacts and are not pushed to Swift or NuGet registries until their
+separate signing and registry-publication gates are enabled. Their clean
+consumer gates already resolve the exact staged assets, execute the packaged
+native ABI, and verify the managed/native dependency evidence. A consumer
+requiring a new API must not be released before that platform tag completes.
+The TypeScript SDK and MCP server
 remain independently versioned with `sdk-v*` and `mcp-v*`; publish them only
 after the compatible platform release and express their minimum supported API
 contract in code and release notes. Do not create all three tags concurrently.
