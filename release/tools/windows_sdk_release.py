@@ -10,7 +10,7 @@ import re
 import subprocess
 import zipfile
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from xml.etree import ElementTree
 
 try:
@@ -39,6 +39,15 @@ NATIVE_ARCHIVE_ENTRIES = {
 }
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 WINDOWS_RUST_TARGET = "x86_64-pc-windows-msvc"
+WINDOWS_INVALID_PATH_CHARACTERS = frozenset('<>:"|?*')
+WINDOWS_RESERVED_PATH_STEMS = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+}
 
 
 class ReleaseError(RuntimeError):
@@ -87,16 +96,43 @@ def nuspec(archive: zipfile.ZipFile) -> ElementTree.Element:
 
 def safe_entries(archive: zipfile.ZipFile) -> set[str]:
     names: set[str] = set()
-    for raw_name in archive.namelist():
+    portable_names: set[str] = set()
+    for entry in archive.infolist():
+        # ZipInfo normalizes the path separator for the current host. Validate
+        # the original central-directory name so a backslash cannot disappear
+        # merely because this gate is running on Windows.
+        raw_name = entry.orig_filename
         if "\\" in raw_name:
             raise ReleaseError("release archive contains a non-portable path separator")
         name = raw_name
         path = PurePosixPath(name)
-        if path.is_absolute() or ".." in path.parts:
+        windows_path = PureWindowsPath(name)
+        logical_name = name[:-1] if name.endswith("/") else name
+        components = logical_name.split("/")
+        has_windows_unsafe_component = any(
+            component.rstrip(" .") != component
+            or any(character in WINDOWS_INVALID_PATH_CHARACTERS for character in component)
+            or component.split(".", 1)[0].upper() in WINDOWS_RESERVED_PATH_STEMS
+            for component in components
+        )
+        if (
+            not logical_name
+            or entry.filename != name
+            or path.is_absolute()
+            or windows_path.drive
+            or windows_path.is_absolute()
+            or any(component in {"", ".", ".."} for component in components)
+            or has_windows_unsafe_component
+            or any(ord(character) < 32 for character in name)
+        ):
             raise ReleaseError("release archive contains an unsafe archive path")
         if name in names:
             raise ReleaseError("release archive contains a duplicate path")
+        portable_name = logical_name.casefold()
+        if portable_name in portable_names:
+            raise ReleaseError("release archive contains a non-portable duplicate path")
         names.add(name)
+        portable_names.add(portable_name)
     return names
 
 
