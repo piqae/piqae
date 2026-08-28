@@ -104,7 +104,11 @@ def classify(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
         # and contract changes must test those downstream consumers too.
         selected["mcp"] |= js_workspace or openapi or sdk or path.startswith("apps/mcp/")
         selected["shopify"] |= (
-            js_workspace or openapi or sdk or path.startswith("apps/shopify/")
+            js_workspace
+            or openapi
+            or sdk
+            or path.startswith("apps/shopify/")
+            or path == "deploy/docker/Dockerfile.shopify"
         )
         selected["openapi"] |= openapi
         selected["terraform"] |= path.startswith("deploy/terraform/")
@@ -128,6 +132,8 @@ def classify(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
             }
             selected["windows_installer"] |= name in {"windows-release.yml", "release.yml"}
         if path.startswith(("packaging/release/", "release/tools/")):
+            selected["release_tooling"] = True
+        if path == "deploy/docker/Dockerfile.shopify":
             selected["release_tooling"] = True
 
     return selected

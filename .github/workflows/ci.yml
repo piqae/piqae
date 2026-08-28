@@ -459,6 +459,8 @@ jobs:
       - run: pnpm --filter @piqae/shopify-app test
       - run: pnpm --filter @piqae/shopify-app test:postgres
       - run: pnpm --filter @piqae/shopify-app format:check
+      - name: Verify clean Shopify image workspace dependencies
+        run: docker build --target shopify-workspace-dependencies --file deploy/docker/Dockerfile.shopify .
       - name: Verify fail-closed release configuration rendering
         working-directory: apps/shopify
         env:
