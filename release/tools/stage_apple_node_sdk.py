@@ -487,12 +487,11 @@ def validate_stage(repository_root: Path, version: str, output: Path) -> dict[st
             raise ReleaseError("release Package.swift does not reference the staged artifact URL")
         if metadata["swiftpm_checksum"] not in package_swift:
             raise ReleaseError("release Package.swift does not reference the staged SwiftPM checksum")
-        required_linker_settings = {
-            '.linkedFramework("CoreFoundation")',
-            '.linkedLibrary("bsm", .when(platforms: [.macOS]))',
-        }
-        if not all(setting in package_swift for setting in required_linker_settings):
-            raise ReleaseError("release Package.swift is missing required native linker settings")
+        expected_package_swift = package_manifest(
+            version, versioned_archive, metadata["swiftpm_checksum"]
+        )
+        if package_swift != expected_package_swift:
+            raise ReleaseError("release Package.swift does not match the generated manifest")
         shim = package_zip.read(f"{root}/Sources/CPiqaeNodeABI/include/shim.h").decode("utf-8")
         if '#include "piqae_node.h"' not in shim or "../../../../native" in shim:
             raise ReleaseError("release package C shim is not independent of the repository layout")
