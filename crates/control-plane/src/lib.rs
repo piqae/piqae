@@ -2016,6 +2016,30 @@ mod tests {
         }
         let _ = sync_virtual_document_node(&application, supported.clone(), false).await;
 
+        let printer_with_target_revision = application
+            .router
+            .clone()
+            .oneshot(idempotent_api_request(
+                "POST",
+                &format!("/v1/printpacket/renders/{render_id}/print"),
+                "piq_test_integration",
+                "printer-with-target-revision",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "specification_revision": "spec_invalid_for_direct_printer",
+                        "title": "Invalid direct printer revision"
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .expect("direct printer revision response");
+        assert_eq!(
+            printer_with_target_revision.status(),
+            StatusCode::BAD_REQUEST
+        );
+
         let required = json_response(
             &application.router,
             idempotent_api_request(

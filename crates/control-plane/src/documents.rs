@@ -992,6 +992,12 @@ async fn print_render(
             "Target printing requires the current design specification revision.",
         ));
     }
+    if request.printer_id.is_some() && request.specification_revision.is_some() {
+        return Err(AppError::invalid(
+            "design_specification_revision_not_allowed",
+            "Direct printer printing must not include a target design specification revision.",
+        ));
+    }
     let encrypted_key = render
         .artifact_object_key_ciphertext
         .as_deref()

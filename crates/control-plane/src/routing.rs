@@ -862,19 +862,7 @@ pub(crate) fn document_media_compatible(
     let Some(profile) = profile else {
         return false;
     };
-    let stock_width = stock
-        .attributes
-        .get("width_mm")
-        .and_then(serde_json::Value::as_f64);
-    let stock_height = stock
-        .attributes
-        .get("height_mm")
-        .or_else(|| stock.attributes.get("length_mm"))
-        .and_then(serde_json::Value::as_f64);
-    let kind = stock
-        .attributes
-        .get("kind")
-        .and_then(serde_json::Value::as_str);
+    let (stock_width, stock_height) = stock_dimensions(stock);
     match media {
         printpacket_renderer::Media::Paged {
             size, orientation, ..
@@ -893,7 +881,7 @@ pub(crate) fn document_media_compatible(
                 } else {
                     "portrait"
                 };
-            kind == Some("sheet")
+            stock_kind_matches(stock, &["sheet"])
                 && stock_height.is_some_and(|stock_height| {
                     dimensions_match_unordered(stock_width, Some(stock_height), width, height)
                 })
@@ -907,7 +895,7 @@ pub(crate) fn document_media_compatible(
         }
         printpacket_renderer::Media::Continuous { width_mm, .. } => {
             let width = f64::from(*width_mm);
-            matches!(kind, Some("roll" | "continuous" | "receipt"))
+            stock_kind_matches(stock, &["roll", "continuous", "receipt"])
                 && stock_width.is_some_and(|value| dimension_close(value, width))
                 && dimension_close(profile.width_mm, width)
         }
@@ -933,16 +921,38 @@ pub(crate) fn document_media_compatible(
                     width,
                     height,
                 );
-            matches!(kind, Some("label" | "roll_label")) && (ordered || rotated)
+            stock_kind_matches(stock, &["label", "roll_label"]) && (ordered || rotated)
         }
     }
 }
 
-fn dimension_close(left: f64, right: f64) -> bool {
+pub(crate) fn stock_dimensions(stock: &StoredStock) -> (Option<f64>, Option<f64>) {
+    (
+        stock
+            .attributes
+            .get("width_mm")
+            .and_then(serde_json::Value::as_f64),
+        stock
+            .attributes
+            .get("height_mm")
+            .or_else(|| stock.attributes.get("length_mm"))
+            .and_then(serde_json::Value::as_f64),
+    )
+}
+
+pub(crate) fn stock_kind_matches(stock: &StoredStock, accepted: &[&str]) -> bool {
+    stock
+        .attributes
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| accepted.contains(&kind))
+}
+
+pub(crate) fn dimension_close(left: f64, right: f64) -> bool {
     (left - right).abs() <= MEDIA_DIMENSION_TOLERANCE_MM
 }
 
-fn dimensions_match_ordered(
+pub(crate) fn dimensions_match_ordered(
     left_width: Option<f64>,
     left_height: Option<f64>,
     right_width: f64,
@@ -952,7 +962,7 @@ fn dimensions_match_ordered(
         && left_height.is_some_and(|height| dimension_close(height, right_height))
 }
 
-fn dimensions_match_unordered(
+pub(crate) fn dimensions_match_unordered(
     left_width: Option<f64>,
     left_height: Option<f64>,
     right_width: f64,
@@ -962,18 +972,18 @@ fn dimensions_match_unordered(
         || dimensions_match_ordered(left_width, left_height, right_height, right_width)
 }
 
-fn stock_orientation_allows(stock: &StoredStock, document_orientation: &str) -> bool {
+pub(crate) fn stock_orientation_allows(stock: &StoredStock, document_orientation: &str) -> bool {
     match stock
         .attributes
         .get("orientation")
         .and_then(serde_json::Value::as_str)
     {
-        None | Some("any") => true,
+        None | Some("either") => true,
         Some(orientation) => orientation == document_orientation,
     }
 }
 
-fn stock_label_rotatable(stock: &StoredStock) -> bool {
+pub(crate) fn stock_label_rotatable(stock: &StoredStock) -> bool {
     stock
         .attributes
         .get("rotatable")
@@ -1289,34 +1299,19 @@ pub(crate) fn stock_profile_dimensions_compatible(
     let Some(profile) = profile else {
         return false;
     };
-    let Some(width) = stock
-        .attributes
-        .get("width_mm")
-        .and_then(serde_json::Value::as_f64)
-    else {
+    let (Some(width), height) = stock_dimensions(stock) else {
         return false;
     };
-    let height = stock
-        .attributes
-        .get("height_mm")
-        .or_else(|| stock.attributes.get("length_mm"))
-        .and_then(serde_json::Value::as_f64);
-    match stock
-        .attributes
-        .get("kind")
-        .and_then(serde_json::Value::as_str)
+    if stock_kind_matches(stock, &["roll", "continuous", "receipt"]) {
+        dimension_close(width, profile.width_mm)
+    } else if stock_kind_matches(stock, &["sheet", "card", "envelope"])
+        || (stock_kind_matches(stock, &["label", "roll_label"]) && stock_label_rotatable(stock))
     {
-        Some("roll" | "continuous" | "receipt") => dimension_close(width, profile.width_mm),
-        Some("sheet" | "card" | "envelope") => {
-            dimensions_match_unordered(Some(width), height, profile.width_mm, profile.height_mm)
-        }
-        Some("label" | "roll_label") if stock_label_rotatable(stock) => {
-            dimensions_match_unordered(Some(width), height, profile.width_mm, profile.height_mm)
-        }
-        Some("label" | "roll_label") => {
-            dimensions_match_ordered(Some(width), height, profile.width_mm, profile.height_mm)
-        }
-        _ => false,
+        dimensions_match_unordered(Some(width), height, profile.width_mm, profile.height_mm)
+    } else if stock_kind_matches(stock, &["label", "roll_label"]) {
+        dimensions_match_ordered(Some(width), height, profile.width_mm, profile.height_mm)
+    } else {
+        false
     }
 }
 
@@ -1550,6 +1545,12 @@ mod tests {
                 },
             };
             let mut physical_stock = stock("sheet", width_mm, Some(height_mm));
+            assert!(document_media_compatible(
+                &landscape,
+                &physical_stock,
+                Some(&profile),
+            ));
+            physical_stock.attributes["orientation"] = serde_json::json!("either");
             assert!(document_media_compatible(
                 &landscape,
                 &physical_stock,

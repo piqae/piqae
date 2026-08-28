@@ -721,25 +721,15 @@ fn document_manifest_matches_stock(
     manifest: &Value,
     stock: &piqae_storage_postgres::StoredStock,
 ) -> bool {
-    const TOLERANCE_MM: f64 = 0.5;
-    let Some(kind) = stock.attributes.get("kind").and_then(Value::as_str) else {
+    let (Some(stock_width), stock_height) = crate::routing::stock_dimensions(stock) else {
         return false;
     };
-    let Some(stock_width) = stock.attributes.get("width_mm").and_then(Value::as_f64) else {
-        return false;
-    };
-    let stock_height = stock
-        .attributes
-        .get("height_mm")
-        .or_else(|| stock.attributes.get("length_mm"))
-        .and_then(Value::as_f64);
     let Some(page_boxes) = manifest.get("page_boxes").and_then(Value::as_array) else {
         return false;
     };
     if page_boxes.is_empty() {
         return false;
     }
-    let close = |left: f64, right: f64| (left - right).abs() <= TOLERANCE_MM;
     page_boxes.iter().all(|page| {
         let Some(width) = page.get("width_mm").and_then(Value::as_f64) else {
             return false;
@@ -747,31 +737,32 @@ fn document_manifest_matches_stock(
         let Some(height) = page.get("height_mm").and_then(Value::as_f64) else {
             return false;
         };
-        let orientation_allowed = match stock.attributes.get("orientation").and_then(Value::as_str)
-        {
-            None | Some("any") => true,
-            Some("landscape") => width > height,
-            Some("portrait") => height >= width,
-            Some(_) => false,
+        let document_orientation = if width > height {
+            "landscape"
+        } else {
+            "portrait"
         };
-        match kind {
-            "roll" | "continuous" | "receipt" => close(width, stock_width),
-            "sheet" | "card" | "envelope" => stock_height.is_some_and(|stock_height| {
-                orientation_allowed
-                    && ((close(width, stock_width) && close(height, stock_height))
-                        || (close(width, stock_height) && close(height, stock_width)))
-            }),
-            "label" | "roll_label" => stock_height.is_some_and(|stock_height| {
-                (close(width, stock_width) && close(height, stock_height))
-                    || (stock
-                        .attributes
-                        .get("rotatable")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
-                        && close(width, stock_height)
-                        && close(height, stock_width))
-            }),
-            _ => false,
+        if crate::routing::stock_kind_matches(stock, &["roll", "continuous", "receipt"]) {
+            crate::routing::dimension_close(width, stock_width)
+        } else if crate::routing::stock_kind_matches(stock, &["sheet", "card", "envelope"]) {
+            crate::routing::stock_orientation_allows(stock, document_orientation)
+                && crate::routing::dimensions_match_unordered(
+                    Some(stock_width),
+                    stock_height,
+                    width,
+                    height,
+                )
+        } else if crate::routing::stock_kind_matches(stock, &["label", "roll_label"]) {
+            crate::routing::dimensions_match_ordered(Some(stock_width), stock_height, width, height)
+                || (crate::routing::stock_label_rotatable(stock)
+                    && crate::routing::dimensions_match_unordered(
+                        Some(stock_width),
+                        stock_height,
+                        width,
+                        height,
+                    ))
+        } else {
+            false
         }
     })
 }

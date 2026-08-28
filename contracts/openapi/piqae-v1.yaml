@@ -6957,7 +6957,10 @@ components:
         render_cost: { $ref: "#/components/schemas/PrintPacketRenderCost" }
       oneOf:
         - required: [printer_id]
-          not: { required: [target_id] }
+          not:
+            anyOf:
+              - required: [target_id]
+              - required: [specification_revision]
         - required: [target_id, specification_revision]
           not: { required: [printer_id] }
     PrintPacketRenderPolicy:

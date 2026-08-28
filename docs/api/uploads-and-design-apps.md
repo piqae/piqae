@@ -91,7 +91,7 @@ Before presenting a printable template, a design application should:
 
 Sheet width/height describe physical stock and therefore match portrait or
 landscape page geometry. An explicit stock `orientation` of `portrait` or
-`landscape` restricts output; `any` or omission allows either. Label width and
+`landscape` restricts output; `either` or omission allows either. Label width and
 height are ordered and cannot rotate unless stock explicitly declares
 `rotatable: true`.
 
