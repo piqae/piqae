@@ -14,8 +14,11 @@ const ACTIVE_SYSTEM_TEMPLATE_KEYS = new Set([
 
 export function isActiveTemplate(template: MerchantTemplate): boolean {
   try {
-    const key = (JSON.parse(template.source) as { system?: { key?: unknown } })
-      .system?.key;
+    const key = (
+      JSON.parse(template.published?.source ?? template.source) as {
+        system?: { key?: unknown };
+      }
+    ).system?.key;
     return typeof key !== "string" || ACTIVE_SYSTEM_TEMPLATE_KEYS.has(key);
   } catch {
     return true;
@@ -49,18 +52,21 @@ export function buildTemplateIndex(
   settings: MerchantSettings,
 ): TemplateIndex {
   const documents = templates
-    .filter((value) => value.state === "published" && isActiveTemplate(value))
+    .filter((value) => value.published && isActiveTemplate(value))
     .slice(0, 50)
-    .map((value) => ({
-      id: value.id,
-      name: value.name,
-      kind: value.kind,
-      pageSize: value.pageSize,
-      revision: value.revision,
-      designTargetId: value.designTargetId ?? null,
-      designSpecificationRevision: value.designSpecificationRevision ?? null,
-      digest: templateDigest(value.source),
-    }));
+    .map((value) => {
+      const published = value.published!;
+      return {
+        id: value.id,
+        name: published.name,
+        kind: published.kind,
+        pageSize: published.pageSize,
+        revision: published.revision,
+        designTargetId: published.designTargetId,
+        designSpecificationRevision: published.designSpecificationRevision,
+        digest: templateDigest(published.source),
+      };
+    });
   const digest = templateDigest(JSON.stringify(documents));
   return {
     schema: "piqae.shopify-template-index/v1",
@@ -155,6 +161,7 @@ export async function seedStarterTemplates(
       state: "published",
       source: starter.source,
       revision: 1,
+      expectedDraftRevision: current?.draftRevision ?? null,
     });
   }
 }

@@ -64,23 +64,22 @@ export async function loadAdminPrintOptions(input: {
     input.workflows.getSettings(shop),
     input.workflows.listTemplates(shop),
   ]);
-  const published = templates.filter(
-    (template) => template.state === "published",
-  );
+  const published = templates.filter((template) => template.published);
   const parsedDocuments = published.map((template) => ({
     template,
-    document: parseTemplateEnvelope(template.source).document,
+    published: template.published!,
+    document: parseTemplateEnvelope(template.published!.source).document,
   }));
 
   if (!link) {
     return {
       linked: false,
-      documents: parsedDocuments.map(({ template }) => ({
+      documents: parsedDocuments.map(({ template, published }) => ({
         id: template.id,
-        name: template.name,
-        kind: template.kind,
+        name: published.name,
+        kind: published.kind,
         isDefault: template.id === settings.defaultTemplateId,
-        designTargetId: template.designTargetId ?? null,
+        designTargetId: published.designTargetId,
         compatibilityKnown: true,
         compatibleTargetIds: [],
       })),
@@ -107,7 +106,7 @@ export async function loadAdminPrintOptions(input: {
       ...target,
       eligible: target.ready,
       isDefault: parsedDocuments.some(
-        ({ template }) => template.designTargetId === target.id,
+        ({ published }) => published.designTargetId === target.id,
       ),
       // Readiness is deliberately fail-closed until the platform's signed
       // per-destination renderer decision is available. Printer online state
@@ -145,12 +144,12 @@ export async function loadAdminPrintOptions(input: {
     linked: true,
     documents:
       parsedDocuments.length > 0
-        ? parsedDocuments.map(({ template, document }) => ({
+        ? parsedDocuments.map(({ template, published, document }) => ({
             id: template.id,
-            name: template.name,
-            kind: template.kind,
+            name: published.name,
+            kind: published.kind,
             isDefault: template.id === settings.defaultTemplateId,
-            designTargetId: template.designTargetId ?? null,
+            designTargetId: published.designTargetId,
             compatibilityKnown: true,
             compatibleTargetIds: targets
               .filter((target) => targetSupportsDocument(target, document))

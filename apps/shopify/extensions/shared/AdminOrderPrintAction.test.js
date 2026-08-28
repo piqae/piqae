@@ -11,6 +11,7 @@ import {
   renderPolicySummary,
   nodeReadinessMessage,
   nodeFallbackWarning,
+  targetForDocument,
 } from "./AdminOrderPrintAction.jsx";
 
 describe("admin print action state", () => {
@@ -41,6 +42,33 @@ describe("admin print action state", () => {
         { id: "ready", eligible: true, isDefault: true },
       ]),
     ).toMatchObject({ id: "ready" });
+  });
+
+  it("selects each document's own compatible target when documents change", () => {
+    const targets = [
+      { id: "receipt", eligible: true },
+      { id: "label", eligible: true, isDefault: true },
+    ];
+    expect(
+      targetForDocument(
+        {
+          designTargetId: "receipt",
+          compatibilityKnown: true,
+          compatibleTargetIds: ["receipt"],
+        },
+        targets,
+      )?.id,
+    ).toBe("receipt");
+    expect(
+      targetForDocument(
+        {
+          designTargetId: "label",
+          compatibilityKnown: true,
+          compatibleTargetIds: ["label"],
+        },
+        targets,
+      )?.id,
+    ).toBe("label");
   });
 
   it("shows a useful backend error", () => {

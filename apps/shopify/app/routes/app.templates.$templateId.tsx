@@ -7,6 +7,7 @@ import {
   newWorkflowId,
   validateDocumentSource,
   workflows,
+  WorkflowConflictError,
   type MerchantTemplate,
 } from "../core/workflows.server";
 import {
@@ -20,6 +21,7 @@ import {
   parseTemplateEnvelope,
   removeSystemOwnership,
   serializeTemplateEnvelope,
+  validatePrintPacket,
   type PrintPacket,
   type TemplateEditorMode,
 } from "../core/template-model";
@@ -77,8 +79,10 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         state: "draft",
         source: starterSource.source,
         revision: 1,
+        draftRevision: 1,
         designTargetId: null,
         designSpecificationRevision: null,
+        published: null,
         updatedAt: new Date(0).toISOString(),
       };
   }
@@ -110,6 +114,19 @@ export async function action({ request, params }: ActionFunctionArgs) {
   const form = await request.formData();
   try {
     const intent = String(form.get("intent") ?? "draft");
+    const expectedDraftRevisionValue = bounded(
+      form,
+      "expectedDraftRevision",
+      20,
+    );
+    const expectedDraftRevision = expectedDraftRevisionValue
+      ? Number(expectedDraftRevisionValue)
+      : null;
+    if (
+      expectedDraftRevision !== null &&
+      (!Number.isInteger(expectedDraftRevision) || expectedDraftRevision < 1)
+    )
+      throw new Error("Document revision is invalid");
     if (intent === "import_order_printer") {
       const imported = importOrderPrinterProTemplate(
         bounded(form, "orderPrinterSource", 65536, true),
@@ -201,13 +218,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
       envelope.document = document;
       envelope.editor.liquid = canonicalToLiquid(document).source;
     }
-    if (
-      envelope.document.media.kind !== "paged" &&
-      documentHasPageBreak(envelope.document.body)
-    )
-      throw new Error(
-        `Page breaks are not supported on ${envelope.document.media.kind} media`,
-      );
+    validatePrintPacket(envelope.document);
     const pageSize = pageSizeForDocument(envelope.document);
     const designTargetId = bounded(form, "designTargetId", 128);
     let designSpecificationRevision: string | null = null;
@@ -232,7 +243,24 @@ export async function action({ request, params }: ActionFunctionArgs) {
       designSpecificationRevision = specification.specification_revision;
     }
     let source = serializeTemplateEnvelope(envelope);
+    const id = existing?.id ?? newWorkflowId();
+    let staged = null;
     if (intent === "publish") {
+      // Persist the editable draft through CAS before creating a remote Piqae
+      // revision. An already-stale browser is rejected before that external
+      // side effect, and a remote outage still leaves the merchant's draft safe.
+      staged = await workflows().saveTemplate(session.shop, {
+        id,
+        name: bounded(form, "name", 200, true),
+        kind: kind as MerchantTemplate["kind"],
+        pageSize,
+        state: "draft",
+        source,
+        revision: existing?.revision ?? 1,
+        designTargetId: designTargetId || null,
+        designSpecificationRevision,
+        expectedDraftRevision: existing ? expectedDraftRevision : null,
+      });
       const services = createProductionServices();
       source = await publishCanonicalTemplate({
         shop: session.shop,
@@ -245,7 +273,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
       });
     }
     const saved = await workflows().saveTemplate(session.shop, {
-      id: existing?.id ?? newWorkflowId(),
+      id,
       name: bounded(form, "name", 200, true),
       kind: kind as MerchantTemplate["kind"],
       pageSize,
@@ -254,9 +282,11 @@ export async function action({ request, params }: ActionFunctionArgs) {
       revision: existing?.revision ?? 1,
       designTargetId: designTargetId || null,
       designSpecificationRevision,
+      expectedDraftRevision:
+        staged?.draftRevision ?? (existing ? expectedDraftRevision : null),
     });
     await syncTemplateIndex(admin, workflows(), session.shop);
-    if (savingFromStarter)
+    if (savingFromStarter || !params.templateId || params.templateId === "new")
       return redirect(`/app/templates/${encodeURIComponent(saved.id)}`, 303);
     return { ok: true, error: "", deleted: false, id: saved.id };
   } catch (error) {
@@ -268,7 +298,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
             ? error.message
             : "Template could not be saved",
       },
-      { status: 400 },
+      { status: error instanceof WorkflowConflictError ? 409 : 400 },
     );
   }
 }
@@ -716,6 +746,11 @@ export default function TemplateEditor() {
             value={JSON.stringify(document)}
           />
           <input type="hidden" name="source" value={source} />
+          <input
+            type="hidden"
+            name="expectedDraftRevision"
+            value={template?.draftRevision ?? ""}
+          />
           {workspace === "liquid" ? null : (
             <input type="hidden" name="liquid" value={liquid} />
           )}
@@ -837,17 +872,6 @@ function mediaDimension(value: number): string {
   if (!Number.isFinite(value) || value < 5 || value > 1000)
     throw new Error("Document media dimensions must be between 5 and 1000 mm");
   return String(Math.round(value * 100) / 100);
-}
-
-function documentHasPageBreak(blocks: PrintPacket["body"]): boolean {
-  return blocks.some((block) => {
-    if (block.type === "page_break") return true;
-    if ("children" in block) return documentHasPageBreak(block.children);
-    return block.type === "conditional"
-      ? documentHasPageBreak(block.then) ||
-          documentHasPageBreak(block.else ?? [])
-      : false;
-  });
 }
 
 export function templateStateLabel(

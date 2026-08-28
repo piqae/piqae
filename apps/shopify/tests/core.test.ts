@@ -928,6 +928,17 @@ describe("Shopify document experience", () => {
         state: "published",
         source: starter.source,
         revision: 1,
+        draftRevision: 1,
+        published: {
+          revision: 1,
+          name: starter.name,
+          kind: starter.kind,
+          pageSize: starter.pageSize,
+          source: starter.source,
+          designTargetId: null,
+          designSpecificationRevision: null,
+          media: starter.specification.media,
+        },
         updatedAt: "2026-08-10T00:00:00.000Z",
       },
       "draft-id",
@@ -941,7 +952,12 @@ describe("Shopify document experience", () => {
     expect(parseTemplateEnvelope(draft.source).system).toBeUndefined();
     expect(() =>
       customizedSystemDraft(
-        { ...draft, updatedAt: "2026-08-10T00:00:00.000Z" },
+        {
+          ...draft,
+          draftRevision: 1,
+          published: null,
+          updatedAt: "2026-08-10T00:00:00.000Z",
+        },
         "again",
       ),
     ).toThrow("Only system documents");

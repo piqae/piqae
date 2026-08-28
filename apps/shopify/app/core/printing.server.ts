@@ -211,10 +211,10 @@ export class ShopifyPrintingService {
     if (systemTemplateKey) {
       const selected = (await this.workflow.listTemplates(shop)).find(
         (candidate) => {
-          if (candidate.state !== "published") return false;
+          if (!candidate.published) return false;
           try {
             return (
-              parseTemplateEnvelope(candidate.source).system?.key ===
+              parseTemplateEnvelope(candidate.published.source).system?.key ===
               systemTemplateKey
             );
           } catch {
@@ -224,8 +224,8 @@ export class ShopifyPrintingService {
       );
       if (!selected)
         throw new Error("The published receipt document is unavailable");
-      const revision = parseTemplateEnvelope(selected.source).published
-        ?.piqaeRevisionId;
+      const revision = parseTemplateEnvelope(selected.published!.source)
+        .published?.piqaeRevisionId;
       if (!revision)
         throw new Error(
           "The published receipt has no pinned Piqae revision; reconnect or publish it before printing",
@@ -235,9 +235,9 @@ export class ShopifyPrintingService {
     if (!templateId || templateId === ACCOUNT_DEFAULT_DOCUMENT_ID)
       return fallback;
     const selected = await this.workflow.getTemplate(shop, templateId);
-    if (!selected || selected.state !== "published")
+    if (!selected?.published)
       throw new Error("The selected document is not published");
-    const revision = parseTemplateEnvelope(selected.source).published
+    const revision = parseTemplateEnvelope(selected.published.source).published
       ?.piqaeRevisionId;
     if (!revision)
       throw new Error(

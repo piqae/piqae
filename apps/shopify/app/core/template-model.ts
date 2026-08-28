@@ -145,16 +145,36 @@ export function validatePrintPacket(document: PrintPacket): void {
       }
     }
   };
-  walk(
-    [
-      ...(document.header?.first ?? []),
-      ...(document.header?.default ?? []),
-      ...document.body,
-      ...(document.footer?.default ?? []),
-      ...(document.footer?.last ?? []),
-    ],
-    0,
-  );
+  const regions = documentRegions(document);
+  walk(regions, 0);
+  if (document.media.kind === "continuous" && blocksHavePageBreak(regions))
+    throw new Error(
+      `Page breaks are not supported on ${document.media.kind} media`,
+    );
+}
+
+export function documentHasPageBreak(document: PrintPacket): boolean {
+  return blocksHavePageBreak(documentRegions(document));
+}
+
+function documentRegions(document: PrintPacket): Block[] {
+  return [
+    ...(document.header?.first ?? []),
+    ...(document.header?.default ?? []),
+    ...document.body,
+    ...(document.footer?.default ?? []),
+    ...(document.footer?.last ?? []),
+  ];
+}
+
+function blocksHavePageBreak(blocks: Block[]): boolean {
+  return blocks.some((block) => {
+    if (block.type === "page_break") return true;
+    if ("children" in block && blocksHavePageBreak(block.children)) return true;
+    return block.type === "conditional"
+      ? blocksHavePageBreak(block.then) || blocksHavePageBreak(block.else ?? [])
+      : false;
+  });
 }
 export function removeSystemOwnership(envelope: TemplateEnvelope) {
   delete envelope.system;

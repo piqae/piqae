@@ -72,6 +72,19 @@ export function chooseDefault(items) {
   );
 }
 
+export function targetForDocument(document, targets) {
+  const allowed = targets.filter(
+    (target) =>
+      target.eligible &&
+      (!document?.compatibilityKnown ||
+        document.compatibleTargetIds.includes(target.id)),
+  );
+  return (
+    allowed.find(({ id }) => id === document?.designTargetId) ??
+    chooseDefault(allowed)
+  );
+}
+
 export function renderPolicySummary(policy) {
   if (policy === "cloud_only")
     return "Cloud rendering is required. The exact preview PDF is sent to the printer.";
@@ -204,18 +217,9 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   );
   useEffect(() => {
     if (!selectedDocument || !options?.targets) return;
-    const allowed = options.targets.filter(
-      (target) =>
-        target.eligible &&
-        (!selectedDocument.compatibilityKnown ||
-          selectedDocument.compatibleTargetIds.includes(target.id)),
+    setDestinationId(
+      targetForDocument(selectedDocument, options.targets)?.id ?? "",
     );
-    if (!allowed.some(({ id }) => id === destinationId))
-      setDestinationId(
-        allowed.find(({ id }) => id === selectedDocument.designTargetId)?.id ??
-          chooseDefault(allowed)?.id ??
-          "",
-      );
   }, [selectedDocument?.id, options]);
   useEffect(() => {
     if (!options?.linked || !selectedDocument || orderIds.length === 0) return;

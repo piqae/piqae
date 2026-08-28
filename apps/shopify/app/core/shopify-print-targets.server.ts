@@ -1,23 +1,5 @@
 import type { DesignSpecification, Stock } from "@piqae/sdk";
-import type {
-  MediaCompatibilityStatus,
-  ShopifyPrintTarget,
-} from "./shopify-print-targets";
-
-type MediaProjection = {
-  status?: unknown;
-  reasons?: unknown;
-  profile_dimensions_mm?: {
-    width_mm?: unknown;
-    height_mm?: unknown;
-  } | null;
-  loaded_media?: {
-    source?: unknown;
-    confidence?: unknown;
-    observed_at?: unknown;
-    fresh_until?: unknown;
-  } | null;
-};
+import type { ShopifyPrintTarget } from "./shopify-print-targets";
 
 export async function loadShopifyPrintTargets(client: {
   targets: {
@@ -48,16 +30,8 @@ export function mapDesignSpecification(
         ({ binding }) => binding.id === selected.binding.id,
       )
     : undefined;
-  const projection = (
-    selected as unknown as
-      | {
-          media_compatibility?: MediaProjection;
-        }
-      | undefined
-  )?.media_compatibility;
-  const status = isMediaStatus(projection?.status)
-    ? projection.status
-    : "not_reported";
+  const projection = selected?.media_compatibility;
+  const status = projection?.status ?? "not_reported";
   const loaded = projection?.loaded_media;
   return {
     id: specification.target.id,
@@ -75,13 +49,11 @@ export function mapDesignSpecification(
     stock: stockProjection(specification.stock),
     mediaCompatibility: {
       status,
-      reasons: Array.isArray(projection?.reasons)
-        ? projection.reasons.filter(
-            (reason): reason is string => typeof reason === "string",
-          )
-        : status === "ready"
+      reasons:
+        projection?.reasons ??
+        (status === "ready"
           ? []
-          : ["Loaded media has not been reported by this destination"],
+          : ["Loaded media has not been reported by this destination"]),
       profileDimensionsMm:
         numberOrNull(projection?.profile_dimensions_mm?.width_mm) !== null &&
         numberOrNull(projection?.profile_dimensions_mm?.height_mm) !== null
@@ -94,10 +66,10 @@ export function mapDesignSpecification(
               )!,
             }
           : null,
-      source: stringOrNull(loaded?.source),
-      confidence: stringOrNull(loaded?.confidence),
-      observedAt: stringOrNull(loaded?.observed_at),
-      freshUntil: stringOrNull(loaded?.fresh_until),
+      source: loaded?.source ?? null,
+      confidence: loaded?.confidence ?? null,
+      observedAt: loaded?.observed_at ?? null,
+      freshUntil: loaded?.fresh_until ?? null,
     },
   };
 }
@@ -119,16 +91,4 @@ function stockProjection(stock: Stock | null): ShopifyPrintTarget["stock"] {
 
 function numberOrNull(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-function stringOrNull(value: unknown) {
-  return typeof value === "string" ? value : null;
-}
-function isMediaStatus(value: unknown): value is MediaCompatibilityStatus {
-  return [
-    "ready",
-    "not_reported",
-    "stale",
-    "untrusted",
-    "incompatible",
-  ].includes(String(value));
 }

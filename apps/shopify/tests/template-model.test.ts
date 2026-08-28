@@ -3,6 +3,7 @@ import {
   parseTemplateEnvelope,
   serializeTemplateEnvelope,
   validatePrintPacket,
+  documentHasPageBreak,
 } from "../app/core/template-model";
 import { starterTemplates } from "../app/core/starter-templates";
 import starterSpecifications from "./fixtures/printpacket/starter-specifications.json";
@@ -58,6 +59,32 @@ describe("PrintPacket model", () => {
       children = next;
     }
     expect(() => validatePrintPacket(document)).toThrow("12 levels");
+  });
+
+  it("rejects page breaks recursively in every continuous-media region", () => {
+    const receipt = structuredClone(
+      starterTemplates.find(({ id }) => id === "receipt")!.specification,
+    );
+    receipt.header = { default: [{ type: "page_break" }] };
+    expect(documentHasPageBreak(receipt)).toBe(true);
+    expect(() => validatePrintPacket(receipt)).toThrow(
+      "not supported on continuous media",
+    );
+
+    const label = structuredClone(
+      starterTemplates.find(({ id }) => id === "product-label")!.specification,
+    );
+    label.footer = {
+      last: [
+        {
+          type: "conditional",
+          condition: { type: "path", path: ["order", "id"] },
+          then: [{ type: "page_break" }],
+        },
+      ],
+    };
+    expect(documentHasPageBreak(label)).toBe(true);
+    expect(() => validatePrintPacket(label)).not.toThrow();
   });
 
   it.each([0, 1, 50, 200])(

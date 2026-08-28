@@ -33,6 +33,7 @@ import {
   isLineItemsExpression,
   type ShopifyAuthoringScope,
 } from "../core/shopify-editor-scopes";
+import { documentHasPageBreak } from "../core/template-model";
 import type { ShopifyPrintTarget } from "../core/shopify-print-targets";
 
 type DesignStock = ShopifyPrintTarget["stock"];
@@ -161,7 +162,7 @@ export function PrintPacketEditor({
   const allAuthoringFields = [...AUTHORING_FIELDS, ...customFields];
   const canonicalBody = canonicalizeShopifyEditorBody(value.body);
   const continuousPageBreaks =
-    value.media.kind !== "paged" && containsPageBreak(value.body);
+    value.media.kind !== "paged" && documentHasPageBreak(value);
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const latest = useRef(value);
@@ -550,7 +551,7 @@ export function PrintPacketEditor({
             className={`piqae-page-sheet piqae-rendered-canvas piqae-media-${value.media.kind}`}
             style={canvasStyle(value)}
           >
-            <SafeAreaGuide stock={stock} />
+            <SafeAreaGuide value={value} stock={stock} />
             <DocumentCanvas
               blocks={canonicalBody}
               selectedPath={selection?.path}
@@ -603,7 +604,7 @@ export function PrintPacketPreview({
         className={`piqae-page-sheet piqae-rendered-canvas piqae-media-${value.media.kind}`}
         style={canvasStyle(value)}
       >
-        <SafeAreaGuide stock={stock} />
+        <SafeAreaGuide value={value} stock={stock} />
         <DocumentCanvas
           blocks={value.body}
           editable={false}
@@ -615,14 +616,11 @@ export function PrintPacketPreview({
   );
 }
 
-function canvasStyle(value: PrintPacket): CSSProperties {
+export function canvasGeometry(value: PrintPacket): {
+  widthMm: number;
+  heightMm: number | null;
+} {
   const media = value.media;
-  const margins = media.margins ?? {
-    top_mm: 0,
-    right_mm: 0,
-    bottom_mm: 0,
-    left_mm: 0,
-  };
   let width = 210;
   let height: number | null = 297;
   if (media.kind === "paged") {
@@ -633,7 +631,9 @@ function canvasStyle(value: PrintPacket): CSSProperties {
           ? [148, 210]
           : [215.9, 279.4];
     [width, height] =
-      media.orientation === "landscape" ? portrait.reverse() : portrait;
+      media.orientation === "landscape"
+        ? [portrait[1]!, portrait[0]!]
+        : [portrait[0]!, portrait[1]!];
   } else if (media.kind === "continuous") {
     width = media.width_mm;
     height = null;
@@ -641,23 +641,61 @@ function canvasStyle(value: PrintPacket): CSSProperties {
     width = media.width_mm;
     height = media.height_mm;
   }
+  return { widthMm: width, heightMm: height };
+}
+
+export function canvasStyle(value: PrintPacket): CSSProperties {
+  const media = value.media;
+  const margins = media.margins ?? {
+    top_mm: 0,
+    right_mm: 0,
+    bottom_mm: 0,
+    left_mm: 0,
+  };
+  const { widthMm, heightMm } = canvasGeometry(value);
+  const fixed = heightMm !== null;
+  const padding = fixed
+    ? `${(margins.top_mm / widthMm) * 100}% ${(margins.right_mm / widthMm) * 100}% ${(margins.bottom_mm / widthMm) * 100}% ${(margins.left_mm / widthMm) * 100}%`
+    : `${margins.top_mm}mm ${margins.right_mm}mm ${margins.bottom_mm}mm ${margins.left_mm}mm`;
   return {
-    "--piqae-media-width": `${width}mm`,
-    "--piqae-media-height": height === null ? "auto" : `${height}mm`,
-    "--piqae-media-min-height": `${height ?? 120}mm`,
-    padding: `${margins.top_mm}mm ${margins.right_mm}mm ${margins.bottom_mm}mm ${margins.left_mm}mm`,
+    "--piqae-media-width": `${widthMm}mm`,
+    "--piqae-media-height": "auto",
+    "--piqae-media-min-height": fixed ? "0" : "120mm",
+    aspectRatio: fixed ? `${widthMm} / ${heightMm}` : undefined,
+    padding,
   } as CSSProperties;
 }
 
-function SafeAreaGuide({ stock }: { stock: DesignStock }) {
+export function safeAreaStyle(
+  value: PrintPacket,
+  safe: NonNullable<NonNullable<DesignStock>["safeAreaMm"]>,
+): CSSProperties {
+  const { widthMm, heightMm } = canvasGeometry(value);
+  if (heightMm === null)
+    return {
+      inset: `${safe.top}mm ${safe.right}mm ${safe.bottom}mm ${safe.left}mm`,
+    };
+  return {
+    top: `${(safe.top / heightMm) * 100}%`,
+    right: `${(safe.right / widthMm) * 100}%`,
+    bottom: `${(safe.bottom / heightMm) * 100}%`,
+    left: `${(safe.left / widthMm) * 100}%`,
+  };
+}
+
+function SafeAreaGuide({
+  value,
+  stock,
+}: {
+  value: PrintPacket;
+  stock: DesignStock;
+}) {
   if (!stock?.safeAreaMm) return null;
   const safe = stock.safeAreaMm;
   return (
     <div
       className="piqae-safe-area-guide"
-      style={{
-        inset: `${safe.top}mm ${safe.right}mm ${safe.bottom}mm ${safe.left}mm`,
-      }}
+      style={safeAreaStyle(value, safe)}
       aria-hidden="true"
     />
   );
@@ -689,18 +727,6 @@ function MediaRuler({
       ) : null}
     </div>
   );
-}
-
-function containsPageBreak(blocks: Block[]): boolean {
-  return blocks.some((block) => {
-    if (block.type === "page_break") return true;
-    if ("children" in block) return containsPageBreak(block.children);
-    if (block.type === "conditional")
-      return (
-        containsPageBreak(block.then) || containsPageBreak(block.else ?? [])
-      );
-    return false;
-  });
 }
 
 function DocumentCanvas({

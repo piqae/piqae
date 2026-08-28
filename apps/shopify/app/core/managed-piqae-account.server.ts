@@ -110,6 +110,7 @@ export class ManagedPiqaeAccountService {
       await this.workflows.saveTemplate(shop, {
         ...local,
         source: serializeTemplateEnvelope(envelope),
+        expectedDraftRevision: local.draftRevision,
       });
       if (starter.id === "invoice") defaultRevisionId = revision.id;
     }

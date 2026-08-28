@@ -38,6 +38,10 @@ const migration5 = await readFile(
   path.join(root, "migrations/0005_template_targets_and_media.sql"),
   "utf8",
 );
+const migration6 = await readFile(
+  path.join(root, "migrations/0006_template_draft_published_pointers.sql"),
+  "utf8",
+);
 const suffix = randomBytes(8).toString("hex");
 const schemas = [
   `piqae_shopify_fresh_${suffix}`,
@@ -127,7 +131,7 @@ async function assertions(client) {
 
   const templateId = "11111111-1111-4111-8111-111111111111";
   await client.query(
-    "INSERT INTO shopify_workflow_templates(id,shop,name,kind,page_size,state,source) VALUES($1,$2,'Invoice','invoice','A4','published',$3)",
+    "INSERT INTO shopify_workflow_templates(id,shop,name,kind,page_size,draft_source,draft_revision) VALUES($1,$2,'Invoice','invoice','A4',$3,1)",
     [
       templateId,
       "alpha.myshopify.com",
@@ -150,18 +154,32 @@ async function assertions(client) {
   )
     throw new Error("template target and media association was not retained");
   await client.query(
-    "INSERT INTO shopify_workflow_template_revisions(template_id,shop,revision,name,kind,page_size,source,design_target_id,design_specification_revision) VALUES($1,$2,1,'Product label','label','100x50mm',$3,$4,$5)",
-    [templateId, "alpha.myshopify.com", "{}", "tgt_alpha", "spec_alpha"],
+    "INSERT INTO shopify_workflow_template_revisions(template_id,shop,revision,name,kind,page_size,source,design_target_id,design_specification_revision,media) VALUES($1,$2,1,'Product label','label','100x50mm',$3,$4,$5,$6)",
+    [
+      templateId,
+      "alpha.myshopify.com",
+      "{}",
+      "tgt_alpha",
+      "spec_alpha",
+      '{"kind":"label","width_mm":100,"height_mm":50}',
+    ],
+  );
+  await client.query(
+    "UPDATE shopify_workflow_templates SET published_revision=1 WHERE shop=$1 AND id=$2",
+    ["alpha.myshopify.com", templateId],
   );
   const revision = await client.query(
-    "SELECT design_target_id,design_specification_revision FROM shopify_workflow_template_revisions WHERE shop=$1 AND template_id=$2 AND revision=1",
+    "SELECT design_target_id,design_specification_revision,media FROM shopify_workflow_template_revisions WHERE shop=$1 AND template_id=$2 AND revision=1",
     ["alpha.myshopify.com", templateId],
   );
   if (
     revision.rows[0]?.design_target_id !== "tgt_alpha" ||
-    revision.rows[0]?.design_specification_revision !== "spec_alpha"
+    revision.rows[0]?.design_specification_revision !== "spec_alpha" ||
+    revision.rows[0]?.media?.kind !== "label"
   )
-    throw new Error("published template target association was not retained");
+    throw new Error(
+      "published template target/media snapshot was not retained",
+    );
   await rejects(
     client,
     "UPDATE shopify_workflow_templates SET design_target_id=$1,design_specification_revision=NULL WHERE shop=$2 AND id=$3",
@@ -174,6 +192,27 @@ async function assertions(client) {
   );
   if (crossRead.rowCount !== 0)
     throw new Error("cross-tenant template probe leaked data");
+  const firstCas = await client.query(
+    "UPDATE shopify_workflow_templates SET draft_revision=draft_revision+1,name='Draft label edit',design_target_id='tgt_draft',design_specification_revision='spec_draft' WHERE shop=$1 AND id=$2 AND draft_revision=1",
+    ["alpha.myshopify.com", templateId],
+  );
+  const staleCas = await client.query(
+    "UPDATE shopify_workflow_templates SET draft_revision=draft_revision+1 WHERE shop=$1 AND id=$2 AND draft_revision=1",
+    ["alpha.myshopify.com", templateId],
+  );
+  if (firstCas.rowCount !== 1 || staleCas.rowCount !== 0)
+    throw new Error("template draft compare-and-swap did not fail closed");
+  const immutable = await client.query(
+    "SELECT t.name AS draft_name,r.name AS published_name,r.design_target_id AS published_target,r.media AS published_media FROM shopify_workflow_templates t JOIN shopify_workflow_template_revisions r ON r.template_id=t.id AND r.shop=t.shop AND r.revision=t.published_revision WHERE t.shop=$1 AND t.id=$2",
+    ["alpha.myshopify.com", templateId],
+  );
+  if (
+    immutable.rows[0]?.draft_name !== "Draft label edit" ||
+    immutable.rows[0]?.published_name !== "Product label" ||
+    immutable.rows[0]?.published_target !== "tgt_alpha" ||
+    immutable.rows[0]?.published_media?.width_mm !== 100
+  )
+    throw new Error("draft edit mutated the immutable publication snapshot");
   await rejects(
     client,
     "INSERT INTO shopify_automation_rules(id,shop,name,trigger_event,delivery,template_id,destination) VALUES($1,$2,'Cross tenant','order_paid','printer',$3,'printer_1')",
@@ -206,6 +245,8 @@ try {
       }
       await client.query(migration5);
       await client.query(migration5);
+      await client.query(migration6);
+      await client.query(migration6);
       if (index === 1) {
         const retained = await client.query(
           "SELECT state FROM shopify_installations WHERE shop=$1",
@@ -214,15 +255,20 @@ try {
         if (retained.rows[0]?.state !== "installed")
           throw new Error("N-1 installation was not retained");
         const columns = await client.query(
-          "SELECT design_target_id,design_specification_revision FROM shopify_workflow_templates WHERE shop=$1 AND id=$2",
+          "SELECT design_target_id,design_specification_revision,draft_source,draft_revision,published_revision FROM shopify_workflow_templates WHERE shop=$1 AND id=$2",
           ["existing.myshopify.com", "33333333-3333-4333-8333-333333333333"],
         );
         if (
           columns.rowCount !== 1 ||
           columns.rows[0]?.design_target_id !== null ||
-          columns.rows[0]?.design_specification_revision !== null
+          columns.rows[0]?.design_specification_revision !== null ||
+          columns.rows[0]?.draft_source !== "{}" ||
+          columns.rows[0]?.draft_revision !== 1 ||
+          columns.rows[0]?.published_revision !== null
         )
-          throw new Error("N-1 template association was not retained safely");
+          throw new Error(
+            "N-1 draft/published pointers were not retained safely",
+          );
       }
       await assertions(client);
     } finally {

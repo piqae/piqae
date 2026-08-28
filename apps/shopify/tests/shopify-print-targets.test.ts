@@ -62,11 +62,11 @@ const base = {
     },
   ],
   specification_revision: "spec_labels_2",
-} as never;
+};
 
 describe("Shopify print target projection", () => {
   it("keeps profile, stock, and loaded-media truth on the target", () => {
-    const target = mapDesignSpecification(base);
+    const target = mapDesignSpecification(base as never);
     expect(target).toMatchObject({
       id: "tgt_labels",
       ready: true,
@@ -95,10 +95,22 @@ describe("Shopify print target projection", () => {
     ).toBe(false);
   });
 
-  it("treats missing loaded-media evidence as not reported and not ready", () => {
-    const specification = structuredClone(base as object) as any;
-    delete specification.destinations[0].media_compatibility;
-    const target = mapDesignSpecification(specification);
+  it("treats not-reported loaded-media evidence as not ready", () => {
+    const specification = {
+      ...structuredClone(base),
+      destinations: [
+        {
+          ...structuredClone(base.destinations[0]),
+          media_compatibility: {
+            status: "not_reported",
+            reasons: ["stock_not_loaded"],
+            profile_dimensions_mm: { width_mm: 100, height_mm: 50 },
+            loaded_media: null,
+          },
+        },
+      ],
+    };
+    const target = mapDesignSpecification(specification as never);
     expect(target.ready).toBe(false);
     expect(target.mediaCompatibility).toMatchObject({
       status: "not_reported",
