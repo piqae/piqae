@@ -140,11 +140,38 @@ class WindowsSdkReleaseTests(unittest.TestCase):
         ):
             MODULE.safe_entries(archive)
 
-        non_portable = self.root / "non-portable.zip"
-        with zipfile.ZipFile(non_portable, "w") as archive:
-            archive.writestr("folder\\file", b"fixture")
-        with zipfile.ZipFile(non_portable) as archive, self.assertRaisesRegex(
-            MODULE.ReleaseError, "path separator"
+        unsafe_paths = {
+            "backslash": ("folder\\file", "path separator"),
+            "parent traversal": ("folder/../file", "unsafe"),
+            "absolute POSIX path": ("/folder/file", "unsafe"),
+            "Windows drive path": ("C:/folder/file", "unsafe"),
+            "normalized dot path": ("folder/./file", "unsafe"),
+            "embedded null": ("folder/file\0hidden", "unsafe"),
+            "Windows reserved name": ("folder/AUX.txt", "unsafe"),
+            "Windows trailing dot": ("folder/file.", "unsafe"),
+            "Windows alternate stream": ("folder/file:stream", "unsafe"),
+        }
+        for label, (member_name, message) in unsafe_paths.items():
+            with self.subTest(label=label):
+                non_portable = self.root / f"non-portable-{label.replace(' ', '-')}.zip"
+                with zipfile.ZipFile(non_portable, "w") as archive:
+                    # Assign filename after construction so zipfile cannot
+                    # normalize the malicious central-directory fixture using
+                    # the host operating system's separator rules.
+                    member = zipfile.ZipInfo("portable-placeholder")
+                    member.filename = member_name
+                    archive.writestr(member, b"fixture")
+                with zipfile.ZipFile(non_portable) as archive, self.assertRaisesRegex(
+                    MODULE.ReleaseError, message
+                ):
+                    MODULE.safe_entries(archive)
+
+        case_collision = self.root / "case-collision.zip"
+        with zipfile.ZipFile(case_collision, "w") as archive:
+            archive.writestr("LICENSE", b"first")
+            archive.writestr("license", b"second")
+        with zipfile.ZipFile(case_collision) as archive, self.assertRaisesRegex(
+            MODULE.ReleaseError, "non-portable duplicate"
         ):
             MODULE.safe_entries(archive)
 

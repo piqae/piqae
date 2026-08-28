@@ -95,7 +95,11 @@ let package = Package(
             name: "CPiqaeNodeABI",
             dependencies: ["PiqaeNodeNative"],
             publicHeadersPath: "include",
-            cSettings: [.define("PIQAE_NODE_HAS_NATIVE_ARTIFACT")]
+            cSettings: [.define("PIQAE_NODE_HAS_NATIVE_ARTIFACT")],
+            linkerSettings: [
+                .linkedFramework("CoreFoundation"),
+                .linkedLibrary("bsm", .when(platforms: [.macOS]))
+            ]
         ),
         .target(name: "PiqaeNodeKit", dependencies: ["CPiqaeNodeABI"]),
         .target(name: "PiqaeNodeKitAirPrint", dependencies: ["PiqaeNodeKit"]),
@@ -483,6 +487,12 @@ def validate_stage(repository_root: Path, version: str, output: Path) -> dict[st
             raise ReleaseError("release Package.swift does not reference the staged artifact URL")
         if metadata["swiftpm_checksum"] not in package_swift:
             raise ReleaseError("release Package.swift does not reference the staged SwiftPM checksum")
+        required_linker_settings = {
+            '.linkedFramework("CoreFoundation")',
+            '.linkedLibrary("bsm", .when(platforms: [.macOS]))',
+        }
+        if not all(setting in package_swift for setting in required_linker_settings):
+            raise ReleaseError("release Package.swift is missing required native linker settings")
         shim = package_zip.read(f"{root}/Sources/CPiqaeNodeABI/include/shim.h").decode("utf-8")
         if '#include "piqae_node.h"' not in shim or "../../../../native" in shim:
             raise ReleaseError("release package C shim is not independent of the repository layout")

@@ -197,6 +197,29 @@ class AppleNodeSdkStageTests(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.ReleaseError, "artifact URL"):
             self.validate()
 
+    def test_rejects_package_manifest_without_native_linker_settings(self) -> None:
+        package = self.stage / self.source_name
+        rewritten = self.root / "missing-linker-settings.zip"
+        package_root = f"PiqaeNodeKit-{self.version}"
+        manifest_name = f"{package_root}/Package.swift"
+        with zipfile.ZipFile(package) as source, zipfile.ZipFile(rewritten, "w") as output:
+            for name in source.namelist():
+                contents = source.read(name)
+                if name == manifest_name:
+                    contents = contents.replace(
+                        b'.linkedLibrary("bsm", .when(platforms: [.macOS]))', b""
+                    )
+                output.writestr(name, contents)
+        rewritten.replace(package)
+        source_hash = MODULE.sha256(package)
+        self.manifest["source_package_sha256"] = source_hash
+        self.write_manifest()
+        (self.stage / f"{self.source_name}.sha256").write_text(
+            f"{source_hash}  {self.source_name}\n", encoding="ascii"
+        )
+        with self.assertRaisesRegex(MODULE.ReleaseError, "native linker settings"):
+            self.validate()
+
     def test_rejects_tampered_third_party_licence_report(self) -> None:
         archive_path = self.stage / self.native_name
         rewritten = self.root / "tampered.zip"
