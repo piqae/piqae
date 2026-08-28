@@ -37,6 +37,10 @@ struct CompatibilityError {
 }
 
 impl AppError {
+    pub(crate) fn is_not_found(&self) -> bool {
+        self.status == StatusCode::NOT_FOUND
+    }
+
     pub fn invalid(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,

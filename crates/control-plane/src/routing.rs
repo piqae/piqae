@@ -530,15 +530,6 @@ async fn compute_target_readiness(
         .repository
         .get_target(tenant.workspace_id, tenant.environment_id, target_id)
         .await?;
-    let target_stock = match target.stock_id.as_deref() {
-        Some(stock_id) => Some(
-            state
-                .repository
-                .get_stock(tenant.workspace_id, tenant.environment_id, stock_id)
-                .await?,
-        ),
-        None => None,
-    };
     let bindings = state
         .repository
         .list_target_bindings(tenant.workspace_id, tenant.environment_id, target_id)
@@ -552,12 +543,6 @@ async fn compute_target_readiness(
         let mut reasons = Vec::new();
         let status = if !target.enabled || !binding.enabled {
             "disabled"
-        } else if target_stock.as_ref().is_some_and(|stock| stock.archived) {
-            reasons.push("target_stock_is_archived".into());
-            "dependency_missing"
-        } else if target_stock.is_none() {
-            reasons.push("target_stock_not_configured".into());
-            "dependency_missing"
         } else if !agents
             .iter()
             .any(|agent| agent.id == binding.agent_id && agent_is_connected(agent))
@@ -573,28 +558,7 @@ async fn compute_target_readiness(
                 )
                 .await
             {
-                Ok(printer) => {
-                    let base = binding_printer_readiness(&target, &binding, &printer, &mut reasons);
-                    if base == "ready" {
-                        let profile = printer.profiles.iter().find(|profile| {
-                            (profile.profile_id.as_str(), profile.revision)
-                                == (binding.profile_id.as_str(), binding.profile_revision)
-                        });
-                        let media = evaluate_binding_media(
-                            state,
-                            tenant,
-                            target_stock.as_ref(),
-                            &printer,
-                            profile,
-                            Utc::now(),
-                        )
-                        .await?;
-                        reasons.extend(media.reasons.iter().cloned());
-                        media.readiness_status()
-                    } else {
-                        base
-                    }
-                }
+                Ok(printer) => binding_printer_readiness(&binding, &printer, &mut reasons),
                 Err(RepositoryError::NotFound) => "destination_missing",
                 Err(error) => return Err(error.into()),
             }
@@ -674,16 +638,21 @@ pub(crate) async fn current_design_specification(
         .list_target_bindings(tenant.workspace_id, tenant.environment_id, target_id)
         .await?;
     let mut destinations = Vec::with_capacity(bindings.len());
-    for binding in bindings {
-        let printer = state
+    for binding in &bindings {
+        let printer = match state
             .repository
             .get_printer(
                 tenant.workspace_id,
                 tenant.environment_id,
                 binding.printer_id,
             )
-            .await?;
-        let profile = printer
+            .await
+        {
+            Ok(printer) => printer,
+            Err(RepositoryError::NotFound) => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let Some(profile) = printer
             .profiles
             .iter()
             .find(|profile| {
@@ -691,7 +660,9 @@ pub(crate) async fn current_design_specification(
                     == (binding.profile_id.as_str(), binding.profile_revision)
             })
             .cloned()
-            .ok_or(RepositoryError::NotFound)?;
+        else {
+            continue;
+        };
         let media_compatibility = evaluate_binding_media(
             state,
             tenant,
@@ -699,17 +670,22 @@ pub(crate) async fn current_design_specification(
             &printer,
             Some(&profile),
             Utc::now(),
+            None,
         )
         .await?;
         destinations.push(DesignSpecificationDestination {
-            binding,
+            binding: binding.clone(),
             printer,
             profile,
             media_compatibility,
         });
     }
-    let canonical = serde_json::to_vec(&(&target, &stock, &readiness, &destinations))
-        .map_err(|_| AppError::service_unavailable("design_specification_serialization_failed"))?;
+    let canonical = serde_json::to_vec(&design_constraint_projection(
+        &target,
+        stock.as_ref(),
+        &bindings,
+    ))
+    .map_err(|_| AppError::service_unavailable("design_specification_serialization_failed"))?;
     let revision = format!("spec_{:x}", Sha256::digest(canonical));
     Ok(DesignSpecificationResponse {
         target,
@@ -717,6 +693,44 @@ pub(crate) async fn current_design_specification(
         readiness,
         destinations,
         specification_revision: revision,
+    })
+}
+
+fn design_constraint_projection(
+    target: &StoredTarget,
+    stock: Option<&StoredStock>,
+    bindings: &[StoredTargetBinding],
+) -> serde_json::Value {
+    let mut binding_constraints = bindings
+        .iter()
+        .map(|binding| {
+            serde_json::json!({
+                "id": binding.id,
+                "target_id": binding.target_id,
+                "printer_id": binding.printer_id,
+                "agent_id": binding.agent_id,
+                "profile_id": binding.profile_id,
+                "profile_revision": binding.profile_revision,
+                "role": binding.role,
+                "enabled": binding.enabled,
+            })
+        })
+        .collect::<Vec<_>>();
+    binding_constraints.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
+    serde_json::json!({
+        "target": {
+            "id": target.id,
+            "stock_id": target.stock_id,
+            "enabled": target.enabled,
+            "routing_policy": target.routing_policy,
+        },
+        "stock": stock.map(|stock| serde_json::json!({
+            "id": stock.id,
+            "revision": stock.revision,
+            "attributes": stock.attributes,
+            "archived": stock.archived,
+        })),
+        "bindings": binding_constraints,
     })
 }
 
@@ -769,6 +783,7 @@ pub(crate) async fn validate_printpacket_media_fence(
     binding_id: &str,
     expected_specification_revision: &str,
     document_media: &printpacket_renderer::Media,
+    requested_source: Option<&str>,
 ) -> Result<PrintPacketMediaFence, AppError> {
     let specification = current_design_specification(state, tenant, target_id).await?;
     if specification.specification_revision != expected_specification_revision {
@@ -793,33 +808,39 @@ pub(crate) async fn validate_printpacket_media_fence(
                 "The selected target binding is no longer available.",
             )
         })?;
-    if destination.media_compatibility.status != "ready" {
-        return Err(AppError::conflict(
-            "target_media_not_ready",
-            "The selected binding does not have fresh, trusted loaded-stock evidence.",
-        ));
-    }
     let stock = specification.stock.as_ref().ok_or_else(|| {
         AppError::conflict(
             "target_stock_not_configured",
             "PrintPacket target printing requires an active stock revision.",
         )
     })?;
+    let media_compatibility = evaluate_binding_media(
+        state,
+        tenant,
+        Some(stock),
+        &destination.printer,
+        Some(&destination.profile),
+        Utc::now(),
+        requested_source,
+    )
+    .await?;
+    if media_compatibility.status != "ready" {
+        return Err(AppError::conflict(
+            "target_media_not_ready",
+            "The selected binding does not have fresh, trusted loaded-stock evidence for the effective profile source.",
+        ));
+    }
     if !document_media_compatible(
         document_media,
         stock,
-        destination
-            .media_compatibility
-            .profile_dimensions_mm
-            .as_ref(),
+        media_compatibility.profile_dimensions_mm.as_ref(),
     ) {
         return Err(AppError::conflict(
             "document_media_incompatible",
             "The PrintPacket media does not match the target stock and immutable profile dimensions.",
         ));
     }
-    let loaded = destination
-        .media_compatibility
+    let loaded = media_compatibility
         .loaded_media
         .as_ref()
         .ok_or_else(|| AppError::conflict("target_media_not_ready", "Loaded stock is unknown."))?;
@@ -833,7 +854,7 @@ pub(crate) async fn validate_printpacket_media_fence(
     })
 }
 
-fn document_media_compatible(
+pub(crate) fn document_media_compatible(
     media: &printpacket_renderer::Media,
     stock: &StoredStock,
     profile: Option<&MediaDimensions>,
@@ -854,7 +875,6 @@ fn document_media_compatible(
         .attributes
         .get("kind")
         .and_then(serde_json::Value::as_str);
-    let close = |left: f64, right: f64| (left - right).abs() <= MEDIA_DIMENSION_TOLERANCE_MM;
     match media {
         printpacket_renderer::Media::Paged {
             size, orientation, ..
@@ -867,17 +887,29 @@ fn document_media_compatible(
             if matches!(orientation, printpacket_renderer::Orientation::Landscape) {
                 std::mem::swap(&mut width, &mut height);
             }
+            let orientation_name =
+                if matches!(orientation, printpacket_renderer::Orientation::Landscape) {
+                    "landscape"
+                } else {
+                    "portrait"
+                };
             kind == Some("sheet")
-                && stock_width.is_some_and(|value| close(value, width))
-                && stock_height.is_some_and(|value| close(value, height))
-                && close(profile.width_mm, width)
-                && close(profile.height_mm, height)
+                && stock_height.is_some_and(|stock_height| {
+                    dimensions_match_unordered(stock_width, Some(stock_height), width, height)
+                })
+                && dimensions_match_unordered(
+                    Some(profile.width_mm),
+                    Some(profile.height_mm),
+                    width,
+                    height,
+                )
+                && stock_orientation_allows(stock, orientation_name)
         }
         printpacket_renderer::Media::Continuous { width_mm, .. } => {
             let width = f64::from(*width_mm);
             matches!(kind, Some("roll" | "continuous" | "receipt"))
-                && stock_width.is_some_and(|value| close(value, width))
-                && close(profile.width_mm, width)
+                && stock_width.is_some_and(|value| dimension_close(value, width))
+                && dimension_close(profile.width_mm, width)
         }
         printpacket_renderer::Media::Label {
             width_mm,
@@ -886,13 +918,67 @@ fn document_media_compatible(
         } => {
             let width = f64::from(*width_mm);
             let height = f64::from(*height_mm);
-            matches!(kind, Some("label" | "roll_label"))
-                && stock_width.is_some_and(|value| close(value, width))
-                && stock_height.is_some_and(|value| close(value, height))
-                && close(profile.width_mm, width)
-                && close(profile.height_mm, height)
+            let ordered = dimensions_match_ordered(stock_width, stock_height, width, height)
+                && dimensions_match_ordered(
+                    Some(profile.width_mm),
+                    Some(profile.height_mm),
+                    width,
+                    height,
+                );
+            let rotated = stock_label_rotatable(stock)
+                && dimensions_match_unordered(stock_width, stock_height, width, height)
+                && dimensions_match_unordered(
+                    Some(profile.width_mm),
+                    Some(profile.height_mm),
+                    width,
+                    height,
+                );
+            matches!(kind, Some("label" | "roll_label")) && (ordered || rotated)
         }
     }
+}
+
+fn dimension_close(left: f64, right: f64) -> bool {
+    (left - right).abs() <= MEDIA_DIMENSION_TOLERANCE_MM
+}
+
+fn dimensions_match_ordered(
+    left_width: Option<f64>,
+    left_height: Option<f64>,
+    right_width: f64,
+    right_height: f64,
+) -> bool {
+    left_width.is_some_and(|width| dimension_close(width, right_width))
+        && left_height.is_some_and(|height| dimension_close(height, right_height))
+}
+
+fn dimensions_match_unordered(
+    left_width: Option<f64>,
+    left_height: Option<f64>,
+    right_width: f64,
+    right_height: f64,
+) -> bool {
+    dimensions_match_ordered(left_width, left_height, right_width, right_height)
+        || dimensions_match_ordered(left_width, left_height, right_height, right_width)
+}
+
+fn stock_orientation_allows(stock: &StoredStock, document_orientation: &str) -> bool {
+    match stock
+        .attributes
+        .get("orientation")
+        .and_then(serde_json::Value::as_str)
+    {
+        None | Some("any") => true,
+        Some(orientation) => orientation == document_orientation,
+    }
+}
+
+fn stock_label_rotatable(stock: &StoredStock) -> bool {
+    stock
+        .attributes
+        .get("rotatable")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 pub(crate) async fn printpacket_execution_failure(
@@ -913,7 +999,16 @@ pub(crate) async fn printpacket_execution_failure(
             "The pinned PrintPacket media is invalid; publish and submit a valid template revision.",
         )));
     };
-    let specification = current_design_specification(state, tenant, pins.target_id).await?;
+    let specification = match current_design_specification(state, tenant, pins.target_id).await {
+        Ok(specification) => specification,
+        Err(error) if error.is_not_found() => {
+            return Ok(Some((
+                piqae_domain::JobFailureReason::TargetConfigurationChanged,
+                "The pinned target, stock, printer, or profile disappeared before native acceptance.",
+            )));
+        }
+        Err(error) => return Err(error),
+    };
     let Some(stock) = specification.stock.as_ref() else {
         return Ok(Some((
             piqae_domain::JobFailureReason::TargetConfigurationChanged,
@@ -949,7 +1044,17 @@ pub(crate) async fn printpacket_execution_failure(
             "The pinned stock revision changed before native acceptance; preflight and submit a new attempt.",
         )));
     }
-    if destination.media_compatibility.status != "ready" {
+    let media_compatibility = evaluate_binding_media(
+        state,
+        tenant,
+        Some(stock),
+        &destination.printer,
+        Some(&destination.profile),
+        Utc::now(),
+        job.options.bin.as_deref(),
+    )
+    .await?;
+    if media_compatibility.status != "ready" {
         return Ok(Some((
             piqae_domain::JobFailureReason::StockNotLoaded,
             "Fresh trusted evidence no longer confirms the target stock is loaded in the pinned source.",
@@ -958,10 +1063,7 @@ pub(crate) async fn printpacket_execution_failure(
     if !document_media_compatible(
         &media,
         stock,
-        destination
-            .media_compatibility
-            .profile_dimensions_mm
-            .as_ref(),
+        media_compatibility.profile_dimensions_mm.as_ref(),
     ) {
         return Ok(Some((
             piqae_domain::JobFailureReason::DocumentMediaIncompatible,
@@ -1033,18 +1135,6 @@ fn printpacket_execution_pins(
     }))
 }
 
-impl MediaCompatibility {
-    pub(crate) fn readiness_status(&self) -> &'static str {
-        match self.status {
-            "ready" => "ready",
-            "not_reported" => "stock_not_loaded",
-            "stale" => "loaded_media_stale",
-            "untrusted" => "loaded_media_untrusted",
-            _ => "media_incompatible",
-        }
-    }
-}
-
 pub(crate) async fn evaluate_binding_media(
     state: &AppState,
     tenant: crate::authentication::TenantContext,
@@ -1052,6 +1142,7 @@ pub(crate) async fn evaluate_binding_media(
     printer: &piqae_storage_postgres::StoredPrinter,
     profile: Option<&PrinterProfileSnapshot>,
     now: DateTime<Utc>,
+    requested_source: Option<&str>,
 ) -> Result<MediaCompatibility, AppError> {
     let profile_dimensions_mm = profile.and_then(profile_dimensions);
     let mut result = MediaCompatibility {
@@ -1089,7 +1180,13 @@ pub(crate) async fn evaluate_binding_media(
         .repository
         .list_loaded_media(tenant.workspace_id, tenant.environment_id, printer.id)
         .await?;
-    let expected_source = profile_media_source(profile);
+    let expected_source = match effective_profile_media_source(profile, requested_source) {
+        Ok(source) => source,
+        Err(reason) => {
+            result.reasons.push(reason.into());
+            return Ok(result);
+        }
+    };
     let selected = match expected_source.as_deref() {
         Some(source) => observations
             .iter()
@@ -1152,6 +1249,27 @@ fn profile_media_source(profile: &PrinterProfileSnapshot) -> Option<String> {
         .map(str::to_owned)
 }
 
+pub(crate) fn effective_profile_media_source(
+    profile: &PrinterProfileSnapshot,
+    requested_source: Option<&str>,
+) -> Result<Option<String>, &'static str> {
+    let configured = profile_media_source(profile);
+    let Some(requested) = requested_source else {
+        return Ok(configured);
+    };
+    if configured.as_deref() == Some(requested) {
+        return Ok(configured);
+    }
+    if profile
+        .safe_overrides
+        .iter()
+        .any(|override_name| override_name == "bin")
+    {
+        return Ok(Some(requested.to_owned()));
+    }
+    Err("media_source_override_not_allowed")
+}
+
 pub(crate) fn profile_dimensions(profile: &PrinterProfileSnapshot) -> Option<MediaDimensions> {
     let dimensions = profile.summary.as_ref()?.get("dimensions_mm")?.as_array()?;
     let width_mm = dimensions.first()?.as_f64()?;
@@ -1178,9 +1296,6 @@ pub(crate) fn stock_profile_dimensions_compatible(
     else {
         return false;
     };
-    if (width - profile.width_mm).abs() > MEDIA_DIMENSION_TOLERANCE_MM {
-        return false;
-    }
     let height = stock
         .attributes
         .get("height_mm")
@@ -1191,13 +1306,15 @@ pub(crate) fn stock_profile_dimensions_compatible(
         .get("kind")
         .and_then(serde_json::Value::as_str)
     {
-        Some("roll" | "continuous" | "receipt") => height.is_none_or(|height| {
-            (height - profile.height_mm).abs() <= MEDIA_DIMENSION_TOLERANCE_MM
-        }),
-        Some("sheet" | "label" | "roll_label" | "card" | "envelope") => {
-            height.is_some_and(|height| {
-                (height - profile.height_mm).abs() <= MEDIA_DIMENSION_TOLERANCE_MM
-            })
+        Some("roll" | "continuous" | "receipt") => dimension_close(width, profile.width_mm),
+        Some("sheet" | "card" | "envelope") => {
+            dimensions_match_unordered(Some(width), height, profile.width_mm, profile.height_mm)
+        }
+        Some("label" | "roll_label") if stock_label_rotatable(stock) => {
+            dimensions_match_unordered(Some(width), height, profile.width_mm, profile.height_mm)
+        }
+        Some("label" | "roll_label") => {
+            dimensions_match_ordered(Some(width), height, profile.width_mm, profile.height_mm)
         }
         _ => false,
     }
@@ -1229,7 +1346,6 @@ fn agent_is_connected_at(agent: &StoredAgent, now: DateTime<Utc>) -> bool {
 }
 
 fn binding_printer_readiness(
-    target: &StoredTarget,
     binding: &StoredTargetBinding,
     printer: &piqae_storage_postgres::StoredPrinter,
     reasons: &mut Vec<String>,
@@ -1247,10 +1363,6 @@ fn binding_printer_readiness(
     };
     if !profile.published {
         return "profile_stale";
-    }
-    if target.stock_id.is_some() && target.stock_id != profile.stock_id {
-        reasons.push("profile_stock_does_not_match_target".into());
-        return "dependency_missing";
     }
     match profile.status.as_deref() {
         Some("ready") | None => printer_readiness(printer.state),
@@ -1412,6 +1524,78 @@ mod tests {
         assert!(document_media_compatible(
             &receipt,
             &stock("receipt", 80.0, None),
+            Some(&profile),
+        ));
+    }
+
+    #[test]
+    fn paged_sheet_geometry_is_physical_and_explicit_orientation_is_enforced() {
+        for (size, width_mm, height_mm) in [
+            (printpacket_renderer::PageSize::A4, 210.0, 297.0),
+            (printpacket_renderer::PageSize::A5, 148.0, 210.0),
+            (printpacket_renderer::PageSize::Letter, 215.9, 279.4),
+        ] {
+            let profile = MediaDimensions {
+                width_mm,
+                height_mm,
+            };
+            let landscape = printpacket_renderer::Media::Paged {
+                size,
+                orientation: printpacket_renderer::Orientation::Landscape,
+                margins: printpacket_renderer::Edges {
+                    top_mm: 0.0,
+                    right_mm: 0.0,
+                    bottom_mm: 0.0,
+                    left_mm: 0.0,
+                },
+            };
+            let mut physical_stock = stock("sheet", width_mm, Some(height_mm));
+            assert!(document_media_compatible(
+                &landscape,
+                &physical_stock,
+                Some(&profile),
+            ));
+            physical_stock.attributes["orientation"] = serde_json::json!("portrait");
+            assert!(!document_media_compatible(
+                &landscape,
+                &physical_stock,
+                Some(&profile),
+            ));
+            physical_stock.attributes["orientation"] = serde_json::json!("landscape");
+            assert!(document_media_compatible(
+                &landscape,
+                &physical_stock,
+                Some(&profile),
+            ));
+        }
+    }
+
+    #[test]
+    fn label_rotation_requires_an_explicit_stock_declaration() {
+        let profile = MediaDimensions {
+            width_mm: 100.0,
+            height_mm: 50.0,
+        };
+        let rotated_label = printpacket_renderer::Media::Label {
+            width_mm: 50.0,
+            height_mm: 100.0,
+            margins: printpacket_renderer::Edges {
+                top_mm: 0.0,
+                right_mm: 0.0,
+                bottom_mm: 0.0,
+                left_mm: 0.0,
+            },
+        };
+        let mut fixed = stock("label", 100.0, Some(50.0));
+        assert!(!document_media_compatible(
+            &rotated_label,
+            &fixed,
+            Some(&profile),
+        ));
+        fixed.attributes["rotatable"] = serde_json::json!(true);
+        assert!(document_media_compatible(
+            &rotated_label,
+            &fixed,
             Some(&profile),
         ));
     }

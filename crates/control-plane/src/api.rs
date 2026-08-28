@@ -2095,6 +2095,7 @@ async fn validate_printpacket_target_media(
         &binding.id,
         expected_revision,
         &media,
+        request.options.bin.as_deref(),
     )
     .await?;
     destination.metadata.insert(
@@ -2171,7 +2172,29 @@ async fn resolve_job_destination(
                 binding: None,
             })
         }
-        (None, Some(target_id)) => resolve_target_destination(state, tenant, target_id, true).await,
+        (None, Some(target_id)) => {
+            let printpacket_media = request
+                .metadata
+                .get("piqae.document.media")
+                .map(|encoded| {
+                    serde_json::from_str::<printpacket_renderer::Media>(encoded).map_err(|_| {
+                        AppError::invalid(
+                            "invalid_document_media",
+                            "Stored PrintPacket media is invalid.",
+                        )
+                    })
+                })
+                .transpose()?;
+            resolve_target_destination(
+                state,
+                tenant,
+                target_id,
+                true,
+                printpacket_media.as_ref(),
+                request.options.bin.as_deref(),
+            )
+            .await
+        }
         _ => Err(AppError::invalid(
             "invalid_destination",
             "Provide exactly one printer_id or target_id.",
@@ -2296,6 +2319,8 @@ async fn resolve_target_destination(
     tenant: TenantContext,
     target_id: &str,
     allow_offline: bool,
+    printpacket_media: Option<&printpacket_renderer::Media>,
+    requested_source: Option<&str>,
 ) -> Result<ResolvedJobDestination, AppError> {
     let target = state
         .repository
@@ -2307,6 +2332,15 @@ async fn resolve_target_destination(
             "The target is disabled or has no ready binding.",
         ));
     }
+    let printpacket_stock = match (printpacket_media, target.stock_id.as_deref()) {
+        (Some(_), Some(stock_id)) => Some(
+            state
+                .repository
+                .get_stock(tenant.workspace_id, tenant.environment_id, stock_id)
+                .await?,
+        ),
+        _ => None,
+    };
     let agents = state
         .repository
         .list_agents(tenant.workspace_id, tenant.environment_id)
@@ -2350,13 +2384,33 @@ async fn resolve_target_destination(
                 == (binding.profile_id.as_str(), binding.profile_revision)
                 && profile.published
                 && matches!(profile.status.as_deref(), None | Some("ready"))
-                && target
-                    .stock_id
-                    .as_ref()
-                    .is_none_or(|stock_id| profile.stock_id.as_ref() == Some(stock_id))
         }) else {
             continue;
         };
+        if let Some(document_media) = printpacket_media {
+            let Some(stock) = printpacket_stock.as_ref() else {
+                continue;
+            };
+            let compatibility = crate::routing::evaluate_binding_media(
+                state,
+                tenant,
+                Some(stock),
+                &printer,
+                Some(profile),
+                Utc::now(),
+                requested_source,
+            )
+            .await?;
+            if compatibility.status != "ready"
+                || !crate::routing::document_media_compatible(
+                    document_media,
+                    stock,
+                    compatibility.profile_dimensions_mm.as_ref(),
+                )
+            {
+                continue;
+            }
+        }
         let mut metadata = BTreeMap::from([
             ("piqae.target_id".into(), target.id.clone()),
             ("piqae.binding_id".into(), binding.id.clone()),

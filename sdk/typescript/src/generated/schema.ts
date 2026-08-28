@@ -1654,7 +1654,10 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Resolve target readiness from synchronized node facts */
+        /**
+         * Resolve target readiness from synchronized node facts
+         * @description Generic route readiness only. Stock and loaded-media safety are reported separately by each design-specification destination so stockless PDF or printer-native targets remain valid.
+         */
         get: operations["getTargetReadiness"];
         put?: never;
         post?: never;
@@ -1676,7 +1679,9 @@ export interface paths {
         /**
          * Get a consolidated, design-facing print specification
          * @description Returns the stock geometry, current target readiness, and the exact
-         *     immutable printer/profile revisions behind each binding. Opaque native
+         *     immutable printer/profile revisions behind each currently resolvable
+         *     binding. Missing printers or profile revisions remain visible in the
+         *     readiness binding list rather than failing this whole projection. Opaque native
          *     driver blobs are intentionally never returned. Clients should retain
          *     the returned revisions with saved designs and re-fetch before printing.
          */
@@ -4310,7 +4315,7 @@ export interface components {
         BindingReadiness: {
             binding: components["schemas"]["TargetBinding"];
             /** @enum {string} */
-            status: "ready" | "disabled" | "node_offline" | "destination_offline" | "destination_missing" | "needs_operator" | "profile_stale" | "driver_mismatch" | "dependency_missing" | "busy" | "stock_not_loaded" | "loaded_media_stale" | "loaded_media_untrusted" | "media_incompatible";
+            status: "ready" | "disabled" | "node_offline" | "destination_offline" | "destination_missing" | "needs_operator" | "profile_stale" | "driver_mismatch" | "dependency_missing" | "busy";
             reasons: string[];
         };
         TargetReadiness: {
@@ -4320,6 +4325,7 @@ export interface components {
             selected_binding_id: string | null;
             bindings: components["schemas"]["BindingReadiness"][];
         };
+        /** @description A currently resolvable binding. Consult readiness.bindings for unavailable bindings that cannot expose a printer/profile snapshot. */
         DesignSpecificationDestination: {
             binding: components["schemas"]["TargetBinding"];
             printer: components["schemas"]["Printer"];
@@ -4355,7 +4361,7 @@ export interface components {
             stock: components["schemas"]["Stock"] | null;
             readiness: components["schemas"]["TargetReadiness"];
             destinations: components["schemas"]["DesignSpecificationDestination"][];
-            /** @description Stable digest-like revision derived from target, stock, capability, profile and binding revisions. */
+            /** @description Stable digest-like revision derived only from target routing constraints, the stock revision/attributes, and immutable binding identities. Heartbeats, printer timestamps, loaded-media evidence, and temporary availability never change it. */
             specification_revision: string;
         };
         Printer: {

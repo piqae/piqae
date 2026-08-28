@@ -2034,6 +2034,7 @@ paths:
       - $ref: "#/components/parameters/TargetId"
     get:
       summary: Resolve target readiness from synchronized node facts
+      description: Generic route readiness only. Stock and loaded-media safety are reported separately by each design-specification destination so stockless PDF or printer-native targets remain valid.
       tags: [Routing]
       operationId: getTargetReadiness
       responses:
@@ -2051,7 +2052,9 @@ paths:
       summary: Get a consolidated, design-facing print specification
       description: |
         Returns the stock geometry, current target readiness, and the exact
-        immutable printer/profile revisions behind each binding. Opaque native
+        immutable printer/profile revisions behind each currently resolvable
+        binding. Missing printers or profile revisions remain visible in the
+        readiness binding list rather than failing this whole projection. Opaque native
         driver blobs are intentionally never returned. Clients should retain
         the returned revisions with saved designs and re-fetch before printing.
       tags: [Routing, Printers]
@@ -6289,7 +6292,7 @@ components:
         status:
           type: string
           enum:
-            [ready, disabled, node_offline, destination_offline, destination_missing, needs_operator, profile_stale, driver_mismatch, dependency_missing, busy, stock_not_loaded, loaded_media_stale, loaded_media_untrusted, media_incompatible]
+            [ready, disabled, node_offline, destination_offline, destination_missing, needs_operator, profile_stale, driver_mismatch, dependency_missing, busy]
         reasons:
           type: array
           items: { type: string }
@@ -6308,6 +6311,7 @@ components:
     DesignSpecificationDestination:
       type: object
       additionalProperties: false
+      description: A currently resolvable binding. Consult readiness.bindings for unavailable bindings that cannot expose a printer/profile snapshot.
       required: [binding, printer, profile, media_compatibility]
       properties:
         binding: { $ref: "#/components/schemas/TargetBinding" }
@@ -6373,7 +6377,7 @@ components:
           items: { $ref: "#/components/schemas/DesignSpecificationDestination" }
         specification_revision:
           type: string
-          description: Stable digest-like revision derived from target, stock, capability, profile and binding revisions.
+          description: Stable digest-like revision derived only from target routing constraints, the stock revision/attributes, and immutable binding identities. Heartbeats, printer timestamps, loaded-media evidence, and temporary availability never change it.
     Printer:
       type: object
       required:

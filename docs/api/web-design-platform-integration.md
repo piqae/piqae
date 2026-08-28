@@ -273,6 +273,13 @@ different multi-request join. Use its fields as follows:
 6. expose only portable profile facts such as media, source, colour, duplex,
    and resolution.
 
+The target-level `readiness` is deliberately generic and does not make a stock
+claim. Require destination `media_compatibility` for PrintPacket, while allowing
+stockless targets for independently validated PDF or printer-native jobs. A
+temporarily missing printer/profile is retained in `readiness.bindings` and
+omitted from the resolvable `destinations` array; it does not make the entire
+specification request fail.
+
 Do not expose or reproduce opaque PrintCore, DEVMODE, PrintTicket, PostScript,
 or vendor-driver settings. The installed driver remains authoritative. Driver
 capabilities and configured dimensions also cannot prove that an operator
@@ -282,6 +289,11 @@ source, confidence, observation and expiry timestamps, and exact stock
 revision. Piqae authorizes a new handoff only from fresh `reported` or
 `operator_confirmed` evidence with current calibration. Absence, unknown or
 inferred confidence, and observations older than 15 minutes fail closed.
+The source comes from immutable profile `summary.source` or `options.bin`.
+Only a profile-authorized `bin` safe override can select a different source.
+For geometry, sheet dimensions are physical and may be portrait or landscape
+unless stock sets an explicit `orientation`; labels retain ordered dimensions
+unless stock explicitly sets `rotatable: true`.
 
 ### Specification revision and saved designs
 
@@ -306,8 +318,9 @@ Before printing, retrieve the specification again and compare its revision. If
 it changed, compare the saved and current snapshots, require preflight, and ask
 for an explicit user decision when production or design constraints changed.
 Never silently scale an existing design or silently fall back from its pinned
-native profile. The revision is a change detector for the current projection,
-not proof that the correct physical stock is loaded.
+native profile. The revision covers stable target/stock/binding constraints;
+live readiness and loaded-media evidence must always be checked separately and
+do not churn saved designs on ordinary node heartbeats.
 
 ## No-node onboarding
 

@@ -577,14 +577,21 @@ async fn validate_for_tenant(
                         "Document page geometry does not match the explicit stock kind and dimensions.",
                     ));
                 }
-                if let Some((profile_id, profile_revision)) = pinned_profile.as_ref()
-                    && !printer.profiles.iter().any(|profile| {
-                        profile.profile_id == *profile_id
-                            && profile.revision == *profile_revision
-                            && crate::routing::stock_profile_dimensions_compatible(
-                                &current,
-                                crate::routing::profile_dimensions(profile).as_ref(),
-                            )
+                let pinned_profile_snapshot =
+                    pinned_profile
+                        .as_ref()
+                        .and_then(|(profile_id, profile_revision)| {
+                            printer.profiles.iter().find(|profile| {
+                                profile.profile_id == *profile_id
+                                    && profile.revision == *profile_revision
+                            })
+                        });
+                if pinned_profile.is_some()
+                    && pinned_profile_snapshot.is_none_or(|profile| {
+                        !crate::routing::stock_profile_dimensions_compatible(
+                            &current,
+                            crate::routing::profile_dimensions(profile).as_ref(),
+                        )
                     })
                 {
                     errors.push(finding(
@@ -593,12 +600,31 @@ async fn validate_for_tenant(
                         "The workflow's immutable profile dimensions do not match the stock.",
                     ));
                 }
+                let loaded_source = pinned_profile_snapshot.map_or_else(
+                    || options.bin.clone(),
+                    |profile| {
+                        match crate::routing::effective_profile_media_source(
+                            profile,
+                            options.bin.as_deref(),
+                        ) {
+                            Ok(source) => source,
+                            Err(code) => {
+                                errors.push(finding(
+                                    code,
+                                    "portable_options.bin",
+                                    "The selected media source is not an immutable profile source or allowed safe override.",
+                                ));
+                                None
+                            }
+                        }
+                    },
+                );
                 validate_loaded_stock(
                     state,
                     workspace_id,
                     environment_id,
                     printer_id,
-                    options.bin.as_deref(),
+                    loaded_source.as_deref(),
                     stock,
                     &mut errors,
                 )
@@ -721,14 +747,29 @@ fn document_manifest_matches_stock(
         let Some(height) = page.get("height_mm").and_then(Value::as_f64) else {
             return false;
         };
+        let orientation_allowed = match stock.attributes.get("orientation").and_then(Value::as_str)
+        {
+            None | Some("any") => true,
+            Some("landscape") => width > height,
+            Some("portrait") => height >= width,
+            Some(_) => false,
+        };
         match kind {
             "roll" | "continuous" | "receipt" => close(width, stock_width),
             "sheet" | "card" | "envelope" => stock_height.is_some_and(|stock_height| {
-                (close(width, stock_width) && close(height, stock_height))
-                    || (close(width, stock_height) && close(height, stock_width))
+                orientation_allowed
+                    && ((close(width, stock_width) && close(height, stock_height))
+                        || (close(width, stock_height) && close(height, stock_width)))
             }),
             "label" | "roll_label" => stock_height.is_some_and(|stock_height| {
-                close(width, stock_width) && close(height, stock_height)
+                (close(width, stock_width) && close(height, stock_height))
+                    || (stock
+                        .attributes
+                        .get("rotatable")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                        && close(width, stock_height)
+                        && close(height, stock_width))
             }),
             _ => false,
         }

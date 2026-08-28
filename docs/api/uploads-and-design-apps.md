@@ -63,13 +63,19 @@ Stocks hold stable business identities and optional portable design facts:
 
 A target binds that stock to one or more exact printer/profile revisions.
 `GET /v1/targets/{target_id}/readiness` reports the currently selected primary
-or standby binding and why other bindings are unavailable.
+or standby binding and why other bindings are unavailable. This is generic
+route readiness: a stockless target may carry PDF or an independently validated
+printer-native job. PrintPacket stock safety is the separate per-destination
+`media_compatibility` projection.
 
 `GET /v1/targets/{target_id}/design-specification` performs these joins in one
-tenant-scoped read and returns a `specification_revision` that changes with the
-target, stock, binding, capability, or immutable profile inputs. Save that
-revision with artwork and re-fetch before printing to detect production setup
-changes.
+tenant-scoped read and returns a `specification_revision` that changes only
+with target routing constraints, the stock revision/attributes, or immutable
+binding identities. Heartbeats, printer timestamps, current loaded-media
+evidence, and temporary availability do not churn it. Save that revision with
+artwork and re-fetch before printing to detect production setup changes.
+Unavailable binding printer/profile snapshots are skipped from `destinations`
+but remain visible with reasons under `readiness.bindings`.
 
 Before presenting a printable template, a design application should:
 
@@ -83,13 +89,22 @@ Before presenting a printable template, a design application should:
    profile with the stock, while failing closed when the stock itself omits
    the required kind, width, or height.
 
+Sheet width/height describe physical stock and therefore match portrait or
+landscape page geometry. An explicit stock `orientation` of `portrait` or
+`landscape` restricts output; `any` or omission allows either. Label width and
+height are ordered and cannot rotate unless stock explicitly declares
+`rotatable: true`.
+
 `media_compatibility` reports `ready`, `not_reported`, `stale`, `untrusted`, or
 `incompatible`, with actionable `reasons`. Its optional `loaded_media` evidence
 identifies the source, confidence, observation time, 15-minute `fresh_until`,
 and exact loaded stock revision. Only `reported` or `operator_confirmed`
 evidence with current calibration can authorize a new handoff. Missing,
 inferred, unknown, or expired evidence never means that the expected stock is
-loaded.
+loaded. Evidence is selected from the immutable profile `summary.source` or
+profile `options.bin`. A per-job bin can change that source only when the exact
+profile declares `bin` as a safe override; a correct roll in another tray does
+not satisfy the pinned source.
 
 Printing a rendered PrintPacket to a target requires the current
 `specification_revision`. Registration validates the document media against

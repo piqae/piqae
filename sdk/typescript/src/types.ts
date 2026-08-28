@@ -686,11 +686,7 @@ export type BindingReadinessStatus =
   | 'profile_stale'
   | 'driver_mismatch'
   | 'dependency_missing'
-  | 'busy'
-  | 'stock_not_loaded'
-  | 'loaded_media_stale'
-  | 'loaded_media_untrusted'
-  | 'media_incompatible';
+  | 'busy';
 
 export interface BindingReadiness {
   binding: TargetBinding;
