@@ -58,11 +58,12 @@ public final class PiqaeNode: @unchecked Sendable {
         await engine.handleWakeHint(hint, context: context)
     }
 
-    #if DEBUG
+    /// Internal observation used to make coalesced-caller cancellation tests
+    /// deterministic in every optimization configuration. This is not public
+    /// SDK surface.
     func wakeWaiterCountForTesting(collapseID: String) async -> Int {
         await engine.wakeWaiterCountForTesting(collapseID: collapseID)
     }
-    #endif
 
     /// Closes handoff admission synchronously from an OS expiration callback.
     /// Actor cleanup follows asynchronously, but no later generation can begin
@@ -364,9 +365,7 @@ actor PiqaeNodeEngine {
         let task: Task<PiqaeWakeHintResult, Never>
     }
     private var wakeTasks: [String: WakeTask] = [:]
-    #if DEBUG
     private var wakeWaiterCounts: [String: Int] = [:]
-    #endif
     private var observers: [UUID: AsyncStream<PiqaeNodeSnapshot>.Continuation] = [:]
     private var snapshotValue: PiqaeNodeSnapshot
 
@@ -921,7 +920,6 @@ actor PiqaeNodeEngine {
         _ task: Task<PiqaeWakeHintResult, Never>,
         collapseID: String
     ) async -> PiqaeWakeHintResult {
-        #if DEBUG
         wakeWaiterCounts[collapseID, default: 0] += 1
         defer {
             let remaining = (wakeWaiterCounts[collapseID] ?? 1) - 1
@@ -931,15 +929,12 @@ actor PiqaeNodeEngine {
                 wakeWaiterCounts[collapseID] = remaining
             }
         }
-        #endif
         return await PiqaeWakeTaskWaiter().wait(for: task)
     }
 
-    #if DEBUG
     func wakeWaiterCountForTesting(collapseID: String) -> Int {
         wakeWaiterCounts[collapseID] ?? 0
     }
-    #endif
 
     private func removeWakeTask(collapseID: String, token: UUID) {
         if wakeTasks[collapseID]?.token == token {
