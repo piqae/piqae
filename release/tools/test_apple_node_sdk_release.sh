@@ -44,7 +44,10 @@ let package = Package(
     ]
 )
 EOF
-cat > "$consumer/Sources/PiqaeReleaseConsumer/main.swift" <<'EOF'
+# Xcode treats main.swift as an implicit top-level entry point, which cannot
+# also contain an @main declaration. A non-special filename keeps this exact
+# consumer canonical under both `swift run` and xcodebuild.
+cat > "$consumer/Sources/PiqaeReleaseConsumer/ReleaseConsumer.swift" <<'EOF'
 import Darwin
 import Foundation
 import PiqaeNodeKit
