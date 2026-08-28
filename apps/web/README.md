@@ -30,6 +30,21 @@ adds authentication server-side, forwards `Last-Event-ID`, disables buffering,
 and streams bytes without placing credentials in the URL. The dashboard
 throttles event-driven data invalidation to avoid request storms.
 
+### Operations navigation
+
+The operational surface has four primary resource views: Jobs, Printers,
+Nodes, and (for managed/integrator deployments) Customers. Queue telemetry is
+a Jobs subview. Physical destinations and routes remain distinct operational
+resources, but live under Advanced diagnostics and inside the related printer
+and node drawers instead of appearing as equal-weight tabs.
+
+Actionable uncertainty is never hidden by this simplification. The Review
+inbox combines unresolved delivery handoffs, physical-destination identity
+issues, and unhealthy route projections with a live count. Existing
+`?view=queue`, `?view=destinations`, `?view=routes`, and `?view=needs_review`
+addresses remain supported so bookmarks, support links, and browser history
+continue to land on the exact diagnostic view.
+
 ### Node availability and queue privacy
 
 The Nodes view combines three deliberately separate signals:

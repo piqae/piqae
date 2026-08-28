@@ -4,6 +4,7 @@ import {
   isOperationalView,
   isStateFilter,
   operationalViews,
+  primaryOperationalView,
   resolveStateFilter,
   stateFilters
 } from './dashboard-navigation';
@@ -22,6 +23,23 @@ describe('dashboard navigation capabilities', () => {
     expect(isOperationalView('customers', { platform: { accounts: true } })).toBe(true);
     expect(isOperationalView('customers', { platform: { accounts: false } })).toBe(false);
     expect(isOperationalView('nonsense', { platform: { accounts: true } })).toBe(false);
+  });
+
+  it('keeps secondary operations out of the primary switcher without breaking their addresses', () => {
+    const primary = operationalViews({ platform: { accounts: true } }).map((view) => view.value);
+    expect(primary).toEqual(['jobs', 'printers', 'nodes', 'customers']);
+    expect(isOperationalView('queue', { platform: { accounts: false } })).toBe(true);
+    expect(isOperationalView('destinations', { platform: { accounts: false } })).toBe(true);
+    expect(isOperationalView('routes', { platform: { accounts: false } })).toBe(true);
+    expect(isOperationalView('needs_review', { platform: { accounts: false } })).toBe(true);
+  });
+
+  it('maps secondary views to the primary tab that owns them', () => {
+    expect(primaryOperationalView('queue')).toBe('jobs');
+    expect(primaryOperationalView('needs_review')).toBe('jobs');
+    expect(primaryOperationalView('destinations')).toBe('printers');
+    expect(primaryOperationalView('routes')).toBe('printers');
+    expect(primaryOperationalView('nodes')).toBe('nodes');
   });
 
   it('keeps the dashboard to two destinations', () => {

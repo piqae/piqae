@@ -22,17 +22,18 @@ export type OperationalView =
   | 'nodes'
   | 'customers';
 
+export type PrimaryOperationalView = 'jobs' | 'printers' | 'nodes' | 'customers';
+
 /**
- * View switcher options for `/dashboard?view=`. Customers only appears on
- * deployments where the accounts platform feature is enabled.
+ * Primary view switcher options for `/dashboard?view=`. Queue telemetry is a
+ * Jobs subview; physical destinations and routes are advanced printer
+ * diagnostics. Those addresses remain valid but do not compete with the four
+ * resources operators use every day. Customers only appears when the accounts
+ * platform feature is enabled.
  */
 export function operationalViews(meta: Pick<DashboardMeta, 'platform'>) {
   return [
     { value: 'jobs', label: 'Jobs' },
-    { value: 'queue', label: 'Queue' },
-    { value: 'destinations', label: 'Destinations' },
-    { value: 'routes', label: 'Routes' },
-    { value: 'needs_review', label: 'Needs review' },
     { value: 'printers', label: 'Printers' },
     { value: 'nodes', label: 'Nodes' },
     ...(meta.platform.accounts ? [{ value: 'customers', label: 'Customers' }] : [])
@@ -43,7 +44,23 @@ export function isOperationalView(
   value: string | null,
   meta: Pick<DashboardMeta, 'platform'>
 ): value is OperationalView {
-  return operationalViews(meta).some((view) => view.value === value);
+  if (value === 'customers') return meta.platform.accounts;
+  return [
+    'jobs',
+    'queue',
+    'destinations',
+    'routes',
+    'needs_review',
+    'printers',
+    'nodes'
+  ].includes(value ?? '');
+}
+
+/** The primary tab that owns an operational subview or diagnostic address. */
+export function primaryOperationalView(view: OperationalView): PrimaryOperationalView {
+  if (view === 'queue' || view === 'needs_review') return 'jobs';
+  if (view === 'destinations' || view === 'routes') return 'printers';
+  return view;
 }
 
 const JOB_STATE_FILTERS = [

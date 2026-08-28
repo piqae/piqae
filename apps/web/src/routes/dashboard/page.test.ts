@@ -252,6 +252,119 @@ describe('uncertain delivery on the operations dashboard', () => {
   });
 });
 
+describe('operations information architecture', () => {
+  afterEach(cleanup);
+
+  it('keeps four resource views primary and presents review as a separate inbox', () => {
+    render(Page, {
+      data: pageData([job({ state: 'delivery_uncertain' })]) as never,
+      form: null as never
+    });
+
+    const primary = screen.getByRole('group', { name: 'Primary operational view' });
+    expect(primary.querySelectorAll('button')).toHaveLength(3);
+    expect(primary).toHaveTextContent('Jobs');
+    expect(primary).toHaveTextContent('Printers');
+    expect(primary).toHaveTextContent('Nodes');
+    expect(primary).not.toHaveTextContent('Queue');
+    expect(primary).not.toHaveTextContent('Destinations');
+    expect(primary).not.toHaveTextContent('Routes');
+    expect(primary).not.toHaveTextContent('Needs review');
+    expect(screen.getByRole('link', { name: 'Review inbox: 1 actionable issue' })).toHaveAttribute(
+      'href',
+      '/dashboard?view=needs_review'
+    );
+  });
+
+  it('keeps queue telemetry inside Jobs and marks Jobs as its primary context', () => {
+    page.url = new URL('https://piqae.test/dashboard?view=queue') as never;
+    render(Page, {
+      data: { ...pageData([]), view: 'queue' } as never,
+      form: null as never
+    });
+
+    expect(screen.getByRole('button', { name: 'Jobs' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('navigation', { name: 'Jobs view' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Queue telemetry' })).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('keeps the inbox badge global while its table reports filtered results', async () => {
+    page.url = new URL('https://piqae.test/dashboard?view=needs_review') as never;
+    render(Page, {
+      data: {
+        ...pageData([job({ title: 'Unproven label', state: 'delivery_uncertain' })]),
+        view: 'needs_review'
+      } as never,
+      form: null as never
+    });
+
+    await fireEvent.input(screen.getByLabelText('Search review items'), {
+      target: { value: 'does not exist' }
+    });
+    expect(screen.getByRole('link', { name: 'Review inbox: 1 actionable issue' })).toBeInTheDocument();
+    expect(screen.getByText('No review items match these filters.')).toBeInTheDocument();
+  });
+
+  it('keeps route diagnostics addressable under the Printers context', () => {
+    page.url = new URL('https://piqae.test/dashboard?view=routes') as never;
+    render(Page, {
+      data: { ...pageData([]), view: 'routes' } as never,
+      form: null as never
+    });
+
+    expect(screen.getByRole('button', { name: 'Printers' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText('Advanced diagnostics').closest('details')).toHaveAttribute('open');
+    expect(screen.getByRole('link', { name: 'Routes and telemetry' })).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('puts route and destination truth inside printer details', () => {
+    const route = {
+      id: 'rte_01',
+      physicalDestinationId: 'pdst_01',
+      printerId: printer.id,
+      agentId: agent.id,
+      nativeQueueId: 'Dispatch-labels',
+      enabled: true,
+      health: 'ready',
+      telemetryFreshness: 'live',
+      projectionHealth: 'current',
+      schedulingAuthorityId: 'auth_cloud',
+      latestObservation: null,
+      updatedAt: minutesAgo(1)
+    };
+    page.url = new URL('https://piqae.test/dashboard?view=printers&printer=prt_01') as never;
+    render(Page, {
+      data: {
+        ...pageData([]),
+        view: 'printers',
+        destinations: [{
+          id: 'pdst_01',
+          displayName: 'Dispatch Zebra',
+          manufacturer: 'Zebra',
+          model: 'ZT411',
+          identityConfidence: 'verified',
+          status: 'active',
+          routeCount: 1,
+          updatedAt: minutesAgo(1)
+        }],
+        routes: [route],
+        detail: { kind: 'printer', printer, agent, jobs: [] }
+      } as never,
+      form: null as never
+    });
+
+    expect(screen.getByRole('heading', { name: /Routing and destination/ })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Dispatch Zebra.*Dispatch-labels/ })).toHaveAttribute(
+      'href',
+      expect.stringContaining('route=rte_01')
+    );
+    expect(screen.getByRole('link', { name: 'View all route diagnostics' })).toHaveAttribute(
+      'href',
+      expect.stringContaining('view=routes')
+    );
+  });
+});
+
 describe('managed customer operations', () => {
   const account = {
     id: 'wsp_child',
