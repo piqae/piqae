@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import pg, { type Pool } from "pg";
+import pg, { type Pool, type PoolClient } from "pg";
 import { normalizeShopDomain } from "./model";
 import { parseTemplateEnvelope, type PrintPacket } from "./template-model";
 import { resolveShopifyStorage } from "./piqae-runtime.server";
@@ -111,6 +111,10 @@ export interface WorkflowRepository {
     shop: string,
     value: SaveMerchantTemplate,
   ): Promise<MerchantTemplate>;
+  saveTemplatesAtomically(
+    shop: string,
+    values: SaveMerchantTemplate[],
+  ): Promise<MerchantTemplate[]>;
   deleteTemplate(shop: string, id: string): Promise<boolean>;
   listAutomations(shop: string): Promise<AutomationRule[]>;
   saveAutomation(
@@ -154,6 +158,19 @@ export class MemoryWorkflowRepository implements WorkflowRepository {
     );
   }
   async saveTemplate(shop: string, value: SaveMerchantTemplate) {
+    return this.saveTemplateNow(shop, value);
+  }
+  async saveTemplatesAtomically(shop: string, values: SaveMerchantTemplate[]) {
+    const key = normalizeShopDomain(shop);
+    const before = structuredClone(this.templates.get(key) ?? []);
+    try {
+      return values.map((value) => this.saveTemplateNow(shop, value));
+    } catch (error) {
+      this.templates.set(key, before);
+      throw error;
+    }
+  }
+  private saveTemplateNow(shop: string, value: SaveMerchantTemplate) {
     const key = normalizeShopDomain(shop);
     const all = this.templates.get(key) ?? [];
     const previous = all.find((item) => item.id === value.id);
@@ -325,69 +342,11 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
     const normalizedShop = normalizeShopDomain(shop);
     try {
       await client.query("BEGIN");
-      const current = await client.query(
-        "SELECT draft_revision,published_revision FROM shopify_workflow_templates WHERE shop=$1 AND id=$2 FOR UPDATE",
-        [normalizedShop, v.id],
+      const saved = await this.saveTemplateWithClient(
+        client,
+        normalizedShop,
+        v,
       );
-      const existing = current.rows[0];
-      if (
-        (existing &&
-          v.expectedDraftRevision !== Number(existing.draft_revision)) ||
-        (!existing && v.expectedDraftRevision != null)
-      )
-        throw new WorkflowConflictError();
-      const draftRevision = existing ? Number(existing.draft_revision) + 1 : 1;
-      const draftWrite = await client.query(
-        "INSERT INTO shopify_workflow_templates(id,shop,name,kind,page_size,draft_source,draft_revision,design_target_id,design_specification_revision,state,source,revision) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(id,shop) DO UPDATE SET name=EXCLUDED.name,kind=EXCLUDED.kind,page_size=EXCLUDED.page_size,draft_source=EXCLUDED.draft_source,draft_revision=EXCLUDED.draft_revision,design_target_id=EXCLUDED.design_target_id,design_specification_revision=EXCLUDED.design_specification_revision,updated_at=now() WHERE $13::integer IS NOT NULL AND shopify_workflow_templates.draft_revision=$13 RETURNING draft_revision",
-        [
-          v.id,
-          normalizedShop,
-          v.name,
-          v.kind,
-          v.pageSize,
-          v.source,
-          draftRevision,
-          v.designTargetId ?? null,
-          v.designSpecificationRevision ?? null,
-          v.state,
-          v.source,
-          Math.max(1, v.revision),
-          v.expectedDraftRevision ?? null,
-        ],
-      );
-      if (draftWrite.rowCount !== 1) throw new WorkflowConflictError();
-      if (v.state === "published") {
-        const highest = await client.query(
-          "SELECT COALESCE(MAX(revision),0) AS revision FROM shopify_workflow_template_revisions WHERE template_id=$1 AND shop=$2",
-          [v.id, normalizedShop],
-        );
-        const revision = Number(highest.rows[0]?.revision ?? 0) + 1;
-        const media = parseTemplateEnvelope(v.source).document.media;
-        await client.query(
-          "INSERT INTO shopify_workflow_template_revisions(template_id,shop,revision,name,kind,page_size,source,design_target_id,design_specification_revision,media) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
-          [
-            v.id,
-            normalizedShop,
-            revision,
-            v.name,
-            v.kind,
-            v.pageSize,
-            v.source,
-            v.designTargetId ?? null,
-            v.designSpecificationRevision ?? null,
-            JSON.stringify(media),
-          ],
-        );
-        await client.query(
-          "UPDATE shopify_workflow_templates SET published_revision=$3 WHERE shop=$1 AND id=$2",
-          [normalizedShop, v.id, revision],
-        );
-      }
-      const result = await client.query(
-        `${TEMPLATE_SELECT} WHERE t.shop=$1 AND t.id=$2`,
-        [normalizedShop, v.id],
-      );
-      const saved = templateRow(result.rows[0]);
       await client.query("COMMIT");
       return saved;
     } catch (error) {
@@ -396,6 +355,96 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
     } finally {
       client.release();
     }
+  }
+  async saveTemplatesAtomically(shop: string, values: SaveMerchantTemplate[]) {
+    const client = await this.pool.connect();
+    const normalizedShop = normalizeShopDomain(shop);
+    try {
+      await client.query("BEGIN");
+      const saved: MerchantTemplate[] = [];
+      for (const value of [...values].sort((left, right) =>
+        left.id.localeCompare(right.id),
+      ))
+        saved.push(
+          await this.saveTemplateWithClient(client, normalizedShop, value),
+        );
+      await client.query("COMMIT");
+      return saved;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+  private async saveTemplateWithClient(
+    client: PoolClient,
+    normalizedShop: string,
+    v: SaveMerchantTemplate,
+  ): Promise<MerchantTemplate> {
+    const current = await client.query(
+      "SELECT draft_revision,published_revision FROM shopify_workflow_templates WHERE shop=$1 AND id=$2 FOR UPDATE",
+      [normalizedShop, v.id],
+    );
+    const existing = current.rows[0];
+    if (
+      (existing &&
+        v.expectedDraftRevision !== Number(existing.draft_revision)) ||
+      (!existing && v.expectedDraftRevision != null)
+    )
+      throw new WorkflowConflictError();
+    const draftRevision = existing ? Number(existing.draft_revision) + 1 : 1;
+    const draftWrite = await client.query(
+      "INSERT INTO shopify_workflow_templates(id,shop,name,kind,page_size,draft_source,draft_revision,design_target_id,design_specification_revision,state,source,revision) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(id,shop) DO UPDATE SET name=EXCLUDED.name,kind=EXCLUDED.kind,page_size=EXCLUDED.page_size,draft_source=EXCLUDED.draft_source,draft_revision=EXCLUDED.draft_revision,design_target_id=EXCLUDED.design_target_id,design_specification_revision=EXCLUDED.design_specification_revision,updated_at=now() WHERE $13::integer IS NOT NULL AND shopify_workflow_templates.draft_revision=$13 RETURNING draft_revision",
+      [
+        v.id,
+        normalizedShop,
+        v.name,
+        v.kind,
+        v.pageSize,
+        v.source,
+        draftRevision,
+        v.designTargetId ?? null,
+        v.designSpecificationRevision ?? null,
+        v.state,
+        v.source,
+        Math.max(1, v.revision),
+        v.expectedDraftRevision ?? null,
+      ],
+    );
+    if (draftWrite.rowCount !== 1) throw new WorkflowConflictError();
+    if (v.state === "published") {
+      const highest = await client.query(
+        "SELECT COALESCE(MAX(revision),0) AS revision FROM shopify_workflow_template_revisions WHERE template_id=$1 AND shop=$2",
+        [v.id, normalizedShop],
+      );
+      const revision = Number(highest.rows[0]?.revision ?? 0) + 1;
+      const media = parseTemplateEnvelope(v.source).document.media;
+      await client.query(
+        "INSERT INTO shopify_workflow_template_revisions(template_id,shop,revision,name,kind,page_size,source,design_target_id,design_specification_revision,media) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+        [
+          v.id,
+          normalizedShop,
+          revision,
+          v.name,
+          v.kind,
+          v.pageSize,
+          v.source,
+          v.designTargetId ?? null,
+          v.designSpecificationRevision ?? null,
+          JSON.stringify(media),
+        ],
+      );
+      await client.query(
+        "UPDATE shopify_workflow_templates SET published_revision=$3 WHERE shop=$1 AND id=$2",
+        [normalizedShop, v.id, revision],
+      );
+    }
+    const result = await client.query(
+      `${TEMPLATE_SELECT} WHERE t.shop=$1 AND t.id=$2`,
+      [normalizedShop, v.id],
+    );
+    return templateRow(result.rows[0]);
   }
   async deleteTemplate(shop: string, id: string) {
     const r = await this.pool.query(

@@ -18,6 +18,22 @@ export async function publishCanonicalTemplate(input: {
   clientFactory?: (token: string) => PiqaeClient;
   managedClientFactory?: (link: ShopLink) => PiqaeClient;
   assetFetcher?: typeof fetchTemplateAsset;
+  activate?: (publishedSource: string) => Promise<void>;
+}): Promise<string> {
+  return input.shops.withShopLock(input.shop, () => publishLocked(input));
+}
+
+async function publishLocked(input: {
+  shop: string;
+  name: string;
+  source: string;
+  shops: ShopRepository;
+  vault: CredentialVault;
+  baseUrl: string;
+  clientFactory?: (token: string) => PiqaeClient;
+  managedClientFactory?: (link: ShopLink) => PiqaeClient;
+  assetFetcher?: typeof fetchTemplateAsset;
+  activate?: (publishedSource: string) => Promise<void>;
 }): Promise<string> {
   const link = await input.shops.get(input.shop);
   if (!link)
@@ -57,12 +73,15 @@ export async function publishCanonicalTemplate(input: {
     `shopify-template-publish-${canonicalDigest}`,
   );
   envelope.published = {
+    piqaeAccountId: link.piqaeAccountId,
+    piqaeEnvironmentId: link.piqaeLiveEnvironmentId ?? null,
     piqaeTemplateId: template.id,
     piqaeRevisionId: revision.id,
     canonicalDigest,
   };
-  await input.shops.put({ ...link, templateRevisionId: revision.id });
-  return serializeTemplateEnvelope(envelope);
+  const publishedSource = serializeTemplateEnvelope(envelope);
+  await input.activate?.(publishedSource);
+  return publishedSource;
 }
 
 async function mapWithConcurrency<T>(

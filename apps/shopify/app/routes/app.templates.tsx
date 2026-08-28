@@ -17,6 +17,7 @@ import {
 } from "../core/template-index.server";
 import {
   parseTemplateEnvelope,
+  removeSystemOwnership,
   serializeTemplateEnvelope,
 } from "../core/template-model";
 export const templates = [
@@ -30,7 +31,7 @@ export function customizedSystemDraft(
   const envelope = parseTemplateEnvelope(existing.source);
   if (!envelope.system?.immutable)
     throw new Error("Only system documents can be customized this way");
-  delete envelope.system;
+  removeSystemOwnership(envelope);
   return {
     id,
     name: `${existing.name} — customized`.slice(0, 200),
@@ -73,7 +74,11 @@ export async function action({ request }: ActionFunctionArgs) {
       parsed.source.length > 65536
     )
       throw new Error("Imported template source is invalid");
-    const source = validateDocumentSource(parsed.source);
+    const envelope = parseTemplateEnvelope(
+      validateDocumentSource(parsed.source),
+    );
+    removeSystemOwnership(envelope);
+    const source = serializeTemplateEnvelope(envelope);
     const saved = await workflows().saveTemplate(session.shop, {
       id: newWorkflowId(),
       name:

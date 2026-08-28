@@ -16,6 +16,8 @@ import {
 } from "./orders.server";
 import { workflows, type WorkflowRepository } from "./workflows.server";
 import { parseTemplateEnvelope } from "./template-model";
+import { templateDigest } from "./template-digest.server";
+import { findSystemTemplate, systemTemplateId } from "./template-index.server";
 import { ACCOUNT_DEFAULT_DOCUMENT_ID } from "./admin-print-options.server";
 import type { DownloadTokenVault } from "./download-token.server";
 
@@ -63,6 +65,8 @@ export class ShopifyPrintingService {
     const publication = await this.resolveTemplatePublication(
       shop,
       link.templateRevisionId,
+      link.piqaeAccountId,
+      link.piqaeLiveEnvironmentId ?? null,
       input.templateId,
     );
     const settings = await this.workflow.getSettings(shop);
@@ -151,6 +155,8 @@ export class ShopifyPrintingService {
       const publication = await this.resolveTemplatePublication(
         shop,
         link.templateRevisionId,
+        link.piqaeAccountId,
+        link.piqaeLiveEnvironmentId ?? null,
         input.templateId,
       );
       const rendered = await client.printPackets.renders.retrieve(
@@ -226,33 +232,31 @@ export class ShopifyPrintingService {
   private async resolveTemplatePublication(
     shop: string,
     fallback: string,
+    piqaeAccountId: string,
+    piqaeEnvironmentId: string | null,
     templateId?: string,
     systemTemplateKey?: "receipt",
   ) {
     if (templateId && systemTemplateKey)
       throw new Error("Select one document source");
     if (systemTemplateKey) {
-      const selected = (await this.workflow.listTemplates(shop)).find(
-        (candidate) => {
-          if (!candidate.published) return false;
-          try {
-            return (
-              parseTemplateEnvelope(candidate.published.source).system?.key ===
-              systemTemplateKey
-            );
-          } catch {
-            return false;
-          }
-        },
-      );
-      if (!selected)
-        throw new Error("The published receipt document is unavailable");
-      const revision = parseTemplateEnvelope(selected.published!.source)
-        .published?.piqaeRevisionId;
-      if (!revision)
-        throw new Error(
-          "The published receipt has no pinned Piqae revision; reconnect or publish it before printing",
+      const selected =
+        (await this.workflow.getTemplate(
+          shop,
+          systemTemplateId(systemTemplateKey) ?? "",
+        )) ??
+        findSystemTemplate(
+          await this.workflow.listTemplates(shop),
+          systemTemplateKey,
         );
+      if (!selected?.published)
+        throw new Error("The published receipt document is unavailable");
+      const revision = exactPublishedRevision(
+        selected.published!.source,
+        piqaeAccountId,
+        piqaeEnvironmentId,
+        "receipt",
+      );
       return {
         revisionId: revision,
         designTargetId: selected.published!.designTargetId,
@@ -269,12 +273,12 @@ export class ShopifyPrintingService {
     const selected = await this.workflow.getTemplate(shop, templateId);
     if (!selected?.published)
       throw new Error("The selected document is not published");
-    const revision = parseTemplateEnvelope(selected.published.source).published
-      ?.piqaeRevisionId;
-    if (!revision)
-      throw new Error(
-        "The selected document has no published Piqae revision; publish it again before printing",
-      );
+    const revision = exactPublishedRevision(
+      selected.published.source,
+      piqaeAccountId,
+      piqaeEnvironmentId,
+      "selected document",
+    );
     return {
       revisionId: revision,
       designTargetId: selected.published.designTargetId,
@@ -324,6 +328,8 @@ export class ShopifyPrintingService {
     const publication = await this.resolveTemplatePublication(
       shop,
       link.templateRevisionId,
+      link.piqaeAccountId,
+      link.piqaeLiveEnvironmentId ?? null,
       input.templateId,
       input.systemTemplateKey,
     );
@@ -480,6 +486,36 @@ export function parseRenderCost(
     pdf_bytes: Number(candidate.pdf_bytes),
     input_bytes: Number(candidate.input_bytes),
   };
+}
+
+function exactPublishedRevision(
+  source: string,
+  piqaeAccountId: string,
+  piqaeEnvironmentId: string | null,
+  documentName: string,
+): string {
+  const envelope = parseTemplateEnvelope(source);
+  const published = envelope.published;
+  if (!published)
+    throw new Error(
+      `The published ${documentName} has no pinned Piqae revision; reconnect or publish it before printing`,
+    );
+  if (published.piqaeAccountId !== piqaeAccountId)
+    throw new Error(
+      `The published ${documentName} belongs to a different Piqae account; reconnect or publish it before printing`,
+    );
+  if (published.piqaeEnvironmentId !== piqaeEnvironmentId)
+    throw new Error(
+      `The published ${documentName} belongs to a different Piqae environment; reconnect or publish it before printing`,
+    );
+  if (
+    published.canonicalDigest !==
+    templateDigest(JSON.stringify(envelope.document))
+  )
+    throw new Error(
+      `The published ${documentName} no longer matches its pinned Piqae revision; reconnect or publish it before printing`,
+    );
+  return published.piqaeRevisionId;
 }
 
 function stableActivityId(hexDigest: string): string {

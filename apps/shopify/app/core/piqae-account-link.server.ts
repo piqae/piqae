@@ -13,8 +13,15 @@ import {
   parseTemplateEnvelope,
   serializeTemplateEnvelope,
 } from "./template-model";
-import { seedStarterTemplates } from "./template-index.server";
-import type { WorkflowRepository } from "./workflows.server";
+import {
+  findSystemTemplate,
+  seedStarterTemplates,
+  systemTemplateId,
+} from "./template-index.server";
+import type {
+  SaveMerchantTemplate,
+  WorkflowRepository,
+} from "./workflows.server";
 
 interface LinkClient {
   workspaces: { current(): Promise<Workspace> };
@@ -47,6 +54,16 @@ export class PiqaeAccountLinker {
   ): Promise<ShopLink> {
     const shop = normalizeShopDomain(shopInput);
     const credential = validateCredential(credentialInput);
+    return this.shops.withShopLock(shop, () =>
+      this.linkExistingLocked(shop, credential),
+    );
+  }
+
+  private async linkExistingLocked(
+    shop: string,
+    credential: string,
+  ): Promise<ShopLink> {
+    const expectedLink = await this.shops.get(shop);
     const client = this.clientFactory(credential);
     const workspace = await client.workspaces.current();
     if (workspace.status !== "active")
@@ -54,10 +71,14 @@ export class PiqaeAccountLinker {
 
     await seedStarterTemplates(this.workflows, shop);
     const stored = await this.workflows.listTemplates(shop);
+    const updates: SaveMerchantTemplate[] = [];
     let defaultRevisionId: string | undefined;
     for (const starter of starterTemplates) {
+      const canonicalDigest = createHash("sha256")
+        .update(JSON.stringify(starter.specification))
+        .digest("hex");
       const digest = createHash("sha256")
-        .update(`${shop}\0${starter.id}`)
+        .update(`${shop}\0${starter.id}\0${canonicalDigest}`)
         .digest("hex");
       const template = await client.printPackets.templates.create(
         {
@@ -71,25 +92,26 @@ export class PiqaeAccountLinker {
         starter.specification,
         `shopify-link-publish-${digest}`,
       );
-      const local = stored.find((candidate) => {
-        try {
-          return (
-            parseTemplateEnvelope(candidate.source).system?.key === starter.id
-          );
-        } catch {
-          return false;
-        }
-      });
+      const local =
+        stored.find(
+          (candidate) => candidate.id === systemTemplateId(starter.id),
+        ) ?? findSystemTemplate(stored, starter.id);
       if (!local) throw new Error("PIQAE_DEFAULT_TEMPLATE_MISSING");
-      const envelope = parseTemplateEnvelope(local.source);
+      // Relinking is the explicit point where a system starter advances to the
+      // current canonical specification. Routine seeding preserves the prior
+      // immutable publication and its exact revision pin.
+      const envelope = parseTemplateEnvelope(starter.source);
       envelope.published = {
+        piqaeAccountId: workspace.id,
+        // Existing-token workspace discovery does not expose an environment;
+        // the control plane's tenant-scoped revision lookup remains the final
+        // authorization boundary for this mode.
+        piqaeEnvironmentId: null,
         piqaeTemplateId: template.id,
         piqaeRevisionId: revision.id,
-        canonicalDigest: createHash("sha256")
-          .update(JSON.stringify(starter.specification))
-          .digest("hex"),
+        canonicalDigest,
       };
-      await this.workflows.saveTemplate(shop, {
+      updates.push({
         ...local,
         source: serializeTemplateEnvelope(envelope),
         expectedDraftRevision: local.draftRevision,
@@ -97,6 +119,7 @@ export class PiqaeAccountLinker {
       if (starter.id === "invoice") defaultRevisionId = revision.id;
     }
     if (!defaultRevisionId) throw new Error("PIQAE_DEFAULT_TEMPLATE_MISSING");
+    await this.workflows.saveTemplatesAtomically(shop, updates);
     const link: ShopLink = {
       shop,
       piqaeAccountId: workspace.id,
@@ -106,7 +129,8 @@ export class PiqaeAccountLinker {
       planHandle: null,
       createdAt: new Date().toISOString(),
     };
-    await this.shops.put(link);
+    if (!(await this.shops.putIfCurrentMatches(link, expectedLink)))
+      throw new Error("PIQAE_ACCOUNT_LINK_CHANGED");
     return link;
   }
 }

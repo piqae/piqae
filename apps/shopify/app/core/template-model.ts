@@ -50,6 +50,8 @@ export type TemplateEnvelope = {
   assets: ExternalAsset[];
   system?: { key: string; immutable: true };
   published?: {
+    piqaeAccountId: string;
+    piqaeEnvironmentId: string | null;
     piqaeTemplateId: string;
     piqaeRevisionId: string;
     canonicalDigest: string;
@@ -74,17 +76,41 @@ export function parseTemplateEnvelope(source: string): TemplateEnvelope {
     !["visual", "liquid", "source"].includes(envelope.editor.mode)
   )
     throw new Error("Document editor metadata is invalid");
+  validatePublicationMetadata(envelope.published);
   validateImportMetadata(envelope.editor.import);
   return envelope;
 }
 export function serializeTemplateEnvelope(value: TemplateEnvelope): string {
   validateAssets(value.assets);
   validatePrintPacket(value.document);
+  validatePublicationMetadata(value.published);
   validateImportMetadata(value.editor.import);
   const source = JSON.stringify(value);
   if (new TextEncoder().encode(source).byteLength > 262_144)
     throw new Error("Document source exceeds 256 KiB");
   return source;
+}
+
+function validatePublicationMetadata(value: TemplateEnvelope["published"]) {
+  if (!value) return;
+  if (
+    !validPublicationId(value.piqaeAccountId) ||
+    (value.piqaeEnvironmentId !== null &&
+      !validPublicationId(value.piqaeEnvironmentId)) ||
+    !validPublicationId(value.piqaeTemplateId) ||
+    !validPublicationId(value.piqaeRevisionId) ||
+    !/^[a-f0-9]{64}$/.test(value.canonicalDigest)
+  )
+    throw new Error("Published Piqae revision metadata is invalid");
+}
+
+function validPublicationId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 200 &&
+    !/[\s\u0000-\u001f\u007f]/.test(value)
+  );
 }
 
 function validateImportMetadata(value: TemplateEnvelope["editor"]["import"]) {
@@ -227,5 +253,6 @@ function blocksHavePageBreak(blocks: Block[]): boolean {
 }
 export function removeSystemOwnership(envelope: TemplateEnvelope) {
   delete envelope.system;
+  delete envelope.published;
   return envelope;
 }

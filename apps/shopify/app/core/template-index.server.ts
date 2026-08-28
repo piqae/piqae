@@ -3,7 +3,9 @@ import type {
   MerchantTemplate,
   WorkflowRepository,
 } from "./workflows.server";
+import { WorkflowConflictError } from "./workflows.server";
 import { templateDigest } from "./template-digest.server";
+import { parseTemplateEnvelope } from "./template-model";
 
 const ACTIVE_SYSTEM_TEMPLATE_KEYS = new Set([
   "invoice",
@@ -11,6 +13,19 @@ const ACTIVE_SYSTEM_TEMPLATE_KEYS = new Set([
   "receipt",
   "credit-note",
 ]);
+const SYSTEM_TEMPLATE_POSITIONS = new Map([
+  ["invoice", 1],
+  ["packing-slip", 2],
+  ["receipt", 3],
+  ["product-label", 4],
+]);
+
+export function systemTemplateId(key: string): string | null {
+  const position = SYSTEM_TEMPLATE_POSITIONS.get(key);
+  return position
+    ? `00000000-0000-4000-8000-${String(position).padStart(12, "0")}`
+    : null;
+}
 
 export function isActiveTemplate(template: MerchantTemplate): boolean {
   try {
@@ -132,36 +147,136 @@ export async function seedStarterTemplates(
   repository: WorkflowRepository,
   shop: string,
 ): Promise<void> {
-  const existing = await repository.listTemplates(shop);
-  const existingSystemTemplates = new Map(
-    existing.flatMap((value) => {
-      try {
-        const parsed = JSON.parse(value.source) as {
-          system?: { key?: unknown };
-        };
-        return typeof parsed.system?.key === "string"
-          ? [[parsed.system.key, value] as const]
-          : [];
-      } catch {
-        return [];
-      }
-    }),
-  );
   const { starterTemplates } = await import("./starter-templates");
   for (const [position, starter] of starterTemplates.entries()) {
-    const current = existingSystemTemplates.get(starter.id);
-    if (current?.source === starter.source) continue;
-    await repository.saveTemplate(shop, {
-      id:
-        current?.id ??
-        `00000000-0000-4000-8000-${String(position + 1).padStart(12, "0")}`,
-      name: starter.name,
-      kind: starter.kind,
-      pageSize: starter.pageSize,
-      state: "published",
-      source: starter.source,
-      revision: 1,
-      expectedDraftRevision: current?.draftRevision ?? null,
-    });
+    const deterministicId = systemTemplateId(starter.id);
+    if (
+      !deterministicId ||
+      position + 1 !== SYSTEM_TEMPLATE_POSITIONS.get(starter.id)
+    )
+      throw new Error(`Shopify starter position is invalid for ${starter.id}`);
+    let saved = false;
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const current =
+        (await repository.getTemplate(shop, deterministicId)) ??
+        findSystemTemplate(await repository.listTemplates(shop), starter.id);
+      if (
+        current?.published &&
+        hasValidPublishedRevision(current.published.source, starter.id)
+      ) {
+        saved = true;
+        break;
+      }
+      if (
+        current?.source === starter.source &&
+        current.published?.source === starter.source &&
+        current.name === starter.name &&
+        current.kind === starter.kind &&
+        current.pageSize === starter.pageSize &&
+        current.state === "published"
+      ) {
+        saved = true;
+        break;
+      }
+      try {
+        await repository.saveTemplate(shop, {
+          id: current?.id ?? deterministicId,
+          name: starter.name,
+          kind: starter.kind,
+          pageSize: starter.pageSize,
+          state: "published",
+          source: starter.source,
+          revision: 1,
+          designTargetId: null,
+          designSpecificationRevision: null,
+          expectedDraftRevision: current?.draftRevision ?? null,
+        });
+        saved = true;
+        break;
+      } catch (error) {
+        if (!(error instanceof WorkflowConflictError)) throw error;
+      }
+    }
+    if (!saved)
+      throw new Error(`Could not seed Shopify starter template ${starter.id}`);
   }
+}
+
+export function findSystemTemplate(
+  templates: MerchantTemplate[],
+  key: string,
+): MerchantTemplate | undefined {
+  return templates.find((value) => {
+    for (const source of [value.published?.source, value.source]) {
+      if (!source) continue;
+      try {
+        if (
+          (JSON.parse(source) as { system?: { key?: unknown } }).system?.key ===
+          key
+        )
+          return true;
+      } catch {
+        // Try the other immutable/draft source before falling back to the ID.
+      }
+    }
+    return false;
+  });
+}
+
+function hasValidPublishedRevision(source: string, systemKey: string): boolean {
+  try {
+    const envelope = parseTemplateEnvelope(source);
+    const published = envelope.published;
+    return Boolean(
+      envelope.system?.key === systemKey &&
+      envelope.system.immutable === true &&
+      published &&
+      published.canonicalDigest ===
+        templateDigest(JSON.stringify(envelope.document)),
+    );
+  } catch {
+    return hasRecoverablePreContextPublication(source, systemKey);
+  }
+}
+
+function hasRecoverablePreContextPublication(
+  source: string,
+  systemKey: string,
+): boolean {
+  try {
+    const raw = JSON.parse(source) as Record<string, unknown> & {
+      published?: Record<string, unknown>;
+    };
+    const published = raw.published;
+    if (
+      !published ||
+      "piqaeAccountId" in published ||
+      "piqaeEnvironmentId" in published ||
+      !validPublicationId(published.piqaeTemplateId) ||
+      !validPublicationId(published.piqaeRevisionId) ||
+      typeof published.canonicalDigest !== "string" ||
+      !/^[a-f0-9]{64}$/.test(published.canonicalDigest)
+    )
+      return false;
+    const unowned = structuredClone(raw);
+    delete unowned.published;
+    const envelope = parseTemplateEnvelope(JSON.stringify(unowned));
+    return (
+      envelope.system?.key === systemKey &&
+      envelope.system.immutable === true &&
+      published.canonicalDigest ===
+        templateDigest(JSON.stringify(envelope.document))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function validPublicationId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 200 &&
+    !/[\s\u0000-\u001f\u007f]/.test(value)
+  );
 }

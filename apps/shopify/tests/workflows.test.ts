@@ -5,6 +5,7 @@ import {
   parseSettings,
   validateDocumentSource,
   WorkflowConflictError,
+  type MerchantTemplate,
 } from "../app/core/workflows.server";
 import {
   ASSET_LIMITS,
@@ -21,6 +22,48 @@ import {
 
 const alpha = "alpha.myshopify.com";
 const beta = "beta.myshopify.com";
+
+class CorruptedTemplateReadRepository extends MemoryWorkflowRepository {
+  private corruption?: {
+    id: string;
+    draftRevision: number;
+    source: string;
+  };
+
+  corruptTemplateRead(template: MerchantTemplate, source: string) {
+    this.corruption = {
+      id: template.id,
+      draftRevision: template.draftRevision,
+      source,
+    };
+  }
+
+  private corrupted(value: MerchantTemplate): MerchantTemplate {
+    if (
+      value.id !== this.corruption?.id ||
+      value.draftRevision !== this.corruption.draftRevision
+    )
+      return value;
+    return {
+      ...value,
+      source: this.corruption.source,
+      published: value.published
+        ? { ...value.published, source: this.corruption.source }
+        : null,
+    };
+  }
+
+  override async listTemplates(shop: string) {
+    return (await super.listTemplates(shop)).map((value) =>
+      this.corrupted(value),
+    );
+  }
+
+  override async getTemplate(shop: string, id: string) {
+    const value = await super.getTemplate(shop, id);
+    return value ? this.corrupted(value) : null;
+  }
+}
 
 describe("merchant workflow persistence", () => {
   it("keeps every resource tenant scoped", async () => {
@@ -185,6 +228,132 @@ describe("hybrid template authority", () => {
       ),
     ).toBe(true);
   });
+
+  it("seeds concurrently without creating replacement revisions", async () => {
+    const repository = new MemoryWorkflowRepository();
+    await Promise.all(
+      Array.from({ length: 12 }, () => seedStarterTemplates(repository, alpha)),
+    );
+    const templates = await repository.listTemplates(alpha);
+    expect(templates).toHaveLength(starterTemplates.length);
+    expect(templates.every((value) => value.revision === 1)).toBe(true);
+  });
+
+  it("retains exact immutable publication pins across restart reseeding", async () => {
+    const repository = new MemoryWorkflowRepository();
+    await seedStarterTemplates(repository, alpha);
+    const invoice = (await repository.listTemplates(alpha)).find(
+      (value) => parseTemplateEnvelope(value.source).system?.key === "invoice",
+    )!;
+    const envelope = parseTemplateEnvelope(invoice.source);
+    envelope.published = {
+      piqaeAccountId: "account_invoice",
+      piqaeEnvironmentId: null,
+      piqaeTemplateId: "template_invoice",
+      piqaeRevisionId: "revision_invoice",
+      canonicalDigest: templateDigest(JSON.stringify(envelope.document)),
+    };
+    const pinned = await repository.saveTemplate(alpha, {
+      ...invoice,
+      source: serializeTemplateEnvelope(envelope),
+      expectedDraftRevision: invoice.draftRevision,
+    });
+
+    await Promise.all(
+      Array.from({ length: 8 }, () => seedStarterTemplates(repository, alpha)),
+    );
+    const restarted = await repository.getTemplate(alpha, invoice.id);
+    expect(restarted).toEqual(pinned);
+    expect(
+      parseTemplateEnvelope(restarted!.published!.source).published,
+    ).toEqual(envelope.published);
+  });
+
+  it("never lets a duplicate system-key clone replace the deterministic owner", async () => {
+    const repository = new MemoryWorkflowRepository();
+    await seedStarterTemplates(repository, alpha);
+    const deterministic = (await repository.listTemplates(alpha)).find(
+      ({ id }) => id === "00000000-0000-4000-8000-000000000001",
+    )!;
+    const ownerEnvelope = parseTemplateEnvelope(deterministic.source);
+    ownerEnvelope.published = {
+      piqaeAccountId: "account_owner",
+      piqaeEnvironmentId: null,
+      piqaeTemplateId: "template_owner",
+      piqaeRevisionId: "revision_owner",
+      canonicalDigest: templateDigest(JSON.stringify(ownerEnvelope.document)),
+    };
+    const owner = await repository.saveTemplate(alpha, {
+      ...deterministic,
+      source: serializeTemplateEnvelope(ownerEnvelope),
+      expectedDraftRevision: deterministic.draftRevision,
+    });
+    const cloneEnvelope = parseTemplateEnvelope(starterTemplates[0]!.source);
+    cloneEnvelope.published = {
+      piqaeAccountId: "account_clone",
+      piqaeEnvironmentId: null,
+      piqaeTemplateId: "template_clone",
+      piqaeRevisionId: "revision_clone",
+      canonicalDigest: templateDigest(JSON.stringify(cloneEnvelope.document)),
+    };
+    await repository.saveTemplate(alpha, {
+      ...starterTemplates[0]!,
+      id: newWorkflowId(),
+      source: serializeTemplateEnvelope(cloneEnvelope),
+      state: "published",
+      revision: 1,
+    });
+
+    await seedStarterTemplates(repository, alpha);
+    expect(await repository.getTemplate(alpha, owner.id)).toEqual(owner);
+  });
+
+  it.each([
+    {
+      piqaeTemplateId: "template_invoice",
+      piqaeRevisionId: "",
+      canonicalDigest: "a".repeat(64),
+    },
+    {
+      piqaeTemplateId: "template_invoice",
+      piqaeRevisionId: "revision_invoice",
+      canonicalDigest: "a".repeat(64),
+    },
+    {
+      piqaeTemplateId: "template invoice",
+      piqaeRevisionId: "revision_invoice",
+      canonicalDigest: "current",
+    },
+  ])(
+    "fails closed and repairs a malformed publication pin",
+    async (published) => {
+      const repository = new CorruptedTemplateReadRepository();
+      await seedStarterTemplates(repository, alpha);
+      const invoice = (await repository.listTemplates(alpha)).find(
+        (value) =>
+          parseTemplateEnvelope(value.source).system?.key === "invoice",
+      )!;
+      const envelope = parseTemplateEnvelope(invoice.source);
+      envelope.published = {
+        piqaeAccountId: "account_invoice",
+        piqaeEnvironmentId: null,
+        ...published,
+        canonicalDigest:
+          published.canonicalDigest === "current"
+            ? templateDigest(JSON.stringify(envelope.document))
+            : published.canonicalDigest,
+      };
+      repository.corruptTemplateRead(invoice, JSON.stringify(envelope));
+
+      await seedStarterTemplates(repository, alpha);
+      const repaired = await repository.getTemplate(alpha, invoice.id);
+      expect(repaired?.source).toBe(starterTemplates[0]!.source);
+      expect(repaired?.published?.source).toBe(starterTemplates[0]!.source);
+      expect(
+        parseTemplateEnvelope(repaired!.published!.source).published,
+      ).toBeUndefined();
+    },
+  );
 
   it("builds a compact non-sensitive Shopify cache", async () => {
     const repository = new MemoryWorkflowRepository();
