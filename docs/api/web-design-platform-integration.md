@@ -268,13 +268,20 @@ different multi-request join. Use its fields as follows:
    gap, and marks that are actually present;
 4. compare stock geometry with `profile.summary.dimensions_mm` and block when
    it is absent or materially incompatible; and
-5. expose only portable profile facts such as media, source, colour, duplex,
+5. require the destination's `media_compatibility.status` to be `ready` and
+   show its actionable reasons otherwise; and
+6. expose only portable profile facts such as media, source, colour, duplex,
    and resolution.
 
 Do not expose or reproduce opaque PrintCore, DEVMODE, PrintTicket, PostScript,
 or vendor-driver settings. The installed driver remains authoritative. Driver
 capabilities and configured dimensions also cannot prove that an operator
 loaded the expected physical roll, sheet, tray, ink, or finishing hardware.
+The `loaded_media` member is evidence rather than a default: it includes the
+source, confidence, observation and expiry timestamps, and exact stock
+revision. Piqae authorizes a new handoff only from fresh `reported` or
+`operator_confirmed` evidence with current calibration. Absence, unknown or
+inferred confidence, and observations older than 15 minutes fail closed.
 
 ### Specification revision and saved designs
 
@@ -388,11 +395,25 @@ visual design against those editorial rules.
 For each user print action:
 
 1. authorize the account, target, design revision, quantity, and environment;
-2. re-check target readiness and the saved `specification_revision`;
+2. re-check target readiness, destination `media_compatibility`, and the saved
+   `specification_revision`;
 3. render and preflight the exact PDF;
 4. compute its byte length and SHA-256 digest;
 5. create and PUT a tenant-scoped upload; and
-6. create the job using `target_id` and a stable idempotency key.
+6. create the job using `target_id`, the current `specification_revision`, and
+   a stable idempotency key.
+
+PrintPacket target registration validates its declared paged, continuous, or
+label media against the explicit business-stock kind and geometry plus the
+immutable profile dimensions. Piqae pins the resolved binding/profile/stock
+revisions and revalidates them, the driver/profile state, and loaded-stock
+evidence after lease claim immediately before native responsibility can be
+offered. A fence failure is a durable `job.updated` terminal event with
+`target_configuration_changed`, `stock_not_loaded`, or
+`document_media_incompatible`; no native responsibility was accepted. After
+correction, the host must create an explicitly new attempt. This does not
+collapse PDF and printer-native workflows or silently substitute a generic
+profile.
 
 Prefer a target to a concrete printer when pre-acceptance failover is safe. Do
 not provide both. A useful idempotency key identifies one intended print

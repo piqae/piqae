@@ -1925,7 +1925,8 @@ async fn create_job_impl(
 ) -> Result<Response, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
     validate_create(&request, allow_reserved_metadata)?;
-    let destination = resolve_job_destination(&state, tenant, &request).await?;
+    let mut destination = resolve_job_destination(&state, tenant, &request).await?;
+    validate_printpacket_target_media(&state, tenant, &request, &mut destination).await?;
     let printer_native_metadata =
         validate_printer_native_job(&state, tenant, &request, &destination).await?;
     let resolved_ticket = validate_resolved_ticket(&state, tenant, &request, &destination).await?;
@@ -2051,6 +2052,67 @@ async fn create_job_impl(
             Ok((StatusCode::CREATED, Json(JobResponse::from(queued))).into_response())
         }
     }
+}
+
+async fn validate_printpacket_target_media(
+    state: &AppState,
+    tenant: TenantContext,
+    request: &CreateJobRequest,
+    destination: &mut ResolvedJobDestination,
+) -> Result<(), AppError> {
+    let Some(target_id) = request.target_id.as_deref() else {
+        return Ok(());
+    };
+    let Some(encoded_media) = request.metadata.get("piqae.document.media") else {
+        return Ok(());
+    };
+    let expected_revision = request
+        .metadata
+        .get("piqae.design_specification_revision")
+        .ok_or_else(|| {
+            AppError::conflict(
+                "design_specification_revision_required",
+                "Target PrintPacket jobs require the current design specification revision.",
+            )
+        })?;
+    let media =
+        serde_json::from_str::<printpacket_renderer::Media>(encoded_media).map_err(|_| {
+            AppError::invalid(
+                "invalid_document_media",
+                "Stored PrintPacket media is invalid.",
+            )
+        })?;
+    let binding = destination.binding.as_ref().ok_or_else(|| {
+        AppError::conflict(
+            "target_binding_changed",
+            "The target no longer resolves to an immutable profile binding.",
+        )
+    })?;
+    let fence = crate::routing::validate_printpacket_media_fence(
+        state,
+        tenant,
+        target_id,
+        &binding.id,
+        expected_revision,
+        &media,
+    )
+    .await?;
+    destination.metadata.insert(
+        "piqae.design_specification_revision".into(),
+        fence.specification_revision,
+    );
+    destination
+        .metadata
+        .insert("piqae.stock_id".into(), fence.stock_id);
+    destination.metadata.insert(
+        "piqae.stock_revision".into(),
+        fence.stock_revision.to_string(),
+    );
+    destination.metadata.insert(
+        "piqae.loaded_media_snapshot".into(),
+        fence.loaded_media_snapshot,
+    );
+    Ok(())
 }
 
 struct ResolvedJobDestination {
@@ -3147,6 +3209,69 @@ pub async fn agent_sync(
                 return Err(error.into());
             }
             break;
+        }
+        let execution_failure =
+            match crate::routing::printpacket_execution_failure(&state, tenant, &lease.job).await {
+                Ok(failure) => failure,
+                Err(error) => {
+                    let mut unreleased = vec![lease];
+                    unreleased.extend(leases);
+                    let _ = release_agent_lease_batch(&state, tenant, request.agent_id, unreleased)
+                        .await;
+                    return Err(error);
+                }
+            };
+        if let Some((reason, message)) = execution_failure {
+            let transition = match state
+                .repository
+                .fail_agent_lease_before_handoff(
+                    tenant.workspace_id,
+                    tenant.environment_id,
+                    request.agent_id,
+                    lease.job.id,
+                    lease.lease_id,
+                    &lease.lease_token,
+                    reason,
+                    message,
+                )
+                .await
+            {
+                Ok(transition) => transition,
+                Err(error) => {
+                    let mut unreleased = vec![lease];
+                    unreleased.extend(leases);
+                    let _ = release_agent_lease_batch(&state, tenant, request.agent_id, unreleased)
+                        .await;
+                    return Err(error.into());
+                }
+            };
+            match transition {
+                PreHandoffTransitionOutcome::Transitioned(transition) => {
+                    if let Err(error) = state
+                        .publish_idempotently(
+                            &transition.webhook_idempotency_key,
+                            tenant,
+                            "job.updated",
+                            &transition.job,
+                        )
+                        .await
+                    {
+                        let _ = release_agent_lease_batch(
+                            &state,
+                            tenant,
+                            request.agent_id,
+                            leases.collect(),
+                        )
+                        .await;
+                        return Err(error.into());
+                    }
+                }
+                PreHandoffTransitionOutcome::UnsafeLocalResponsibility => {
+                    // An acceptance raced this server-side revalidation. The
+                    // durable node now owns recovery; never rewind it here.
+                }
+            }
+            continue;
         }
         let preparation =
             match prepare_agent_offer_content(&state, tenant, &lease.job, &request.document_render)

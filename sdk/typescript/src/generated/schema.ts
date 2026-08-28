@@ -3825,6 +3825,7 @@ export interface components {
             /** Format: int64 */
             capability_revision: number;
             workflow?: components["schemas"]["ResourceRevision"] | null;
+            /** @description When present, validation requires exact active stock, compatible document page geometry, and fresh trusted loaded-stock evidence. */
             stock?: components["schemas"]["ResourceRevision"] | null;
             /** @default {} */
             portable_options?: components["schemas"]["JobOptions"];
@@ -3846,7 +3847,10 @@ export interface components {
             message: string;
         };
         PrintIntentValidation: {
-            /** @enum {string} */
+            /**
+             * @description operator_action_required means document and configuration validation passed but loaded-stock evidence is missing, stale, untrusted, or mismatched.
+             * @enum {string}
+             */
             status: "valid" | "invalid" | "operator_action_required";
             /** Format: int64 */
             capability_revision: number;
@@ -3993,6 +3997,11 @@ export interface components {
              *     PrintPacket or printer-native capability contract. The job remains
              *     blocked without lease retries until an authenticated capability
              *     report proves compatibility has been restored.
+             *     `target_configuration_changed`, `stock_not_loaded`, and
+             *     `document_media_incompatible` are server-side pre-handoff fences:
+             *     no native responsibility was accepted and the actionable event is
+             *     durable. Submit a new attempt only after correcting and preflighting
+             *     the destination; never infer that the original attempt printed.
              */
             reason: string | null;
             message: string | null;
@@ -4301,7 +4310,7 @@ export interface components {
         BindingReadiness: {
             binding: components["schemas"]["TargetBinding"];
             /** @enum {string} */
-            status: "ready" | "disabled" | "node_offline" | "destination_offline" | "destination_missing" | "needs_operator" | "profile_stale" | "driver_mismatch" | "dependency_missing" | "busy";
+            status: "ready" | "disabled" | "node_offline" | "destination_offline" | "destination_missing" | "needs_operator" | "profile_stale" | "driver_mismatch" | "dependency_missing" | "busy" | "stock_not_loaded" | "loaded_media_stale" | "loaded_media_untrusted" | "media_incompatible";
             reasons: string[];
         };
         TargetReadiness: {
@@ -4315,6 +4324,31 @@ export interface components {
             binding: components["schemas"]["TargetBinding"];
             printer: components["schemas"]["Printer"];
             profile: components["schemas"]["PrinterProfileSnapshot"];
+            media_compatibility: components["schemas"]["TargetMediaCompatibility"];
+        };
+        TargetMediaDimensions: {
+            width_mm: number;
+            height_mm: number;
+        };
+        TargetLoadedMediaEvidence: {
+            source: string;
+            /** @enum {string} */
+            confidence: "reported" | "operator_confirmed" | "inferred" | "unknown";
+            /** Format: date-time */
+            observed_at: string;
+            /**
+             * Format: date-time
+             * @description After this instant the observation cannot authorize a new native handoff.
+             */
+            fresh_until: string;
+            stock: components["schemas"]["ResourceRevision"] | null;
+        };
+        TargetMediaCompatibility: {
+            /** @enum {string} */
+            status: "ready" | "not_reported" | "stale" | "untrusted" | "incompatible";
+            reasons: string[];
+            profile_dimensions_mm: components["schemas"]["TargetMediaDimensions"] | null;
+            loaded_media: components["schemas"]["TargetLoadedMediaEvidence"] | null;
         };
         DesignSpecification: {
             target: components["schemas"]["Target"];
@@ -4860,6 +4894,8 @@ export interface components {
         PrintPacketPrintRequest: {
             printer_id?: string;
             target_id?: string;
+            /** @description Required with target_id. Must equal the latest target design-specification revision. */
+            specification_revision?: string;
             title: string;
             options?: components["schemas"]["JobOptions"];
             /** @default 1 */

@@ -984,6 +984,14 @@ async fn print_render(
             "Only a completed document render can be printed.",
         ));
     }
+    let document_media =
+        render_document_media(&state, tenant.workspace_id, tenant.environment_id, &render).await?;
+    if request.target_id.is_some() && request.specification_revision.is_none() {
+        return Err(AppError::conflict(
+            "design_specification_revision_required",
+            "Target printing requires the current design specification revision.",
+        ));
+    }
     let encrypted_key = render
         .artifact_object_key_ciphertext
         .as_deref()
@@ -1104,6 +1112,14 @@ async fn print_render(
     );
     metadata.insert("piqae.document.render_mode".into(), selected_mode.into());
     metadata.insert(
+        "piqae.document.media".into(),
+        serde_json::to_string(&document_media)
+            .map_err(|_| AppError::service_unavailable("document_media_serialization_failed"))?,
+    );
+    if let Some(revision) = request.specification_revision {
+        metadata.insert("piqae.design_specification_revision".into(), revision);
+    }
+    metadata.insert(
         "piqae.document.render_decision_reason".into(),
         decision_reason.into(),
     );
@@ -1146,6 +1162,32 @@ async fn print_render(
     .await
 }
 
+async fn render_document_media(
+    state: &AppState,
+    workspace_id: piqae_domain::WorkspaceId,
+    environment_id: piqae_domain::EnvironmentId,
+    render: &StoredDocumentRender,
+) -> Result<printpacket_renderer::Media, AppError> {
+    let revision = state
+        .repository
+        .get_document_revision(workspace_id, environment_id, &render.template_revision_id)
+        .await?;
+    let bytes = state
+        .document_secrets
+        .decrypt(
+            &document_aad(
+                &workspace_id.to_string(),
+                &environment_id.to_string(),
+                &revision.template_id,
+            ),
+            &revision.spec_ciphertext,
+        )
+        .map_err(|_| AppError::service_unavailable("document_decryption_failed"))?;
+    let document: PrintPacketV1 = serde_json::from_slice(&bytes)
+        .map_err(|_| AppError::service_unavailable("invalid_stored_document"))?;
+    Ok(document.media)
+}
+
 fn validate_render_cost(cost: Option<&RenderCost>) -> Result<(), AppError> {
     let Some(cost) = cost else {
         return Ok(());
@@ -1168,6 +1210,7 @@ fn validate_render_cost(cost: Option<&RenderCost>) -> Result<(), AppError> {
 struct PrintRenderRequest {
     printer_id: Option<String>,
     target_id: Option<String>,
+    specification_revision: Option<String>,
     title: String,
     #[serde(default)]
     options: JobOptions,

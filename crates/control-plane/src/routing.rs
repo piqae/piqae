@@ -11,12 +11,12 @@ use chrono::{DateTime, TimeDelta, Utc};
 use piqae_auth::Scope;
 use piqae_domain::{PrinterId, PrinterState};
 use piqae_storage_postgres::{
-    StoredAgent, StoredBindingReadiness, StoredPrintWorkflow, StoredStock, StoredTarget,
-    StoredTargetBinding, StoredTargetReadiness,
+    PrinterProfileSnapshot, StoredAgent, StoredBindingReadiness, StoredLoadedMedia,
+    StoredPrintWorkflow, StoredStock, StoredTarget, StoredTargetBinding, StoredTargetReadiness,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::str::FromStr;
 
 #[derive(Debug, Deserialize)]
@@ -530,14 +530,14 @@ async fn compute_target_readiness(
         .repository
         .get_target(tenant.workspace_id, tenant.environment_id, target_id)
         .await?;
-    let target_stock_available = if let Some(stock_id) = target.stock_id.as_deref() {
-        !state
-            .repository
-            .get_stock(tenant.workspace_id, tenant.environment_id, stock_id)
-            .await?
-            .archived
-    } else {
-        true
+    let target_stock = match target.stock_id.as_deref() {
+        Some(stock_id) => Some(
+            state
+                .repository
+                .get_stock(tenant.workspace_id, tenant.environment_id, stock_id)
+                .await?,
+        ),
+        None => None,
     };
     let bindings = state
         .repository
@@ -552,8 +552,11 @@ async fn compute_target_readiness(
         let mut reasons = Vec::new();
         let status = if !target.enabled || !binding.enabled {
             "disabled"
-        } else if !target_stock_available {
+        } else if target_stock.as_ref().is_some_and(|stock| stock.archived) {
             reasons.push("target_stock_is_archived".into());
+            "dependency_missing"
+        } else if target_stock.is_none() {
+            reasons.push("target_stock_not_configured".into());
             "dependency_missing"
         } else if !agents
             .iter()
@@ -570,7 +573,28 @@ async fn compute_target_readiness(
                 )
                 .await
             {
-                Ok(printer) => binding_printer_readiness(&target, &binding, &printer, &mut reasons),
+                Ok(printer) => {
+                    let base = binding_printer_readiness(&target, &binding, &printer, &mut reasons);
+                    if base == "ready" {
+                        let profile = printer.profiles.iter().find(|profile| {
+                            (profile.profile_id.as_str(), profile.revision)
+                                == (binding.profile_id.as_str(), binding.profile_revision)
+                        });
+                        let media = evaluate_binding_media(
+                            state,
+                            tenant,
+                            target_stock.as_ref(),
+                            &printer,
+                            profile,
+                            Utc::now(),
+                        )
+                        .await?;
+                        reasons.extend(media.reasons.iter().cloned());
+                        media.readiness_status()
+                    } else {
+                        base
+                    }
+                }
                 Err(RepositoryError::NotFound) => "destination_missing",
                 Err(error) => return Err(error.into()),
             }
@@ -600,18 +624,19 @@ async fn compute_target_readiness(
 
 #[derive(Debug, Serialize)]
 pub struct DesignSpecificationDestination {
-    binding: StoredTargetBinding,
-    printer: piqae_storage_postgres::StoredPrinter,
-    profile: piqae_storage_postgres::PrinterProfileSnapshot,
+    pub(crate) binding: StoredTargetBinding,
+    pub(crate) printer: piqae_storage_postgres::StoredPrinter,
+    pub(crate) profile: piqae_storage_postgres::PrinterProfileSnapshot,
+    pub(crate) media_compatibility: MediaCompatibility,
 }
 
 #[derive(Debug, Serialize)]
 pub struct DesignSpecificationResponse {
-    target: StoredTarget,
-    stock: Option<StoredStock>,
-    readiness: StoredTargetReadiness,
-    destinations: Vec<DesignSpecificationDestination>,
-    specification_revision: String,
+    pub(crate) target: StoredTarget,
+    pub(crate) stock: Option<StoredStock>,
+    pub(crate) readiness: StoredTargetReadiness,
+    pub(crate) destinations: Vec<DesignSpecificationDestination>,
+    pub(crate) specification_revision: String,
 }
 
 pub async fn design_specification(
@@ -620,9 +645,19 @@ pub async fn design_specification(
     Path(target_id): Path<String>,
 ) -> Result<Json<DesignSpecificationResponse>, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::PrintersRead).await?;
+    Ok(Json(
+        current_design_specification(&state, tenant, &target_id).await?,
+    ))
+}
+
+pub(crate) async fn current_design_specification(
+    state: &AppState,
+    tenant: crate::authentication::TenantContext,
+    target_id: &str,
+) -> Result<DesignSpecificationResponse, AppError> {
     let target = state
         .repository
-        .get_target(tenant.workspace_id, tenant.environment_id, &target_id)
+        .get_target(tenant.workspace_id, tenant.environment_id, target_id)
         .await?;
     let stock = match target.stock_id.as_deref() {
         Some(id) => Some(
@@ -633,10 +668,10 @@ pub async fn design_specification(
         ),
         None => None,
     };
-    let readiness = compute_target_readiness(&state, tenant, &target_id).await?;
+    let readiness = compute_target_readiness(state, tenant, target_id).await?;
     let bindings = state
         .repository
-        .list_target_bindings(tenant.workspace_id, tenant.environment_id, &target_id)
+        .list_target_bindings(tenant.workspace_id, tenant.environment_id, target_id)
         .await?;
     let mut destinations = Vec::with_capacity(bindings.len());
     for binding in bindings {
@@ -657,22 +692,529 @@ pub async fn design_specification(
             })
             .cloned()
             .ok_or(RepositoryError::NotFound)?;
+        let media_compatibility = evaluate_binding_media(
+            state,
+            tenant,
+            stock.as_ref(),
+            &printer,
+            Some(&profile),
+            Utc::now(),
+        )
+        .await?;
         destinations.push(DesignSpecificationDestination {
             binding,
             printer,
             profile,
+            media_compatibility,
         });
     }
     let canonical = serde_json::to_vec(&(&target, &stock, &readiness, &destinations))
         .map_err(|_| AppError::service_unavailable("design_specification_serialization_failed"))?;
     let revision = format!("spec_{:x}", Sha256::digest(canonical));
-    Ok(Json(DesignSpecificationResponse {
+    Ok(DesignSpecificationResponse {
         target,
         stock,
         readiness,
         destinations,
         specification_revision: revision,
+    })
+}
+
+/// Loaded-media observations are deliberately short-lived. They describe an
+/// operator or device observation, not an indefinitely valid printer default.
+pub(crate) const LOADED_MEDIA_FRESHNESS_SECONDS: i64 = 15 * 60;
+const MEDIA_DIMENSION_TOLERANCE_MM: f64 = 0.5;
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct MediaDimensions {
+    pub(crate) width_mm: f64,
+    pub(crate) height_mm: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct LoadedMediaStock {
+    pub(crate) id: String,
+    pub(crate) revision: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct LoadedMediaEvidence {
+    pub(crate) source: String,
+    pub(crate) confidence: String,
+    pub(crate) observed_at: DateTime<Utc>,
+    pub(crate) fresh_until: DateTime<Utc>,
+    pub(crate) stock: Option<LoadedMediaStock>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct MediaCompatibility {
+    pub(crate) status: &'static str,
+    pub(crate) reasons: Vec<String>,
+    pub(crate) profile_dimensions_mm: Option<MediaDimensions>,
+    pub(crate) loaded_media: Option<LoadedMediaEvidence>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PrintPacketMediaFence {
+    pub(crate) specification_revision: String,
+    pub(crate) stock_id: String,
+    pub(crate) stock_revision: u64,
+    pub(crate) loaded_media_snapshot: String,
+}
+
+pub(crate) async fn validate_printpacket_media_fence(
+    state: &AppState,
+    tenant: crate::authentication::TenantContext,
+    target_id: &str,
+    binding_id: &str,
+    expected_specification_revision: &str,
+    document_media: &printpacket_renderer::Media,
+) -> Result<PrintPacketMediaFence, AppError> {
+    let specification = current_design_specification(state, tenant, target_id).await?;
+    if specification.specification_revision != expected_specification_revision {
+        return Err(AppError::conflict(
+            "design_specification_changed",
+            "The target design specification changed; refresh and preflight the template again.",
+        ));
+    }
+    if specification.readiness.status != "ready" {
+        return Err(AppError::conflict(
+            "target_not_ready",
+            "The target has no binding with fresh, trusted loaded-stock evidence.",
+        ));
+    }
+    let destination = specification
+        .destinations
+        .iter()
+        .find(|destination| destination.binding.id == binding_id)
+        .ok_or_else(|| {
+            AppError::conflict(
+                "target_binding_changed",
+                "The selected target binding is no longer available.",
+            )
+        })?;
+    if destination.media_compatibility.status != "ready" {
+        return Err(AppError::conflict(
+            "target_media_not_ready",
+            "The selected binding does not have fresh, trusted loaded-stock evidence.",
+        ));
+    }
+    let stock = specification.stock.as_ref().ok_or_else(|| {
+        AppError::conflict(
+            "target_stock_not_configured",
+            "PrintPacket target printing requires an active stock revision.",
+        )
+    })?;
+    if !document_media_compatible(
+        document_media,
+        stock,
+        destination
+            .media_compatibility
+            .profile_dimensions_mm
+            .as_ref(),
+    ) {
+        return Err(AppError::conflict(
+            "document_media_incompatible",
+            "The PrintPacket media does not match the target stock and immutable profile dimensions.",
+        ));
+    }
+    let loaded = destination
+        .media_compatibility
+        .loaded_media
+        .as_ref()
+        .ok_or_else(|| AppError::conflict("target_media_not_ready", "Loaded stock is unknown."))?;
+    let loaded_media_snapshot = serde_json::to_string(loaded)
+        .map_err(|_| AppError::service_unavailable("loaded_media_serialization_failed"))?;
+    Ok(PrintPacketMediaFence {
+        specification_revision: specification.specification_revision,
+        stock_id: stock.id.clone(),
+        stock_revision: stock.revision,
+        loaded_media_snapshot,
+    })
+}
+
+fn document_media_compatible(
+    media: &printpacket_renderer::Media,
+    stock: &StoredStock,
+    profile: Option<&MediaDimensions>,
+) -> bool {
+    let Some(profile) = profile else {
+        return false;
+    };
+    let stock_width = stock
+        .attributes
+        .get("width_mm")
+        .and_then(serde_json::Value::as_f64);
+    let stock_height = stock
+        .attributes
+        .get("height_mm")
+        .or_else(|| stock.attributes.get("length_mm"))
+        .and_then(serde_json::Value::as_f64);
+    let kind = stock
+        .attributes
+        .get("kind")
+        .and_then(serde_json::Value::as_str);
+    let close = |left: f64, right: f64| (left - right).abs() <= MEDIA_DIMENSION_TOLERANCE_MM;
+    match media {
+        printpacket_renderer::Media::Paged {
+            size, orientation, ..
+        } => {
+            let (mut width, mut height) = match size {
+                printpacket_renderer::PageSize::A4 => (210.0, 297.0),
+                printpacket_renderer::PageSize::A5 => (148.0, 210.0),
+                printpacket_renderer::PageSize::Letter => (215.9, 279.4),
+            };
+            if matches!(orientation, printpacket_renderer::Orientation::Landscape) {
+                std::mem::swap(&mut width, &mut height);
+            }
+            kind == Some("sheet")
+                && stock_width.is_some_and(|value| close(value, width))
+                && stock_height.is_some_and(|value| close(value, height))
+                && close(profile.width_mm, width)
+                && close(profile.height_mm, height)
+        }
+        printpacket_renderer::Media::Continuous { width_mm, .. } => {
+            let width = f64::from(*width_mm);
+            matches!(kind, Some("roll" | "continuous" | "receipt"))
+                && stock_width.is_some_and(|value| close(value, width))
+                && close(profile.width_mm, width)
+        }
+        printpacket_renderer::Media::Label {
+            width_mm,
+            height_mm,
+            ..
+        } => {
+            let width = f64::from(*width_mm);
+            let height = f64::from(*height_mm);
+            matches!(kind, Some("label" | "roll_label"))
+                && stock_width.is_some_and(|value| close(value, width))
+                && stock_height.is_some_and(|value| close(value, height))
+                && close(profile.width_mm, width)
+                && close(profile.height_mm, height)
+        }
+    }
+}
+
+pub(crate) async fn printpacket_execution_failure(
+    state: &AppState,
+    tenant: crate::authentication::TenantContext,
+    job: &piqae_domain::Job,
+) -> Result<Option<(piqae_domain::JobFailureReason, &'static str)>, AppError> {
+    let Some(pins) = printpacket_execution_pins(&job.metadata) else {
+        return Ok(None);
+    };
+    let pins = match pins {
+        Ok(pins) => pins,
+        Err(failure) => return Ok(Some(failure)),
+    };
+    let Ok(media) = serde_json::from_str::<printpacket_renderer::Media>(pins.encoded_media) else {
+        return Ok(Some((
+            piqae_domain::JobFailureReason::DocumentMediaIncompatible,
+            "The pinned PrintPacket media is invalid; publish and submit a valid template revision.",
+        )));
+    };
+    let specification = current_design_specification(state, tenant, pins.target_id).await?;
+    let Some(stock) = specification.stock.as_ref() else {
+        return Ok(Some((
+            piqae_domain::JobFailureReason::TargetConfigurationChanged,
+            "The target stock is no longer configured; restore it and submit a new print attempt.",
+        )));
+    };
+    let destination = specification.destinations.iter().find(|destination| {
+        destination.binding.id == *pins.binding_id
+            && destination.binding.profile_id == *pins.profile_id
+            && destination.binding.profile_revision == pins.profile_revision
+            && destination.printer.id == job.printer_id
+    });
+    let Some(destination) = destination else {
+        return Ok(Some((
+            piqae_domain::JobFailureReason::TargetConfigurationChanged,
+            "The pinned target, printer, or immutable profile revision changed before native acceptance.",
+        )));
+    };
+    let target_or_binding_disabled = !specification.target.enabled || !destination.binding.enabled;
+    if target_or_binding_disabled
+        || destination.binding.agent_id != destination.printer.agent_id
+        || !destination.profile.published
+        || !matches!(destination.profile.status.as_deref(), Some("ready") | None)
+    {
+        return Ok(Some((
+            piqae_domain::JobFailureReason::TargetConfigurationChanged,
+            "The target, binding, driver, or immutable profile is no longer ready for native acceptance.",
+        )));
+    }
+    if stock.id != *pins.stock_id || stock.revision != pins.stock_revision {
+        return Ok(Some((
+            piqae_domain::JobFailureReason::TargetConfigurationChanged,
+            "The pinned stock revision changed before native acceptance; preflight and submit a new attempt.",
+        )));
+    }
+    if destination.media_compatibility.status != "ready" {
+        return Ok(Some((
+            piqae_domain::JobFailureReason::StockNotLoaded,
+            "Fresh trusted evidence no longer confirms the target stock is loaded in the pinned source.",
+        )));
+    }
+    if !document_media_compatible(
+        &media,
+        stock,
+        destination
+            .media_compatibility
+            .profile_dimensions_mm
+            .as_ref(),
+    ) {
+        return Ok(Some((
+            piqae_domain::JobFailureReason::DocumentMediaIncompatible,
+            "The PrintPacket media no longer matches the target stock and immutable profile dimensions.",
+        )));
+    }
+    if specification.specification_revision != *pins.specification_revision {
+        return Ok(Some((
+            piqae_domain::JobFailureReason::TargetConfigurationChanged,
+            "The target design specification changed before native acceptance; preflight and submit a new attempt.",
+        )));
+    }
+    Ok(None)
+}
+
+type ExecutionFailure = (piqae_domain::JobFailureReason, &'static str);
+
+struct PrintPacketExecutionPins<'a> {
+    target_id: &'a str,
+    binding_id: &'a str,
+    profile_id: &'a str,
+    profile_revision: u64,
+    specification_revision: &'a str,
+    stock_id: &'a str,
+    stock_revision: u64,
+    encoded_media: &'a str,
+}
+
+fn printpacket_execution_pins(
+    metadata: &BTreeMap<String, String>,
+) -> Option<Result<PrintPacketExecutionPins<'_>, ExecutionFailure>> {
+    let target_id = metadata.get("piqae.target_id")?;
+    let encoded_media = metadata.get("piqae.document.media")?;
+    let pins = (
+        metadata.get("piqae.binding_id"),
+        metadata.get("piqae.profile_id"),
+        metadata
+            .get("piqae.profile_revision")
+            .and_then(|value| value.parse::<u64>().ok()),
+        metadata.get("piqae.design_specification_revision"),
+        metadata.get("piqae.stock_id"),
+        metadata
+            .get("piqae.stock_revision")
+            .and_then(|value| value.parse::<u64>().ok()),
+    );
+    let (
+        Some(binding_id),
+        Some(profile_id),
+        Some(profile_revision),
+        Some(specification_revision),
+        Some(stock_id),
+        Some(stock_revision),
+    ) = pins
+    else {
+        return Some(Err((
+            piqae_domain::JobFailureReason::TargetConfigurationChanged,
+            "PrintPacket target execution pins are incomplete; refresh the destination and submit a new print attempt.",
+        )));
+    };
+    Some(Ok(PrintPacketExecutionPins {
+        target_id,
+        binding_id,
+        profile_id,
+        profile_revision,
+        specification_revision,
+        stock_id,
+        stock_revision,
+        encoded_media,
     }))
+}
+
+impl MediaCompatibility {
+    pub(crate) fn readiness_status(&self) -> &'static str {
+        match self.status {
+            "ready" => "ready",
+            "not_reported" => "stock_not_loaded",
+            "stale" => "loaded_media_stale",
+            "untrusted" => "loaded_media_untrusted",
+            _ => "media_incompatible",
+        }
+    }
+}
+
+pub(crate) async fn evaluate_binding_media(
+    state: &AppState,
+    tenant: crate::authentication::TenantContext,
+    stock: Option<&StoredStock>,
+    printer: &piqae_storage_postgres::StoredPrinter,
+    profile: Option<&PrinterProfileSnapshot>,
+    now: DateTime<Utc>,
+) -> Result<MediaCompatibility, AppError> {
+    let profile_dimensions_mm = profile.and_then(profile_dimensions);
+    let mut result = MediaCompatibility {
+        status: "incompatible",
+        reasons: Vec::new(),
+        profile_dimensions_mm,
+        loaded_media: None,
+    };
+    let Some(stock) = stock else {
+        result.reasons.push("target_stock_not_configured".into());
+        return Ok(result);
+    };
+    if stock.archived {
+        result.reasons.push("target_stock_is_archived".into());
+        return Ok(result);
+    }
+    let Some(profile) = profile else {
+        result.reasons.push("profile_revision_unavailable".into());
+        return Ok(result);
+    };
+    if profile.stock_id.as_deref() != Some(stock.id.as_str()) {
+        result
+            .reasons
+            .push("profile_stock_does_not_match_target".into());
+        return Ok(result);
+    }
+    if !stock_profile_dimensions_compatible(stock, result.profile_dimensions_mm.as_ref()) {
+        result
+            .reasons
+            .push("profile_dimensions_do_not_match_stock".into());
+        return Ok(result);
+    }
+
+    let observations = state
+        .repository
+        .list_loaded_media(tenant.workspace_id, tenant.environment_id, printer.id)
+        .await?;
+    let expected_source = profile_media_source(profile);
+    let selected = match expected_source.as_deref() {
+        Some(source) => observations
+            .iter()
+            .find(|observation| observation.source == source),
+        None if observations.len() == 1 => observations.first(),
+        None => None,
+    };
+    let Some(selected) = selected else {
+        result.status = "not_reported";
+        result.reasons.push(if expected_source.is_some() {
+            "loaded_media_not_reported_for_profile_source".into()
+        } else {
+            "profile_media_source_not_configured".into()
+        });
+        return Ok(result);
+    };
+    result.loaded_media = Some(loaded_media_evidence(selected));
+    if selected.observed_at + TimeDelta::seconds(LOADED_MEDIA_FRESHNESS_SECONDS) < now {
+        result.status = "stale";
+        result.reasons.push("loaded_media_observation_stale".into());
+        return Ok(result);
+    }
+    if !matches!(
+        selected.confidence.as_str(),
+        "reported" | "operator_confirmed"
+    ) {
+        result.status = "untrusted";
+        result
+            .reasons
+            .push("loaded_media_confidence_untrusted".into());
+        return Ok(result);
+    }
+    if selected.calibration_state != "current" {
+        result.status = "untrusted";
+        result
+            .reasons
+            .push("loaded_media_calibration_not_current".into());
+        return Ok(result);
+    }
+    if selected.stock_id.as_deref() != Some(stock.id.as_str())
+        || selected.stock_revision != Some(stock.revision)
+    {
+        result.status = "incompatible";
+        result
+            .reasons
+            .push("loaded_stock_revision_does_not_match_target".into());
+        return Ok(result);
+    }
+    result.status = "ready";
+    Ok(result)
+}
+
+fn profile_media_source(profile: &PrinterProfileSnapshot) -> Option<String> {
+    profile
+        .summary
+        .as_ref()
+        .and_then(|summary| summary.get("source"))
+        .and_then(serde_json::Value::as_str)
+        .or(profile.options.bin.as_deref())
+        .map(str::to_owned)
+}
+
+pub(crate) fn profile_dimensions(profile: &PrinterProfileSnapshot) -> Option<MediaDimensions> {
+    let dimensions = profile.summary.as_ref()?.get("dimensions_mm")?.as_array()?;
+    let width_mm = dimensions.first()?.as_f64()?;
+    let height_mm = dimensions.get(1)?.as_f64()?;
+    (width_mm.is_finite() && height_mm.is_finite() && width_mm > 0.0 && height_mm > 0.0).then_some(
+        MediaDimensions {
+            width_mm,
+            height_mm,
+        },
+    )
+}
+
+pub(crate) fn stock_profile_dimensions_compatible(
+    stock: &StoredStock,
+    profile: Option<&MediaDimensions>,
+) -> bool {
+    let Some(profile) = profile else {
+        return false;
+    };
+    let Some(width) = stock
+        .attributes
+        .get("width_mm")
+        .and_then(serde_json::Value::as_f64)
+    else {
+        return false;
+    };
+    if (width - profile.width_mm).abs() > MEDIA_DIMENSION_TOLERANCE_MM {
+        return false;
+    }
+    let height = stock
+        .attributes
+        .get("height_mm")
+        .or_else(|| stock.attributes.get("length_mm"))
+        .and_then(serde_json::Value::as_f64);
+    match stock
+        .attributes
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("roll" | "continuous" | "receipt") => height.is_none_or(|height| {
+            (height - profile.height_mm).abs() <= MEDIA_DIMENSION_TOLERANCE_MM
+        }),
+        Some("sheet" | "label" | "roll_label" | "card" | "envelope") => {
+            height.is_some_and(|height| {
+                (height - profile.height_mm).abs() <= MEDIA_DIMENSION_TOLERANCE_MM
+            })
+        }
+        _ => false,
+    }
+}
+
+fn loaded_media_evidence(observation: &StoredLoadedMedia) -> LoadedMediaEvidence {
+    LoadedMediaEvidence {
+        source: observation.source.clone(),
+        confidence: observation.confidence.clone(),
+        observed_at: observation.observed_at,
+        fresh_until: observation.observed_at + TimeDelta::seconds(LOADED_MEDIA_FRESHNESS_SECONDS),
+        stock: observation
+            .stock_id
+            .clone()
+            .zip(observation.stock_revision)
+            .map(|(id, revision)| LoadedMediaStock { id, revision }),
+    }
 }
 
 const NODE_HEARTBEAT_STALE_AFTER_SECONDS: i64 = 90;
@@ -790,6 +1332,89 @@ fn invalid_safe_override_set(values: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stock(kind: &str, width_mm: f64, height_mm: Option<f64>) -> StoredStock {
+        StoredStock {
+            id: "stk_test".into(),
+            revision: 3,
+            name: "Test stock".into(),
+            sku: None,
+            description: None,
+            attributes: serde_json::json!({
+                "kind": kind,
+                "width_mm": width_mm,
+                "height_mm": height_mm,
+            }),
+            archived: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn printpacket_media_must_match_stock_and_immutable_profile_geometry() {
+        let profile = MediaDimensions {
+            width_mm: 100.0,
+            height_mm: 50.0,
+        };
+        let label = printpacket_renderer::Media::Label {
+            width_mm: 100.0,
+            height_mm: 50.0,
+            margins: printpacket_renderer::Edges {
+                top_mm: 0.0,
+                right_mm: 0.0,
+                bottom_mm: 0.0,
+                left_mm: 0.0,
+            },
+        };
+        assert!(document_media_compatible(
+            &label,
+            &stock("label", 100.0, Some(50.0)),
+            Some(&profile),
+        ));
+        assert!(!document_media_compatible(
+            &label,
+            &stock("label", 102.0, Some(50.0)),
+            Some(&profile),
+        ));
+        assert!(!document_media_compatible(
+            &label,
+            &stock("sheet", 100.0, Some(50.0)),
+            Some(&profile),
+        ));
+        let mut incomplete_stock = stock("label", 100.0, None);
+        incomplete_stock.attributes = serde_json::json!({
+            "kind": "label",
+            "width_mm": 100.0,
+        });
+        assert!(!document_media_compatible(
+            &label,
+            &incomplete_stock,
+            Some(&profile),
+        ));
+    }
+
+    #[test]
+    fn continuous_media_compares_width_without_inventing_a_cut_length() {
+        let profile = MediaDimensions {
+            width_mm: 80.0,
+            height_mm: 200.0,
+        };
+        let receipt = printpacket_renderer::Media::Continuous {
+            width_mm: 80.0,
+            margins: printpacket_renderer::Edges {
+                top_mm: 2.0,
+                right_mm: 2.0,
+                bottom_mm: 2.0,
+                left_mm: 2.0,
+            },
+        };
+        assert!(document_media_compatible(
+            &receipt,
+            &stock("receipt", 80.0, None),
+            Some(&profile),
+        ));
+    }
 
     #[test]
     fn name_limits_count_unicode_characters_not_bytes() {

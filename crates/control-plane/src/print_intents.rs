@@ -398,6 +398,7 @@ async fn validate_for_tenant(
         .await?;
     let mut errors = Vec::new();
     let mut intent = intent;
+    let mut pinned_profile: Option<(String, u64)> = None;
     if intent.capability_revision == 0 || intent.capability_revision != printer.capability_revision
     {
         errors.push(finding(
@@ -450,6 +451,7 @@ async fn validate_for_tenant(
                     )),
                     _ => {}
                 }
+                pinned_profile = workflow.profile_id.clone().zip(workflow.profile_revision);
                 if workflow.stock_id.is_some() != workflow.stock_revision.is_some() {
                     errors.push(finding(
                         "workflow_stock_invalid",
@@ -567,7 +569,41 @@ async fn validate_for_tenant(
             .get_stock(workspace_id, environment_id, &stock.id)
             .await
         {
-            Ok(current) if current.revision == stock.revision && !current.archived => {}
+            Ok(current) if current.revision == stock.revision && !current.archived => {
+                if !document_manifest_matches_stock(&intent.document_manifest, &current) {
+                    errors.push(finding(
+                        "document_media_incompatible",
+                        "document_manifest.page_boxes",
+                        "Document page geometry does not match the explicit stock kind and dimensions.",
+                    ));
+                }
+                if let Some((profile_id, profile_revision)) = pinned_profile.as_ref()
+                    && !printer.profiles.iter().any(|profile| {
+                        profile.profile_id == *profile_id
+                            && profile.revision == *profile_revision
+                            && crate::routing::stock_profile_dimensions_compatible(
+                                &current,
+                                crate::routing::profile_dimensions(profile).as_ref(),
+                            )
+                    })
+                {
+                    errors.push(finding(
+                        "profile_media_incompatible",
+                        "workflow",
+                        "The workflow's immutable profile dimensions do not match the stock.",
+                    ));
+                }
+                validate_loaded_stock(
+                    state,
+                    workspace_id,
+                    environment_id,
+                    printer_id,
+                    options.bin.as_deref(),
+                    stock,
+                    &mut errors,
+                )
+                .await?;
+            }
             _ => errors.push(finding(
                 "stock_revision_unavailable",
                 "stock",
@@ -577,12 +613,126 @@ async fn validate_for_tenant(
     }
     let status = if errors.is_empty() {
         "valid"
+    } else if errors.iter().all(|finding| {
+        matches!(
+            finding.get("code").and_then(Value::as_str),
+            Some(
+                "loaded_media_not_reported"
+                    | "loaded_media_stale"
+                    | "loaded_media_untrusted"
+                    | "loaded_stock_mismatch"
+            )
+        )
+    }) {
+        "operator_action_required"
     } else {
         "invalid"
     };
     Ok(
         json!({"status":status,"capability_revision":printer.capability_revision,"errors":errors,"warnings":[],"normalized_intent":if errors.is_empty() { serde_json::to_value(intent)? } else { Value::Null }}),
     )
+}
+
+async fn validate_loaded_stock(
+    state: &AppState,
+    workspace_id: piqae_domain::WorkspaceId,
+    environment_id: piqae_domain::EnvironmentId,
+    printer_id: PrinterId,
+    expected_source: Option<&str>,
+    stock: &ResourceRevision,
+    errors: &mut Vec<Value>,
+) -> Result<(), AppError> {
+    let observations = state
+        .repository
+        .list_loaded_media(workspace_id, environment_id, printer_id)
+        .await?;
+    let observation = match expected_source {
+        Some(source) => observations
+            .iter()
+            .find(|observation| observation.source == source),
+        None if observations.len() == 1 => observations.first(),
+        None => None,
+    };
+    let Some(observation) = observation else {
+        errors.push(finding(
+            "loaded_media_not_reported",
+            "stock",
+            "No loaded-stock evidence exists for the selected media source.",
+        ));
+        return Ok(());
+    };
+    if observation.observed_at + Duration::seconds(crate::routing::LOADED_MEDIA_FRESHNESS_SECONDS)
+        < Utc::now()
+    {
+        errors.push(finding(
+            "loaded_media_stale",
+            "stock",
+            "Loaded-stock evidence expired and must be observed again.",
+        ));
+    } else if !matches!(
+        observation.confidence.as_str(),
+        "reported" | "operator_confirmed"
+    ) || observation.calibration_state != "current"
+    {
+        errors.push(finding(
+            "loaded_media_untrusted",
+            "stock",
+            "Loaded-stock evidence is inferred, unknown, or not currently calibrated.",
+        ));
+    } else if observation.stock_id.as_deref() != Some(stock.id.as_str())
+        || observation.stock_revision != Some(stock.revision)
+    {
+        errors.push(finding(
+            "loaded_stock_mismatch",
+            "stock",
+            "The observed loaded stock does not match the requested immutable stock revision.",
+        ));
+    }
+    Ok(())
+}
+
+fn document_manifest_matches_stock(
+    manifest: &Value,
+    stock: &piqae_storage_postgres::StoredStock,
+) -> bool {
+    const TOLERANCE_MM: f64 = 0.5;
+    let Some(kind) = stock.attributes.get("kind").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(stock_width) = stock.attributes.get("width_mm").and_then(Value::as_f64) else {
+        return false;
+    };
+    let stock_height = stock
+        .attributes
+        .get("height_mm")
+        .or_else(|| stock.attributes.get("length_mm"))
+        .and_then(Value::as_f64);
+    let Some(page_boxes) = manifest.get("page_boxes").and_then(Value::as_array) else {
+        return false;
+    };
+    if page_boxes.is_empty() {
+        return false;
+    }
+    let close = |left: f64, right: f64| (left - right).abs() <= TOLERANCE_MM;
+    page_boxes.iter().all(|page| {
+        let Some(width) = page.get("width_mm").and_then(Value::as_f64) else {
+            return false;
+        };
+        let Some(height) = page.get("height_mm").and_then(Value::as_f64) else {
+            return false;
+        };
+        match kind {
+            "roll" | "continuous" | "receipt" => close(width, stock_width),
+            "sheet" | "card" | "envelope" => stock_height.is_some_and(|stock_height| {
+                (close(width, stock_width) && close(height, stock_height))
+                    || (close(width, stock_height) && close(height, stock_width))
+            }),
+            "label" | "roll_label" => stock_height.is_some_and(|stock_height| {
+                close(width, stock_width) && close(height, stock_height)
+            }),
+            _ => false,
+        }
+    })
 }
 
 fn finding(code: &str, path: &str, message: &str) -> Value {

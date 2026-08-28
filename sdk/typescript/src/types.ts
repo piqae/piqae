@@ -43,7 +43,10 @@ export type EvaluatePrintPacketRenderReadiness = components['schemas']['Evaluate
 export type PrintPacketRenderReadiness = components['schemas']['PrintPacketRenderReadiness'];
 export type PrintPacketPrintRequest =
   & { title: string; options?: JobOptions; deliveries?: number; render_policy?: PrintPacketRenderPolicy; render_cost?: PrintPacketRenderCost }
-  & ({ printer_id: PiqaeId; target_id?: never } | { target_id: PiqaeId; printer_id?: never });
+  & (
+    | { printer_id: PiqaeId; target_id?: never; specification_revision?: never }
+    | { target_id: PiqaeId; printer_id?: never; specification_revision: string }
+  );
 export type CreatePrintPacketPreview = components['schemas']['CreatePrintPacketPreview'];
 export type PrintPacketPreview = components['schemas']['PrintPacketPreview'];
 export type ApprovedPrintPacketPreview = components['schemas']['ApprovedPrintPacketPreview'];
@@ -683,7 +686,11 @@ export type BindingReadinessStatus =
   | 'profile_stale'
   | 'driver_mismatch'
   | 'dependency_missing'
-  | 'busy';
+  | 'busy'
+  | 'stock_not_loaded'
+  | 'loaded_media_stale'
+  | 'loaded_media_untrusted'
+  | 'media_incompatible';
 
 export interface BindingReadiness {
   binding: TargetBinding;
@@ -703,6 +710,28 @@ export interface DesignSpecificationDestination {
   printer: Printer;
   /** Exact immutable profile revision selected by the binding. */
   profile: PrinterProfileSnapshot;
+  media_compatibility: TargetMediaCompatibility;
+}
+
+export interface TargetMediaDimensions {
+  width_mm: number;
+  height_mm: number;
+}
+
+export interface TargetLoadedMediaEvidence {
+  source: string;
+  confidence: 'reported' | 'operator_confirmed' | 'inferred' | 'unknown';
+  observed_at: string;
+  /** After this instant the observation cannot authorize a new native handoff. */
+  fresh_until: string;
+  stock: { id: PiqaeId; revision: number } | null;
+}
+
+export interface TargetMediaCompatibility {
+  status: 'ready' | 'not_reported' | 'stale' | 'untrusted' | 'incompatible';
+  reasons: string[];
+  profile_dimensions_mm: TargetMediaDimensions | null;
+  loaded_media: TargetLoadedMediaEvidence | null;
 }
 
 /** One read model for sizing an editor canvas and checking production readiness. */

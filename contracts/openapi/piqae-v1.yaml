@@ -5630,6 +5630,7 @@ components:
             - { $ref: "#/components/schemas/ResourceRevision" }
             - { type: "null" }
         stock:
+          description: When present, validation requires exact active stock, compatible document page geometry, and fresh trusted loaded-stock evidence.
           oneOf:
             - { $ref: "#/components/schemas/ResourceRevision" }
             - { type: "null" }
@@ -5662,7 +5663,10 @@ components:
       additionalProperties: false
       required: [status, capability_revision, errors, warnings]
       properties:
-        status: { type: string, enum: [valid, invalid, operator_action_required] }
+        status:
+          type: string
+          enum: [valid, invalid, operator_action_required]
+          description: operator_action_required means document and configuration validation passed but loaded-stock evidence is missing, stale, untrusted, or mismatched.
         capability_revision: { type: integer, format: int64, minimum: 1 }
         errors: { type: array, maxItems: 128, items: { $ref: "#/components/schemas/PrintIntentFinding" } }
         warnings: { type: array, maxItems: 128, items: { $ref: "#/components/schemas/PrintIntentFinding" } }
@@ -5908,6 +5912,11 @@ components:
             PrintPacket or printer-native capability contract. The job remains
             blocked without lease retries until an authenticated capability
             report proves compatibility has been restored.
+            `target_configuration_changed`, `stock_not_loaded`, and
+            `document_media_incompatible` are server-side pre-handoff fences:
+            no native responsibility was accepted and the actionable event is
+            durable. Submit a new attempt only after correcting and preflighting
+            the destination; never infer that the original attempt printed.
         message:
           type: [string, "null"]
         agent_id:
@@ -6280,7 +6289,7 @@ components:
         status:
           type: string
           enum:
-            [ready, disabled, node_offline, destination_offline, destination_missing, needs_operator, profile_stale, driver_mismatch, dependency_missing, busy]
+            [ready, disabled, node_offline, destination_offline, destination_missing, needs_operator, profile_stale, driver_mismatch, dependency_missing, busy, stock_not_loaded, loaded_media_stale, loaded_media_untrusted, media_incompatible]
         reasons:
           type: array
           items: { type: string }
@@ -6299,11 +6308,55 @@ components:
     DesignSpecificationDestination:
       type: object
       additionalProperties: false
-      required: [binding, printer, profile]
+      required: [binding, printer, profile, media_compatibility]
       properties:
         binding: { $ref: "#/components/schemas/TargetBinding" }
         printer: { $ref: "#/components/schemas/Printer" }
         profile: { $ref: "#/components/schemas/PrinterProfileSnapshot" }
+        media_compatibility: { $ref: "#/components/schemas/TargetMediaCompatibility" }
+    TargetMediaDimensions:
+      type: object
+      additionalProperties: false
+      required: [width_mm, height_mm]
+      properties:
+        width_mm: { type: number, exclusiveMinimum: 0 }
+        height_mm: { type: number, exclusiveMinimum: 0 }
+    TargetLoadedMediaEvidence:
+      type: object
+      additionalProperties: false
+      required: [source, confidence, observed_at, fresh_until, stock]
+      properties:
+        source: { type: string, minLength: 1, maxLength: 255 }
+        confidence: { type: string, enum: [reported, operator_confirmed, inferred, unknown] }
+        observed_at: { type: string, format: date-time }
+        fresh_until:
+          type: string
+          format: date-time
+          description: After this instant the observation cannot authorize a new native handoff.
+        stock:
+          oneOf:
+            - { $ref: "#/components/schemas/ResourceRevision" }
+            - { type: "null" }
+    TargetMediaCompatibility:
+      type: object
+      additionalProperties: false
+      required: [status, reasons, profile_dimensions_mm, loaded_media]
+      properties:
+        status:
+          type: string
+          enum: [ready, not_reported, stale, untrusted, incompatible]
+        reasons:
+          type: array
+          maxItems: 32
+          items: { type: string, maxLength: 255 }
+        profile_dimensions_mm:
+          oneOf:
+            - { $ref: "#/components/schemas/TargetMediaDimensions" }
+            - { type: "null" }
+        loaded_media:
+          oneOf:
+            - { $ref: "#/components/schemas/TargetLoadedMediaEvidence" }
+            - { type: "null" }
     DesignSpecification:
       type: object
       additionalProperties: false
@@ -6888,6 +6941,11 @@ components:
       properties:
         printer_id: { type: string }
         target_id: { type: string }
+        specification_revision:
+          type: string
+          minLength: 6
+          maxLength: 80
+          description: Required with target_id. Must equal the latest target design-specification revision.
         title: { type: string, minLength: 1, maxLength: 255 }
         options: { $ref: "#/components/schemas/JobOptions" }
         deliveries: { type: integer, minimum: 1, maximum: 100, default: 1 }
@@ -6896,7 +6954,7 @@ components:
       oneOf:
         - required: [printer_id]
           not: { required: [target_id] }
-        - required: [target_id]
+        - required: [target_id, specification_revision]
           not: { required: [printer_id] }
     PrintPacketRenderPolicy:
       type: string
