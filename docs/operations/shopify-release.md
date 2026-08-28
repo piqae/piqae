@@ -82,6 +82,7 @@ the repository source. Enable GitHub check-suite waiting and these watch paths:
 ```text
 /apps/shopify/**
 /sdk/typescript/**
+/sdk/printpacket/**
 /deploy/docker/Dockerfile.shopify
 /railway.shopify.toml
 /package.json

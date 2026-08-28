@@ -39,7 +39,11 @@ class CiReleaseContractTest(unittest.TestCase):
         )
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         xtask = (ROOT / "xtask/src/main.rs").read_text(encoding="utf-8")
+        railway_runbook = (
+            ROOT / "docs/operations/shopify-release.md"
+        ).read_text(encoding="utf-8")
         self.assertIn(clean_target, workflow)
+        self.assertIn("/sdk/printpacket/**", railway_runbook)
         for argument in (
             '"docker"',
             '"build"',

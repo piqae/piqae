@@ -135,6 +135,8 @@ def classify(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
             selected["release_tooling"] = True
         if path == "deploy/docker/Dockerfile.shopify":
             selected["release_tooling"] = True
+        if path == "docs/operations/shopify-release.md":
+            selected["release_tooling"] = True
 
     return selected
 
