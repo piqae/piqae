@@ -133,28 +133,97 @@ export function validateAssets(assets: ExternalAsset[]) {
 export function validatePrintPacket(document: PrintPacket): void {
   if (document?.format !== "printpacket/v1" || !Array.isArray(document.body))
     throw new Error("Document must use printpacket/v1");
+  validateMedia(document.media);
+  validateRegion(document.header);
+  validateRegion(document.footer);
   let count = 0;
   const walk = (blocks: Block[], depth: number) => {
     if (depth > 12) throw new Error("Document nesting exceeds 12 levels");
     for (const block of blocks) {
+      if (!block || typeof block !== "object")
+        throw new Error("Document block is invalid");
       if (++count > 2_000) throw new Error("Document exceeds 2,000 blocks");
-      if ("children" in block) walk(block.children, depth + 1);
+      if ("children" in block) {
+        if (!Array.isArray(block.children))
+          throw new Error("Document block children are invalid");
+        walk(block.children, depth + 1);
+      }
       if (block.type === "conditional") {
+        if (!Array.isArray(block.then) || !Array.isArray(block.else ?? []))
+          throw new Error("Document conditional branches are invalid");
         walk(block.then, depth + 1);
         walk(block.else ?? [], depth + 1);
       }
     }
   };
-  walk(
-    [
-      ...(document.header?.first ?? []),
-      ...(document.header?.default ?? []),
-      ...document.body,
-      ...(document.footer?.default ?? []),
-      ...(document.footer?.last ?? []),
-    ],
-    0,
-  );
+  const regions = documentRegions(document);
+  walk(regions, 0);
+  if (document.media.kind !== "paged" && blocksHavePageBreak(regions))
+    throw new Error(
+      `Page breaks are not supported on ${document.media.kind} media`,
+    );
+}
+
+function validateMedia(media: PrintPacket["media"] | undefined) {
+  if (!media || typeof media !== "object")
+    throw new Error("Document media is invalid");
+  if (media.kind === "paged") {
+    if (
+      !["a4", "a5", "letter"].includes(media.size) ||
+      (media.orientation !== undefined &&
+        !["portrait", "landscape"].includes(media.orientation))
+    )
+      throw new Error("Document media is invalid");
+    return;
+  }
+  if (
+    media.kind === "continuous" &&
+    Number.isFinite(media.width_mm) &&
+    media.width_mm > 0
+  )
+    return;
+  if (
+    media.kind === "label" &&
+    Number.isFinite(media.width_mm) &&
+    media.width_mm > 0 &&
+    Number.isFinite(media.height_mm) &&
+    media.height_mm > 0
+  )
+    return;
+  throw new Error("Document media is invalid");
+}
+
+function validateRegion(region: PrintPacket["header"] | undefined) {
+  if (region === undefined) return;
+  if (
+    !region ||
+    typeof region !== "object" ||
+    Array.isArray(region) ||
+    Object.values(region).some((blocks) => !Array.isArray(blocks))
+  )
+    throw new Error("Document page region is invalid");
+}
+
+export function documentHasPageBreak(document: PrintPacket): boolean {
+  return blocksHavePageBreak(documentRegions(document));
+}
+
+function documentRegions(document: PrintPacket): Block[] {
+  return [
+    ...Object.values(document.header ?? {}).flat(),
+    ...document.body,
+    ...Object.values(document.footer ?? {}).flat(),
+  ];
+}
+
+function blocksHavePageBreak(blocks: Block[]): boolean {
+  return blocks.some((block) => {
+    if (block.type === "page_break") return true;
+    if ("children" in block && blocksHavePageBreak(block.children)) return true;
+    return block.type === "conditional"
+      ? blocksHavePageBreak(block.then) || blocksHavePageBreak(block.else ?? [])
+      : false;
+  });
 }
 export function removeSystemOwnership(envelope: TemplateEnvelope) {
   delete envelope.system;

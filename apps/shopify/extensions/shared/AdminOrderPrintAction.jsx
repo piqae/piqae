@@ -18,6 +18,15 @@ export function newInteractionId(orderIds) {
   return `${resource || "orders"}-${Date.now().toString(36)}-${interactionSequence.toString(36)}`;
 }
 
+export function stableOptionKey(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
 class PrintActionErrorBoundary extends Component {
   state = { error: "" };
 
@@ -63,47 +72,42 @@ export function chooseDefault(items) {
   );
 }
 
+export function targetForDocument(document, targets) {
+  if (!canUsePublishedBinding(document)) return undefined;
+  const allowed = targets.filter(
+    (target) =>
+      target.eligible &&
+      (!document?.compatibilityKnown ||
+        document.compatibleTargetIds.includes(target.id)),
+  );
+  if (document?.designTargetId)
+    return allowed.find(({ id }) => id === document.designTargetId);
+  return undefined;
+}
+
+export function canUsePublishedBinding(document) {
+  return Boolean(
+    document?.targetBindingStatus === "ready" &&
+    document.designTargetId &&
+    document.designSpecificationRevision,
+  );
+}
+
 export function renderPolicySummary(policy) {
   if (policy === "cloud_only")
     return "Cloud rendering is required. The exact preview PDF is sent to the printer.";
   if (policy === "prefer_node")
     return "A ready compatible node is preferred. Piqae safely falls back to the exact preview PDF.";
   if (policy === "require_node")
-    return "Node rendering is required. Printing stays blocked until a compatible selected node can accept the exact render.";
+    return "Node rendering is required. Piqae checks every compatible target binding at submission and fails closed if none can accept the exact render.";
   return "Piqae automatically selects the fastest compatible path for this document and destination.";
 }
 
-export function canUseDestinationForPolicy(destination, policy) {
-  if (!destination?.eligible) return false;
-  return policy !== "require_node" || destination.nodeRendering?.ready === true;
-}
-
-export function nodeReadinessMessage(readiness) {
-  if (!readiness) return "Checking node renderer and resources…";
-  const missing = readiness.missing_resources?.length ?? 0;
-  if (missing > 0)
-    return `Warming ${missing} required ${missing === 1 ? "resource" : "resources"}`;
-  if (readiness.ready) return "Ready · required resources cached";
-  if (readiness.reason === "renderer_abi_unavailable")
-    return "This node needs a compatible document renderer";
-  if (readiness.reason === "resource_media_type_unsupported")
-    return "This node does not support a required image type";
-  if (readiness.reason === "resources_not_cached")
-    return "Required renderer resources are not cached yet";
-  return readiness.reason ?? "Node rendering readiness is unavailable";
-}
-
-export function nodeFallbackWarning(readiness, policy) {
-  if (
-    !readiness ||
-    readiness.ready ||
-    policy === "cloud_only" ||
-    policy === "require_node"
-  )
-    return null;
-  if (readiness.reason === "renderer_abi_unavailable")
-    return "This node needs the latest Piqae document renderer. This print will continue using the exact cloud-rendered preview PDF.";
-  return "Node rendering is unavailable for this document. This print will continue using the exact cloud-rendered preview PDF.";
+export function canUseDestinationForPolicy(destination, _policy) {
+  // Target print is authoritative: core evaluates every exact binding against
+  // renderer capability and topology at handoff. A printer-only preflight here
+  // would check the wrong binding when a compatible standby is available.
+  return Boolean(destination?.eligible);
 }
 
 export async function loadWithTimeout(
@@ -135,11 +139,11 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   const [options, setOptions] = useState(null);
   const [documentId, setDocumentId] = useState("");
   const [destinationId, setDestinationId] = useState("");
+  const [targetSearch, setTargetSearch] = useState("");
   const [state, setState] = useState("loading");
   const [error, setError] = useState("");
   const [result, setResult] = useState("");
   const [preview, setPreview] = useState(null);
-  const [nodeReadiness, setNodeReadiness] = useState(null);
   const requestSequence = useRef(0);
   const previewSequence = useRef(0);
   const interactionId = useRef(newInteractionId(orderIds));
@@ -156,7 +160,7 @@ function AdminOrderPrintActionContent({ bulk = false }) {
       if (sequence !== requestSequence.current) return;
       const defaultDocument = chooseDefault(value.documents ?? []);
       const defaultDestination = chooseDefault(
-        (value.destinations ?? []).filter((item) => item.eligible),
+        (value.targets ?? []).filter((item) => item.eligible),
       );
       setOptions(value);
       setDocumentId(defaultDocument?.id ?? "");
@@ -179,6 +183,25 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   const selectedDocument = documentId
     ? options?.documents?.find(({ id }) => id === documentId)
     : undefined;
+  const allEligibleTargets =
+    options?.targets?.filter((item) => item.eligible) ?? [];
+  const compatibleTargets = allEligibleTargets.filter(
+    (target) =>
+      (!selectedDocument?.compatibilityKnown ||
+        selectedDocument.compatibleTargetIds.includes(target.id)) &&
+      `${target.name} ${target.stock?.name ?? ""} ${target.destinations?.map(({ printerName }) => printerName).join(" ") ?? ""}`
+        .toLowerCase()
+        .includes(targetSearch.toLowerCase()),
+  );
+  const selectedTarget = options?.targets?.find(
+    ({ id }) => id === destinationId,
+  );
+  useEffect(() => {
+    if (!selectedDocument || !options?.targets) return;
+    setDestinationId(
+      targetForDocument(selectedDocument, options.targets)?.id ?? "",
+    );
+  }, [selectedDocument?.id, options]);
   useEffect(() => {
     if (!options?.linked || !selectedDocument || orderIds.length === 0) return;
     const sequence = ++previewSequence.current;
@@ -219,39 +242,6 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   const src = preview?.artifactUrl ?? PRINT_PLACEHOLDER_URL;
 
   useEffect(() => {
-    setNodeReadiness(null);
-    const policy = options?.renderExecutionPolicy ?? "automatic";
-    if (!preview || !destinationId || policy === "cloud_only") return;
-    const sequence = ++requestSequence.current;
-    loadWithTimeout((signal) =>
-      authorizedJson("/api/print/admin/readiness", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          renderId: preview.renderId,
-          printerId: destinationId,
-          renderCost: preview.renderCost,
-        }),
-        signal,
-      }),
-    )
-      .then((value) => {
-        if (sequence === requestSequence.current) setNodeReadiness(value);
-      })
-      .catch((cause) => {
-        if (sequence !== requestSequence.current) return;
-        setNodeReadiness({
-          destination: {
-            supported: false,
-            ready: false,
-            reason: messageForLoadError(cause),
-            missing_resources: [],
-          },
-        });
-      });
-  }, [preview?.renderId, destinationId, options?.renderExecutionPolicy]);
-
-  useEffect(() => {
     if (!preview) return;
     return () => {
       if (approvedPreview.current === preview.previewId) return;
@@ -270,7 +260,13 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   }, [preview?.previewId]);
 
   async function printDirect() {
-    if (!preview || !destinationId || state === "printing") return;
+    if (
+      !preview ||
+      !destinationId ||
+      !canUsePublishedBinding(selectedDocument) ||
+      state === "printing"
+    )
+      return;
     setState("printing");
     setError("");
     setResult("");
@@ -281,11 +277,13 @@ function AdminOrderPrintActionContent({ bulk = false }) {
           method: "POST",
           headers: {
             "content-type": "application/json",
-            "idempotency-key": `shopify-admin-${interactionId.current}`,
+            "idempotency-key": `shopify-admin-${interactionId.current}-${stableOptionKey(`${destinationId}:${selectedDocument.designSpecificationRevision}`)}`,
           },
           body: JSON.stringify({
             renderId: preview.renderId,
-            printerId: destinationId,
+            targetId: destinationId,
+            specificationRevision: selectedDocument.designSpecificationRevision,
+            templateId: selectedDocument.id,
             renderCost: preview.renderCost,
           }),
         },
@@ -303,24 +301,15 @@ function AdminOrderPrintActionContent({ bulk = false }) {
     }
   }
 
-  const eligible = options?.destinations?.filter((item) => item.eligible) ?? [];
-  const selectedDestination = eligible.find(({ id }) => id === destinationId);
+  const eligible = compatibleTargets;
+  const selectedDestination = selectedTarget;
   const policy = options?.renderExecutionPolicy ?? "automatic";
-  const effectiveNodeRendering = nodeReadiness?.destination ??
-    selectedDestination?.nodeRendering ?? {
-      supported: false,
-      ready: false,
-      reason: "Checking node renderer and resources…",
-      cacheState: "unknown",
-    };
   const canPrint = Boolean(
     preview &&
     destinationId &&
+    canUsePublishedBinding(selectedDocument) &&
     state === "ready" &&
-    canUseDestinationForPolicy(
-      { ...selectedDestination, nodeRendering: effectiveNodeRendering },
-      policy,
-    ),
+    canUseDestinationForPolicy(selectedDestination, policy),
   );
 
   return (
@@ -378,16 +367,64 @@ function AdminOrderPrintActionContent({ bulk = false }) {
               Manage documents
             </s-button>
 
-            <s-text type="strong">Destination</s-text>
+            <s-text type="strong">Print target</s-text>
+            {selectedDocument?.targetBindingStatus === "revision_changed" && (
+              <s-banner tone="critical">
+                This target changed after the document was published. Review its
+                printer, profile, and stock in the editor, then publish the
+                document again.
+                <s-button href={options.manageDocumentsUrl}>
+                  Review document
+                </s-button>
+              </s-banner>
+            )}
+            {selectedDocument?.targetBindingStatus === "target_missing" && (
+              <s-banner tone="critical">
+                This document's published target is no longer available. Choose
+                a replacement in the editor and publish again.
+              </s-banner>
+            )}
+            {selectedDocument?.targetBindingStatus === "unknown" && (
+              <s-banner tone="info">
+                Printer status is temporarily unavailable, so direct printing
+                stays paused. The PDF preview remains available; try again when
+                the connection recovers.
+              </s-banner>
+            )}
+            {selectedDocument?.targetBindingStatus === "document_invalid" && (
+              <s-banner tone="critical">
+                This published document is damaged and cannot be matched to a
+                print target. Open it in Documents and publish a valid revision.
+              </s-banner>
+            )}
+            {selectedDocument?.targetBindingStatus === "media_incompatible" && (
+              <s-banner tone="critical">
+                This document no longer matches its published target stock or
+                profile. Review the media settings and publish again.
+              </s-banner>
+            )}
+            {selectedDocument?.targetBindingStatus === "unbound" && (
+              <s-banner tone="warning">
+                Choose a print target in the document editor and publish before
+                direct printing. PDF preview and browser printing remain
+                available.
+              </s-banner>
+            )}
             <s-banner tone={policy === "require_node" ? "warning" : "info"}>
               {renderPolicySummary(policy)}
             </s-banner>
             {options.destinationError && (
               <s-banner tone="warning">{options.destinationError}</s-banner>
             )}
+            <s-text-field
+              label="Search targets"
+              value={targetSearch}
+              onInput={(event) => setTargetSearch(event.currentTarget.value)}
+              placeholder="Printer, target, or stock"
+            />
             {eligible.length > 0 ? (
               <s-select
-                label="Printer"
+                label="Target"
                 value={destinationId}
                 onChange={(event) =>
                   setDestinationId(event.currentTarget.value)
@@ -395,38 +432,55 @@ function AdminOrderPrintActionContent({ bulk = false }) {
               >
                 {eligible.map((destination) => (
                   <option key={destination.id} value={destination.id}>
-                    {destination.name} · Ready
+                    {destination.name} ·{" "}
+                    {destination.stock?.name ?? "stock not configured"}
                   </option>
                 ))}
               </s-select>
             ) : (
               <s-banner tone="info">
-                No connected printer is ready. PDF preview and browser printing
-                remain available.
+                No compatible target has a ready printer, pinned profile, and
+                reported matching stock. PDF preview and browser printing remain
+                available.
                 <s-button href={options.setupDestinationUrl}>
                   Set up a printer
                 </s-button>
               </s-banner>
             )}
+            {selectedDestination && (
+              <>
+                <s-text>
+                  Advisory destination:{" "}
+                  {selectedDocument?.advisoryDestination?.printerName ??
+                    "selected by Piqae at handoff"}{" "}
+                  · Profile:{" "}
+                  {selectedDocument?.advisoryDestination?.profileName ??
+                    "selected by Piqae"}{" "}
+                  · Stock: {selectedDestination.stock?.name ?? "not configured"}
+                </s-text>
+                <s-text>
+                  Loaded media:{" "}
+                  {selectedDocument?.advisoryDestination?.mediaStatus?.replaceAll(
+                    "_",
+                    " ",
+                  ) ?? "not reported"}
+                </s-text>
+                <s-text>
+                  Last reported destination state:{" "}
+                  {selectedDocument?.advisoryDestination?.readinessStatus?.replaceAll(
+                    "_",
+                    " ",
+                  ) ?? "unknown"}
+                </s-text>
+              </>
+            )}
             {selectedDestination && policy !== "cloud_only" && (
               <s-text>
-                Node renderer: {nodeReadinessMessage(effectiveNodeRendering)}
+                Piqae validates the exact target binding, route, renderer, and
+                resources when you submit. A compatible standby is used when the
+                primary cannot satisfy this document.
               </s-text>
             )}
-            {nodeFallbackWarning(nodeReadiness?.destination, policy) && (
-              <s-banner tone="warning">
-                {nodeFallbackWarning(nodeReadiness.destination, policy)}
-              </s-banner>
-            )}
-            {selectedDestination &&
-              policy === "require_node" &&
-              !effectiveNodeRendering.ready && (
-                <s-banner tone="critical">
-                  This printer cannot be used while node rendering is required.
-                  Choose Automatic in Printers for safe cloud-PDF fallback, or
-                  wait for this node's renderer and resources to become ready.
-                </s-banner>
-              )}
             {error && <s-banner tone="critical">{error}</s-banner>}
             {result && <s-banner tone="success">{result}</s-banner>}
             <s-button

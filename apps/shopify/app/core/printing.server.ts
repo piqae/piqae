@@ -23,6 +23,11 @@ export type PrintResult =
   | { mode: "direct"; renderId: string; jobId: string }
   | { mode: "download"; renderId: string; downloadUrl: string };
 type Client = Pick<PiqaeClient, "printPackets">;
+type ResolvedPublication = {
+  revisionId: string;
+  designTargetId: string | null;
+  designSpecificationRevision: string | null;
+};
 
 export class ShopifyPrintingService {
   constructor(
@@ -55,7 +60,7 @@ export class ShopifyPrintingService {
     const shop = normalizeShopDomain(input.shop);
     const link = await this.shops.get(shop);
     if (!link) throw new Error("Connect a Piqae account before printing");
-    const templateRevisionId = await this.resolveTemplateRevision(
+    const publication = await this.resolveTemplatePublication(
       shop,
       link.templateRevisionId,
       input.templateId,
@@ -71,7 +76,7 @@ export class ShopifyPrintingService {
         JSON.stringify({
           shop,
           ids: orders.map((order) => order.id),
-          templateRevisionId,
+          templateRevisionId: publication.revisionId,
           requestKey: input.requestKey,
         }),
       )
@@ -80,7 +85,7 @@ export class ShopifyPrintingService {
     const renderInput = shopifyDocumentInput(shop, orders);
     const render = await client.printPackets.renders.create(
       {
-        template_revision_id: templateRevisionId,
+        template_revision_id: publication.revisionId,
         input: renderInput,
       },
       `shopify-preview-render-${digest}`,
@@ -115,10 +120,18 @@ export class ShopifyPrintingService {
     shop: string;
     previewId: string;
     renderId: string;
-    printerId: string;
+    printerId?: string;
+    targetId?: string;
+    targetSpecificationRevision?: string;
+    templateId?: string;
     requestKey: string;
     renderCost?: PrintPacketRenderCost;
   }) {
+    if (
+      Boolean(input.targetId) === Boolean(input.printerId) ||
+      Boolean(input.targetId) !== Boolean(input.targetSpecificationRevision)
+    )
+      throw new Error("Choose exactly one print target or printer");
     const shop = normalizeShopDomain(input.shop);
     if (!(await this.shops.ownsRender(shop, input.renderId)))
       throw new Error("Preview not found");
@@ -131,10 +144,33 @@ export class ShopifyPrintingService {
     );
     if (preview.render_id !== input.renderId)
       throw new Error("Preview not found");
+    let destination:
+      | { target_id: string; specification_revision: string }
+      | { printer_id: string };
+    if (input.targetId) {
+      const publication = await this.resolveTemplatePublication(
+        shop,
+        link.templateRevisionId,
+        input.templateId,
+      );
+      const rendered = await client.printPackets.renders.retrieve(
+        input.renderId,
+      );
+      if (rendered.template_revision_id !== publication.revisionId)
+        throw new Error("Preview does not belong to the selected publication");
+      destination = {
+        target_id: input.targetId,
+        specification_revision: this.publishedTargetRevision(
+          publication,
+          input.targetId,
+          input.targetSpecificationRevision,
+        ),
+      };
+    } else destination = { printer_id: input.printerId! };
     const approved = await client.printPackets.previews.approve(
       input.previewId,
       {
-        printer_id: input.printerId,
+        ...destination,
         title: "Shopify order documents",
         render_policy: settings.renderExecutionPolicy,
         render_cost: input.renderCost,
@@ -187,7 +223,7 @@ export class ShopifyPrintingService {
     );
   }
 
-  private async resolveTemplateRevision(
+  private async resolveTemplatePublication(
     shop: string,
     fallback: string,
     templateId?: string,
@@ -198,10 +234,10 @@ export class ShopifyPrintingService {
     if (systemTemplateKey) {
       const selected = (await this.workflow.listTemplates(shop)).find(
         (candidate) => {
-          if (candidate.state !== "published") return false;
+          if (!candidate.published) return false;
           try {
             return (
-              parseTemplateEnvelope(candidate.source).system?.key ===
+              parseTemplateEnvelope(candidate.published.source).system?.key ===
               systemTemplateKey
             );
           } catch {
@@ -211,46 +247,96 @@ export class ShopifyPrintingService {
       );
       if (!selected)
         throw new Error("The published receipt document is unavailable");
-      const revision = parseTemplateEnvelope(selected.source).published
-        ?.piqaeRevisionId;
+      const revision = parseTemplateEnvelope(selected.published!.source)
+        .published?.piqaeRevisionId;
       if (!revision)
         throw new Error(
           "The published receipt has no pinned Piqae revision; reconnect or publish it before printing",
         );
-      return revision;
+      return {
+        revisionId: revision,
+        designTargetId: selected.published!.designTargetId,
+        designSpecificationRevision:
+          selected.published!.designSpecificationRevision,
+      };
     }
     if (!templateId || templateId === ACCOUNT_DEFAULT_DOCUMENT_ID)
-      return fallback;
+      return {
+        revisionId: fallback,
+        designTargetId: null,
+        designSpecificationRevision: null,
+      };
     const selected = await this.workflow.getTemplate(shop, templateId);
-    if (!selected || selected.state !== "published")
+    if (!selected?.published)
       throw new Error("The selected document is not published");
-    const revision = parseTemplateEnvelope(selected.source).published
+    const revision = parseTemplateEnvelope(selected.published.source).published
       ?.piqaeRevisionId;
     if (!revision)
       throw new Error(
         "The selected document has no published Piqae revision; publish it again before printing",
       );
-    return revision;
+    return {
+      revisionId: revision,
+      designTargetId: selected.published.designTargetId,
+      designSpecificationRevision:
+        selected.published.designSpecificationRevision,
+    };
+  }
+
+  private publishedTargetRevision(
+    publication: ResolvedPublication,
+    targetId: string,
+    requestedRevision: string | undefined,
+  ): string {
+    if (
+      publication.designTargetId !== targetId ||
+      !publication.designSpecificationRevision
+    )
+      throw new Error(
+        "This published document is not bound to that print target; choose the target in the editor and publish again",
+      );
+    if (requestedRevision !== publication.designSpecificationRevision)
+      throw new Error(
+        "The print target setup changed after this document was published; review it in the editor and publish again",
+      );
+    return publication.designSpecificationRevision;
   }
   async printOrders(input: {
     admin: AdminGraphql;
     shop: string;
     orderIds: string[];
     printerId?: string;
+    targetId?: string;
+    targetSpecificationRevision?: string;
     requestKey?: string;
     templateId?: string;
     systemTemplateKey?: "receipt";
     resourceType?: "orders" | "draft_orders";
   }): Promise<PrintResult> {
+    if (
+      (input.targetId && input.printerId) ||
+      Boolean(input.targetId) !== Boolean(input.targetSpecificationRevision)
+    )
+      throw new Error("Target prints require one exact specification revision");
     const shop = normalizeShopDomain(input.shop);
     const link = await this.shops.get(shop);
     if (!link) throw new Error("Connect a Piqae account before printing");
-    const templateRevisionId = await this.resolveTemplateRevision(
+    const publication = await this.resolveTemplatePublication(
       shop,
       link.templateRevisionId,
       input.templateId,
       input.systemTemplateKey,
     );
+    const targetDestination = input.targetId
+      ? {
+          target_id: input.targetId,
+          specification_revision: this.publishedTargetRevision(
+            publication,
+            input.targetId,
+            input.targetSpecificationRevision,
+          ),
+        }
+      : null;
     const settings = await this.workflow.getSettings(shop);
     const bindings = parseShopifyDataBindings(settings.metafieldAllowlist);
     const orders =
@@ -262,7 +348,10 @@ export class ShopifyPrintingService {
         JSON.stringify({
           shop,
           ids: orders.map((o) => o.id),
-          template: templateRevisionId,
+          template: publication.revisionId,
+          destination: input.targetId ?? input.printerId ?? "download",
+          targetSpecificationRevision:
+            targetDestination?.specification_revision ?? "",
           requestKey: input.requestKey ?? "",
         }),
       )
@@ -271,7 +360,7 @@ export class ShopifyPrintingService {
     const renderInput = shopifyDocumentInput(shop, orders);
     const render = await client.printPackets.renders.create(
       {
-        template_revision_id: templateRevisionId,
+        template_revision_id: publication.revisionId,
         input: renderInput,
       },
       `shopify-render-${digest}`,
@@ -289,17 +378,18 @@ export class ShopifyPrintingService {
       `shopify-render-${digest}`,
       ownership,
     );
-    if (input.printerId) {
+    if (input.printerId || input.targetId) {
       const settings = await this.workflow.getSettings(shop);
       const completed = await waitForRender(client, render);
       if (completed.state !== "completed")
         throw new Error(
           `document render failed: ${completed.failure_code ?? completed.state}`,
         );
+      const destination = targetDestination ?? { printer_id: input.printerId! };
       const job = await client.printPackets.renders.print(
         completed.id,
         {
-          printer_id: input.printerId,
+          ...destination,
           title: `Shopify orders ${orders.map((o) => o.name).join(", ")}`,
           render_policy: settings.renderExecutionPolicy,
           render_cost: measuredRenderCost(
@@ -308,13 +398,13 @@ export class ShopifyPrintingService {
             orders.length,
           ),
         },
-        `shopify-print-${digest}-${input.printerId}`,
+        `shopify-print-${digest}-${input.targetId ?? input.printerId}`,
       );
       await workflows().recordActivity(shop, {
         id: stableActivityId(digest),
         orderName: orders.map((order) => order.name).join(", "),
         documentName: "Order document",
-        destination: input.printerId,
+        destination: input.targetId ?? input.printerId!,
         state: "accepted",
       });
       return { mode: "direct", renderId: render.id, jobId: job.id };

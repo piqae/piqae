@@ -8,6 +8,7 @@ import {
   validateDocumentSource,
   workflows,
   type MerchantTemplate,
+  type SaveMerchantTemplate,
 } from "../core/workflows.server";
 import {
   seedStarterTemplates,
@@ -25,7 +26,7 @@ export const templates = [
 export function customizedSystemDraft(
   existing: MerchantTemplate,
   id: string,
-): Omit<MerchantTemplate, "updatedAt"> {
+): SaveMerchantTemplate {
   const envelope = parseTemplateEnvelope(existing.source);
   if (!envelope.system?.immutable)
     throw new Error("Only system documents can be customized this way");
@@ -86,7 +87,7 @@ export async function action({ request }: ActionFunctionArgs) {
       state: "draft",
       source,
       revision: 1,
-    } as Omit<MerchantTemplate, "updatedAt">);
+    });
     await syncTemplateIndex(admin, workflows(), session.shop);
     return { ok: true, error: "", id: saved.id };
   } catch (error) {

@@ -4,6 +4,7 @@ import {
   newWorkflowId,
   parseSettings,
   validateDocumentSource,
+  WorkflowConflictError,
 } from "../app/core/workflows.server";
 import {
   ASSET_LIMITS,
@@ -33,8 +34,13 @@ describe("merchant workflow persistence", () => {
       state: "draft",
       source: starterTemplates[0]!.source,
       revision: 1,
+      designTargetId: "tgt_invoice",
+      designSpecificationRevision: "spec_invoice_3",
     });
-    expect(await repository.getTemplate(alpha, id)).not.toBeNull();
+    expect(await repository.getTemplate(alpha, id)).toMatchObject({
+      designTargetId: "tgt_invoice",
+      designSpecificationRevision: "spec_invoice_3",
+    });
     expect(await repository.getTemplate(beta, id)).toBeNull();
     expect(await repository.deleteTemplate(beta, id)).toBe(false);
     expect(await repository.getTemplate(alpha, id)).not.toBeNull();
@@ -54,6 +60,53 @@ describe("merchant workflow persistence", () => {
     });
     expect((await repository.getTemplate(alpha, id))?.state).toBe("published");
     expect(await repository.deleteTemplate(alpha, id)).toBe(false);
+  });
+
+  it("keeps publication immutable and rejects stale draft saves", async () => {
+    const repository = new MemoryWorkflowRepository();
+    const id = newWorkflowId();
+    const published = await repository.saveTemplate(alpha, {
+      id,
+      name: "Receipt v1",
+      kind: "receipt",
+      pageSize: "80mm",
+      state: "published",
+      source: starterTemplates[2]!.source,
+      revision: 1,
+      designTargetId: "target_receipt",
+      designSpecificationRevision: "spec_1",
+    });
+    const draft = await repository.saveTemplate(alpha, {
+      id,
+      name: "Receipt draft v2",
+      kind: "receipt",
+      pageSize: "80mm",
+      state: "draft",
+      source: starterTemplates[2]!.source,
+      revision: published.revision,
+      designTargetId: "target_other",
+      designSpecificationRevision: "spec_2",
+      expectedDraftRevision: published.draftRevision,
+    });
+    expect(draft.published).toMatchObject({
+      revision: 1,
+      name: "Receipt v1",
+      designTargetId: "target_receipt",
+      designSpecificationRevision: "spec_1",
+      media: { kind: "continuous", width_mm: 80 },
+    });
+    await expect(
+      repository.saveTemplate(alpha, {
+        id,
+        name: "Stale edit",
+        kind: "receipt",
+        pageSize: "80mm",
+        state: "draft",
+        source: starterTemplates[2]!.source,
+        revision: 1,
+        expectedDraftRevision: published.draftRevision,
+      }),
+    ).rejects.toBeInstanceOf(WorkflowConflictError);
   });
 
   it("filters bounded activity without crossing shops", async () => {
@@ -145,6 +198,38 @@ describe("hybrid template authority", () => {
     );
     expect(JSON.stringify(index)).not.toContain("canonical");
     expect(index.digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(index.documents[0]).toMatchObject({
+      designTargetId: null,
+      designSpecificationRevision: null,
+    });
+  });
+
+  it("indexes the immutable publication while newer draft edits stay private", async () => {
+    const repository = new MemoryWorkflowRepository();
+    await seedStarterTemplates(repository, alpha);
+    const invoice = (await repository.listTemplates(alpha)).find(
+      ({ id }) => id === "00000000-0000-4000-8000-000000000001",
+    )!;
+    await repository.saveTemplate(alpha, {
+      id: invoice.id,
+      name: "Unpublished invoice edit",
+      kind: invoice.kind,
+      pageSize: invoice.pageSize,
+      state: "draft",
+      source: invoice.source,
+      revision: invoice.revision,
+      designTargetId: "target_draft_only",
+      designSpecificationRevision: "spec_draft_only",
+      expectedDraftRevision: invoice.draftRevision,
+    });
+    const index = buildTemplateIndex(
+      await repository.listTemplates(alpha),
+      await repository.getSettings(alpha),
+    );
+    expect(index.documents.find(({ id }) => id === invoice.id)).toMatchObject({
+      name: invoice.published!.name,
+      designTargetId: null,
+    });
   });
 
   it("accepts the new PrintPacket envelope", () => {

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import pg, { type Pool } from "pg";
 import { normalizeShopDomain } from "./model";
-import { parseTemplateEnvelope } from "./template-model";
+import { parseTemplateEnvelope, type PrintPacket } from "./template-model";
 import { resolveShopifyStorage } from "./piqae-runtime.server";
 
 export type MerchantSettings = {
@@ -26,8 +26,35 @@ export type MerchantTemplate = {
   state: "draft" | "published";
   source: string;
   revision: number;
+  draftRevision: number;
+  designTargetId?: string | null;
+  designSpecificationRevision?: string | null;
+  published: PublishedTemplateRevision | null;
   updatedAt: string;
 };
+export type PublishedTemplateRevision = {
+  revision: number;
+  name: string;
+  kind: string;
+  pageSize: string;
+  source: string;
+  designTargetId: string | null;
+  designSpecificationRevision: string | null;
+  media: PrintPacket["media"];
+};
+export type SaveMerchantTemplate = Omit<
+  MerchantTemplate,
+  "updatedAt" | "draftRevision" | "published"
+> & { expectedDraftRevision?: number | null };
+
+export class WorkflowConflictError extends Error {
+  constructor() {
+    super(
+      "This document changed in another session. Reload it before saving again.",
+    );
+    this.name = "WorkflowConflictError";
+  }
+}
 export type AutomationRule = {
   id: string;
   name: string;
@@ -82,7 +109,7 @@ export interface WorkflowRepository {
   getTemplate(shop: string, id: string): Promise<MerchantTemplate | null>;
   saveTemplate(
     shop: string,
-    value: Omit<MerchantTemplate, "updatedAt">,
+    value: SaveMerchantTemplate,
   ): Promise<MerchantTemplate>;
   deleteTemplate(shop: string, id: string): Promise<boolean>;
   listAutomations(shop: string): Promise<AutomationRule[]>;
@@ -126,16 +153,44 @@ export class MemoryWorkflowRepository implements WorkflowRepository {
       (await this.listTemplates(shop)).find((value) => value.id === id) ?? null
     );
   }
-  async saveTemplate(shop: string, value: Omit<MerchantTemplate, "updatedAt">) {
+  async saveTemplate(shop: string, value: SaveMerchantTemplate) {
     const key = normalizeShopDomain(shop);
     const all = this.templates.get(key) ?? [];
     const previous = all.find((item) => item.id === value.id);
-    const saved = {
-      ...value,
-      revision:
-        previous && value.state === "published"
-          ? previous.revision + 1
-          : value.revision,
+    if (
+      (previous && value.expectedDraftRevision !== previous.draftRevision) ||
+      (!previous && value.expectedDraftRevision != null)
+    )
+      throw new WorkflowConflictError();
+    const draftRevision = previous ? previous.draftRevision + 1 : 1;
+    const publishedRevision =
+      value.state === "published"
+        ? {
+            revision: (previous?.published?.revision ?? 0) + 1,
+            name: value.name,
+            kind: value.kind,
+            pageSize: value.pageSize,
+            source: value.source,
+            designTargetId: value.designTargetId ?? null,
+            designSpecificationRevision:
+              value.designSpecificationRevision ?? null,
+            media: structuredClone(
+              parseTemplateEnvelope(value.source).document.media,
+            ),
+          }
+        : (previous?.published ?? null);
+    const saved: MerchantTemplate = {
+      id: value.id,
+      name: value.name,
+      kind: value.kind,
+      pageSize: value.pageSize,
+      state: publishedRevision ? "published" : "draft",
+      source: value.source,
+      revision: publishedRevision?.revision ?? draftRevision,
+      draftRevision,
+      designTargetId: value.designTargetId ?? null,
+      designSpecificationRevision: value.designSpecificationRevision ?? null,
+      published: publishedRevision,
       updatedAt: new Date().toISOString(),
     };
     this.templates.set(key, [
@@ -147,7 +202,7 @@ export class MemoryWorkflowRepository implements WorkflowRepository {
   async deleteTemplate(shop: string, id: string) {
     const key = normalizeShopDomain(shop);
     const all = this.templates.get(key) ?? [];
-    if (all.find((value) => value.id === id)?.state !== "draft") return false;
+    if (all.find((value) => value.id === id)?.published) return false;
     this.templates.set(
       key,
       all.filter((value) => value.id !== id),
@@ -253,50 +308,86 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
   }
   async listTemplates(shop: string) {
     const result = await this.pool.query(
-      "SELECT id,name,kind,page_size,state,source,revision,updated_at FROM shopify_workflow_templates WHERE shop=$1 ORDER BY updated_at DESC LIMIT 100",
+      `${TEMPLATE_SELECT} WHERE t.shop=$1 ORDER BY t.updated_at DESC LIMIT 100`,
       [normalizeShopDomain(shop)],
     );
     return result.rows.map(templateRow);
   }
   async getTemplate(shop: string, id: string) {
     const result = await this.pool.query(
-      "SELECT id,name,kind,page_size,state,source,revision,updated_at FROM shopify_workflow_templates WHERE shop=$1 AND id=$2",
+      `${TEMPLATE_SELECT} WHERE t.shop=$1 AND t.id=$2`,
       [normalizeShopDomain(shop), id],
     );
     return result.rows[0] ? templateRow(result.rows[0]) : null;
   }
-  async saveTemplate(shop: string, v: Omit<MerchantTemplate, "updatedAt">) {
+  async saveTemplate(shop: string, v: SaveMerchantTemplate) {
     const client = await this.pool.connect();
+    const normalizedShop = normalizeShopDomain(shop);
     try {
       await client.query("BEGIN");
-      const result = await client.query(
-        "INSERT INTO shopify_workflow_templates(id,shop,name,kind,page_size,state,source,revision) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(id,shop) DO UPDATE SET name=EXCLUDED.name,kind=EXCLUDED.kind,page_size=EXCLUDED.page_size,state=EXCLUDED.state,source=EXCLUDED.source,revision=CASE WHEN EXCLUDED.state='published' THEN shopify_workflow_templates.revision+1 ELSE shopify_workflow_templates.revision END,updated_at=now() RETURNING id,name,kind,page_size,state,source,revision,updated_at",
+      const current = await client.query(
+        "SELECT draft_revision,published_revision FROM shopify_workflow_templates WHERE shop=$1 AND id=$2 FOR UPDATE",
+        [normalizedShop, v.id],
+      );
+      const existing = current.rows[0];
+      if (
+        (existing &&
+          v.expectedDraftRevision !== Number(existing.draft_revision)) ||
+        (!existing && v.expectedDraftRevision != null)
+      )
+        throw new WorkflowConflictError();
+      const draftRevision = existing ? Number(existing.draft_revision) + 1 : 1;
+      const draftWrite = await client.query(
+        "INSERT INTO shopify_workflow_templates(id,shop,name,kind,page_size,draft_source,draft_revision,design_target_id,design_specification_revision,state,source,revision) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(id,shop) DO UPDATE SET name=EXCLUDED.name,kind=EXCLUDED.kind,page_size=EXCLUDED.page_size,draft_source=EXCLUDED.draft_source,draft_revision=EXCLUDED.draft_revision,design_target_id=EXCLUDED.design_target_id,design_specification_revision=EXCLUDED.design_specification_revision,updated_at=now() WHERE $13::integer IS NOT NULL AND shopify_workflow_templates.draft_revision=$13 RETURNING draft_revision",
         [
           v.id,
-          normalizeShopDomain(shop),
+          normalizedShop,
           v.name,
           v.kind,
           v.pageSize,
+          v.source,
+          draftRevision,
+          v.designTargetId ?? null,
+          v.designSpecificationRevision ?? null,
           v.state,
           v.source,
-          v.revision,
+          Math.max(1, v.revision),
+          v.expectedDraftRevision ?? null,
         ],
       );
-      const saved = templateRow(result.rows[0]);
-      if (saved.state === "published") {
+      if (draftWrite.rowCount !== 1) throw new WorkflowConflictError();
+      if (v.state === "published") {
+        const highest = await client.query(
+          "SELECT COALESCE(MAX(revision),0) AS revision FROM shopify_workflow_template_revisions WHERE template_id=$1 AND shop=$2",
+          [v.id, normalizedShop],
+        );
+        const revision = Number(highest.rows[0]?.revision ?? 0) + 1;
+        const media = parseTemplateEnvelope(v.source).document.media;
         await client.query(
-          "INSERT INTO shopify_workflow_template_revisions(template_id,shop,revision,name,kind,page_size,source) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING",
+          "INSERT INTO shopify_workflow_template_revisions(template_id,shop,revision,name,kind,page_size,source,design_target_id,design_specification_revision,media) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
           [
-            saved.id,
-            normalizeShopDomain(shop),
-            saved.revision,
-            saved.name,
-            saved.kind,
-            saved.pageSize,
-            saved.source,
+            v.id,
+            normalizedShop,
+            revision,
+            v.name,
+            v.kind,
+            v.pageSize,
+            v.source,
+            v.designTargetId ?? null,
+            v.designSpecificationRevision ?? null,
+            JSON.stringify(media),
           ],
         );
+        await client.query(
+          "UPDATE shopify_workflow_templates SET published_revision=$3 WHERE shop=$1 AND id=$2",
+          [normalizedShop, v.id, revision],
+        );
       }
+      const result = await client.query(
+        `${TEMPLATE_SELECT} WHERE t.shop=$1 AND t.id=$2`,
+        [normalizedShop, v.id],
+      );
+      const saved = templateRow(result.rows[0]);
       await client.query("COMMIT");
       return saved;
     } catch (error) {
@@ -308,7 +399,7 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
   }
   async deleteTemplate(shop: string, id: string) {
     const r = await this.pool.query(
-      "DELETE FROM shopify_workflow_templates WHERE shop=$1 AND id=$2 AND state='draft'",
+      "DELETE FROM shopify_workflow_templates WHERE shop=$1 AND id=$2 AND published_revision IS NULL",
       [normalizeShopDomain(shop), id],
     );
     return r.rowCount === 1;
@@ -394,15 +485,45 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
     );
   }
 }
+const TEMPLATE_SELECT = `SELECT
+  t.id,t.name,t.kind,t.page_size,t.draft_source,t.draft_revision,
+  t.design_target_id,t.design_specification_revision,t.updated_at,t.published_revision,
+  r.name AS published_name,r.kind AS published_kind,r.page_size AS published_page_size,
+  r.source AS published_source,r.design_target_id AS published_design_target_id,
+  r.design_specification_revision AS published_design_specification_revision,
+  r.media AS published_media
+FROM shopify_workflow_templates t
+LEFT JOIN shopify_workflow_template_revisions r
+  ON r.template_id=t.id AND r.shop=t.shop AND r.revision=t.published_revision`;
+
 function templateRow(x: any): MerchantTemplate {
+  const draftRevision = Number(x.draft_revision);
+  const published =
+    x.published_revision === null
+      ? null
+      : {
+          revision: Number(x.published_revision),
+          name: x.published_name,
+          kind: x.published_kind,
+          pageSize: x.published_page_size,
+          source: x.published_source,
+          designTargetId: x.published_design_target_id ?? null,
+          designSpecificationRevision:
+            x.published_design_specification_revision ?? null,
+          media: x.published_media,
+        };
   return {
     id: String(x.id),
     name: x.name,
     kind: x.kind,
     pageSize: x.page_size,
-    state: x.state,
-    source: x.source,
-    revision: x.revision,
+    state: published ? "published" : "draft",
+    source: x.draft_source,
+    revision: published?.revision ?? draftRevision,
+    draftRevision,
+    designTargetId: x.design_target_id ?? null,
+    designSpecificationRevision: x.design_specification_revision ?? null,
+    published,
     updatedAt: new Date(x.updated_at).toISOString(),
   };
 }

@@ -12,6 +12,10 @@ import {
   removeBlockAtPath,
   replaceBlockAtPath,
   searchDocumentFields,
+  canvasGeometry,
+  canvasStyle,
+  responsiveCanvasGeometry,
+  safeAreaStyle,
 } from "../app/components/PrintPacketEditor";
 import {
   authoringPathExpression,
@@ -20,8 +24,54 @@ import {
 import type { ShopifyDocumentField } from "../app/core/shopify-document-fields";
 import type { Block, PrintPacket } from "../app/core/template-model";
 import editorGeneratedPacket from "./fixtures/printpacket/editor-generated-packet.json";
+import { starterTemplates } from "../app/core/starter-templates";
 
 describe("PrintPacket editor serialization", () => {
+  it("keeps paged and label canvases at their physical aspect ratio", () => {
+    const a4 = structuredClone(starterTemplates[0]!.specification);
+    expect(canvasGeometry(a4)).toEqual({ widthMm: 210, heightMm: 297 });
+    expect(canvasStyle(a4).aspectRatio).toBe("210 / 297");
+    if (a4.media.kind !== "paged") throw new Error("invoice must be paged");
+    a4.media.orientation = "landscape";
+    expect(canvasGeometry(a4)).toEqual({ widthMm: 297, heightMm: 210 });
+    expect(canvasStyle(a4).aspectRatio).toBe("297 / 210");
+
+    const label = starterTemplates.find(
+      ({ id }) => id === "product-label",
+    )!.specification;
+    expect(canvasGeometry(label)).toEqual({ widthMm: 100, heightMm: 50 });
+    expect(canvasStyle(label).aspectRatio).toBe("100 / 50");
+    expect(
+      safeAreaStyle(label, { top: 2, right: 4, bottom: 3, left: 5 }),
+    ).toEqual({ top: "4%", right: "4%", bottom: "6%", left: "5%" });
+  });
+  it.each([320, 768])(
+    "preserves A4 portrait, landscape, and label ratios at a %i px browser width",
+    (browserWidth) => {
+      const portrait = structuredClone(starterTemplates[0]!.specification);
+      const landscape = structuredClone(portrait);
+      if (landscape.media.kind !== "paged")
+        throw new Error("invoice must be paged");
+      landscape.media.orientation = "landscape";
+      const label = starterTemplates.find(
+        ({ id }) => id === "product-label",
+      )!.specification;
+
+      for (const [document, expectedRatio] of [
+        [portrait, 210 / 297],
+        [landscape, 297 / 210],
+        [label, 100 / 50],
+      ] as const) {
+        const geometry = responsiveCanvasGeometry(document, browserWidth);
+        expect(geometry.widthPx).toBeLessThanOrEqual(browserWidth - 32);
+        expect(geometry.heightPx).not.toBeNull();
+        expect(geometry.widthPx / geometry.heightPx!).toBeCloseTo(
+          expectedRatio,
+          8,
+        );
+      }
+    },
+  );
   it("preserves computed values, line breaks, and non-text layout blocks", () => {
     const blocks: Block[] = [
       {

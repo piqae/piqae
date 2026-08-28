@@ -6,6 +6,12 @@ import type { ShopLink } from "./model";
 import { normalizeShopDomain } from "./model";
 import type { WorkflowRepository } from "./workflows.server";
 import type { RenderExecutionPolicy } from "./workflows.server";
+import { parseTemplateEnvelope } from "./template-model";
+import { loadShopifyPrintTargets } from "./shopify-print-targets.server";
+import {
+  selectTargetDestination,
+  type ShopifyPrintTarget,
+} from "./shopify-print-targets";
 
 /**
  * Selects the account's provisioned starter revision instead of a merchant
@@ -22,20 +28,31 @@ export type AdminPrintOptions = {
     name: string;
     kind: string;
     isDefault: boolean;
-  }>;
-  destinations: Array<{
-    id: string;
-    name: string;
-    state: string;
-    eligible: boolean;
-    isDefault: boolean;
-    nodeRendering: {
-      supported: boolean;
-      ready: boolean;
-      cacheState: "ready" | "warming" | "missing" | "unknown";
-      reason: string;
+    designTargetId: string | null;
+    designSpecificationRevision: string | null;
+    targetBindingStatus:
+      | "ready"
+      | "unbound"
+      | "target_missing"
+      | "unknown"
+      | "document_invalid"
+      | "revision_changed"
+      | "media_incompatible";
+    compatibilityKnown: boolean;
+    compatibleTargetIds: string[];
+    advisoryDestination: null | {
+      printerName: string;
+      profileName: string;
+      mediaStatus: string;
+      readinessStatus: string;
     };
   }>;
+  targets: Array<
+    ShopifyPrintTarget & {
+      eligible: boolean;
+      isDefault: boolean;
+    }
+  >;
   manageDocumentsUrl: string;
   setupDestinationUrl: string;
   destinationError?: string;
@@ -56,21 +73,38 @@ export async function loadAdminPrintOptions(input: {
     input.workflows.getSettings(shop),
     input.workflows.listTemplates(shop),
   ]);
-  const published = templates.filter(
-    (template) => template.state === "published",
-  );
-  const documents = published.map((template) => ({
-    id: template.id,
-    name: template.name,
-    kind: template.kind,
-    isDefault: template.id === settings.defaultTemplateId,
-  }));
+  const published = templates.filter((template) => template.published);
+  const parsedDocuments = published.map((template) => {
+    let document: ReturnType<typeof parseTemplateEnvelope>["document"] | null =
+      null;
+    try {
+      document = parseTemplateEnvelope(template.published!.source).document;
+    } catch {
+      // One damaged publication must not hide every printable document.
+    }
+    return { template, published: template.published!, document };
+  });
 
   if (!link) {
     return {
       linked: false,
-      documents,
-      destinations: [],
+      documents: parsedDocuments.map(({ template, published, document }) => ({
+        id: template.id,
+        name: published.name,
+        kind: published.kind,
+        isDefault: template.id === settings.defaultTemplateId,
+        designTargetId: published.designTargetId,
+        designSpecificationRevision: published.designSpecificationRevision,
+        targetBindingStatus: !document
+          ? "document_invalid"
+          : published.designTargetId
+            ? "target_missing"
+            : "unbound",
+        compatibilityKnown: document !== null,
+        compatibleTargetIds: [],
+        advisoryDestination: null,
+      })),
+      targets: [],
       manageDocumentsUrl: "/app/templates",
       setupDestinationUrl: "/app/printers",
       renderExecutionPolicy: settings.renderExecutionPolicy,
@@ -85,25 +119,18 @@ export async function loadAdminPrintOptions(input: {
           accessToken: () => input.vault.open(link.encryptedCredential, shop),
         });
   if (!client) throw new Error("PIQAE_MANAGED_ACCOUNT_NOT_READY");
-  let destinations: AdminPrintOptions["destinations"] = [];
+  let targets: AdminPrintOptions["targets"] = [];
   let destinationError: string | undefined;
   try {
-    const page = await client.printers.list({ limit: 100 });
-    destinations = page.data.map((printer) => ({
-      id: printer.id,
-      name: printer.name,
-      state: printer.state,
-      eligible: printer.state === "online",
-      isDefault: printer.id === settings.defaultPrinterId,
-      // Readiness is deliberately fail-closed until the platform's signed
-      // per-destination renderer decision is available. Printer online state
-      // alone does not prove renderer ABI or resource-cache compatibility.
-      nodeRendering: {
-        supported: false,
-        ready: false,
-        cacheState: "unknown",
-        reason: "Node renderer capability has not been verified",
-      },
+    const loaded = await loadShopifyPrintTargets(client);
+    if (loaded.partial)
+      destinationError = "Some printer status is temporarily unavailable";
+    targets = loaded.targets.map((target) => ({
+      ...target,
+      eligible: target.hasMediaCandidate,
+      isDefault: parsedDocuments.some(
+        ({ published }) => published.designTargetId === target.id,
+      ),
     }));
   } catch {
     // A printer-list outage must not hide document preview or PDF download.
@@ -120,13 +147,70 @@ export async function loadAdminPrintOptions(input: {
           name: "Default document",
           kind: "document",
           isDefault: true,
+          designTargetId: null,
+          designSpecificationRevision: null,
+          targetBindingStatus: "unbound" as const,
+          compatibilityKnown: false,
+          compatibleTargetIds: targets.map(({ id }) => id),
+          advisoryDestination: null,
         },
       ]
     : [];
   return {
     linked: true,
-    documents: documents.length > 0 ? documents : accountDefault,
-    destinations,
+    documents:
+      parsedDocuments.length > 0
+        ? parsedDocuments.map(({ template, published, document }) => {
+            const target = published.designTargetId
+              ? targets.find(({ id }) => id === published.designTargetId)
+              : undefined;
+            const revisionCurrent = Boolean(
+              target &&
+              published.designSpecificationRevision ===
+                target.specificationRevision,
+            );
+            const advisoryDestination =
+              target && document
+                ? selectTargetDestination(target, document)
+                : null;
+            const mediaCompatible = advisoryDestination !== null;
+            const targetBindingStatus = !document
+              ? "document_invalid"
+              : !published.designTargetId
+                ? "unbound"
+                : !target
+                  ? destinationError
+                    ? "unknown"
+                    : "target_missing"
+                  : !revisionCurrent
+                    ? "revision_changed"
+                    : !mediaCompatible
+                      ? "media_incompatible"
+                      : "ready";
+            return {
+              id: template.id,
+              name: published.name,
+              kind: published.kind,
+              isDefault: template.id === settings.defaultTemplateId,
+              designTargetId: published.designTargetId,
+              designSpecificationRevision:
+                published.designSpecificationRevision,
+              targetBindingStatus,
+              compatibilityKnown: document !== null,
+              compatibleTargetIds:
+                targetBindingStatus === "ready" && target ? [target.id] : [],
+              advisoryDestination: advisoryDestination
+                ? {
+                    printerName: advisoryDestination.printerName,
+                    profileName: advisoryDestination.profileName,
+                    mediaStatus: advisoryDestination.mediaCompatibility.status,
+                    readinessStatus: advisoryDestination.readinessStatus,
+                  }
+                : null,
+            };
+          })
+        : accountDefault,
+    targets,
     manageDocumentsUrl: "/app/templates",
     setupDestinationUrl: "/app/printers",
     destinationError,

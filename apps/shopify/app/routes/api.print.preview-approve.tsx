@@ -11,9 +11,20 @@ export async function action({ request, params }: ActionFunctionArgs) {
   const body = (await request.json()) as Record<string, unknown>;
   const renderId = typeof body.renderId === "string" ? body.renderId : "";
   const printerId = typeof body.printerId === "string" ? body.printerId : "";
+  const targetId = typeof body.targetId === "string" ? body.targetId : "";
+  const templateId = typeof body.templateId === "string" ? body.templateId : "";
+  const specificationRevision =
+    typeof body.specificationRevision === "string"
+      ? body.specificationRevision
+      : "";
   const requestKey = request.headers.get("idempotency-key") ?? "";
   if (
-    ![previewId, renderId, printerId].every((value) => ID.test(value)) ||
+    ![previewId, renderId].every((value) => ID.test(value)) ||
+    !ID.test(targetId || printerId) ||
+    Boolean(targetId) === Boolean(printerId) ||
+    Boolean(targetId) !== Boolean(specificationRevision) ||
+    (specificationRevision && !ID.test(specificationRevision)) ||
+    (targetId && !ID.test(templateId)) ||
     !requestKey
   )
     return cors(
@@ -25,7 +36,10 @@ export async function action({ request, params }: ActionFunctionArgs) {
       shop: session.shop,
       previewId,
       renderId,
-      printerId,
+      printerId: printerId || undefined,
+      targetId: targetId || undefined,
+      targetSpecificationRevision: specificationRevision || undefined,
+      templateId: templateId || undefined,
       requestKey,
       renderCost,
     });

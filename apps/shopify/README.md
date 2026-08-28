@@ -37,6 +37,23 @@ printer alone is never treated as node-render ready.
 The setting affects execution location, not delivery truth. Native spooler
 acceptance still does not prove that paper was produced.
 
+## Document and print-target authority
+
+Each merchant document keeps an editable draft separately from its immutable
+published revision. Saving a draft uses compare-and-swap revision checks and
+never changes the document currently used by Admin, POS, automations, or print
+handoff. Publishing snapshots the exact PrintPacket source, document media,
+target id, and target design-specification revision. A stale editor receives a
+conflict response and must reload instead of overwriting newer work.
+
+The target is the authority for its immutable printer/profile binding and
+business stock. The editor sizes its canvas from `document.media`, then offers
+only compatible targets. Loaded-media evidence is operational truth reported by
+Piqae: absent, stale, untrusted, or mismatched evidence is shown distinctly and
+cannot be fabricated from profile dimensions. Printing sends the saved target
+id and exact design-specification revision so the control plane can revalidate
+the binding and stock immediately before handoff.
+
 ## Piqae test runtime
 
 `PIQAE_SHOPIFY_RUNTIME` is explicit: `fake` uses only the loopback virtual

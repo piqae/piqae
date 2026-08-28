@@ -15,6 +15,8 @@ const migrationFiles = [
   "0002_merchant_workflows.sql",
   "0003_render_execution_policy.sql",
   "0004_managed_piqae_accounts.sql",
+  "0005_template_targets_and_media.sql",
+  "0006_template_draft_published_pointers.sql",
 ];
 const client = new pg.Client({
   connectionString: databaseUrl,

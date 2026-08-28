@@ -13,6 +13,14 @@ async function execute(request: Request) {
     request.method === "POST"
       ? String(body?.get("printerId") ?? "").trim() || undefined
       : undefined;
+  const targetId =
+    request.method === "POST"
+      ? String(body?.get("targetId") ?? "").trim() || undefined
+      : undefined;
+  const targetSpecificationRevision =
+    request.method === "POST"
+      ? String(body?.get("specificationRevision") ?? "").trim() || undefined
+      : undefined;
   const templateId = String(
     body?.get("templateId") ?? url.searchParams.get("templateId") ?? "",
   ).trim();
@@ -33,6 +41,8 @@ async function execute(request: Request) {
       .map((v) => v.trim())
       .filter(Boolean),
     printerId,
+    targetId,
+    targetSpecificationRevision,
     templateId: templateId || undefined,
     requestKey: request.headers.get("idempotency-key") ?? undefined,
   });
