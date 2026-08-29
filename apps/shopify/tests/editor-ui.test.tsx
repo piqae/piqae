@@ -7,8 +7,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   insertBlockAtPath,
   PrintPacketEditor,
+  PrintPacketPreview,
+  orderBatchPresentation,
 } from "../app/components/PrintPacketEditor";
 import type { PrintPacket } from "../app/core/template-model";
+import { starterTemplates } from "../app/core/starter-templates";
 import Templates from "../app/routes/app.templates";
 import {
   documentNameError,
@@ -99,6 +102,105 @@ afterEach(async () => {
 });
 
 describe("Shopify document editor layout", () => {
+  it("keeps starter order batching explicit without changing open source semantics", () => {
+    const invoice = starterTemplates.find(
+      ({ id }) => id === "invoice",
+    )!.specification;
+    const packingSlip = starterTemplates.find(
+      ({ id }) => id === "packing-slip",
+    )!.specification;
+    const receipt = starterTemplates.find(
+      ({ id }) => id === "receipt",
+    )!.specification;
+    const rootPath = [{ branch: "root" as const, index: 0 }];
+
+    expect(
+      orderBatchPresentation(invoice.body[0]!, rootPath, invoice.media.kind),
+    ).toBe("one_order_per_page");
+    expect(
+      orderBatchPresentation(
+        packingSlip.body[0]!,
+        rootPath,
+        packingSlip.media.kind,
+      ),
+    ).toBe("one_order_per_page");
+    expect(
+      orderBatchPresentation(
+        receipt.body.find((block) => block.type === "repeat")!,
+        [
+          {
+            branch: "root",
+            index: receipt.body.findIndex((block) => block.type === "repeat"),
+          },
+        ],
+        receipt.media.kind,
+      ),
+    ).toBe("continuous");
+
+    const flowingInvoice = structuredClone(invoice);
+    const repeat = flowingInvoice.body[0];
+    if (repeat?.type !== "repeat") throw new Error("invoice repeat missing");
+    repeat.children = repeat.children.filter(
+      (child) => child.type !== "page_break",
+    );
+    expect(
+      orderBatchPresentation(repeat, rootPath, flowingInvoice.media.kind),
+    ).toBe("flowing_pages");
+  });
+
+  it("presents the order batch as document structure, not editable content", async () => {
+    const invoice = starterTemplates.find(
+      ({ id }) => id === "invoice",
+    )!.specification;
+    const page = await render(
+      <PrintPacketEditor value={invoice} onChange={() => undefined} />,
+    );
+    const batch = page.querySelector<HTMLElement>(".piqae-canvas-order-batch");
+
+    expect(batch).not.toBeNull();
+    expect(batch?.classList.contains("piqae-canvas-selectable")).toBe(false);
+    expect(
+      batch?.querySelector('[aria-label="Order batching behavior"]')
+        ?.textContent,
+    ).toBe("One page per order");
+    expect(page.textContent).not.toContain("Repeats for each orders");
+
+    await act(async () => {
+      batch?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(page.querySelector(".piqae-selection-rail")).toBeNull();
+  });
+
+  it("keeps Preview chrome-free and aligned with the editor workspace", async () => {
+    const invoice = starterTemplates.find(
+      ({ id }) => id === "invoice",
+    )!.specification;
+    const page = await render(
+      <PrintPacketPreview
+        value={invoice}
+        workspaceControls={
+          <div role="group" aria-label="Editor workspace">
+            Design Code Preview
+          </div>
+        }
+      />,
+    );
+    const stage = page.querySelector(".piqae-preview-stage");
+    const canvas = stage?.querySelector(".piqae-presentation-canvas");
+    const batch = canvas?.querySelector<HTMLElement>(
+      ".piqae-canvas-order-batch",
+    );
+
+    expect(stage?.querySelector(".piqae-workspace-toolbar [role=group]")).not
+      .toBeNull;
+    expect(canvas).not.toBeNull();
+    expect(canvas?.querySelector(".piqae-canvas-selectable")).toBeNull();
+    expect(canvas?.querySelector(".piqae-canvas-badge")).toBeNull();
+    expect(canvas?.querySelector(".piqae-canvas-page-break")).toBeNull();
+    expect(canvas?.querySelector(".piqae-canvas-empty")).toBeNull();
+    expect(batch?.style.gap).toBe("");
+  });
+
   it("keeps starter and editable actions in the Shopify title bar contract", () => {
     expect(editorTitleBarActions(true)).toEqual({
       primary: { label: "Save as copy", intent: "draft" },

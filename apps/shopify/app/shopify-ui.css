@@ -12,11 +12,13 @@
   grid-template-columns: minmax(18rem, 2fr) minmax(16rem, 1fr);
 }
 .piqae-preview-stage {
-  min-height: 70vh;
-  padding: 1rem;
+  padding: 1.25rem 0.75rem;
   overflow: auto;
-  border-radius: 0.75rem;
-  background: #ededed;
+  border-radius: 10px;
+  background: #f4f4f5;
+}
+.piqae-preview-stage .piqae-page-sheet {
+  margin-bottom: 0;
 }
 .piqae-import-panel {
   border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
@@ -260,6 +262,29 @@
   border-color: #005bd3;
   outline: 2px solid #005bd3;
   outline-offset: 2px;
+}
+.piqae-canvas-order-batch {
+  position: relative;
+}
+.piqae-canvas-structure-note {
+  position: absolute;
+  top: -1.35rem;
+  left: 0;
+  color: #616161;
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+.piqae-presentation-canvas .piqae-canvas-text:hover,
+.piqae-presentation-canvas .piqae-canvas-text:focus {
+  outline-color: transparent;
+}
+.piqae-presentation-canvas .piqae-expression-editor > [contenteditable]:hover,
+.piqae-presentation-canvas .piqae-expression-editor > [contenteditable]:focus {
+  border-color: transparent;
+  box-shadow: none;
+  background: transparent;
 }
 .piqae-canvas-stack {
   display: flex;

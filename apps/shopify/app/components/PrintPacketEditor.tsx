@@ -601,6 +601,7 @@ export function PrintPacketEditor({
               insertionSlots={false}
               selectedPath={selection?.path}
               editable={!disabled}
+              mediaKind={value.media.kind}
               authoringFields={allAuthoringFields}
               onSelect={(block, path) =>
                 setSelection({ position: -1, block, path })
@@ -636,24 +637,81 @@ export type BlockPathPart = {
 };
 export type BlockPath = BlockPathPart[];
 
+export type OrderBatchPresentation =
+  | "one_order_per_page"
+  | "flowing_pages"
+  | "continuous"
+  | "fixed_media";
+
+/**
+ * Root `orders` repeats are document batching, not ordinary merchant content.
+ * Keep the source open and editable in Code while presenting its actual page
+ * behavior plainly in Design.
+ */
+export function orderBatchPresentation(
+  block: Block,
+  path: BlockPath,
+  mediaKind: PrintPacket["media"]["kind"],
+): OrderBatchPresentation | null {
+  if (
+    path.length !== 1 ||
+    block.type !== "repeat" ||
+    block.items.type !== "path" ||
+    block.items.path.length !== 1 ||
+    block.items.path[0] !== "orders"
+  )
+    return null;
+  if (mediaKind === "continuous") return "continuous";
+  if (mediaKind === "label") return "fixed_media";
+  return blocksContainPageBreak(block.children)
+    ? "one_order_per_page"
+    : "flowing_pages";
+}
+
+function blocksContainPageBreak(blocks: readonly Block[]): boolean {
+  return blocks.some((block) => {
+    if (block.type === "page_break") return true;
+    if ("children" in block && blocksContainPageBreak(block.children))
+      return true;
+    if (block.type === "table")
+      return blocksContainPageBreak(block.empty ?? []);
+    if (block.type === "data_list")
+      return (
+        blocksContainPageBreak(block.header ?? []) ||
+        blocksContainPageBreak(block.item) ||
+        blocksContainPageBreak(block.empty ?? [])
+      );
+    return block.type === "conditional"
+      ? blocksContainPageBreak(block.then) ||
+          blocksContainPageBreak(block.else ?? [])
+      : false;
+  });
+}
+
 export function PrintPacketPreview({
   value,
   stock = null,
+  workspaceControls,
 }: {
   value: PrintPacket;
   stock?: DesignStock;
+  workspaceControls?: ReactNode;
 }) {
   return (
-    <div className="piqae-preview-stage" aria-label="Rendered document preview">
-      <MediaRuler value={value} stock={stock} />
+    <div className="piqae-preview-stage" aria-label="Document layout preview">
+      {workspaceControls ? (
+        <div className="piqae-workspace-toolbar">{workspaceControls}</div>
+      ) : null}
+      <MediaRuler value={value} stock={stock} showSafeArea={false} />
       <div
-        className={`piqae-page-sheet piqae-rendered-canvas piqae-media-${value.media.kind}`}
+        className={`piqae-page-sheet piqae-rendered-canvas piqae-presentation-canvas piqae-media-${value.media.kind}`}
         style={canvasStyle(value)}
       >
-        <SafeAreaGuide value={value} stock={stock} />
         <DocumentCanvas
-          blocks={value.body}
+          blocks={canonicalizeShopifyEditorBody(value.body)}
           editable={false}
+          mediaKind={value.media.kind}
+          preview
           onSelect={() => undefined}
           onChange={() => undefined}
         />
@@ -773,9 +831,11 @@ function SafeAreaGuide({
 function MediaRuler({
   value,
   stock,
+  showSafeArea = true,
 }: {
   value: PrintPacket;
   stock: DesignStock;
+  showSafeArea?: boolean;
 }) {
   const media = value.media;
   const size =
@@ -787,7 +847,7 @@ function MediaRuler({
   return (
     <div className="piqae-media-ruler" aria-label="Document media">
       <strong>{size}</strong>
-      {stock?.safeAreaMm ? <span>Safe area shown</span> : null}
+      {showSafeArea && stock?.safeAreaMm ? <span>Safe area shown</span> : null}
       {stock?.gapMm !== null && stock?.gapMm !== undefined ? (
         <span>{stock.gapMm} mm gap</span>
       ) : null}
@@ -803,6 +863,8 @@ function DocumentCanvas({
   path = [],
   branch = "root",
   editable = true,
+  mediaKind,
+  preview = false,
   selectedPath,
   authoringFields = AUTHORING_FIELDS,
   scope = "order",
@@ -815,6 +877,8 @@ function DocumentCanvas({
   path?: BlockPath;
   branch?: BlockPathPart["branch"];
   editable?: boolean;
+  mediaKind: PrintPacket["media"]["kind"];
+  preview?: boolean;
   selectedPath?: BlockPath;
   authoringFields?: readonly ShopifyDocumentField[];
   scope?: ShopifyAuthoringScope;
@@ -841,6 +905,8 @@ function DocumentCanvas({
               block={block}
               path={blockPath}
               editable={editable}
+              mediaKind={mediaKind}
+              preview={preview}
               selectedPath={selectedPath}
               selected={sameBlockPath(selectedPath, blockPath)}
               authoringFields={authoringFields}
@@ -866,6 +932,8 @@ function CanvasBlock({
   block,
   path,
   editable,
+  mediaKind,
+  preview,
   selectedPath,
   selected,
   authoringFields,
@@ -877,6 +945,8 @@ function CanvasBlock({
   block: Block;
   path: BlockPath;
   editable: boolean;
+  mediaKind: PrintPacket["media"]["kind"];
+  preview: boolean;
   selectedPath?: BlockPath;
   selected: boolean;
   authoringFields: readonly ShopifyDocumentField[];
@@ -899,7 +969,10 @@ function CanvasBlock({
   useEffect(() => {
     if (!selected) setEditingText(false);
   }, [selected]);
+  const batchPresentation = orderBatchPresentation(block, path, mediaKind);
+  const selectableClass = preview ? "" : " piqae-canvas-selectable";
   const select = (event: React.MouseEvent) => {
+    if (preview || batchPresentation) return;
     event.stopPropagation();
     onSelect(block, path);
   };
@@ -973,14 +1046,14 @@ function CanvasBlock({
   if (block.type === "divider")
     return (
       <hr
-        className={`piqae-canvas-selectable${selected ? " piqae-canvas-selected" : ""}`}
-        onClick={select}
+        className={`${selectableClass.trim()}${selected ? " piqae-canvas-selected" : ""}`}
+        onClick={preview ? undefined : select}
       />
     );
   if (block.type === "spacer")
     return (
       <div
-        className={`piqae-canvas-spacer piqae-canvas-selectable${selected ? " piqae-canvas-selected" : ""}`}
+        className={`piqae-canvas-spacer${selectableClass}${selected ? " piqae-canvas-selected" : ""}`}
         style={{ height: `${Math.max(8, block.height_mm * 2)}px` }}
         onClick={select}
       >
@@ -988,7 +1061,7 @@ function CanvasBlock({
       </div>
     );
   if (block.type === "page_break")
-    return (
+    return preview ? null : (
       <div
         className={
           selected
@@ -1003,7 +1076,7 @@ function CanvasBlock({
   if (block.type === "image")
     return (
       <div
-        className={`piqae-canvas-image piqae-canvas-selectable${selected ? " piqae-canvas-selected" : ""}`}
+        className={`piqae-canvas-image${selectableClass}${selected ? " piqae-canvas-selected" : ""}`}
         style={{
           width: `${Math.max(80, block.width_mm * 2)}px`,
           height: `${Math.max(40, block.height_mm * 2)}px`,
@@ -1017,7 +1090,7 @@ function CanvasBlock({
   if (block.type === "qr" || block.type === "barcode")
     return (
       <div
-        className={`piqae-canvas-code piqae-canvas-${block.type} piqae-canvas-selectable${selected ? " piqae-canvas-selected" : ""}`}
+        className={`piqae-canvas-code piqae-canvas-${block.type}${selectableClass}${selected ? " piqae-canvas-selected" : ""}`}
         onClick={select}
       >
         <span aria-hidden="true">{block.type === "qr" ? "▦" : "▌█▌▌█▌█"}</span>
@@ -1027,7 +1100,7 @@ function CanvasBlock({
   if (block.type === "table")
     return (
       <div
-        className={`piqae-canvas-table piqae-canvas-selectable${selected ? " piqae-canvas-selected" : ""}`}
+        className={`piqae-canvas-table${selectableClass}${selected ? " piqae-canvas-selected" : ""}`}
         onClick={select}
       >
         <div className="piqae-canvas-table-row piqae-canvas-table-head">
@@ -1274,18 +1347,22 @@ function CanvasBlock({
   if (block.type === "conditional")
     return (
       <section
-        className={`piqae-canvas-conditional piqae-canvas-selectable${selected ? " piqae-canvas-selected" : ""}`}
+        className={`piqae-canvas-conditional${selectableClass}${selected ? " piqae-canvas-selected" : ""}`}
         onClick={select}
       >
-        <span className="piqae-canvas-badge">
-          Shown when {expressionLabel(block.condition)}
-        </span>
+        {preview ? null : (
+          <span className="piqae-canvas-badge">
+            Shown when {expressionLabel(block.condition)}
+          </span>
+        )}
         {block.then.length ? (
           <DocumentCanvas
             blocks={block.then}
             path={path}
             branch="then"
             editable={editable}
+            mediaKind={mediaKind}
+            preview={preview}
             selectedPath={selectedPath}
             authoringFields={authoringFields}
             scope={scope}
@@ -1297,10 +1374,11 @@ function CanvasBlock({
           <AddContentSlot
             label="Add content"
             editable={editable}
+            preview={preview}
             onAdd={(child) => onChange({ ...block, then: [child] }, path)}
           />
         )}
-        {block.else?.length ? (
+        {!preview && block.else?.length ? (
           <>
             <span className="piqae-canvas-badge">Otherwise</span>
             <DocumentCanvas
@@ -1308,6 +1386,8 @@ function CanvasBlock({
               path={path}
               branch="else"
               editable={editable}
+              mediaKind={mediaKind}
+              preview={preview}
               selectedPath={selectedPath}
               authoringFields={authoringFields}
               scope={scope}
@@ -1338,14 +1418,34 @@ function CanvasBlock({
             .join(" "),
           gap: `${block.gap_mm ?? 0}mm`,
         }
-      : { gap: `${"gap_mm" in block ? (block.gap_mm ?? 0) : 0}mm` };
+      : block.type === "repeat"
+        ? undefined
+        : { gap: `${"gap_mm" in block ? (block.gap_mm ?? 0) : 0}mm` };
+  const batchLabel =
+    batchPresentation === "one_order_per_page"
+      ? "One page per order"
+      : batchPresentation === "flowing_pages"
+        ? "Orders flow across pages"
+        : batchPresentation === "continuous"
+          ? "Continuous order batch"
+          : batchPresentation === "fixed_media"
+            ? "Fixed-media order batch"
+            : null;
   return (
     <section
-      className={`${className} piqae-canvas-selectable${selected ? " piqae-canvas-selected" : ""}`}
+      className={`${className}${batchPresentation ? " piqae-canvas-order-batch" : selectableClass}${selected ? " piqae-canvas-selected" : ""}`}
       style={style}
-      onClick={select}
+      onClick={preview || batchPresentation ? undefined : select}
     >
-      {block.type === "repeat" ? (
+      {!preview && batchLabel ? (
+        <span
+          className="piqae-canvas-structure-note"
+          role="note"
+          aria-label="Order batching behavior"
+        >
+          {batchLabel}
+        </span>
+      ) : !preview && block.type === "repeat" ? (
         <span className="piqae-canvas-badge">
           Repeats for each {expressionLabel(block.items)}
         </span>
@@ -1356,6 +1456,8 @@ function CanvasBlock({
           path={path}
           branch="children"
           editable={editable}
+          mediaKind={mediaKind}
+          preview={preview}
           selectedPath={selectedPath}
           authoringFields={authoringFields}
           scope={childScope}
@@ -1368,6 +1470,7 @@ function CanvasBlock({
         <AddContentSlot
           label="Add content"
           editable={editable}
+          preview={preview}
           onAdd={(child) =>
             "children" in block
               ? onChange({ ...block, children: [child] }, path)
@@ -1473,12 +1576,15 @@ function CanvasInsertionSlot({
 function AddContentSlot({
   label,
   editable,
+  preview = false,
   onAdd,
 }: {
   label: string;
   editable: boolean;
+  preview?: boolean;
   onAdd(block: Block): void;
 }) {
+  if (preview) return null;
   if (!editable) return <span className="piqae-canvas-empty">No content</span>;
   return (
     <button
