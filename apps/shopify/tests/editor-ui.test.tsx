@@ -512,6 +512,10 @@ describe("Shopify document editor layout", () => {
         new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
       );
     });
+    await act(
+      () =>
+        new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    );
     expect(editor.getAttribute("contenteditable")).toBe("false");
 
     await act(async () => {
@@ -527,6 +531,10 @@ describe("Shopify document editor layout", () => {
         new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
       );
     });
+    await act(
+      () =>
+        new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    );
     await act(async () => {
       text.dispatchEvent(
         new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
