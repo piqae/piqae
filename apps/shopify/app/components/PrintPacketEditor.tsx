@@ -495,8 +495,8 @@ export function PrintPacketEditor({
             </div>
           </div>
         </div>
-        <div className="piqae-selection-rail" aria-live="polite">
-          {selection?.path ? (
+        {selection ? (
+          <div className="piqae-selection-rail" aria-live="polite">
             <div className="piqae-selection-bar">
               <span className="piqae-selection-title">
                 <Icon name={blockIcon(selection.block)} />
@@ -514,7 +514,11 @@ export function PrintPacketEditor({
                 <ToolButton
                   icon="up"
                   label="Move up"
-                  disabled={disabled || selection.path.at(-1)?.index === 0}
+                  disabled={
+                    disabled ||
+                    !selection.path ||
+                    selection.path.at(-1)?.index === 0
+                  }
                   onClick={() => moveSelected(-1)}
                 />
                 <ToolButton
@@ -522,6 +526,7 @@ export function PrintPacketEditor({
                   label="Move down"
                   disabled={
                     disabled ||
+                    !selection.path ||
                     selection.path.at(-1)?.index ===
                       siblingsAtPath(value.body, selection.path).length - 1
                   }
@@ -530,7 +535,7 @@ export function PrintPacketEditor({
                 <ToolButton
                   icon="duplicate"
                   label="Duplicate"
-                  disabled={disabled}
+                  disabled={disabled || !selection.path}
                   onClick={duplicateSelected}
                 />
                 <ToolButton
@@ -542,12 +547,8 @@ export function PrintPacketEditor({
                 />
               </span>
             </div>
-          ) : (
-            <p className="piqae-selection-hint">
-              Select anything on the page to edit it, or add content above.
-            </p>
-          )}
-        </div>
+          </div>
+        ) : null}
       </div>
       <div className="piqae-editor-workspace">
         {continuousPageBreaks ? (
