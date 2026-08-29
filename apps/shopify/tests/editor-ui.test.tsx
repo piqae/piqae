@@ -349,8 +349,9 @@ describe("Shopify document editor layout", () => {
       ".piqae-canvas-order-batch",
     );
 
-    expect(stage?.querySelector(".piqae-workspace-toolbar [role=group]")).not
-      .toBeNull;
+    expect(
+      stage?.querySelector(".piqae-workspace-toolbar [role=group]"),
+    ).not.toBeNull();
     expect(canvas).not.toBeNull();
     expect(canvas?.querySelector(".piqae-canvas-selectable")).toBeNull();
     expect(canvas?.querySelector(".piqae-canvas-badge")).toBeNull();
@@ -511,6 +512,10 @@ describe("Shopify document editor layout", () => {
         new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
       );
     });
+    await act(
+      () =>
+        new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    );
     expect(editor.getAttribute("contenteditable")).toBe("false");
 
     await act(async () => {
@@ -526,6 +531,10 @@ describe("Shopify document editor layout", () => {
         new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
       );
     });
+    await act(
+      () =>
+        new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    );
     await act(async () => {
       text.dispatchEvent(
         new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
