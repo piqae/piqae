@@ -970,13 +970,13 @@ mod tests {
     fn mutation_bounds_never_persist_an_unopenable_key_registry() {
         let dir = tempfile::tempdir().unwrap();
         let mut registry = ConnectorRegistry::load(dir.path()).unwrap();
-        let now = Utc::now().timestamp_millis();
+        let expires_unix_ms = i64::MAX;
         for index in 0..MAX_CONNECTORS {
             registry
                 .register_prepared_key(
                     SecureKeyHandle::new(format!("prepared-{index}")).unwrap(),
                     [u8::try_from(index).unwrap_or_default(); 32],
-                    now.saturating_add(60_000),
+                    expires_unix_ms,
                 )
                 .unwrap();
         }
@@ -985,7 +985,7 @@ mod tests {
                 .register_prepared_key(
                     SecureKeyHandle::new("prepared-overflow".into()).unwrap(),
                     [255; 32],
-                    now.saturating_add(60_000),
+                    expires_unix_ms,
                 )
                 .is_err()
         );
@@ -1004,14 +1004,14 @@ mod tests {
                 .register_prepared_key(
                     handle.clone(),
                     [u8::try_from(index).unwrap_or_default(); 32],
-                    now.saturating_add(60_000),
+                    expires_unix_ms,
                 )
                 .unwrap();
             registry.cancel_prepared_key(&handle).unwrap();
         }
         let overflow = SecureKeyHandle::new("cleanup-overflow".into()).unwrap();
         registry
-            .register_prepared_key(overflow.clone(), [254; 32], now.saturating_add(60_000))
+            .register_prepared_key(overflow.clone(), [254; 32], expires_unix_ms)
             .unwrap();
         assert!(registry.cancel_prepared_key(&overflow).is_err());
         assert!(registry.prepared_key(&overflow).is_some());
