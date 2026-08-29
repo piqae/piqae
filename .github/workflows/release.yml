@@ -19,6 +19,14 @@ on:
         type: boolean
         required: true
         default: false
+      platform:
+        description: Artifact scope; macOS is the fast native lane, all is full certification
+        type: choice
+        options:
+          - macos
+          - all
+        required: true
+        default: macos
 
 permissions:
   contents: read
@@ -41,6 +49,7 @@ jobs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
       windows_enabled: ${{ steps.release.outputs.windows_enabled }}
+      platform: ${{ steps.release.outputs.platform }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -54,15 +63,18 @@ jobs:
           REQUESTED_BUILD: ${{ inputs.build_number }}
           REQUESTED_PUBLISH: ${{ inputs.publish }}
           REQUESTED_VERSION: ${{ inputs.version }}
+          REQUESTED_PLATFORM: ${{ inputs.platform }}
         run: |
           if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/tags/v* ]]; then
             version=${GITHUB_REF_NAME#v}
             build_number=$GITHUB_RUN_NUMBER
             tag=$GITHUB_REF_NAME
+            platform=all
           elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             version=$REQUESTED_VERSION
             build_number=$REQUESTED_BUILD
             tag=$GITHUB_REF_NAME
+            platform=${REQUESTED_PLATFORM:-macos}
             if [[ "$version" != "${GITHUB_REF_NAME#v}" ]]; then
               echo "Requested version must match the selected tag $GITHUB_REF_NAME." >&2
               exit 2
@@ -71,6 +83,7 @@ jobs:
             version=$REQUESTED_VERSION
             build_number=$REQUESTED_BUILD
             tag=""
+            platform=${REQUESTED_PLATFORM:-macos}
           fi
           if [[ ! "$version" =~ ^[0-9]+([.][0-9]+){2}([.-][0-9A-Za-z.-]+)?$ ]]; then
             echo "Version must be a safe SemVer-like value without a leading v." >&2
@@ -90,6 +103,8 @@ jobs:
             echo "Publication requires selecting a protected v* tag ref." >&2
             exit 1
           fi
+          python3 release/tools/release_platform.py "$platform" >/dev/null
+          windows_tier=$(ruby -e 'require "yaml"; puts YAML.load_file("release/support-matrix.yaml").fetch("platforms").fetch("windows_10_11_x86_64").fetch("tier")')
           if [[ "$publish" == true ]]; then
             ruby release/tools/check_product_release.rb \
               --product --release-version "$version"
@@ -99,6 +114,10 @@ jobs:
             fi
             if [[ "$REF_PROTECTED" != true ]]; then
               echo "Publication requires a protected v* tag ref." >&2
+              exit 1
+            fi
+            if [[ "$platform" == all && "$windows_tier" != disabled ]]; then
+              echo "Stable publication requires an aggregate-gated Windows promoter; Windows is currently expected to remain Disabled." >&2
               exit 1
             fi
             git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
@@ -114,7 +133,7 @@ jobs:
             echo "build_number=$build_number"
             echo "publish=$publish"
             echo "tag=$tag"
-            windows_tier=$(ruby -e 'require "yaml"; puts YAML.load_file("release/support-matrix.yaml").fetch("platforms").fetch("windows_10_11_x86_64").fetch("tier")')
+            python3 release/tools/release_platform.py "$platform"
             if [[ "$windows_tier" == disabled ]]; then
               echo "windows_enabled=false"
             else
@@ -122,9 +141,57 @@ jobs:
             fi
           } >> "$GITHUB_OUTPUT"
 
+  core:
+    name: Shared release gates
+    needs: prepare
+    runs-on: ${{ vars.PIQAE_CI_RUST_RUNNER || vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 50
+    services:
+      postgres:
+        image: postgres:16@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_DB: piqae_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d piqae_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PIQAE_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/piqae_test
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.88.0
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: release-core
+          save-if: ${{ github.ref_type == 'tag' }}
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - name: Install CUPS development library
+        run: sudo apt-get update && sudo apt-get install --yes libcups2-dev
+      - name: Install locked JavaScript workspace dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Run shared protocol, database, SDK and policy gates once
+        run: cargo xtask release check --platform core
+
   macos:
     name: macOS signed candidate and promotion
-    needs: prepare
+    needs: [prepare, core]
     permissions:
       actions: read
       attestations: write
@@ -134,13 +201,15 @@ jobs:
     with:
       version: ${{ needs.prepare.outputs.version }}
       build_number: ${{ needs.prepare.outputs.build_number }}
-      publish: ${{ needs.prepare.outputs.publish == 'true' }}
+      # Promotion is deferred until every selected sibling has succeeded; this
+      # reusable call produces only the signed candidate and release evidence.
+      publish: false
     secrets: inherit
 
   windows:
     name: Windows signed candidate and promotion
-    needs: prepare
-    if: needs.prepare.outputs.windows_enabled == 'true'
+    needs: [prepare, core]
+    if: needs.prepare.outputs.platform == 'all' && needs.prepare.outputs.windows_enabled == 'true'
     permissions:
       actions: read
       attestations: write
@@ -149,12 +218,15 @@ jobs:
     uses: ./.github/workflows/windows-release.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
-      publish: ${{ needs.prepare.outputs.publish == 'true' }}
+      # The parent workflow owns publication fan-in. If Windows becomes
+      # enabled, prepare fails closed until an aggregate-gated promoter exists.
+      publish: false
     secrets: inherit
 
   apple_sdk:
     name: Apple embedded node SDK candidate
-    needs: prepare
+    needs: [prepare, core]
+    if: needs.prepare.outputs.platform == 'all'
     runs-on: ${{ vars.PIQAE_RELEASE_MACOS_RUNNER || 'macos-15' }}
     timeout-minutes: 45
     permissions:
@@ -212,7 +284,8 @@ jobs:
 
   windows_sdk:
     name: Windows embedded node SDK candidate
-    needs: prepare
+    needs: [prepare, core]
+    if: needs.prepare.outputs.platform == 'all'
     runs-on: ${{ vars.PIQAE_RELEASE_WINDOWS_RUNNER || 'windows-latest' }}
     timeout-minutes: 45
     permissions:
@@ -274,7 +347,8 @@ jobs:
 
   linux:
     name: Linux (${{ matrix.artifact }})
-    needs: prepare
+    needs: [prepare, core]
+    if: needs.prepare.outputs.platform == 'all'
     strategy:
       fail-fast: false
       matrix:
@@ -353,7 +427,8 @@ jobs:
 
   server:
     name: Container (${{ matrix.name }})
-    needs: prepare
+    needs: [prepare, core]
+    if: needs.prepare.outputs.platform == 'all'
     runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     strategy:
@@ -370,16 +445,9 @@ jobs:
       attestations: write
       contents: read
       id-token: write
-      packages: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        if: needs.prepare.outputs.publish == 'true'
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         id: metadata
         with:
@@ -387,33 +455,147 @@ jobs:
           tags: |
             type=raw,value=v${{ needs.prepare.outputs.version }}
             type=sha
+      - name: Prepare private image candidate directory
+        run: mkdir -p artifacts/container
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         id: build
         with:
           context: .
           file: ${{ matrix.dockerfile }}
-          push: ${{ needs.prepare.outputs.publish == 'true' }}
+          push: false
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
+          outputs: type=docker,dest=artifacts/container/piqae-${{ matrix.name }}.tar
+      - name: Checksum immutable image candidate
+        run: >-
+          cd artifacts/container &&
+          sha256sum piqae-${{ matrix.name }}.tar
+          > piqae-${{ matrix.name }}.tar.sha256
       - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
-        if: needs.prepare.outputs.publish == 'true'
+        if: github.event.repository.private == false
         with:
-          subject-name: ghcr.io/piqae/piqae/${{ matrix.name }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
+          subject-path: artifacts/container/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: piqae-container-${{ matrix.name }}
+          path: artifacts/container/*
+          if-no-files-found: error
+          retention-days: 14
 
-  finalize:
-    name: Publish GitHub prerelease
+  promote_containers:
+    name: Promote container (${{ matrix.name }}) after aggregate gate
     needs: [prepare, macos, windows, apple_sdk, windows_sdk, linux, server]
     if: >-
       always() && needs.prepare.outputs.publish == 'true'
       && needs.prepare.result == 'success'
+      && needs.prepare.outputs.platform == 'all'
       && needs.macos.result == 'success'
-      && (needs.windows.result == 'success' || needs.windows.result == 'skipped')
+      && (
+        (needs.prepare.outputs.windows_enabled == 'true' && needs.windows.result == 'success')
+        || (needs.prepare.outputs.windows_enabled == 'false' && needs.windows.result == 'skipped')
+      )
       && needs.apple_sdk.result == 'success'
       && needs.windows_sdk.result == 'success'
       && needs.linux.result == 'success'
       && needs.server.result == 'success'
+    runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [server, web, migrate]
+    permissions:
+      actions: read
+      attestations: read
+      id-token: write
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: piqae-container-${{ matrix.name }}
+          path: artifacts/container
+      - name: Verify immutable image candidate
+        run: cd artifacts/container && sha256sum --check piqae-${{ matrix.name }}.tar.sha256
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Load and push verified candidate tags
+        id: push
+        shell: bash
+        env:
+          IMAGE: ghcr.io/piqae/piqae/${{ matrix.name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker load --input "artifacts/container/piqae-${{ matrix.name }}.tar"
+          short_sha=${GITHUB_SHA:0:7}
+          docker tag "$IMAGE:v$VERSION" "$IMAGE:sha-$short_sha"
+          docker push "$IMAGE:v$VERSION"
+          docker push "$IMAGE:sha-$short_sha"
+          digest=$(docker buildx imagetools inspect "$IMAGE:v$VERSION" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        with:
+          subject-name: ghcr.io/piqae/piqae/${{ matrix.name }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  promote_macos:
+    name: Promote verified macOS candidate after aggregate gate
+    needs: [prepare, macos, windows, apple_sdk, windows_sdk, linux, server, promote_containers]
+    if: >-
+      always() && needs.prepare.outputs.publish == 'true'
+      && needs.prepare.result == 'success'
+      && needs.macos.result == 'success'
+      && (
+        (
+          needs.prepare.outputs.platform == 'macos'
+          && needs.windows.result == 'skipped'
+          && needs.apple_sdk.result == 'skipped'
+          && needs.windows_sdk.result == 'skipped'
+          && needs.linux.result == 'skipped'
+          && needs.server.result == 'skipped'
+          && needs.promote_containers.result == 'skipped'
+        )
+        || (
+          needs.prepare.outputs.platform == 'all'
+          && (
+            (needs.prepare.outputs.windows_enabled == 'true' && needs.windows.result == 'success')
+            || (needs.prepare.outputs.windows_enabled == 'false' && needs.windows.result == 'skipped')
+          )
+          && needs.apple_sdk.result == 'success'
+          && needs.windows_sdk.result == 'success'
+          && needs.linux.result == 'success'
+          && needs.server.result == 'success'
+          && needs.promote_containers.result == 'success'
+        )
+      )
+    permissions:
+      actions: read
+      attestations: read
+      contents: write
+    uses: ./.github/workflows/macos-promotion.yml
+    with:
+      source_run_id: ${{ github.run_id }}
+      source_sha: ${{ github.sha }}
+      tag: ${{ needs.prepare.outputs.tag }}
+      version: ${{ needs.macos.outputs.version }}
+      build_number: ${{ needs.macos.outputs.build_number }}
+      artifact_name: ${{ needs.macos.outputs.artifact_name }}
+      evidence_artifact_name: piqae-macos-${{ needs.macos.outputs.version }}-${{ needs.macos.outputs.build_number }}-evidence
+      recovery_mode: false
+    secrets: inherit
+
+  finalize:
+    name: Publish GitHub prerelease
+    needs: [prepare, promote_macos]
+    if: >-
+      always() && needs.prepare.outputs.publish == 'true'
+      && needs.prepare.result == 'success'
+      && needs.promote_macos.result == 'success'
     runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
@@ -421,16 +603,19 @@ jobs:
       contents: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.prepare.outputs.platform == 'all'
         with:
           pattern: piqae-linux-*
           path: linux-artifacts
           merge-multiple: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.prepare.outputs.platform == 'all'
         with:
           pattern: piqae-node-*-sdk
           path: sdk-artifacts
           merge-multiple: true
       - name: Attach Linux and SDK assets and publish the draft prerelease
+        if: needs.prepare.outputs.platform == 'all'
         env:
           CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'piqae/piqae' }}
           GH_REPO: ${{ github.repository }}
@@ -446,3 +631,19 @@ jobs:
           gh release upload "$RELEASE_TAG" linux-artifacts/* --clobber
           gh release upload "$RELEASE_TAG" sdk-artifacts/* --clobber
           gh release edit "$RELEASE_TAG" --draft=false --prerelease
+      - name: Publish the macOS-only draft prerelease
+        if: needs.prepare.outputs.platform == 'macos'
+        env:
+          CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'piqae/piqae' }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REPOSITORY" != "$CANONICAL_REPOSITORY" ]]; then
+            echo "GitHub release publishing is enabled only in $CANONICAL_REPOSITORY." >&2
+            exit 1
+          fi
+          gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' | grep -Fx true
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease \
+            --notes "macOS Preview release. This release intentionally contains only the signed, notarised universal macOS package, updater, checksums, SBOM, and provenance. Windows, Linux, container, and embedded SDK artifacts require the all-platform certification lane."

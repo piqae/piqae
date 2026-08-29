@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import unittest
 
 
@@ -118,6 +119,105 @@ class CiReleaseContractTest(unittest.TestCase):
             windows_pack.index("dotnet pack"),
         )
         self.assertIn("/p:PiqaeThirdPartyLicenses=", windows_pack)
+
+    def test_release_workflow_has_bounded_macos_and_explicit_full_scopes(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn("platform:\n        description: Artifact scope", workflow)
+        self.assertIn("default: macos", workflow)
+        self.assertIn('release_platform.py "$platform"', workflow)
+        self.assertIn("platform=all", workflow)
+        self.assertIn("pnpm install --frozen-lockfile", workflow)
+        self.assertIn("aggregate-gated Windows promoter", workflow)
+        self.assertIn(
+            'if [[ "$platform" == all && "$windows_tier" != disabled ]]', workflow
+        )
+        self.assertEqual(
+            workflow.count("cargo xtask release check --platform core"), 1
+        )
+        self.assertIn("needs: [prepare, core]", workflow)
+        for job in ("windows", "apple_sdk", "windows_sdk", "linux", "server"):
+            match = re.search(rf"(?ms)^  {job}:.*?(?=^  [a-z_]+:|\Z)", workflow)
+            self.assertIsNotNone(match)
+            section = match.group(0)
+            self.assertIn("needs.prepare.outputs.platform == 'all'", section)
+        self.assertIn("Publish the macOS-only draft prerelease", workflow)
+        self.assertIn("intentionally contains only", workflow)
+        self.assertIn(
+            "needs.prepare.outputs.platform == 'all'\n"
+            "          && (\n"
+            "            (needs.prepare.outputs.windows_enabled == 'true' && needs.windows.result == 'success')",
+            workflow,
+        )
+        for selected in ("apple_sdk", "windows_sdk", "linux", "server"):
+            self.assertIn(f"needs.{selected}.result == 'success'", workflow)
+        self.assertNotIn(
+            "needs.apple_sdk.result == 'success' || needs.apple_sdk.result == 'skipped'",
+            workflow,
+        )
+        macos_call = re.search(r"(?ms)^  macos:.*?(?=^  [a-z_]+:|\Z)", workflow)
+        self.assertIn("publish: false", macos_call.group(0))
+        promotion = re.search(
+            r"(?ms)^  promote_macos:.*?(?=^  [a-z_]+:|\Z)", workflow
+        )
+        self.assertIsNotNone(promotion)
+        self.assertIn(
+            "needs: [prepare, macos, windows, apple_sdk, windows_sdk, linux, server, promote_containers]",
+            promotion.group(0),
+        )
+        self.assertIn("uses: ./.github/workflows/macos-promotion.yml", promotion.group(0))
+        finalizer = re.search(r"(?ms)^  finalize:.*?(?=^  [a-z_]+:|\Z)", workflow)
+        self.assertIn("needs: [prepare, promote_macos]", finalizer.group(0))
+        self.assertIn("needs.promote_macos.result == 'success'", finalizer.group(0))
+
+        macos_workflow = (ROOT / ".github/workflows/macos-release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("value: ${{ jobs.candidate.outputs.artifact_name }}", macos_workflow)
+
+        windows_call = re.search(r"(?ms)^  windows:.*?(?=^  [a-z_]+:|\Z)", workflow)
+        self.assertIn("publish: false", windows_call.group(0))
+
+        server = re.search(r"(?ms)^  server:.*?(?=^  [a-z_]+:|\Z)", workflow)
+        self.assertIn("push: false", server.group(0))
+        self.assertIn("outputs: type=docker", server.group(0))
+        self.assertIn("name: piqae-container-${{ matrix.name }}", server.group(0))
+        self.assertNotIn("docker/login-action", server.group(0))
+
+        container_promotion = re.search(
+            r"(?ms)^  promote_containers:.*?(?=^  [a-z_]+:|\Z)", workflow
+        )
+        self.assertIsNotNone(container_promotion)
+        self.assertIn("needs.server.result == 'success'", container_promotion.group(0))
+        self.assertIn("fail-fast: false", container_promotion.group(0))
+        self.assertIn("sha256sum --check", container_promotion.group(0))
+        self.assertIn("docker push", container_promotion.group(0))
+        self.assertIn(
+            "needs.promote_containers.result == 'success'", promotion.group(0)
+        )
+
+    def test_release_artifacts_fan_out_after_one_shared_gate(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        for job in ("macos", "windows", "apple_sdk", "windows_sdk", "linux", "server"):
+            match = re.search(rf"(?ms)^  {job}:.*?(?=^  [a-z_]+:|\Z)", workflow)
+            self.assertIsNotNone(match)
+            self.assertIn("needs: [prepare, core]", match.group(0))
+        for matrix_job in ("linux", "server"):
+            match = re.search(rf"(?ms)^  {matrix_job}:.*?(?=^  [a-z_]+:|\Z)", workflow)
+            self.assertIn("fail-fast: false", match.group(0))
+
+    def test_apple_xcframework_honors_cargo_target_directory(self) -> None:
+        script = (ROOT / "sdk/apple/scripts/build-xcframework.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('cargo_target_directory=$(cargo metadata', script)
+        self.assertIn(
+            '"$cargo_target_directory/aarch64-apple-darwin/release/libpiqae_node_ffi.a"',
+            script,
+        )
+        self.assertNotIn(
+            '"$repository_root/target/aarch64-apple-darwin/release/libpiqae_node_ffi.a"',
+            script,
+        )
 
 
 if __name__ == "__main__":
