@@ -15,7 +15,8 @@ use anyhow::{Context as _, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use piqae_agent_storage::{
-    AcceptedJob, AgentStore, CloudAcceptIntent, CloudRouteProof, LocalJob, StoredNamedProfile,
+    AcceptedJob, AgentStore, CloudAcceptIntent, CloudRouteProof, JobPersistenceFacts, LocalJob,
+    StoredNamedProfile,
 };
 use piqae_domain::{
     AgentId, EventId, JobFailureReason, JobId, JobState, NativePrinterOption, PrinterCapabilities,
@@ -661,30 +662,36 @@ impl EmbeddedQueue {
             bail!("offered embedded content digest does not match");
         }
         let path = self.persist_content_for_scope(connector_id, &digest, content)?;
-        let prepared = self.store_for_scope_mut(connector_id)?.prepare_cloud_job(
-            &AcceptedJob {
-                job_id: offer.job.id.to_string(),
-                submission_id: format!("sub_{}", offer.job.id),
-                printer_id,
-                printer_native_id: scoped_native_id(&snapshot.adapter_id, &snapshot.native_id),
-                title: offer.job.title.clone(),
-                content_sha256: digest.clone(),
-                content_path: path.to_string_lossy().into_owned(),
-                content_kind: match offer.job.content_kind {
-                    piqae_domain::ContentKind::Pdf => "pdf",
-                    piqae_domain::ContentKind::Raw => "raw",
-                }
-                .into(),
-                options_json: serde_json::to_string(&offer.job.options)?,
-                expires_unix_ms: Some(offer.job.expires_at.timestamp_millis()),
-                accepted_unix_ms: Utc::now().timestamp_millis(),
-                cloud_managed: true,
-            },
-            &offer.lease_id.to_string(),
-            &offer.lease_token,
-            offer.lease_expires_at.timestamp_millis(),
-            &route_proof,
-        );
+        let prepared = self
+            .store_for_scope_mut(connector_id)?
+            .prepare_cloud_job_with_facts(
+                &AcceptedJob {
+                    job_id: offer.job.id.to_string(),
+                    submission_id: format!("sub_{}", offer.job.id),
+                    printer_id,
+                    printer_native_id: scoped_native_id(&snapshot.adapter_id, &snapshot.native_id),
+                    title: offer.job.title.clone(),
+                    content_sha256: digest.clone(),
+                    content_path: path.to_string_lossy().into_owned(),
+                    content_kind: match offer.job.content_kind {
+                        piqae_domain::ContentKind::Pdf => "pdf",
+                        piqae_domain::ContentKind::Raw => "raw",
+                    }
+                    .into(),
+                    options_json: serde_json::to_string(&offer.job.options)?,
+                    expires_unix_ms: Some(offer.job.expires_at.timestamp_millis()),
+                    accepted_unix_ms: Utc::now().timestamp_millis(),
+                    cloud_managed: true,
+                },
+                &offer.lease_id.to_string(),
+                &offer.lease_token,
+                offer.lease_expires_at.timestamp_millis(),
+                &route_proof,
+                &JobPersistenceFacts {
+                    route_connector_id: Some(connector_id.to_owned()),
+                    ..JobPersistenceFacts::default()
+                },
+            );
         let local = match prepared {
             Ok(local) => local,
             Err(error) => {

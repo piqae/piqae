@@ -5,6 +5,7 @@ use piqae_local_ipc::{
     LocalPrinterQueue, LocalStatus, NativeProfileCapturePayload, PendingBrokerAuthorization,
     ProfileCaptureAuthorized, ProfileValidationResult,
 };
+pub use piqae_protocol::agent::AmbiguousHandoffResolution;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
@@ -136,6 +137,16 @@ pub enum RuntimeCommand {
         confirmed: bool,
         respond_to: oneshot::Sender<Result<LocalJobAccepted, CommandFailure>>,
     },
+    LocalAmbiguousHandoff {
+        job_id: String,
+        respond_to: oneshot::Sender<Result<LocalAmbiguousHandoff, CommandFailure>>,
+    },
+    ResolveLocalAmbiguousHandoff {
+        job_id: String,
+        ambiguity_id: String,
+        resolution: AmbiguousHandoffResolution,
+        respond_to: oneshot::Sender<Result<(), CommandFailure>>,
+    },
     ConnectorDetails {
         respond_to: oneshot::Sender<Result<Vec<LocalConnectorDetail>, CommandFailure>>,
     },
@@ -233,6 +244,11 @@ pub enum LocalContent {
 pub struct LocalJobAccepted {
     pub job_id: String,
     pub state: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LocalAmbiguousHandoff {
+    pub ambiguity_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

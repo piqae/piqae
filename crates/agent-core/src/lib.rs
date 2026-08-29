@@ -58,6 +58,9 @@ pub struct LocalSubmission {
     pub options: JobOptions,
     pub native_profile: Option<NativeProfilePayload>,
     pub printer_native_binding: Option<PrinterNativeBindingPin>,
+    /// Durable queue authority that owns this job's native route reservation.
+    /// Local jobs leave this unset and use the executor's queue-scoped owner.
+    pub route_connector_id: Option<String>,
     pub deadline_unix_ms: i64,
     pub route_fence: Option<piqae_protocol::executor::LocalRouteFence>,
 }
@@ -353,6 +356,7 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
     pub const DEFAULT_OBSERVATION_DEADLINE_MS: i64 = 30_000;
     pub const DEFAULT_RECONCILIATION_INTERVAL_MS: i64 = 2_000;
     pub const DEFAULT_UNCERTAINTY_AFTER_MS: i64 = 10 * 60 * 1_000;
+    pub const DEFAULT_LOCAL_RETRY_DELAY_MS: i64 = 2_000;
 
     pub const fn new(store: AgentStore, executor: E, clock: C) -> Self {
         Self {
@@ -420,15 +424,12 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
         Ok(count)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the pre-handoff state machine keeps persistence and executor outcomes in one audit point"
+    )]
     async fn execute_job(&mut self, job: LocalJob) -> Result<(), AgentError> {
-        self.transition(
-            &job.job_id,
-            &job.state,
-            JobState::Preparing,
-            None,
-            "Validating local job",
-            "{}",
-        )?;
+        self.begin_execution(&job)?;
 
         let Some(options) = self.validate_job_options(&job)? else {
             if let Some(path) = confidential_content_path(&job.content_path) {
@@ -475,6 +476,7 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
             options,
             native_profile,
             printer_native_binding: job.printer_native_binding,
+            route_connector_id: job.route_connector_id,
             deadline_unix_ms: self.clock.unix_ms() + self.execution_deadline_ms,
             route_fence: None,
         };
@@ -508,14 +510,28 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
                 } else {
                     (JobState::FailedTerminal, error.code.as_str())
                 };
-                self.transition(
-                    &job.job_id,
-                    "spool_intent",
-                    state,
-                    Some(reason),
-                    &error.message,
-                    &serde_json::to_string(&error)?,
-                )?;
+                let details = serde_json::to_string(&error)?;
+                if error.retryable && !error.handoff_may_have_succeeded && !job.cloud_managed {
+                    let now = self.clock.unix_ms();
+                    self.store.record_local_retryable_failure(
+                        &EventId::new().to_string(),
+                        &job.job_id,
+                        reason,
+                        &error.message,
+                        &details,
+                        now,
+                        now + Self::DEFAULT_LOCAL_RETRY_DELAY_MS,
+                    )?;
+                } else {
+                    self.transition(
+                        &job.job_id,
+                        "spool_intent",
+                        state,
+                        Some(reason),
+                        &error.message,
+                        &details,
+                    )?;
+                }
                 if !error.retryable {
                     if let Some(path) = confidential_path.as_ref() {
                         let _ = tokio::fs::remove_file(path).await;
@@ -524,6 +540,35 @@ impl<E: Executor, C: Clock> AgentEngine<E, C> {
             }
         }
         Ok(())
+    }
+
+    fn begin_execution(&mut self, job: &LocalJob) -> Result<(), AgentError> {
+        let mut state = parse_state(&job.state)?;
+        if state == JobState::FailedRetryable {
+            if job.cloud_managed {
+                return Err(AgentError::InvalidTransition {
+                    from: JobState::FailedRetryable,
+                    to: JobState::Preparing,
+                });
+            }
+            self.transition(
+                &job.job_id,
+                &job.state,
+                JobState::QueuedLocal,
+                Some("local_retry"),
+                "Retrying locally queued job after a pre-handoff failure",
+                "{}",
+            )?;
+            state = JobState::QueuedLocal;
+        }
+        self.transition(
+            &job.job_id,
+            state_name(state),
+            JobState::Preparing,
+            None,
+            "Validating local job",
+            "{}",
+        )
     }
 
     fn validate_job_options(&mut self, job: &LocalJob) -> Result<Option<JobOptions>, AgentError> {
@@ -1386,6 +1431,135 @@ mod tests {
             engine.store().failure_health().expect("durable health"),
             (1, Some("executor_crashed".into()))
         );
+    }
+
+    #[tokio::test]
+    async fn retryable_pre_handoff_failure_requeues_before_retrying_once() {
+        let executor = FakeExecutor {
+            result: Some(Err(ExecutorFailure {
+                code: "printer_temporarily_unavailable".into(),
+                message: "virtual printer is temporarily unavailable".into(),
+                retryable: true,
+                handoff_may_have_succeeded: false,
+                native_code: None,
+            })),
+            ..FakeExecutor::default()
+        };
+        let store = AgentStore::in_memory().expect("store");
+        let mut engine = AgentEngine::new(store, executor, FixedClock(10));
+        engine
+            .accept(&accepted("retryable", "pdf"))
+            .expect("accept");
+
+        engine.run_once().await.expect("bounded first failure");
+        assert_eq!(
+            engine
+                .store()
+                .get_job("retryable")
+                .expect("query")
+                .expect("job")
+                .state,
+            "failed_retryable"
+        );
+
+        assert_eq!(engine.run_once().await.expect("retry remains deferred"), 0);
+        let (store, executor, _) = engine.into_parts();
+        let mut engine = AgentEngine::new(
+            store,
+            executor,
+            FixedClock(10 + AgentEngine::<FakeExecutor, FixedClock>::DEFAULT_LOCAL_RETRY_DELAY_MS),
+        );
+        engine.run_once().await.expect("safe retry after restart");
+        assert_eq!(engine.executor_mut().submitted.len(), 2);
+        assert_eq!(
+            engine
+                .store()
+                .get_job("retryable")
+                .expect("query")
+                .expect("job")
+                .state,
+            "accepted_by_spooler"
+        );
+        let states = engine
+            .store()
+            .pending_events(0, 20)
+            .expect("events")
+            .into_iter()
+            .map(|event| event.state)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            states,
+            [
+                "queued_local",
+                "preparing",
+                "rendering",
+                "spool_intent",
+                "failed_retryable",
+                "queued_local",
+                "preparing",
+                "rendering",
+                "spool_intent",
+                "accepted_by_spooler",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_prehandoff_rejection_never_self_retries_or_blocks_new_work() {
+        let executor = FakeExecutor {
+            result: Some(Err(ExecutorFailure {
+                code: "printer_temporarily_unavailable".into(),
+                message: "virtual printer is temporarily unavailable".into(),
+                retryable: true,
+                handoff_may_have_succeeded: false,
+                native_code: None,
+            })),
+            ..FakeExecutor::default()
+        };
+        let store = AgentStore::in_memory().expect("store");
+        let mut engine = AgentEngine::new(store, executor, FixedClock(10));
+        let mut cloud = accepted("cloud-rejected", "pdf");
+        cloud.cloud_managed = true;
+        engine
+            .accept_with_facts(
+                &cloud,
+                &JobPersistenceFacts {
+                    route_connector_id: Some("legacy".into()),
+                    ..JobPersistenceFacts::default()
+                },
+            )
+            .expect("cloud responsibility");
+
+        engine.run_once().await.expect("bounded cloud rejection");
+        assert_eq!(
+            engine
+                .store()
+                .get_job("cloud-rejected")
+                .expect("query")
+                .expect("job")
+                .state,
+            "failed_retryable"
+        );
+        assert_eq!(engine.run_once().await.expect("cloud retry quarantined"), 0);
+
+        let (store, mut executor, _) = engine.into_parts();
+        executor.result = None;
+        let mut restarted = AgentEngine::new(store, executor, FixedClock(20));
+        assert_eq!(
+            restarted
+                .run_once()
+                .await
+                .expect("restart keeps cloud retry quarantined"),
+            0
+        );
+        let mut later = accepted("new-server-authorized-job", "pdf");
+        later.accepted_unix_ms = 2;
+        restarted.accept(&later).expect("later local authority");
+        assert_eq!(
+            restarted.run_once().await.expect("later work progresses"),
+            1
+        );
+        assert_eq!(restarted.executor_mut().submitted.len(), 2);
     }
 
     #[tokio::test]

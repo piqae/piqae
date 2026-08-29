@@ -279,6 +279,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   printer_native_binding_json TEXT CHECK (
     printer_native_binding_json IS NULL OR json_valid(printer_native_binding_json)
   ),
+  route_connector_id TEXT,
   UNIQUE (printer_id, printer_sequence)
 );
 
@@ -309,6 +310,16 @@ CREATE TABLE IF NOT EXISTS cloud_accept_intents (
   prepared_unix_ms INTEGER NOT NULL
 );
 
+-- Minimal non-lease fencing proof retained across activation so a crash after
+-- the native handoff journal commit can be reconciled exactly. Lease tokens
+-- remain confined to cloud_accept_intents and are deleted at activation.
+CREATE TABLE IF NOT EXISTS cloud_route_proofs (
+  job_id TEXT PRIMARY KEY REFERENCES jobs(job_id) ON DELETE CASCADE,
+  reservation_id TEXT NOT NULL CHECK (reservation_id <> ''),
+  generation INTEGER NOT NULL CHECK (generation > 0),
+  fencing_token TEXT NOT NULL CHECK (fencing_token <> '')
+);
+
 CREATE TABLE IF NOT EXISTS cloud_release_cleanups (
   job_id TEXT PRIMARY KEY REFERENCES jobs(job_id) ON DELETE CASCADE,
   lease_id TEXT NOT NULL,
@@ -337,6 +348,19 @@ CREATE TABLE IF NOT EXISTS job_events (
   observed_unix_ms INTEGER NOT NULL,
   UNIQUE (job_id, job_sequence)
 );
+
+-- Durable operator decisions are keyed to one exact local route ambiguity.
+-- The opaque ambiguity ID contains no fencing token or document data.
+CREATE TABLE IF NOT EXISTS local_handoff_resolutions (
+  ambiguity_id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+  resolution TEXT NOT NULL
+    CHECK (resolution IN ('release_for_retry', 'confirm_accepted')),
+  observed_unix_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS local_handoff_resolutions_job
+  ON local_handoff_resolutions (job_id, observed_unix_ms);
 
 CREATE TABLE IF NOT EXISTS event_outbox (
   outbox_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
