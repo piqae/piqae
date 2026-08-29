@@ -127,6 +127,10 @@ class CiReleaseContractTest(unittest.TestCase):
         self.assertIn('release_platform.py "$platform"', workflow)
         self.assertIn("platform=all", workflow)
         self.assertIn("pnpm install --frozen-lockfile", workflow)
+        self.assertIn("aggregate-gated Windows promoter", workflow)
+        self.assertIn(
+            'if [[ "$platform" == all && "$windows_tier" != disabled ]]', workflow
+        )
         self.assertEqual(
             workflow.count("cargo xtask release check --platform core"), 1
         )
@@ -157,7 +161,7 @@ class CiReleaseContractTest(unittest.TestCase):
         )
         self.assertIsNotNone(promotion)
         self.assertIn(
-            "needs: [prepare, macos, windows, apple_sdk, windows_sdk, linux, server]",
+            "needs: [prepare, macos, windows, apple_sdk, windows_sdk, linux, server, promote_containers]",
             promotion.group(0),
         )
         self.assertIn("uses: ./.github/workflows/macos-promotion.yml", promotion.group(0))
@@ -169,6 +173,27 @@ class CiReleaseContractTest(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("value: ${{ jobs.candidate.outputs.artifact_name }}", macos_workflow)
+
+        windows_call = re.search(r"(?ms)^  windows:.*?(?=^  [a-z_]+:|\Z)", workflow)
+        self.assertIn("publish: false", windows_call.group(0))
+
+        server = re.search(r"(?ms)^  server:.*?(?=^  [a-z_]+:|\Z)", workflow)
+        self.assertIn("push: false", server.group(0))
+        self.assertIn("outputs: type=docker", server.group(0))
+        self.assertIn("name: piqae-container-${{ matrix.name }}", server.group(0))
+        self.assertNotIn("docker/login-action", server.group(0))
+
+        container_promotion = re.search(
+            r"(?ms)^  promote_containers:.*?(?=^  [a-z_]+:|\Z)", workflow
+        )
+        self.assertIsNotNone(container_promotion)
+        self.assertIn("needs.server.result == 'success'", container_promotion.group(0))
+        self.assertIn("fail-fast: false", container_promotion.group(0))
+        self.assertIn("sha256sum --check", container_promotion.group(0))
+        self.assertIn("docker push", container_promotion.group(0))
+        self.assertIn(
+            "needs.promote_containers.result == 'success'", promotion.group(0)
+        )
 
     def test_release_artifacts_fan_out_after_one_shared_gate(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")

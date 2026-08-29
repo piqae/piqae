@@ -55,6 +55,16 @@ succeeded. Matrix jobs use `fail-fast: false`, and independent sibling jobs are
 not cancelled when another candidate fails, so their evidence remains useful
 without permitting a partial publication.
 
+Container jobs likewise build checksummed, provenance-attested Docker archives
+as private 14-day workflow artifacts without authenticating to GHCR. Only after
+the aggregate gate succeeds does a separate `fail-fast: false` promotion matrix
+verify and load those exact archives, push the version and commit tags, and
+attest the resulting registry digests. macOS promotion follows successful
+container promotion. The parent invokes Windows as candidate-only; if its
+support tier is enabled, stable publication fails in `prepare` until Windows has
+an equivalent aggregate-gated promoter, preventing the dormant workflow from
+advancing its installer or appcast early.
+
 Windows-only and Linux-only selectors are intentionally not exposed yet.
 Windows desktop remains Disabled in the support matrix, while the Linux bundle
 does not have an independent signed update-feed publisher. Adding either choice

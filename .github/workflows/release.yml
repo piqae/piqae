@@ -104,6 +104,7 @@ jobs:
             exit 1
           fi
           python3 release/tools/release_platform.py "$platform" >/dev/null
+          windows_tier=$(ruby -e 'require "yaml"; puts YAML.load_file("release/support-matrix.yaml").fetch("platforms").fetch("windows_10_11_x86_64").fetch("tier")')
           if [[ "$publish" == true ]]; then
             ruby release/tools/check_product_release.rb \
               --product --release-version "$version"
@@ -113,6 +114,10 @@ jobs:
             fi
             if [[ "$REF_PROTECTED" != true ]]; then
               echo "Publication requires a protected v* tag ref." >&2
+              exit 1
+            fi
+            if [[ "$platform" == all && "$windows_tier" != disabled ]]; then
+              echo "Stable publication requires an aggregate-gated Windows promoter; Windows is currently expected to remain Disabled." >&2
               exit 1
             fi
             git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
@@ -129,7 +134,6 @@ jobs:
             echo "publish=$publish"
             echo "tag=$tag"
             python3 release/tools/release_platform.py "$platform"
-            windows_tier=$(ruby -e 'require "yaml"; puts YAML.load_file("release/support-matrix.yaml").fetch("platforms").fetch("windows_10_11_x86_64").fetch("tier")')
             if [[ "$windows_tier" == disabled ]]; then
               echo "windows_enabled=false"
             else
@@ -214,7 +218,9 @@ jobs:
     uses: ./.github/workflows/windows-release.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
-      publish: ${{ needs.prepare.outputs.publish == 'true' }}
+      # The parent workflow owns publication fan-in. If Windows becomes
+      # enabled, prepare fails closed until an aggregate-gated promoter exists.
+      publish: false
     secrets: inherit
 
   apple_sdk:
@@ -439,16 +445,9 @@ jobs:
       attestations: write
       contents: read
       id-token: write
-      packages: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        if: needs.prepare.outputs.publish == 'true'
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         id: metadata
         with:
@@ -456,24 +455,97 @@ jobs:
           tags: |
             type=raw,value=v${{ needs.prepare.outputs.version }}
             type=sha
+      - name: Prepare private image candidate directory
+        run: mkdir -p artifacts/container
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         id: build
         with:
           context: .
           file: ${{ matrix.dockerfile }}
-          push: ${{ needs.prepare.outputs.publish == 'true' }}
+          push: false
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
+          outputs: type=docker,dest=artifacts/container/piqae-${{ matrix.name }}.tar
+      - name: Checksum immutable image candidate
+        run: >-
+          cd artifacts/container &&
+          sha256sum piqae-${{ matrix.name }}.tar
+          > piqae-${{ matrix.name }}.tar.sha256
       - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
-        if: needs.prepare.outputs.publish == 'true'
+        if: github.event.repository.private == false
+        with:
+          subject-path: artifacts/container/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: piqae-container-${{ matrix.name }}
+          path: artifacts/container/*
+          if-no-files-found: error
+          retention-days: 14
+
+  promote_containers:
+    name: Promote container (${{ matrix.name }}) after aggregate gate
+    needs: [prepare, macos, windows, apple_sdk, windows_sdk, linux, server]
+    if: >-
+      always() && needs.prepare.outputs.publish == 'true'
+      && needs.prepare.result == 'success'
+      && needs.prepare.outputs.platform == 'all'
+      && needs.macos.result == 'success'
+      && (
+        (needs.prepare.outputs.windows_enabled == 'true' && needs.windows.result == 'success')
+        || (needs.prepare.outputs.windows_enabled == 'false' && needs.windows.result == 'skipped')
+      )
+      && needs.apple_sdk.result == 'success'
+      && needs.windows_sdk.result == 'success'
+      && needs.linux.result == 'success'
+      && needs.server.result == 'success'
+    runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [server, web, migrate]
+    permissions:
+      actions: read
+      attestations: read
+      id-token: write
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: piqae-container-${{ matrix.name }}
+          path: artifacts/container
+      - name: Verify immutable image candidate
+        run: cd artifacts/container && sha256sum --check piqae-${{ matrix.name }}.tar.sha256
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Load and push verified candidate tags
+        id: push
+        shell: bash
+        env:
+          IMAGE: ghcr.io/piqae/piqae/${{ matrix.name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker load --input "artifacts/container/piqae-${{ matrix.name }}.tar"
+          short_sha=${GITHUB_SHA:0:7}
+          docker tag "$IMAGE:v$VERSION" "$IMAGE:sha-$short_sha"
+          docker push "$IMAGE:v$VERSION"
+          docker push "$IMAGE:sha-$short_sha"
+          digest=$(docker buildx imagetools inspect "$IMAGE:v$VERSION" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         with:
           subject-name: ghcr.io/piqae/piqae/${{ matrix.name }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
   promote_macos:
     name: Promote verified macOS candidate after aggregate gate
-    needs: [prepare, macos, windows, apple_sdk, windows_sdk, linux, server]
+    needs: [prepare, macos, windows, apple_sdk, windows_sdk, linux, server, promote_containers]
     if: >-
       always() && needs.prepare.outputs.publish == 'true'
       && needs.prepare.result == 'success'
@@ -486,6 +558,7 @@ jobs:
           && needs.windows_sdk.result == 'skipped'
           && needs.linux.result == 'skipped'
           && needs.server.result == 'skipped'
+          && needs.promote_containers.result == 'skipped'
         )
         || (
           needs.prepare.outputs.platform == 'all'
@@ -497,6 +570,7 @@ jobs:
           && needs.windows_sdk.result == 'success'
           && needs.linux.result == 'success'
           && needs.server.result == 'success'
+          && needs.promote_containers.result == 'success'
         )
       )
     permissions:
