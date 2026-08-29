@@ -9,8 +9,8 @@
     "enabled": true
   },
   "vars": {
-    "WEB_ORIGIN": "https://piqae-web-production.up.railway.app",
-    "API_ORIGIN": "https://piqae-production-097e.up.railway.app"
+    "WEB_ORIGIN": "https://piqae-web-v0122-production-production.up.railway.app",
+    "API_ORIGIN": "https://piqae-api-v0122-production-production.up.railway.app"
   },
   "routes": [
     {
