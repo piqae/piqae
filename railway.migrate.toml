@@ -6,5 +6,5 @@ builder = "DOCKERFILE"
 dockerfilePath = "deploy/docker/Dockerfile.server"
 
 [deploy]
-startCommand = "migrate"
+startCommand = "/usr/local/bin/piqae-server migrate"
 restartPolicyType = "NEVER"

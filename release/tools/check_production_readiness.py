@@ -230,6 +230,15 @@ def structural_errors() -> list[str]:
         ],
         errors,
     )
+    require_text(
+        ROOT / "railway.migrate.toml",
+        [
+            'dockerfilePath = "deploy/docker/Dockerfile.server"',
+            'startCommand = "/usr/local/bin/piqae-server migrate"',
+            'restartPolicyType = "NEVER"',
+        ],
+        errors,
+    )
 
     terraform_main = require_text(
         ROOT / "deploy/terraform/main.tf",
