@@ -193,6 +193,56 @@ describe("Shopify document editor layout", () => {
     expect(page.querySelector(".piqae-selection-rail")).toBeNull();
   });
 
+  it("protects the terminal order page break and keeps insertion before it", async () => {
+    const invoice = structuredClone(
+      starterTemplates.find(({ id }) => id === "invoice")!.specification,
+    );
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={invoice} onChange={onChange} />,
+    );
+    const framing = page.querySelector<HTMLElement>(
+      ".piqae-canvas-protected-framing",
+    )!;
+    const repeat = invoice.body[0];
+    if (repeat?.type !== "repeat") throw new Error("invoice repeat missing");
+    const finalAuthorSlot = framing.previousElementSibling as HTMLElement;
+
+    expect(framing.getAttribute("role")).toBe("note");
+    expect(framing.tabIndex).toBe(-1);
+    expect(
+      finalAuthorSlot.classList.contains("piqae-canvas-insertion-slot"),
+    ).toBe(true);
+    expect(finalAuthorSlot.dataset.insertionIndex).toBe(
+      String(repeat.children.length - 1),
+    );
+    expect(
+      framing.parentElement?.querySelector(
+        `.piqae-canvas-insertion-slot[data-insertion-index="${repeat.children.length}"]`,
+      ),
+    ).toBeNull();
+
+    await act(async () => framing.click());
+    expect(page.querySelector(".piqae-selection-rail")).toBeNull();
+
+    await act(async () => {
+      finalAuthorSlot
+        .querySelector<HTMLButtonElement>('[aria-label="Add content here"]')
+        ?.click();
+    });
+    await act(async () => {
+      Array.from(finalAuthorSlot.querySelectorAll("[role=menuitem]"))
+        .find((item) => item.textContent?.includes("Text"))
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    const next = onChange.mock.lastCall?.[0] as PrintPacket;
+    const nextRepeat = next.body[0];
+    expect(nextRepeat?.type).toBe("repeat");
+    if (nextRepeat?.type !== "repeat") return;
+    expect(nextRepeat.children.at(-1)?.type).toBe("page_break");
+    expect(nextRepeat.children.at(-2)?.type).toBe("paragraph");
+  });
+
   it("keeps Preview chrome-free and aligned with the editor workspace", async () => {
     const invoice = starterTemplates.find(
       ({ id }) => id === "invoice",
@@ -409,6 +459,37 @@ describe("Shopify document editor layout", () => {
     expect(editor.getAttribute("contenteditable")).toBe("true");
   });
 
+  it("selects nested text before editing and can delete the nested element", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={gridPacket} onChange={onChange} />,
+    );
+    const nestedText = page.querySelector<HTMLElement>(
+      ".piqae-canvas-grid .piqae-canvas-text",
+    )!;
+    const editor = nestedText.querySelector<HTMLElement>("[role=textbox]")!;
+
+    expect(editor.getAttribute("contenteditable")).toBe("false");
+    await act(async () => nestedText.click());
+    expect(page.querySelector(".piqae-selection-title")?.textContent).toContain(
+      "Text",
+    );
+    expect(editor.getAttribute("contenteditable")).toBe("false");
+
+    await act(async () => {
+      nestedText.focus();
+      nestedText.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Delete", bubbles: true }),
+      );
+    });
+    const next = onChange.mock.lastCall?.[0] as PrintPacket;
+    const grid = authoredBody(next)[0];
+    expect(grid.type).toBe("grid");
+    if (grid.type !== "grid") return;
+    expect(grid.children).toHaveLength(1);
+    expect(grid.children[0]?.type).toBe("paragraph");
+  });
+
   it("removes a selected non-editing block from keyboard or contextual delete", async () => {
     const onChange = vi.fn();
     const page = await render(
@@ -620,6 +701,28 @@ describe("Shopify document editor layout", () => {
       "image",
       "paragraph",
     ]);
+  });
+
+  it("rejects malformed or untrusted drag payloads", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={packet} onChange={onChange} />,
+    );
+    const finalSlot = page.querySelectorAll<HTMLElement>(
+      ".piqae-canvas-insertion-slot",
+    )[2];
+    const dataTransfer = {
+      types: ["application/x-piqae-printpacket-block"],
+      getData: () => '{"type":"paragraph"}',
+      dropEffect: "none",
+    } as DataTransfer;
+
+    await act(async () => {
+      const drop = new Event("drop", { bubbles: true, cancelable: true });
+      Object.defineProperty(drop, "dataTransfer", { value: dataTransfer });
+      finalSlot?.dispatchEvent(drop);
+    });
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it("inserts at nested branch paths without flattening the document", () => {

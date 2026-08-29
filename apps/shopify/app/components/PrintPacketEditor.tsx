@@ -48,6 +48,18 @@ const QUICK_INSERT_TYPES = [
   "spacer",
 ] as const;
 type QuickInsertType = (typeof QUICK_INSERT_TYPES)[number];
+const DRAG_INSERT_TYPES = [
+  ...QUICK_INSERT_TYPES,
+  "table",
+  "repeat",
+  "conditional",
+  "qr",
+  "barcode",
+  "grid",
+  "stack",
+  "row",
+] as const;
+type DragInsertType = (typeof DRAG_INSERT_TYPES)[number];
 
 const schema = new Schema({
   nodes: {
@@ -390,7 +402,7 @@ export function PrintPacketEditor({
                 icon="text"
                 label="Text"
                 disabled={disabled}
-                dragBlock={() => quickInsertBlock("paragraph")}
+                dragType="paragraph"
                 onClick={() =>
                   insert(
                     schema.nodes.paragraph!.create(
@@ -404,7 +416,7 @@ export function PrintPacketEditor({
                 icon="heading"
                 label="Heading"
                 disabled={disabled}
-                dragBlock={() => quickInsertBlock("heading")}
+                dragType="heading"
                 onClick={() =>
                   insert(
                     schema.nodes.heading!.create(
@@ -426,21 +438,21 @@ export function PrintPacketEditor({
                 icon="table"
                 label="Line items"
                 disabled={disabled}
-                dragBlock={defaultTable}
+                dragType="table"
                 onClick={() => insertBlock(defaultTable())}
               />
               <ToolButton
                 icon="repeat"
                 label="Repeating content"
                 disabled={disabled}
-                dragBlock={defaultRepeat}
+                dragType="repeat"
                 onClick={() => insertBlock(defaultRepeat())}
               />
               <ToolButton
                 icon="condition"
                 label="Conditional section"
                 disabled={disabled}
-                dragBlock={defaultConditional}
+                dragType="conditional"
                 onClick={() => insertBlock(defaultConditional())}
               />
             </div>
@@ -450,7 +462,7 @@ export function PrintPacketEditor({
                 icon="image"
                 label="Image"
                 disabled={disabled}
-                dragBlock={() => quickInsertBlock("image")}
+                dragType="image"
                 onClick={() =>
                   insertBlock({
                     type: "image",
@@ -465,14 +477,14 @@ export function PrintPacketEditor({
                 icon="qr"
                 label="QR code"
                 disabled={disabled}
-                dragBlock={defaultQrCode}
+                dragType="qr"
                 onClick={() => insertBlock(defaultQrCode())}
               />
               <ToolButton
                 icon="barcode"
                 label="Barcode"
                 disabled={disabled}
-                dragBlock={defaultBarcode}
+                dragType="barcode"
                 onClick={() => insertBlock(defaultBarcode())}
               />
             </div>
@@ -482,35 +494,35 @@ export function PrintPacketEditor({
                 icon="columns"
                 label="Columns"
                 disabled={disabled}
-                dragBlock={defaultGrid}
+                dragType="grid"
                 onClick={() => insertBlock(defaultGrid())}
               />
               <ToolButton
                 icon="stack"
                 label="Stack"
                 disabled={disabled}
-                dragBlock={() => defaultContainer("stack")}
+                dragType="stack"
                 onClick={() => insertBlock(defaultContainer("stack"))}
               />
               <ToolButton
                 icon="row"
                 label="Row"
                 disabled={disabled}
-                dragBlock={() => defaultContainer("row")}
+                dragType="row"
                 onClick={() => insertBlock(defaultContainer("row"))}
               />
               <ToolButton
                 icon="divider"
                 label="Divider"
                 disabled={disabled}
-                dragBlock={() => quickInsertBlock("divider")}
+                dragType="divider"
                 onClick={() => insert(schema.nodes.divider!.create())}
               />
               <ToolButton
                 icon="spacer"
                 label="Spacing"
                 disabled={disabled}
-                dragBlock={() => quickInsertBlock("spacer")}
+                dragType="spacer"
                 onClick={() => insertBlock({ type: "spacer", height_mm: 6 })}
               />
             </div>
@@ -663,29 +675,9 @@ export function orderBatchPresentation(
     return null;
   if (mediaKind === "continuous") return "continuous";
   if (mediaKind === "label") return "fixed_media";
-  return blocksContainPageBreak(block.children)
+  return block.children.at(-1)?.type === "page_break"
     ? "one_order_per_page"
     : "flowing_pages";
-}
-
-function blocksContainPageBreak(blocks: readonly Block[]): boolean {
-  return blocks.some((block) => {
-    if (block.type === "page_break") return true;
-    if ("children" in block && blocksContainPageBreak(block.children))
-      return true;
-    if (block.type === "table")
-      return blocksContainPageBreak(block.empty ?? []);
-    if (block.type === "data_list")
-      return (
-        blocksContainPageBreak(block.header ?? []) ||
-        blocksContainPageBreak(block.item) ||
-        blocksContainPageBreak(block.empty ?? [])
-      );
-    return block.type === "conditional"
-      ? blocksContainPageBreak(block.then) ||
-          blocksContainPageBreak(block.else ?? [])
-      : false;
-  });
 }
 
 export function PrintPacketPreview({
@@ -865,6 +857,7 @@ function DocumentCanvas({
   editable = true,
   mediaKind,
   preview = false,
+  protectTerminalPageBreak = false,
   selectedPath,
   authoringFields = AUTHORING_FIELDS,
   scope = "order",
@@ -879,6 +872,7 @@ function DocumentCanvas({
   editable?: boolean;
   mediaKind: PrintPacket["media"]["kind"];
   preview?: boolean;
+  protectTerminalPageBreak?: boolean;
   selectedPath?: BlockPath;
   authoringFields?: readonly ShopifyDocumentField[];
   scope?: ShopifyAuthoringScope;
@@ -895,6 +889,10 @@ function DocumentCanvas({
     <div className="piqae-document-flow">
       {blocks.map((block, index) => {
         const blockPath = insertionPath(index);
+        const protectedFraming =
+          protectTerminalPageBreak &&
+          index === blocks.length - 1 &&
+          block.type === "page_break";
         const key = `${path.map((part) => `${part.branch}-${part.index}`).join("/")}-${branch}-${index}`;
         return (
           <Fragment key={key}>
@@ -907,6 +905,7 @@ function DocumentCanvas({
               editable={editable}
               mediaKind={mediaKind}
               preview={preview}
+              protectedFraming={protectedFraming}
               selectedPath={selectedPath}
               selected={sameBlockPath(selectedPath, blockPath)}
               authoringFields={authoringFields}
@@ -918,7 +917,10 @@ function DocumentCanvas({
           </Fragment>
         );
       })}
-      {editable && insertionSlots && onInsert ? (
+      {editable &&
+      insertionSlots &&
+      onInsert &&
+      !(protectTerminalPageBreak && blocks.at(-1)?.type === "page_break") ? (
         <CanvasInsertionSlot
           path={insertionPath(blocks.length)}
           onInsert={onInsert}
@@ -934,6 +936,7 @@ function CanvasBlock({
   editable,
   mediaKind,
   preview,
+  protectedFraming,
   selectedPath,
   selected,
   authoringFields,
@@ -947,6 +950,7 @@ function CanvasBlock({
   editable: boolean;
   mediaKind: PrintPacket["media"]["kind"];
   preview: boolean;
+  protectedFraming: boolean;
   selectedPath?: BlockPath;
   selected: boolean;
   authoringFields: readonly ShopifyDocumentField[];
@@ -963,8 +967,9 @@ function CanvasBlock({
     tableWidth: number;
     columns: Extract<Block, { type: "table" }>["columns"];
   } | null>(null);
-  const topLevelText =
-    isTopLevelAuthoringPath(path) &&
+  const selectBeforeEdit =
+    editable &&
+    !preview &&
     (block.type === "paragraph" || block.type === "heading");
   useEffect(() => {
     if (!selected) setEditingText(false);
@@ -972,7 +977,7 @@ function CanvasBlock({
   const batchPresentation = orderBatchPresentation(block, path, mediaKind);
   const selectableClass = preview ? "" : " piqae-canvas-selectable";
   const select = (event: React.MouseEvent) => {
-    if (preview || batchPresentation) return;
+    if (preview || batchPresentation || protectedFraming) return;
     event.stopPropagation();
     onSelect(block, path);
   };
@@ -986,27 +991,26 @@ function CanvasBlock({
         }}
         className={`piqae-canvas-text${selected ? " piqae-canvas-selected" : ""}`}
         style={{ textAlign: block.style?.align ?? "left" }}
-        tabIndex={topLevelText && editable ? 0 : undefined}
+        tabIndex={selectBeforeEdit ? 0 : undefined}
         aria-label={
-          topLevelText && editable
+          selectBeforeEdit
             ? `${block.type === "heading" ? "Heading" : "Text"} block: ${inlineLabel(block.content)}. Press Enter or F2 to edit.`
             : undefined
         }
         onClick={select}
         onFocus={(event) => {
-          if (topLevelText && event.target === event.currentTarget)
+          if (selectBeforeEdit && event.target === event.currentTarget)
             onSelect(block, path);
         }}
         onDoubleClick={(event) => {
-          if (!topLevelText || !editable) return;
+          if (!selectBeforeEdit) return;
           event.stopPropagation();
           onSelect(block, path);
           setEditingText(true);
         }}
         onKeyDown={(event) => {
           if (
-            topLevelText &&
-            editable &&
+            selectBeforeEdit &&
             !editingText &&
             (event.key === "Enter" || event.key === "F2")
           ) {
@@ -1020,15 +1024,15 @@ function CanvasBlock({
         <ExpressionEditor
           value={editableInlineWithScope(block.content, scope)}
           fields={contextualFieldSuggestions(authoringFields, scope)}
-          disabled={!editable || (topLevelText && !editingText)}
+          disabled={!editable || (selectBeforeEdit && !editingText)}
           multiline
-          autoFocus={topLevelText && editingText}
+          autoFocus={selectBeforeEdit && editingText}
           onEscape={() => {
             setEditingText(false);
             requestAnimationFrame(() => textBlockElement.current?.focus());
           }}
           onBlur={() => {
-            if (topLevelText) setEditingText(false);
+            if (selectBeforeEdit) setEditingText(false);
           }}
           onChange={(source) =>
             onChange(
@@ -1064,13 +1068,19 @@ function CanvasBlock({
     return preview ? null : (
       <div
         className={
-          selected
-            ? "piqae-canvas-page-break piqae-canvas-selected"
-            : "piqae-canvas-page-break"
+          protectedFraming
+            ? "piqae-canvas-page-break piqae-canvas-protected-framing"
+            : selected
+              ? "piqae-canvas-page-break piqae-canvas-selected"
+              : "piqae-canvas-page-break"
         }
-        onClick={select}
+        role={protectedFraming ? "note" : undefined}
+        aria-label={
+          protectedFraming ? "Required page break between orders" : undefined
+        }
+        onClick={protectedFraming ? undefined : select}
       >
-        Page break
+        {protectedFraming ? "Page break between orders" : "Page break"}
       </div>
     );
   if (block.type === "image")
@@ -1465,6 +1475,7 @@ function CanvasBlock({
           authoringFields={authoringFields}
           scope={childScope}
           insertionSlots={block.type !== "grid" && block.type !== "row"}
+          protectTerminalPageBreak={batchPresentation === "one_order_per_page"}
           onSelect={onSelect}
           onInsert={onInsert}
           onChange={onChange}
@@ -1769,14 +1780,14 @@ function ToolButton({
   label,
   tone,
   disabled,
-  dragBlock,
+  dragType,
   onClick,
 }: {
   icon: IconName;
   label: string;
   tone?: "critical";
   disabled?: boolean;
-  dragBlock?: () => Block;
+  dragType?: DragInsertType;
   onClick(): void;
 }) {
   return (
@@ -1786,17 +1797,14 @@ function ToolButton({
       aria-label={label}
       data-tooltip={label}
       disabled={disabled}
-      draggable={Boolean(dragBlock) && !disabled}
+      draggable={Boolean(dragType) && !disabled}
       onDragStart={(event) => {
-        if (!dragBlock || disabled) {
+        if (!dragType || disabled) {
           event.preventDefault();
           return;
         }
         event.dataTransfer.effectAllowed = "copy";
-        event.dataTransfer.setData(
-          PIQAE_BLOCK_DRAG_TYPE,
-          JSON.stringify(dragBlock()),
-        );
+        event.dataTransfer.setData(PIQAE_BLOCK_DRAG_TYPE, dragType);
       }}
       onClick={onClick}
     >
@@ -2922,17 +2930,6 @@ function sameBlockPath(left?: BlockPath, right?: BlockPath) {
   );
 }
 
-/** Treat the mandatory orders repeat as document framing, not author content. */
-function isTopLevelAuthoringPath(path: BlockPath) {
-  return (
-    (path.length === 1 && path[0]?.branch === "root") ||
-    (path.length === 2 &&
-      path[0]?.branch === "root" &&
-      path[0].index === 0 &&
-      path[1]?.branch === "children")
-  );
-}
-
 export function moveBlockAtPath(
   blocks: Block[],
   path: BlockPath,
@@ -3481,40 +3478,35 @@ function hasPiqaeBlockDrag(dataTransfer: DataTransfer) {
   return Array.from(dataTransfer.types).includes(PIQAE_BLOCK_DRAG_TYPE);
 }
 function draggedBlock(dataTransfer: DataTransfer): Block | null {
-  const source = dataTransfer.getData(PIQAE_BLOCK_DRAG_TYPE);
-  if (!source || source.length > 65_536) return null;
-  try {
-    const value = JSON.parse(source) as unknown;
-    if (!value || typeof value !== "object") return null;
-    const type = (value as { type?: unknown }).type;
-    if (typeof type !== "string" || !DRAGGABLE_BLOCK_TYPES.has(type))
-      return null;
-    return value as Block;
-  } catch {
-    return null;
+  const type = dataTransfer.getData(PIQAE_BLOCK_DRAG_TYPE);
+  if (!DRAG_INSERT_TYPES.some((candidate) => candidate === type)) return null;
+  return dragInsertBlock(type as DragInsertType);
+}
+function dragInsertBlock(type: DragInsertType): Block {
+  switch (type) {
+    case "paragraph":
+    case "heading":
+    case "image":
+    case "divider":
+    case "spacer":
+      return quickInsertBlock(type);
+    case "table":
+      return defaultTable();
+    case "repeat":
+      return defaultRepeat();
+    case "conditional":
+      return defaultConditional();
+    case "qr":
+      return defaultQrCode();
+    case "barcode":
+      return defaultBarcode();
+    case "grid":
+      return defaultGrid();
+    case "stack":
+    case "row":
+      return defaultContainer(type);
   }
 }
-const DRAGGABLE_BLOCK_TYPES = new Set([
-  "section",
-  "stack",
-  "row",
-  "box",
-  "paragraph",
-  "heading",
-  "grid",
-  "table",
-  "repeat",
-  "data_list",
-  "conditional",
-  "spacer",
-  "divider",
-  "page_break",
-  "keep_together",
-  "image",
-  "image_value",
-  "qr",
-  "barcode",
-]);
 function quickInsertBlock(type: QuickInsertType): Block {
   if (type === "paragraph")
     return {
