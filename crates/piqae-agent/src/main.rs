@@ -32,8 +32,9 @@ use piqae_agent_core::{
 };
 use piqae_agent_storage::{
     AcceptedJob, AgentStore, CloudAcceptIntent, CloudRouteProof, JobPersistenceFacts,
-    NativeProfileCapture, PendingEvent, PrinterNativeBindingPin, QueueCounts, StorageError,
-    StoredLoadedMedia, StoredNamedProfile, StoredPrinter,
+    LOCAL_HANDOFF_CONFIRM_ACCEPTED, LOCAL_HANDOFF_RELEASE_FOR_RETRY, NativeProfileCapture,
+    PendingEvent, PrinterNativeBindingPin, QueueCounts, StorageError, StoredLoadedMedia,
+    StoredNamedProfile, StoredPrinter,
 };
 use piqae_domain::{
     AgentId, ContentKind, EventId, JobEvent, JobFailureReason, JobId, JobState, NativeProfileKind,
@@ -508,6 +509,13 @@ impl SharedRuntimeExecutor {
         }
     }
 
+    fn route_owner<'a>(&'a self, submission: &'a LocalSubmission) -> &'a str {
+        submission
+            .route_connector_id
+            .as_deref()
+            .unwrap_or(&self.connector_id)
+    }
+
     async fn discover_printers(&self) -> Result<Vec<DiscoveredPrinter>, ControlFailure> {
         self.runtime.lock().await.discover_printers().await
     }
@@ -522,6 +530,481 @@ impl SharedRuntimeExecutor {
             .native_queue(native_printer_id)
             .await
     }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "cross-file crash reconciliation keeps exact proof matching and all fail-closed outcomes in one startup transaction boundary"
+)]
+fn reconcile_authoritative_route_state(
+    store: &mut AgentStore,
+    coordinator: &mut route_coordinator::RouteCoordinator,
+    connector_id: &str,
+    observed_at: chrono::DateTime<Utc>,
+) -> Result<(usize, usize)> {
+    let mut repaired = 0_usize;
+    let mut unresolved = 0_usize;
+    let authoritative = coordinator.authoritative_reservations_for_connector(connector_id);
+
+    // The coordinator and SQLite are separate durable files. Reconcile the
+    // exact route proof first so no spool intent can ever become runnable a
+    // second time after a crash between their commits.
+    for job in store.cloud_handoff_recovery_candidates()? {
+        if job.route_connector_id.as_deref() != Some(connector_id) {
+            unresolved += 1;
+            continue;
+        }
+        let proof = store.cloud_route_proof(&job.job_id)?;
+        let mut resolution = proof.as_ref().and_then(|proof| {
+            coordinator.authoritative_handoff_for_proof(
+                connector_id,
+                &job.job_id,
+                &proof.reservation_id,
+                proof.generation,
+                &proof.fencing_token,
+            )
+        });
+        if resolution.is_none()
+            && let Some((_, reservation)) = authoritative.iter().find(|(job_id, reservation)| {
+                job_id == &job.job_id
+                    && proof.as_ref().is_none_or(|proof| {
+                        reservation.matches_cloud_proof(
+                            &proof.reservation_id,
+                            proof.generation,
+                            &proof.fencing_token,
+                        )
+                    })
+            })
+        {
+            // The native process may have accepted work before it could
+            // return or before the coordinator recorded an outcome. Preserve
+            // the fence and require explicit ambiguity resolution.
+            coordinator.finish(
+                connector_id,
+                &job.job_id,
+                reservation,
+                piqae_protocol::agent::NativeHandoffOutcome::Ambiguous,
+                None,
+                observed_at,
+            )?;
+            resolution = Some(route_coordinator::AuthoritativeHandoffResolution {
+                outcome: piqae_protocol::agent::NativeHandoffOutcome::Ambiguous,
+                native_job_id: None,
+                observed_at,
+            });
+        }
+        if job.state == "delivery_uncertain" {
+            match resolution.as_ref().map(|resolution| resolution.outcome) {
+                Some(piqae_protocol::agent::NativeHandoffOutcome::RejectedBeforeHandoff) => {
+                    store.release_uncertain_cloud_handoff_for_retry(
+                        &job.job_id,
+                        observed_at.timestamp_millis(),
+                    )?;
+                    repaired += 1;
+                }
+                Some(piqae_protocol::agent::NativeHandoffOutcome::Accepted) => {
+                    store.finalize_uncertain_cloud_handoff_recovery(&job.job_id)?;
+                    repaired += 1;
+                }
+                Some(piqae_protocol::agent::NativeHandoffOutcome::Ambiguous) | None => {
+                    unresolved += 1;
+                }
+            }
+            continue;
+        }
+        match resolution {
+            Some(route_coordinator::AuthoritativeHandoffResolution {
+                outcome: piqae_protocol::agent::NativeHandoffOutcome::Accepted,
+                native_job_id: Some(native_job_id),
+                observed_at: handoff_at,
+            }) => {
+                let event_at = handoff_at.timestamp_millis();
+                store.record_native_acceptance(
+                    &EventId::new().to_string(),
+                    &job.job_id,
+                    &native_job_id,
+                    &serde_json::json!({ "native_job_id": native_job_id }).to_string(),
+                    event_at,
+                    event_at
+                        + AgentEngine::<SharedRuntimeExecutor, SystemClock>::DEFAULT_RECONCILIATION_INTERVAL_MS,
+                    event_at
+                        + AgentEngine::<SharedRuntimeExecutor, SystemClock>::DEFAULT_UNCERTAINTY_AFTER_MS,
+                )?;
+                repaired += 1;
+            }
+            Some(route_coordinator::AuthoritativeHandoffResolution {
+                outcome: piqae_protocol::agent::NativeHandoffOutcome::RejectedBeforeHandoff,
+                observed_at: handoff_at,
+                ..
+            }) => {
+                store.record_cloud_handoff_recovery(
+                    &EventId::new().to_string(),
+                    &job.job_id,
+                    "failed_retryable",
+                    "authoritative_rejected_before_handoff",
+                    "Authoritative native handoff was rejected; awaiting a new server offer",
+                    handoff_at.timestamp_millis(),
+                )?;
+                repaired += 1;
+            }
+            Some(route_coordinator::AuthoritativeHandoffResolution {
+                observed_at: handoff_at,
+                ..
+            }) => {
+                store.record_cloud_handoff_recovery(
+                    &EventId::new().to_string(),
+                    &job.job_id,
+                    "delivery_uncertain",
+                    "ambiguous_handoff",
+                    "Native handoff outcome is uncertain after restart",
+                    handoff_at.timestamp_millis(),
+                )?;
+                repaired += 1;
+            }
+            None => {
+                // Missing/mismatched cross-file proof can never justify a
+                // retry or a route release. Quarantine truthfully.
+                store.record_cloud_handoff_recovery(
+                    &EventId::new().to_string(),
+                    &job.job_id,
+                    "delivery_uncertain",
+                    "route_fence_recovery_incomplete",
+                    "Native handoff proof could not be reconciled after restart",
+                    observed_at.timestamp_millis(),
+                )?;
+                repaired += 1;
+                unresolved += 1;
+            }
+        }
+    }
+
+    let pending_intents = store.pending_cloud_accepts()?;
+    for (job_id, reservation) in authoritative {
+        match store.get_job(&job_id)? {
+            Some(job) if job.cloud_managed => {
+                let durable = match job.state.as_str() {
+                    "cloud_accept_pending" => pending_intents.iter().any(|intent| {
+                        intent.job_id == job_id
+                            && intent.route_proof().is_some_and(|proof| {
+                                reservation.matches_cloud_proof(
+                                    &proof.reservation_id,
+                                    proof.generation,
+                                    &proof.fencing_token,
+                                )
+                            })
+                    }),
+                    "queued_local"
+                    | "preparing"
+                    | "rendering"
+                    | "spool_intent"
+                    | "accepted_by_spooler"
+                    | "spooling"
+                    | "printing"
+                    | "blocked"
+                    | "delivery_uncertain" => true,
+                    _ => false,
+                };
+                if !durable {
+                    coordinator.finish(
+                        connector_id,
+                        &job_id,
+                        &reservation,
+                        piqae_protocol::agent::NativeHandoffOutcome::RejectedBeforeHandoff,
+                        None,
+                        observed_at,
+                    )?;
+                    continue;
+                }
+                if let Some(owner) = job.route_connector_id.as_deref() {
+                    if owner != connector_id {
+                        anyhow::bail!(
+                            "cloud job has a conflicting persisted route connector owner"
+                        );
+                    }
+                } else {
+                    store.backfill_cloud_route_owner(
+                        &job_id,
+                        connector_id,
+                        observed_at.timestamp_millis(),
+                    )?;
+                    repaired += 1;
+                }
+            }
+            Some(_) | None => {
+                coordinator.finish(
+                    connector_id,
+                    &job_id,
+                    &reservation,
+                    piqae_protocol::agent::NativeHandoffOutcome::RejectedBeforeHandoff,
+                    None,
+                    observed_at,
+                )?;
+            }
+        }
+    }
+
+    for job in store.cloud_jobs_missing_route_owner()? {
+        let expected_reservations = coordinator
+            .authoritative_reservations_for_connector(connector_id)
+            .into_iter()
+            .filter(|(job_id, _)| job_id == &job.job_id)
+            .count();
+        if expected_reservations == 1 {
+            store.backfill_cloud_route_owner(
+                &job.job_id,
+                connector_id,
+                observed_at.timestamp_millis(),
+            )?;
+            repaired += 1;
+        } else {
+            unresolved += 1;
+        }
+    }
+    Ok((repaired, unresolved))
+}
+
+/// Reconciles the local queue side of the coordinator/SQLite crash boundary,
+/// then compacts only evidence whose matching `SQLite` outcome is durable.
+#[allow(
+    clippy::too_many_lines,
+    reason = "active-reservation repair, latest-outcome projection, and compaction form one crash boundary"
+)]
+fn reconcile_local_route_state(
+    store: &mut AgentStore,
+    coordinator: &mut route_coordinator::RouteCoordinator,
+    connector_id: &str,
+) -> Result<(usize, usize)> {
+    for (job_id, reservation) in coordinator.local_reservations_for_connector(connector_id) {
+        let already_journaled =
+            coordinator.has_handoff_for_reservation(connector_id, &job_id, &reservation);
+        let durable_local_job = store.get_job(&job_id)?.is_some_and(|job| {
+            !job.cloud_managed
+                && matches!(
+                    job.state.as_str(),
+                    "spool_intent" | "delivery_uncertain" | "failed_retryable" | "failed_terminal"
+                )
+        });
+        if !already_journaled && durable_local_job {
+            coordinator.finish(
+                connector_id,
+                &job_id,
+                &reservation,
+                piqae_protocol::agent::NativeHandoffOutcome::Ambiguous,
+                None,
+                Utc::now(),
+            )?;
+        }
+    }
+
+    let mut latest_by_job = std::collections::BTreeMap::new();
+    for handoff in coordinator.local_handoffs_for_connector(connector_id) {
+        latest_by_job.insert(handoff.job_id.clone(), handoff);
+    }
+
+    let mut repaired = 0_usize;
+    let mut commit_jobs = std::collections::BTreeMap::new();
+    for (job_id, handoff) in latest_by_job {
+        let Some(job) = store.get_job(&job_id)? else {
+            // Missing SQLite truth cannot justify discarding coordinator
+            // evidence. Leave the capacity fence in place.
+            continue;
+        };
+        if job.cloud_managed {
+            continue;
+        }
+        if job.state == "spool_intent" {
+            let event_at = handoff.observed_at.timestamp_millis();
+            match (handoff.outcome, handoff.native_job_id.as_deref()) {
+                (piqae_protocol::agent::NativeHandoffOutcome::Accepted, Some(native_job_id)) => {
+                    store.record_native_acceptance(
+                        &EventId::new().to_string(),
+                        &job_id,
+                        native_job_id,
+                        &serde_json::json!({ "native_job_id": native_job_id }).to_string(),
+                        event_at,
+                        event_at
+                            + AgentEngine::<SharedRuntimeExecutor, SystemClock>::DEFAULT_RECONCILIATION_INTERVAL_MS,
+                        event_at
+                            + AgentEngine::<SharedRuntimeExecutor, SystemClock>::DEFAULT_UNCERTAINTY_AFTER_MS,
+                    )?;
+                }
+                (piqae_protocol::agent::NativeHandoffOutcome::RejectedBeforeHandoff, _) => {
+                    store.record_local_retryable_failure(
+                        &EventId::new().to_string(),
+                        &job_id,
+                        "native_rejected_before_handoff_recovered",
+                        "Recovered a native rejection committed before the local queue update",
+                        "{}",
+                        event_at,
+                        event_at
+                            + AgentEngine::<SharedRuntimeExecutor, SystemClock>::DEFAULT_LOCAL_RETRY_DELAY_MS,
+                    )?;
+                }
+                _ => {
+                    store.record_local_handoff_uncertainty(
+                        &EventId::new().to_string(),
+                        &job_id,
+                        event_at,
+                    )?;
+                }
+            }
+            repaired += 1;
+        }
+        commit_jobs.insert(job_id, handoff.ambiguity_id);
+    }
+
+    let mut commits = Vec::new();
+    for (job_id, ambiguity_id) in commit_jobs {
+        if let Some(job) = store.get_job(&job_id)? {
+            let ambiguity_confirmed = store
+                .local_handoff_resolution(&job_id, &ambiguity_id)?
+                .as_deref()
+                == Some(LOCAL_HANDOFF_CONFIRM_ACCEPTED);
+            commits.push(route_coordinator::LocalHandoffCommit {
+                job_id,
+                state: job.state,
+                native_job_id: job.native_job_id,
+                ambiguity_confirmed,
+            });
+        }
+    }
+    let compacted = coordinator.compact_local_terminal_handoffs(connector_id, &commits)?;
+    Ok((repaired, compacted))
+}
+
+async fn reconcile_local_scheduler_state(
+    engine: &mut AgentEngine<SharedRuntimeExecutor, SystemClock>,
+) -> Result<(usize, usize)> {
+    let coordinator = Arc::clone(&engine.executor_mut().coordinator);
+    let mut coordinator = coordinator.lock().await;
+    reconcile_local_route_state(engine.store_mut(), &mut coordinator, "local")
+}
+
+async fn resolve_local_ambiguous_handoff_control(
+    engine: &mut AgentEngine<SharedRuntimeExecutor, SystemClock>,
+    job_id: &str,
+    ambiguity_id: &str,
+    resolution: piqae_protocol::agent::AmbiguousHandoffResolution,
+) -> Result<(), ControlFailure> {
+    let expected_reason = match resolution {
+        piqae_protocol::agent::AmbiguousHandoffResolution::ReleaseForRetry => {
+            LOCAL_HANDOFF_RELEASE_FOR_RETRY
+        }
+        piqae_protocol::agent::AmbiguousHandoffResolution::ConfirmAccepted => {
+            LOCAL_HANDOFF_CONFIRM_ACCEPTED
+        }
+    };
+    let job = engine
+        .store()
+        .get_job(job_id)
+        .map_err(storage_control_failure)?
+        .ok_or_else(|| control_failure("job_not_found", "local job was not found"))?;
+    if job.cloud_managed {
+        return Err(control_failure(
+            "local_handoff_resolution_forbidden",
+            "cloud-managed uncertainty must be resolved by its authenticated authority",
+        ));
+    }
+    if engine
+        .store()
+        .local_handoff_resolution(job_id, ambiguity_id)
+        .map_err(storage_control_failure)?
+        .as_deref()
+        == Some(expected_reason)
+    {
+        reconcile_local_scheduler_state(engine)
+            .await
+            .map_err(|error| control_failure("route_reconciliation_failed", &error.to_string()))?;
+        return Ok(());
+    }
+    if job.state != "delivery_uncertain" {
+        return Err(control_failure(
+            "local_handoff_not_uncertain",
+            "local job has no unresolved delivery uncertainty",
+        ));
+    }
+
+    let coordinator = Arc::clone(&engine.executor_mut().coordinator);
+    {
+        let mut coordinator = coordinator.lock().await;
+        let target = coordinator
+            .local_handoff_resolution_target("local", job_id)
+            .ok_or_else(|| {
+                control_failure(
+                    "local_handoff_proof_missing",
+                    "local uncertainty has no exact durable route proof",
+                )
+            })?;
+        if target.ambiguity_id != ambiguity_id {
+            return Err(control_failure(
+                "local_handoff_revision_conflict",
+                "local uncertainty changed; refresh before resolving it",
+            ));
+        }
+        coordinator
+            .resolve_ambiguous_handoff(
+                "local",
+                job_id,
+                &target.local_route_key,
+                target.reservation_id,
+                target.generation,
+                resolution,
+            )
+            .map_err(|error| {
+                control_failure("local_handoff_resolution_failed", &error.to_string())
+            })?;
+    }
+
+    let now = Utc::now().timestamp_millis();
+    match resolution {
+        piqae_protocol::agent::AmbiguousHandoffResolution::ReleaseForRetry => engine
+            .store_mut()
+            .release_uncertain_local_handoff_for_retry(
+            job_id,
+            ambiguity_id,
+            now,
+            now + AgentEngine::<SharedRuntimeExecutor, SystemClock>::DEFAULT_LOCAL_RETRY_DELAY_MS,
+        ),
+        piqae_protocol::agent::AmbiguousHandoffResolution::ConfirmAccepted => engine
+            .store_mut()
+            .confirm_uncertain_local_handoff_accepted(job_id, ambiguity_id, now),
+    }
+    .map_err(storage_control_failure)?;
+    reconcile_local_scheduler_state(engine)
+        .await
+        .map_err(|error| control_failure("route_reconciliation_failed", &error.to_string()))?;
+    Ok(())
+}
+
+async fn local_ambiguous_handoff_control(
+    engine: &mut AgentEngine<SharedRuntimeExecutor, SystemClock>,
+    job_id: &str,
+) -> Result<piqae_node_runtime::command::LocalAmbiguousHandoff, ControlFailure> {
+    let job = engine
+        .store()
+        .get_job(job_id)
+        .map_err(storage_control_failure)?
+        .ok_or_else(|| control_failure("job_not_found", "local job was not found"))?;
+    if job.cloud_managed || job.state != "delivery_uncertain" {
+        return Err(control_failure(
+            "local_handoff_not_uncertain",
+            "local job has no unresolved local delivery uncertainty",
+        ));
+    }
+    let coordinator = Arc::clone(&engine.executor_mut().coordinator);
+    let target = coordinator
+        .lock()
+        .await
+        .local_handoff_resolution_target("local", job_id)
+        .ok_or_else(|| {
+            control_failure(
+                "local_handoff_proof_missing",
+                "local uncertainty has no exact durable route proof",
+            )
+        })?;
+    Ok(piqae_node_runtime::command::LocalAmbiguousHandoff {
+        ambiguity_id: target.ambiguity_id,
+    })
 }
 
 #[async_trait]
@@ -555,13 +1038,14 @@ impl Executor for SharedRuntimeExecutor {
         } else {
             None
         };
+        let connector_id = self.route_owner(&submission).to_owned();
         let now = Utc::now();
         let reservation = self
             .coordinator
             .lock()
             .await
             .reserve(
-                &self.connector_id,
+                &connector_id,
                 &submission.printer_native_id,
                 &submission.job_id,
                 now.timestamp_millis(),
@@ -608,8 +1092,8 @@ impl Executor for SharedRuntimeExecutor {
                 None,
             ),
         };
-        let finish = self.coordinator.lock().await.finish(
-            &self.connector_id,
+        let finish = self.coordinator.lock().await.finish_runtime(
+            &connector_id,
             &job_id,
             &reservation,
             outcome,
@@ -942,8 +1426,26 @@ async fn main() -> Result<()> {
             )
         }
     };
-    let route_coordinator = route_coordinator::RouteCoordinator::open(&arguments.data_dir)
+    let mut route_coordinator = route_coordinator::RouteCoordinator::open(&arguments.data_dir)
         .context("open installation route coordinator")?;
+    let (_, compacted) = reconcile_local_route_state(&mut store, &mut route_coordinator, "local")?;
+    if compacted > 0 {
+        info!(compacted, "compacted durably projected local handoff evidence");
+    }
+    if arguments.mode != AgentMode::Local {
+        let (_, unresolved) = reconcile_authoritative_route_state(
+            &mut store,
+            &mut route_coordinator,
+            "legacy",
+            Utc::now(),
+        )?;
+        if unresolved > 0 {
+            warn!(
+                unresolved,
+                "cloud jobs without exact authoritative route ownership remain quarantined"
+            );
+        }
+    }
     let executor = SharedRuntimeExecutor {
         runtime: Arc::new(Mutex::new(executor)),
         coordinator: Arc::new(Mutex::new(route_coordinator)),
@@ -2210,10 +2712,20 @@ async fn control_loop(
                     reject_connector_supervisor_command(error);
                 }
             }
-            _ = scheduler.tick(), if !paused.load(Ordering::Relaxed) => {
+            _ = scheduler.tick() => {
+                if engine.executor_mut().coordinator.lock().await.is_poisoned() {
+                    error!("route coordinator fail-stopped; terminating for durable restart recovery");
+                    break;
+                }
+                if paused.load(Ordering::Relaxed) {
+                    continue;
+                }
                 let before = engine.store().latest_pending_cloud_event_sequence();
                 if let Err(error) = engine.run_once().await {
                     error!(%error, "local print scheduler iteration failed");
+                }
+                if let Err(error) = reconcile_local_scheduler_state(&mut engine).await {
+                    error!(%error, "local route handoff reconciliation failed");
                 }
                 let after = engine.store().latest_pending_cloud_event_sequence();
                 if matches!((before, after), (Ok(before), Ok(after)) if after > before) {
@@ -2225,6 +2737,10 @@ async fn control_loop(
     warn!("local control channel closed");
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "the scheduler checks stop, pause, fail-stop, queue progress, and cloud wakeup in one bounded loop"
+)]
 async fn connector_scheduler_loop(
     connector_id: String,
     mut engine: AgentEngine<SharedRuntimeExecutor>,
@@ -2238,6 +2754,10 @@ async fn connector_scheduler_loop(
         tokio::select! {
             _ = scheduler.tick() => {}
             () = stop.cancelled() => break,
+        }
+        if engine.executor_mut().coordinator.lock().await.is_poisoned() {
+            error!(%connector_id, "route coordinator fail-stopped; terminating scheduler for process restart");
+            break;
         }
         if paused.load(Ordering::Relaxed) {
             continue;
@@ -2304,6 +2824,10 @@ async fn connector_supervisor_loop(
         let command = tokio::select! {
             command = commands.recv() => command,
             _ = liveness.tick() => {
+                if executor.coordinator.lock().await.is_poisoned() {
+                    error!("route coordinator fail-stopped; stopping node for supervised restart");
+                    break;
+                }
                 if legacy_cloud_worker
                     .as_ref()
                     .is_some_and(|worker| worker.task.is_finished())
@@ -2908,7 +3432,7 @@ async fn start_connector_worker(
         .parent()
         .context("connector database has no parent")?;
     std::fs::create_dir_all(parent)?;
-    let store = AgentStore::open(&paths.database)?;
+    let mut store = AgentStore::open(&paths.database)?;
     if !store.integrity_check()? {
         anyhow::bail!("connector database integrity check failed");
     }
@@ -2927,6 +3451,22 @@ async fn start_connector_worker(
         .as_ref()
         .context("installed connector has no file-backed signing key")?;
     let cloud = cloud_configuration_from_connector(&record, device_key)?;
+    {
+        let mut coordinator = executor.coordinator.lock().await;
+        let (_, unresolved) = reconcile_authoritative_route_state(
+            &mut store,
+            &mut coordinator,
+            &record.connector_id,
+            Utc::now(),
+        )?;
+        if unresolved > 0 {
+            warn!(
+                connector_id = %record.connector_id,
+                unresolved,
+                "connector jobs without exact authoritative route ownership remain quarantined"
+            );
+        }
+    }
     let content = ContentStore::open(paths.content).await?;
     let connector_executor = executor.for_connector(record.connector_id.clone());
     let route_coordinator = Arc::clone(&executor.coordinator);
@@ -3318,6 +3858,21 @@ async fn handle_control_request(
                 confirmed,
                 paused.load(Ordering::Relaxed),
             );
+            let _ = respond_to.send(result);
+        }
+        ControlRequest::ResolveLocalAmbiguousHandoff {
+            job_id,
+            ambiguity_id,
+            resolution,
+            respond_to,
+        } => {
+            let result =
+                resolve_local_ambiguous_handoff_control(engine, &job_id, &ambiguity_id, resolution)
+                    .await;
+            let _ = respond_to.send(result);
+        }
+        ControlRequest::LocalAmbiguousHandoff { job_id, respond_to } => {
+            let result = local_ambiguous_handoff_control(engine, &job_id).await;
             let _ = respond_to.send(result);
         }
         ControlRequest::ConnectorDetails { respond_to } => {
@@ -4165,6 +4720,7 @@ fn reprint_local_job(
     }
     let (job_id, digest) = reprint_job_identity(original_job_id, idempotency_key);
     let facts = JobPersistenceFacts {
+        route_connector_id: None,
         target_id: original.target_id.clone(),
         binding_id: original.binding_id.clone(),
         profile_id: original.profile_id.clone(),
@@ -4394,6 +4950,7 @@ fn storage_control_failure(error: StorageError) -> ControlFailure {
         StorageError::PrinterNotFound(_) => {
             control_failure("printer_not_found", &error.to_string())
         }
+        StorageError::JobNotFound(_) => control_failure("job_not_found", &error.to_string()),
         StorageError::ProfileRevisionConflict { .. } => {
             control_failure("profile_revision_conflict", &error.to_string())
         }
@@ -4934,7 +5491,11 @@ impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor
             .route_reservation
             .as_ref()
             .ok_or_else(|| CloudWorkerError::new("route_reservation_required"))?;
-        self.route_coordinator
+        let route_coordinator::AuthoritativeRouteRegistration {
+            reservation: local_reservation,
+            newly_registered,
+        } = self
+            .route_coordinator
             .lock()
             .await
             .register_authoritative(
@@ -4945,94 +5506,137 @@ impl DurableOfferAcceptor<InstalledMaterializedOffer> for InstalledOfferAcceptor
                 Utc::now(),
             )
             .map_err(|_| CloudWorkerError::new("route_reservation_failed"))?;
-        let route_proof = CloudRouteProof {
-            reservation_id: reservation.reservation_id.to_string(),
-            generation: reservation.generation,
-            fencing_token: reservation.fencing_token.clone(),
-        };
-        let mut stores = self.stores.lock().await;
-        let native_binding_session = Arc::clone(&stores.native_binding_session);
-        let native_binding_guard = native_binding_session.refresh_lock.lock().await;
-        if offer.job.content_kind == ContentKind::Raw
-            && !materialized
-                .printer_native_binding
-                .as_ref()
-                .is_some_and(|pin| native_binding_session.matches_pin(pin))
-        {
-            return Err(CloudWorkerError::new("printer_native_binding_stale"));
+        let prepared = async {
+            let route_proof = CloudRouteProof {
+                reservation_id: reservation.reservation_id.to_string(),
+                generation: reservation.generation,
+                fencing_token: reservation.fencing_token.clone(),
+            };
+            let mut stores = self.stores.lock().await;
+            let native_binding_session = Arc::clone(&stores.native_binding_session);
+            let native_binding_guard = native_binding_session.refresh_lock.lock().await;
+            if offer.job.content_kind == ContentKind::Raw
+                && !materialized
+                    .printer_native_binding
+                    .as_ref()
+                    .is_some_and(|pin| native_binding_session.matches_pin(pin))
+            {
+                return Err(CloudWorkerError::new("printer_native_binding_stale"));
+            }
+            let facts = JobPersistenceFacts {
+                route_connector_id: Some(self.connector_id.clone()),
+                target_id: materialized
+                    .profile_pin
+                    .as_ref()
+                    .and_then(|pin| pin.target_id.clone()),
+                binding_id: materialized
+                    .profile_pin
+                    .as_ref()
+                    .and_then(|pin| pin.binding_id.clone()),
+                profile_id: materialized
+                    .profile_pin
+                    .as_ref()
+                    .map(|pin| pin.profile_id.clone()),
+                profile_revision: materialized
+                    .profile_pin
+                    .as_ref()
+                    .map(|pin| pin.profile_revision),
+                stock_id: materialized
+                    .profile_pin
+                    .as_ref()
+                    .and_then(|pin| pin.stock_id.clone()),
+                loaded_media_snapshot_json: materialized
+                    .profile_pin
+                    .as_ref()
+                    .and_then(|pin| pin.loaded_media_snapshot_json.clone()),
+                profile_snapshot_json: materialized.profile_snapshot_json,
+                printer_native_binding: materialized.printer_native_binding,
+            };
+            let local = stores
+                .queue
+                .prepare_cloud_job_with_facts(
+                    &AcceptedJob {
+                        job_id: job_id.to_string(),
+                        submission_id: format!("sub_{job_id}"),
+                        printer_id: offer.job.printer_id.to_string(),
+                        printer_native_id: materialized.printer.native_id.clone(),
+                        title: offer.job.title.clone(),
+                        content_sha256: materialized.stored.sha256.clone(),
+                        content_path: materialized.stored.path.to_string_lossy().into_owned(),
+                        content_kind: match offer.job.content_kind {
+                            ContentKind::Pdf => "pdf",
+                            ContentKind::Raw => "raw",
+                        }
+                        .into(),
+                        options_json: serde_json::to_string(&offer.job.options)
+                            .map_err(|_| CloudWorkerError::new("job_options_invalid"))?,
+                        expires_unix_ms: Some(offer.job.expires_at.timestamp_millis()),
+                        accepted_unix_ms: Utc::now().timestamp_millis(),
+                        cloud_managed: true,
+                    },
+                    &offer.lease_id.to_string(),
+                    &offer.lease_token,
+                    offer.lease_expires_at.timestamp_millis(),
+                    &route_proof,
+                    &facts,
+                )
+                .map_err(|_| CloudWorkerError::new("durable_accept_prepare_failed"))?;
+            let intent = CloudAcceptIntent {
+                job_id: job_id.to_string(),
+                lease_id: offer.lease_id.to_string(),
+                lease_token: offer.lease_token.clone(),
+                lease_expires_unix_ms: offer.lease_expires_at.timestamp_millis(),
+                content_sha256: materialized.stored.sha256,
+                local_sequence: u64::try_from(local.printer_sequence).unwrap_or(u64::MAX),
+                route_reservation_id: Some(route_proof.reservation_id),
+                route_generation: Some(route_proof.generation),
+                route_fencing_token: Some(route_proof.fencing_token),
+                remote_accept_confirmed: false,
+            };
+            drop(native_binding_guard);
+            drop(stores);
+            pending_cloud_acceptance(intent)
         }
-        let facts = JobPersistenceFacts {
-            target_id: materialized
-                .profile_pin
-                .as_ref()
-                .and_then(|pin| pin.target_id.clone()),
-            binding_id: materialized
-                .profile_pin
-                .as_ref()
-                .and_then(|pin| pin.binding_id.clone()),
-            profile_id: materialized
-                .profile_pin
-                .as_ref()
-                .map(|pin| pin.profile_id.clone()),
-            profile_revision: materialized
-                .profile_pin
-                .as_ref()
-                .map(|pin| pin.profile_revision),
-            stock_id: materialized
-                .profile_pin
-                .as_ref()
-                .and_then(|pin| pin.stock_id.clone()),
-            loaded_media_snapshot_json: materialized
-                .profile_pin
-                .as_ref()
-                .and_then(|pin| pin.loaded_media_snapshot_json.clone()),
-            profile_snapshot_json: materialized.profile_snapshot_json,
-            printer_native_binding: materialized.printer_native_binding,
-        };
-        let local = stores
-            .queue
-            .prepare_cloud_job_with_facts(
-                &AcceptedJob {
-                    job_id: job_id.to_string(),
-                    submission_id: format!("sub_{job_id}"),
-                    printer_id: offer.job.printer_id.to_string(),
-                    printer_native_id: materialized.printer.native_id.clone(),
-                    title: offer.job.title.clone(),
-                    content_sha256: materialized.stored.sha256.clone(),
-                    content_path: materialized.stored.path.to_string_lossy().into_owned(),
-                    content_kind: match offer.job.content_kind {
-                        ContentKind::Pdf => "pdf",
-                        ContentKind::Raw => "raw",
-                    }
-                    .into(),
-                    options_json: serde_json::to_string(&offer.job.options)
-                        .map_err(|_| CloudWorkerError::new("job_options_invalid"))?,
-                    expires_unix_ms: Some(offer.job.expires_at.timestamp_millis()),
-                    accepted_unix_ms: Utc::now().timestamp_millis(),
-                    cloud_managed: true,
-                },
-                &offer.lease_id.to_string(),
-                &offer.lease_token,
-                offer.lease_expires_at.timestamp_millis(),
-                &route_proof,
-                &facts,
-            )
-            .map_err(|_| CloudWorkerError::new("durable_accept_prepare_failed"))?;
-        let intent = CloudAcceptIntent {
-            job_id: job_id.to_string(),
-            lease_id: offer.lease_id.to_string(),
-            lease_token: offer.lease_token.clone(),
-            lease_expires_unix_ms: offer.lease_expires_at.timestamp_millis(),
-            content_sha256: materialized.stored.sha256,
-            local_sequence: u64::try_from(local.printer_sequence).unwrap_or(u64::MAX),
-            route_reservation_id: Some(route_proof.reservation_id),
-            route_generation: Some(route_proof.generation),
-            route_fencing_token: Some(route_proof.fencing_token),
-            remote_accept_confirmed: false,
-        };
-        drop(native_binding_guard);
-        drop(stores);
-        pending_cloud_acceptance(intent)
+        .await;
+        if prepared.is_err() {
+            let reservation_id = reservation.reservation_id.to_string();
+            let exact_intent_is_durable = self
+                .stores
+                .lock()
+                .await
+                .queue
+                .pending_cloud_accepts()
+                .map_err(|_| CloudWorkerError::new("durable_accept_query_failed"))?
+                .into_iter()
+                .any(|intent| {
+                    intent.job_id == job_id.to_string()
+                        && intent.route_reservation_id.as_deref() == Some(reservation_id.as_str())
+                        && intent.route_generation == Some(reservation.generation)
+                        && intent.route_fencing_token.as_deref()
+                            == Some(reservation.fencing_token.as_str())
+                });
+            if newly_registered
+                && !exact_intent_is_durable
+                && self
+                    .route_coordinator
+                    .lock()
+                    .await
+                    .finish(
+                        &self.connector_id,
+                        &job_id.to_string(),
+                        &local_reservation,
+                        piqae_protocol::agent::NativeHandoffOutcome::RejectedBeforeHandoff,
+                        None,
+                        Utc::now(),
+                    )
+                    .is_err()
+            {
+                return Err(CloudWorkerError::new(
+                    "route_reservation_compensation_failed",
+                ));
+            }
+        }
+        prepared
     }
 
     async fn activate(&mut self, job_id: JobId) -> Result<(), CloudWorkerError> {
@@ -5809,14 +6413,27 @@ async fn apply_commands(
                 reservation_id,
                 generation,
                 resolution,
-            } => route_coordinator.lock().await.resolve_ambiguous_handoff(
-                connector_id,
-                &job_id.to_string(),
-                &local_route_key,
-                reservation_id,
-                generation,
-                resolution,
-            ),
+            } => {
+                let resolved = route_coordinator.lock().await.resolve_ambiguous_handoff(
+                    connector_id,
+                    &job_id.to_string(),
+                    &local_route_key,
+                    reservation_id,
+                    generation,
+                    resolution,
+                );
+                match resolved {
+                    Err(error) => Err(error),
+                    Ok(()) => match resolution {
+                        piqae_protocol::agent::AmbiguousHandoffResolution::ReleaseForRetry => store
+                            .release_uncertain_cloud_handoff_for_retry(&job_id.to_string(), now)
+                            .map_err(anyhow::Error::from),
+                        piqae_protocol::agent::AmbiguousHandoffResolution::ConfirmAccepted => store
+                            .finalize_uncertain_cloud_handoff_recovery(&job_id.to_string())
+                            .map_err(anyhow::Error::from),
+                    },
+                }
+            }
             command => apply_command(store, paused, command).map_err(anyhow::Error::from),
         };
         match result {
@@ -8021,6 +8638,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn poisoned_route_coordinator_stops_supervisor_instead_of_reloading_workers() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let route_root = fixture.path().join("routes");
+        std::fs::create_dir_all(&route_root).expect("route root");
+        let mut coordinator =
+            route_coordinator::RouteCoordinator::open(&route_root).expect("coordinator");
+        let reservation = coordinator
+            .reserve("local", "virtual-native", "virtual-job", 1)
+            .expect("reservation");
+        let displaced_root = fixture.path().join("routes-displaced");
+        std::fs::rename(&route_root, &displaced_root).expect("displace durable root");
+        std::fs::write(&route_root, b"blocked durable directory")
+            .expect("block durable root recreation");
+        assert!(
+            coordinator
+                .finish_runtime(
+                    "local",
+                    "virtual-job",
+                    &reservation,
+                    piqae_protocol::agent::NativeHandoffOutcome::RejectedBeforeHandoff,
+                    None,
+                    Utc::now(),
+                )
+                .is_err()
+        );
+        assert!(coordinator.is_poisoned());
+
+        let executor = SharedRuntimeExecutor {
+            runtime: Arc::new(Mutex::new(RuntimeExecutor::Fake(FakeExecutor::default()))),
+            coordinator: Arc::new(Mutex::new(coordinator)),
+            observation_cache: Arc::new(Mutex::new(RouteObservationCache::default())),
+            native_binding_session: Arc::new(PrinterNativeBindingSession::fixture(
+                "poison-supervisor",
+            )),
+            connector_id: "local".into(),
+        };
+        let data_dir = fixture.path().join("agent-data");
+        std::fs::create_dir_all(&data_dir).expect("agent data");
+        let (_commands, receive) = mpsc::channel(1);
+        let connections =
+            ConnectorConnectionTracker::new(Arc::new(RwLock::new(ConnectionState::LocalOnly)));
+        let node_runtime = Arc::new(test_node_runtime(fixture.path()));
+        let identity = NodeIdentity::new("Virtual Node", None, None, Vec::new()).expect("identity");
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            connector_supervisor_loop(
+                data_dir,
+                receive,
+                executor,
+                UriFetcher::new(false),
+                PrinterDiscovery::Disabled,
+                Arc::new(SupportPackRegistry::default()),
+                None,
+                connections,
+                node_runtime,
+                identity,
+            ),
+        )
+        .await
+        .expect("poisoned supervisor must exit for service-manager restart");
+        std::fs::remove_file(&route_root).expect("remove durable root blocker");
+        std::fs::rename(&displaced_root, &route_root).expect("restore durable root");
+        route_coordinator::RouteCoordinator::open(&route_root)
+            .expect("launch-style reopen adopts durable state");
+    }
+
+    #[tokio::test]
     async fn connector_shutdown_signals_sync_and_scheduler_before_waiting() {
         let sync_stop = StopSignal::default();
         let scheduler_stop = StopSignal::default();
@@ -8651,6 +9335,7 @@ mod tests {
             options: piqae_domain::JobOptions::default(),
             native_profile: None,
             printer_native_binding: pin,
+            route_connector_id: None,
             deadline_unix_ms: i64::MAX,
             route_fence: None,
         }
@@ -8669,6 +9354,1752 @@ mod tests {
             native_binding_session: session,
             connector_id: "virtual-connector".into(),
         }
+    }
+
+    fn virtual_route_executor(
+        directory: &Path,
+        default_connector_id: &str,
+        fake: FakeExecutor,
+    ) -> SharedRuntimeExecutor {
+        SharedRuntimeExecutor {
+            runtime: Arc::new(Mutex::new(RuntimeExecutor::Fake(fake))),
+            coordinator: Arc::new(Mutex::new(
+                route_coordinator::RouteCoordinator::open(directory).expect("route coordinator"),
+            )),
+            observation_cache: Arc::new(Mutex::new(RouteObservationCache::default())),
+            native_binding_session: Arc::new(PrinterNativeBindingSession::fixture(
+                "virtual-route-process",
+            )),
+            connector_id: default_connector_id.into(),
+        }
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the restart regression keeps reservation, handoff, and reconciliation assertions together"
+    )]
+    async fn cloud_route_owner_survives_topology_change_and_restart() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database = directory.path().join("agent.sqlite3");
+        let routes = directory.path().join("routes");
+        let job_id = "cloud-route-owner-restart";
+        route_coordinator::RouteCoordinator::open(&routes)
+            .expect("initial route coordinator")
+            .reserve(
+                "legacy",
+                "fake-printer",
+                job_id,
+                Utc::now().timestamp_millis(),
+            )
+            .expect("legacy cloud reservation");
+
+        let mut store = AgentStore::open(&database).expect("queue");
+        store
+            .accept_job_with_facts(
+                &AcceptedJob {
+                    job_id: job_id.into(),
+                    submission_id: "sub-cloud-route-owner-restart".into(),
+                    printer_id: "virtual-printer".into(),
+                    printer_native_id: "fake-printer".into(),
+                    title: "virtual cloud route owner".into(),
+                    content_sha256: "virtual-digest".into(),
+                    content_path: "/virtual/not-read".into(),
+                    content_kind: "pdf".into(),
+                    options_json: "{}".into(),
+                    expires_unix_ms: None,
+                    accepted_unix_ms: Utc::now().timestamp_millis(),
+                    cloud_managed: true,
+                },
+                &JobPersistenceFacts {
+                    route_connector_id: Some("legacy".into()),
+                    ..JobPersistenceFacts::default()
+                },
+            )
+            .expect("accepted cloud responsibility");
+        drop(store);
+
+        // A connector is installed before restart, so the queue-scoped default
+        // changes. The job must still execute under its immutable legacy owner.
+        let mut engine = AgentEngine::new(
+            AgentStore::open(&database).expect("restarted queue"),
+            virtual_route_executor(&routes, "ncon_after_acceptance", FakeExecutor::default()),
+            SystemClock,
+        );
+        engine.run_once().await.expect("virtual native handoff");
+        assert_eq!(
+            engine
+                .store()
+                .get_job(job_id)
+                .expect("query")
+                .expect("job")
+                .state,
+            "accepted_by_spooler"
+        );
+        let runtime = engine.executor_mut().runtime.lock().await;
+        let RuntimeExecutor::Fake(fake) = &*runtime else {
+            panic!("virtual executor expected");
+        };
+        assert_eq!(fake.submitted.len(), 1);
+        assert_eq!(
+            fake.submitted[0].route_connector_id.as_deref(),
+            Some("legacy")
+        );
+        drop(runtime);
+        drop(engine);
+
+        tokio::time::sleep(Duration::from_millis(
+            AgentEngine::<SharedRuntimeExecutor>::DEFAULT_RECONCILIATION_INTERVAL_MS as u64 + 50,
+        ))
+        .await;
+        let observations = std::collections::VecDeque::from([Ok(NativeJobObservation {
+            state: piqae_protocol::executor::NativeJobState::Completed,
+            native_code: Some("virtual-complete".into()),
+            message: None,
+        })]);
+        let fake = FakeExecutor {
+            observations,
+            ..FakeExecutor::default()
+        };
+        let mut restarted = AgentEngine::new(
+            AgentStore::open(&database).expect("second restart queue"),
+            virtual_route_executor(&routes, "local", fake),
+            SystemClock,
+        );
+        restarted.run_once().await.expect("durable reconciliation");
+        let job = restarted
+            .store()
+            .get_job(job_id)
+            .expect("query")
+            .expect("job");
+        assert_eq!(job.state, "completed_reported");
+        let states = restarted
+            .store()
+            .pending_events(0, 20)
+            .expect("events")
+            .into_iter()
+            .map(|event| event.state)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            states,
+            [
+                "queued_local",
+                "preparing",
+                "rendering",
+                "spool_intent",
+                "accepted_by_spooler",
+                "completed_reported",
+            ]
+        );
+    }
+
+    fn virtual_cloud_printer() -> DiscoveredPrinter {
+        DiscoveredPrinter {
+            native_id: "fake-printer".into(),
+            name: "virtual route printer".into(),
+            is_default: true,
+            state: piqae_domain::PrinterState::Online,
+            capabilities: piqae_domain::PrinterCapabilities::default(),
+            native_options: std::collections::BTreeMap::new(),
+            driver_fingerprint: None,
+            identity_evidence: Vec::new(),
+        }
+    }
+
+    fn virtual_cloud_reservation(
+        local_route_key: String,
+        generation: u64,
+    ) -> piqae_protocol::agent::CloudRouteReservation {
+        piqae_protocol::agent::CloudRouteReservation {
+            route_id: "rte_01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            local_route_key,
+            reservation_id: uuid::Uuid::new_v4(),
+            generation,
+            fencing_token: format!("virtual-fence-{generation}"),
+            lease_expires_at: Utc::now() + chrono::Duration::minutes(5),
+        }
+    }
+
+    fn prepare_virtual_cloud_spool_intent(
+        store: &mut AgentStore,
+        job_id: &str,
+        connector_id: &str,
+        cloud: &piqae_protocol::agent::CloudRouteReservation,
+    ) {
+        let job = AcceptedJob {
+            job_id: job_id.into(),
+            submission_id: format!("sub-{job_id}"),
+            printer_id: "virtual-printer".into(),
+            printer_native_id: "fake-printer".into(),
+            title: "virtual crash boundary".into(),
+            content_sha256: format!("digest-{job_id}"),
+            content_path: "/virtual/not-read".into(),
+            content_kind: "pdf".into(),
+            options_json: "{}".into(),
+            expires_unix_ms: None,
+            accepted_unix_ms: Utc::now().timestamp_millis(),
+            cloud_managed: true,
+        };
+        store
+            .prepare_cloud_job_with_facts(
+                &job,
+                "virtual-lease",
+                "virtual-lease-capability",
+                i64::MAX,
+                &CloudRouteProof {
+                    reservation_id: cloud.reservation_id.to_string(),
+                    generation: cloud.generation,
+                    fencing_token: cloud.fencing_token.clone(),
+                },
+                &JobPersistenceFacts {
+                    route_connector_id: Some(connector_id.into()),
+                    ..JobPersistenceFacts::default()
+                },
+            )
+            .expect("prepare virtual cloud job");
+        store
+            .confirm_cloud_accept(job_id, Utc::now().timestamp_millis())
+            .expect("confirm virtual cloud job");
+        store
+            .activate_cloud_job(job_id, Utc::now().timestamp_millis())
+            .expect("activate virtual cloud job");
+        for state in ["preparing", "rendering", "spool_intent"] {
+            store
+                .append_next_event(
+                    &EventId::new().to_string(),
+                    job_id,
+                    state,
+                    None,
+                    None,
+                    "{}",
+                    Utc::now().timestamp_millis(),
+                )
+                .expect("advance to virtual spool intent");
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct FrozenClock(i64);
+
+    impl piqae_agent_core::Clock for FrozenClock {
+        fn unix_ms(&self) -> i64 {
+            self.0
+        }
+    }
+
+    #[test]
+    fn local_recovery_projects_latest_acceptance_before_compacting_prior_rejection() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let database = fixture.path().join("agent.sqlite3");
+        let routes = fixture.path().join("routes");
+        let job_id = JobId::new().to_string();
+        let mut store = AgentStore::open(&database).expect("queue");
+        store
+            .accept_job(&AcceptedJob {
+                job_id: job_id.clone(),
+                submission_id: format!("sub-{job_id}"),
+                printer_id: "local-printer".into(),
+                printer_native_id: "local-native".into(),
+                title: "local recovery ordering".into(),
+                content_sha256: "virtual-digest".into(),
+                content_path: "/virtual/not-read".into(),
+                content_kind: "pdf".into(),
+                options_json: "{}".into(),
+                expires_unix_ms: None,
+                accepted_unix_ms: 1,
+                cloud_managed: false,
+            })
+            .expect("accepted local job");
+        for state in ["preparing", "rendering", "spool_intent"] {
+            store
+                .append_next_event(
+                    &EventId::new().to_string(),
+                    &job_id,
+                    state,
+                    None,
+                    None,
+                    "{}",
+                    2,
+                )
+                .expect("advance to native intent");
+        }
+        let mut coordinator =
+            route_coordinator::RouteCoordinator::open(&routes).expect("coordinator");
+        let rejected = coordinator
+            .reserve("local", "local-native", &job_id, 1)
+            .expect("first attempt");
+        coordinator
+            .finish(
+                "local",
+                &job_id,
+                &rejected,
+                piqae_protocol::agent::NativeHandoffOutcome::RejectedBeforeHandoff,
+                None,
+                Utc::now(),
+            )
+            .expect("first rejection");
+        let accepted = coordinator
+            .reserve("local", "local-native", &job_id, 2)
+            .expect("second attempt");
+        coordinator
+            .finish(
+                "local",
+                &job_id,
+                &accepted,
+                piqae_protocol::agent::NativeHandoffOutcome::Accepted,
+                Some("native-latest".into()),
+                Utc::now(),
+            )
+            .expect("later acceptance");
+
+        let (repaired, compacted) =
+            reconcile_local_route_state(&mut store, &mut coordinator, "local")
+                .expect("reconcile latest attempt");
+        assert_eq!((repaired, compacted), (1, 2));
+        let job = store.get_job(&job_id).expect("query").expect("job");
+        assert_eq!(job.state, "accepted_by_spooler");
+        assert_eq!(job.native_job_id.as_deref(), Some("native-latest"));
+        assert!(coordinator.handoffs_for_connector("local", 0).is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the startup, authenticated release, compaction, and restart replay form one crash-boundary proof"
+    )]
+    async fn local_startup_converts_an_unjournaled_active_handoff_to_resolvable_ambiguity() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let database = fixture.path().join("agent.sqlite3");
+        let routes = fixture.path().join("routes");
+        let job_id = "job_local_22222222222222222222222222222222".to_owned();
+        let mut store = AgentStore::open(&database).expect("queue");
+        store
+            .accept_job(&AcceptedJob {
+                job_id: job_id.clone(),
+                submission_id: format!("sub-{job_id}"),
+                printer_id: "local-printer".into(),
+                printer_native_id: "local-native".into(),
+                title: "unjournaled local handoff".into(),
+                content_sha256: "virtual-digest".into(),
+                content_path: "/virtual/not-read".into(),
+                content_kind: "pdf".into(),
+                options_json: "{}".into(),
+                expires_unix_ms: None,
+                accepted_unix_ms: 1,
+                cloud_managed: false,
+            })
+            .expect("accept local job");
+        for state in ["preparing", "rendering", "spool_intent"] {
+            store
+                .append_next_event(
+                    &EventId::new().to_string(),
+                    &job_id,
+                    state,
+                    None,
+                    None,
+                    "{}",
+                    2,
+                )
+                .expect("advance to native intent");
+        }
+        let mut coordinator =
+            route_coordinator::RouteCoordinator::open(&routes).expect("coordinator");
+        let _reservation = coordinator
+            .reserve("local", "local-native", &job_id, 1)
+            .expect("active crash-window reservation");
+        drop(coordinator);
+        drop(store);
+
+        let mut store = AgentStore::open(&database).expect("reopened queue");
+        let mut coordinator =
+            route_coordinator::RouteCoordinator::open(&routes).expect("reopened coordinator");
+        let (repaired, compacted) =
+            reconcile_local_route_state(&mut store, &mut coordinator, "local")
+                .expect("startup ambiguity repair");
+        assert_eq!((repaired, compacted), (1, 0));
+        assert_eq!(
+            store.get_job(&job_id).expect("query").expect("job").state,
+            "delivery_uncertain"
+        );
+        let evidence = coordinator.local_handoffs_for_connector("local");
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(
+            evidence[0].outcome,
+            piqae_protocol::agent::NativeHandoffOutcome::Ambiguous
+        );
+        let first_ambiguity_id = evidence[0].ambiguity_id.clone();
+        drop(coordinator);
+        let mut engine = AgentEngine::new(
+            store,
+            virtual_route_executor(&routes, "local", FakeExecutor::default()),
+            SystemClock,
+        );
+        assert_eq!(
+            local_ambiguous_handoff_control(&mut engine, &job_id)
+                .await
+                .expect("authenticated ambiguity lookup")
+                .ambiguity_id,
+            first_ambiguity_id
+        );
+        resolve_local_ambiguous_handoff_control(
+            &mut engine,
+            &job_id,
+            &first_ambiguity_id,
+            piqae_protocol::agent::AmbiguousHandoffResolution::ReleaseForRetry,
+        )
+        .await
+        .expect("authenticated local ambiguity release");
+        assert_eq!(
+            engine
+                .store()
+                .get_job(&job_id)
+                .expect("query released job")
+                .expect("released job")
+                .state,
+            "failed_retryable"
+        );
+        assert_eq!(
+            engine
+                .store()
+                .local_handoff_resolution(&job_id, &first_ambiguity_id)
+                .expect("resolution marker")
+                .as_deref(),
+            Some("release_for_retry")
+        );
+        assert_eq!(
+            engine
+                .store()
+                .runnable_heads(i64::MAX)
+                .expect("eventually runnable")
+                .len(),
+            1
+        );
+        let coordinator = Arc::clone(&engine.executor_mut().coordinator);
+        assert!(
+            coordinator
+                .lock()
+                .await
+                .local_handoffs_for_connector("local")
+                .is_empty(),
+            "SQLite projection permits safe terminal evidence compaction"
+        );
+        for state in ["preparing", "rendering", "spool_intent"] {
+            engine
+                .store_mut()
+                .append_next_event(
+                    &EventId::new().to_string(),
+                    &job_id,
+                    state,
+                    None,
+                    None,
+                    "{}",
+                    3,
+                )
+                .expect("progress explicitly released attempt");
+        }
+        let second = coordinator
+            .lock()
+            .await
+            .reserve("local", "local-native", &job_id, 3)
+            .expect("fresh local attempt route");
+        coordinator
+            .lock()
+            .await
+            .finish(
+                "local",
+                &job_id,
+                &second,
+                piqae_protocol::agent::NativeHandoffOutcome::Ambiguous,
+                None,
+                Utc::now(),
+            )
+            .expect("fresh attempt ambiguity");
+        engine
+            .store_mut()
+            .record_local_handoff_uncertainty(
+                &EventId::new().to_string(),
+                &job_id,
+                Utc::now().timestamp_millis(),
+            )
+            .expect("project fresh uncertainty");
+        let second_ambiguity_id = coordinator
+            .lock()
+            .await
+            .local_handoff_resolution_target("local", &job_id)
+            .expect("fresh ambiguity")
+            .ambiguity_id;
+        assert_ne!(first_ambiguity_id, second_ambiguity_id);
+        drop(engine);
+
+        let store = AgentStore::open(&database).expect("second queue reopen");
+        let mut restarted = AgentEngine::new(
+            store,
+            virtual_route_executor(&routes, "local", FakeExecutor::default()),
+            SystemClock,
+        );
+        resolve_local_ambiguous_handoff_control(
+            &mut restarted,
+            &job_id,
+            &first_ambiguity_id,
+            piqae_protocol::agent::AmbiguousHandoffResolution::ReleaseForRetry,
+        )
+        .await
+        .expect("lost old response is idempotent after restart");
+        let current = restarted
+            .executor_mut()
+            .coordinator
+            .lock()
+            .await
+            .local_handoff_resolution_target("local", &job_id)
+            .expect("fresh ambiguity remains fenced");
+        assert_eq!(current.ambiguity_id, second_ambiguity_id);
+        assert_eq!(
+            current.outcome,
+            piqae_protocol::agent::NativeHandoffOutcome::Ambiguous
+        );
+        assert_eq!(
+            local_ambiguous_handoff_control(&mut restarted, &job_id)
+                .await
+                .expect("fresh ambiguity lookup")
+                .ambiguity_id,
+            second_ambiguity_id
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the exact confirmation, compaction, restart, and conflicting-resolution checks form one no-reprint proof"
+    )]
+    async fn authenticated_local_confirm_is_restart_safe_and_never_reprints() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let database = fixture.path().join("agent.sqlite3");
+        let routes = fixture.path().join("routes");
+        let job_id = "job_reprint_33333333333333333333333333333333".to_owned();
+        let mut store = AgentStore::open(&database).expect("queue");
+        store
+            .accept_job(&AcceptedJob {
+                job_id: job_id.clone(),
+                submission_id: format!("sub-{job_id}"),
+                printer_id: "local-printer".into(),
+                printer_native_id: "local-native".into(),
+                title: "confirmed uncertain local handoff".into(),
+                content_sha256: "virtual-digest".into(),
+                content_path: "/virtual/not-read".into(),
+                content_kind: "pdf".into(),
+                options_json: "{}".into(),
+                expires_unix_ms: None,
+                accepted_unix_ms: 1,
+                cloud_managed: false,
+            })
+            .expect("accept local job");
+        for state in ["preparing", "rendering", "spool_intent"] {
+            store
+                .append_next_event(
+                    &EventId::new().to_string(),
+                    &job_id,
+                    state,
+                    None,
+                    None,
+                    "{}",
+                    2,
+                )
+                .expect("advance to native intent");
+        }
+        let mut coordinator =
+            route_coordinator::RouteCoordinator::open(&routes).expect("coordinator");
+        let reservation = coordinator
+            .reserve("local", "local-native", &job_id, 1)
+            .expect("local route");
+        coordinator
+            .finish(
+                "local",
+                &job_id,
+                &reservation,
+                piqae_protocol::agent::NativeHandoffOutcome::Ambiguous,
+                None,
+                Utc::now(),
+            )
+            .expect("ambiguous handoff");
+        store
+            .record_local_handoff_uncertainty(
+                &EventId::new().to_string(),
+                &job_id,
+                Utc::now().timestamp_millis(),
+            )
+            .expect("project uncertainty");
+        let ambiguity_id = coordinator
+            .local_handoff_resolution_target("local", &job_id)
+            .expect("exact ambiguity")
+            .ambiguity_id;
+        coordinator
+            .resolve_ambiguous_handoff(
+                "local",
+                &job_id,
+                &reservation.local_route_key,
+                reservation.reservation_id,
+                reservation.generation,
+                piqae_protocol::agent::AmbiguousHandoffResolution::ConfirmAccepted,
+            )
+            .expect("coordinator-first confirmation before crash");
+        drop(coordinator);
+        drop(store);
+
+        let mut store = AgentStore::open(&database).expect("queue after confirmation crash");
+        let mut coordinator =
+            route_coordinator::RouteCoordinator::open(&routes).expect("route after crash");
+        assert_eq!(
+            reconcile_local_route_state(&mut store, &mut coordinator, "local")
+                .expect("startup must retain unprojected confirmation"),
+            (0, 0)
+        );
+        assert_eq!(coordinator.local_handoffs_for_connector("local").len(), 1);
+        drop(coordinator);
+
+        let mut engine = AgentEngine::new(
+            store,
+            virtual_route_executor(&routes, "local", FakeExecutor::default()),
+            SystemClock,
+        );
+        resolve_local_ambiguous_handoff_control(
+            &mut engine,
+            &job_id,
+            &ambiguity_id,
+            piqae_protocol::agent::AmbiguousHandoffResolution::ConfirmAccepted,
+        )
+        .await
+        .expect("authenticated local confirmation");
+        let job = engine
+            .store()
+            .get_job(&job_id)
+            .expect("query")
+            .expect("job");
+        assert_eq!(job.state, "delivery_uncertain");
+        assert_eq!(
+            engine
+                .store()
+                .local_handoff_resolution(&job_id, &ambiguity_id)
+                .expect("resolution marker")
+                .as_deref(),
+            Some("confirm_accepted")
+        );
+        assert!(
+            engine
+                .store()
+                .runnable_heads(i64::MAX)
+                .expect("runnable")
+                .is_empty()
+        );
+        assert!(
+            engine
+                .executor_mut()
+                .coordinator
+                .lock()
+                .await
+                .handoffs_for_connector("local", 0)
+                .is_empty()
+        );
+        drop(engine);
+
+        let store = AgentStore::open(&database).expect("reopened queue");
+        let mut restarted = AgentEngine::new(
+            store,
+            virtual_route_executor(&routes, "local", FakeExecutor::default()),
+            SystemClock,
+        );
+        resolve_local_ambiguous_handoff_control(
+            &mut restarted,
+            &job_id,
+            &ambiguity_id,
+            piqae_protocol::agent::AmbiguousHandoffResolution::ConfirmAccepted,
+        )
+        .await
+        .expect("idempotent confirmation after restart");
+        assert_eq!(restarted.run_once().await.expect("scheduler"), 0);
+        assert!(
+            resolve_local_ambiguous_handoff_control(
+                &mut restarted,
+                &job_id,
+                &ambiguity_id,
+                piqae_protocol::agent::AmbiguousHandoffResolution::ReleaseForRetry,
+            )
+            .await
+            .is_err(),
+            "a confirmed uncertainty cannot later be released"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the 513-attempt fake spooler soak reopens both durable files and alternates outcomes"
+    )]
+    async fn local_fake_handoffs_compact_across_capacity_and_dual_store_restarts() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let database = fixture.path().join("agent.sqlite3");
+        let routes = fixture.path().join("routes");
+        let cloud_job_id = JobId::new().to_string();
+        let mut coordinator =
+            route_coordinator::RouteCoordinator::open(&routes).expect("coordinator");
+        coordinator
+            .reconcile(&[virtual_cloud_printer()], 1, Utc::now())
+            .expect("inventory");
+        let cloud = virtual_cloud_reservation(coordinator.route_id("fake-printer"), 1);
+        let cloud_local = coordinator
+            .register_authoritative("local", "fake-printer", &cloud_job_id, &cloud, Utc::now())
+            .expect("cloud authority")
+            .reservation;
+        coordinator
+            .finish(
+                "local",
+                &cloud_job_id,
+                &cloud_local,
+                piqae_protocol::agent::NativeHandoffOutcome::RejectedBeforeHandoff,
+                None,
+                Utc::now(),
+            )
+            .expect("cloud rejection evidence");
+        drop(coordinator);
+
+        let clock = FrozenClock(1_000_000);
+        let mut engine = AgentEngine::new(
+            AgentStore::open(&database).expect("queue"),
+            virtual_route_executor(&routes, "local", FakeExecutor::default()),
+            clock,
+        );
+        for index in 0..513_u64 {
+            let job_id = JobId::new().to_string();
+            engine
+                .accept(&AcceptedJob {
+                    job_id: job_id.clone(),
+                    submission_id: format!("sub-{job_id}"),
+                    printer_id: format!("printer-{index}"),
+                    printer_native_id: format!("native-{index}"),
+                    title: "bounded local fake handoff".into(),
+                    content_sha256: format!("digest-{index}"),
+                    content_path: "/virtual/not-read".into(),
+                    content_kind: "pdf".into(),
+                    options_json: "{}".into(),
+                    expires_unix_ms: None,
+                    accepted_unix_ms: clock.0,
+                    cloud_managed: false,
+                })
+                .expect("accept local job");
+            {
+                let mut runtime = engine.executor_mut().runtime.lock().await;
+                let RuntimeExecutor::Fake(fake) = &mut *runtime else {
+                    panic!("fake executor expected");
+                };
+                fake.result = Some(if index % 2 == 0 {
+                    Ok(NativeAcceptance {
+                        native_job_id: format!("fake-native-{index}"),
+                    })
+                } else {
+                    Err(ExecutorFailure {
+                        code: "virtual_pre_handoff_rejection".into(),
+                        message: "deterministic virtual rejection".into(),
+                        retryable: true,
+                        handoff_may_have_succeeded: false,
+                        native_code: None,
+                    })
+                });
+                drop(runtime);
+            }
+            assert_eq!(engine.run_once().await.expect("fake handoff"), 1);
+            let coordinator = Arc::clone(&engine.executor_mut().coordinator);
+            let mut coordinator = coordinator.lock().await;
+            let (_, compacted) =
+                reconcile_local_route_state(engine.store_mut(), &mut coordinator, "local")
+                    .expect("durable local compaction");
+            assert_eq!(compacted, 1);
+            assert_eq!(
+                coordinator
+                    .handoffs_for_connector("local", 0)
+                    .into_iter()
+                    .filter(|handoff| handoff.route_id.is_none())
+                    .count(),
+                0
+            );
+            drop(coordinator);
+
+            if index % 100 == 99 {
+                let (store, executor, _) = engine.into_parts();
+                drop(store);
+                drop(executor);
+                engine = AgentEngine::new(
+                    AgentStore::open(&database).expect("reopened queue"),
+                    virtual_route_executor(&routes, "local", FakeExecutor::default()),
+                    clock,
+                );
+            }
+        }
+        let coordinator = Arc::clone(&engine.executor_mut().coordinator);
+        let retained = coordinator.lock().await.handoffs_for_connector("local", 0);
+        assert_eq!(retained.len(), 1);
+        assert!(retained[0].route_id.is_some());
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the authoritative rejection, restart, stale replay, and new attempt are one safety proof"
+    )]
+    async fn cloud_rejection_requires_a_new_authoritative_attempt_before_retry() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database = directory.path().join("agent.sqlite3");
+        let routes = directory.path().join("routes");
+        let job_id = "01ARZ3NDEKTSV4RRFFQ69G5FAA";
+        let mut coordinator =
+            route_coordinator::RouteCoordinator::open(&routes).expect("route coordinator");
+        coordinator
+            .reconcile(&[virtual_cloud_printer()], 1, Utc::now())
+            .expect("virtual route inventory");
+        let local_route_key = coordinator.route_id("fake-printer");
+        let first_cloud = virtual_cloud_reservation(local_route_key.clone(), 9);
+        coordinator
+            .register_authoritative("legacy", "fake-printer", job_id, &first_cloud, Utc::now())
+            .expect("first authoritative route");
+
+        let mut cloud_job = AcceptedJob {
+            job_id: job_id.into(),
+            submission_id: format!("sub-{job_id}"),
+            printer_id: "virtual-printer".into(),
+            printer_native_id: "fake-printer".into(),
+            title: "virtual authoritative retry".into(),
+            content_sha256: "virtual-digest".into(),
+            content_path: "/virtual/not-read".into(),
+            content_kind: "pdf".into(),
+            options_json: "{}".into(),
+            expires_unix_ms: None,
+            accepted_unix_ms: Utc::now().timestamp_millis(),
+            cloud_managed: true,
+        };
+        let facts = JobPersistenceFacts {
+            route_connector_id: Some("legacy".into()),
+            ..JobPersistenceFacts::default()
+        };
+        let first_proof = CloudRouteProof {
+            reservation_id: first_cloud.reservation_id.to_string(),
+            generation: first_cloud.generation,
+            fencing_token: first_cloud.fencing_token.clone(),
+        };
+        let mut store = AgentStore::open(&database).expect("queue");
+        store
+            .prepare_cloud_job_with_facts(
+                &cloud_job,
+                "lease-first",
+                "redacted-first",
+                i64::MAX,
+                &first_proof,
+                &facts,
+            )
+            .expect("first local preparation");
+        store
+            .confirm_cloud_accept(job_id, Utc::now().timestamp_millis())
+            .expect("first remote acceptance");
+        store
+            .activate_cloud_job(job_id, Utc::now().timestamp_millis())
+            .expect("first activation");
+        let retryable = FakeExecutor {
+            result: Some(Err(ExecutorFailure {
+                code: "virtual_unavailable".into(),
+                message: "virtual pre-handoff failure".into(),
+                retryable: true,
+                handoff_may_have_succeeded: false,
+                native_code: None,
+            })),
+            ..FakeExecutor::default()
+        };
+        let executor = virtual_route_executor(&routes, "local", retryable);
+        let coordinator_handle = Arc::clone(&executor.coordinator);
+        let mut engine = AgentEngine::new(store, executor, SystemClock);
+        engine.run_once().await.expect("first rejected handoff");
+        assert_eq!(
+            engine
+                .store()
+                .get_job(job_id)
+                .expect("query rejected job")
+                .expect("rejected job")
+                .state,
+            "failed_retryable"
+        );
+        assert_eq!(engine.run_once().await.expect("no local cloud retry"), 0);
+        drop(engine);
+
+        let mut coordinator = coordinator_handle.lock().await;
+        assert_eq!(
+            coordinator.handoffs_for_connector("legacy", 0)[0].outcome,
+            piqae_protocol::agent::NativeHandoffOutcome::RejectedBeforeHandoff
+        );
+        let rejected_sequence = coordinator.handoffs_for_connector("legacy", 0)[0].sequence;
+        coordinator
+            .acknowledge_handoffs("legacy", rejected_sequence)
+            .expect("authority acknowledged rejection evidence");
+        assert!(coordinator.handoffs_for_connector("legacy", 0).is_empty());
+        drop(coordinator);
+        *coordinator_handle.lock().await =
+            route_coordinator::RouteCoordinator::open(&routes).expect("restart coordinator");
+        let mut coordinator = coordinator_handle.lock().await;
+        assert!(
+            coordinator
+                .register_authoritative("legacy", "fake-printer", job_id, &first_cloud, Utc::now(),)
+                .is_err(),
+            "the consumed proof cannot reactivate the job"
+        );
+        let second_cloud = virtual_cloud_reservation(local_route_key, 10);
+        coordinator
+            .register_authoritative(
+                "ncon_new_authority",
+                "fake-printer",
+                job_id,
+                &second_cloud,
+                Utc::now(),
+            )
+            .expect("new authoritative generation");
+        drop(coordinator);
+
+        cloud_job.accepted_unix_ms = Utc::now().timestamp_millis();
+        let second_proof = CloudRouteProof {
+            reservation_id: second_cloud.reservation_id.to_string(),
+            generation: second_cloud.generation,
+            fencing_token: second_cloud.fencing_token,
+        };
+        let second_facts = JobPersistenceFacts {
+            route_connector_id: Some("ncon_new_authority".into()),
+            ..JobPersistenceFacts::default()
+        };
+        let mut store = AgentStore::open(&database).expect("restarted queue");
+        store
+            .prepare_cloud_job_with_facts(
+                &cloud_job,
+                "lease-second",
+                "redacted-second",
+                i64::MAX,
+                &second_proof,
+                &second_facts,
+            )
+            .expect("new local preparation");
+        store
+            .confirm_cloud_accept(job_id, Utc::now().timestamp_millis())
+            .expect("new remote acceptance");
+        store
+            .activate_cloud_job(job_id, Utc::now().timestamp_millis())
+            .expect("new activation");
+        let mut restarted = AgentEngine::new(
+            store,
+            virtual_route_executor(&routes, "ncon_changed", FakeExecutor::default()),
+            SystemClock,
+        );
+        restarted.run_once().await.expect("one authorized retry");
+        assert_eq!(
+            restarted
+                .store()
+                .get_job(job_id)
+                .expect("query authorized retry")
+                .expect("authorized retry")
+                .state,
+            "accepted_by_spooler"
+        );
+        let runtime = restarted.executor_mut().runtime.lock().await;
+        let RuntimeExecutor::Fake(fake) = &*runtime else {
+            panic!("virtual executor expected");
+        };
+        assert_eq!(fake.submitted.len(), 1);
+        assert_eq!(
+            fake.submitted[0].route_connector_id.as_deref(),
+            Some("ncon_new_authority")
+        );
+        drop(runtime);
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "all cross-file crash windows share one exact virtual authority fixture"
+    )]
+    fn startup_reconciles_each_native_handoff_crash_window_without_resubmission() {
+        for (suffix, outcome, native_job_id, expected_state) in [
+            (
+                "A",
+                piqae_protocol::agent::NativeHandoffOutcome::Accepted,
+                Some("virtual-native-accepted"),
+                "accepted_by_spooler",
+            ),
+            (
+                "B",
+                piqae_protocol::agent::NativeHandoffOutcome::RejectedBeforeHandoff,
+                None,
+                "failed_retryable",
+            ),
+        ] {
+            let fixture = tempfile::tempdir().expect("crash fixture");
+            let database = fixture.path().join("agent.sqlite3");
+            let routes = fixture.path().join("routes");
+            let job_id = format!("01ARZ3NDEKTSV4RRFFQ69G5FA{suffix}");
+            let mut coordinator =
+                route_coordinator::RouteCoordinator::open(&routes).expect("coordinator");
+            coordinator
+                .reconcile(&[virtual_cloud_printer()], 1, Utc::now())
+                .expect("inventory");
+            let cloud = virtual_cloud_reservation(coordinator.route_id("fake-printer"), 3);
+            let reservation = coordinator
+                .register_authoritative("legacy", "fake-printer", &job_id, &cloud, Utc::now())
+                .expect("authority")
+                .reservation;
+            let mut store = AgentStore::open(&database).expect("queue");
+            prepare_virtual_cloud_spool_intent(&mut store, &job_id, "legacy", &cloud);
+            coordinator
+                .finish(
+                    "legacy",
+                    &job_id,
+                    &reservation,
+                    outcome,
+                    native_job_id.map(str::to_owned),
+                    Utc::now(),
+                )
+                .expect("coordinator terminal result");
+            let sequence = coordinator.handoffs_for_connector("legacy", 0)[0].sequence;
+            coordinator
+                .acknowledge_handoffs("legacy", sequence)
+                .expect("server acknowledged handoff evidence");
+            assert!(coordinator.handoffs_for_connector("legacy", 0).is_empty());
+            drop(store);
+            drop(coordinator);
+
+            let mut store = AgentStore::open(&database).expect("restarted queue");
+            let mut coordinator =
+                route_coordinator::RouteCoordinator::open(&routes).expect("restarted coordinator");
+            reconcile_authoritative_route_state(&mut store, &mut coordinator, "legacy", Utc::now())
+                .expect("exact crash reconciliation");
+            let recovered = store
+                .get_job(&job_id)
+                .expect("query recovered job")
+                .expect("recovered job");
+            assert_eq!(recovered.state, expected_state);
+            assert_eq!(recovered.native_job_id.as_deref(), native_job_id);
+            assert!(
+                store
+                    .cloud_route_proof(&job_id)
+                    .expect("proof query")
+                    .is_none()
+            );
+            assert!(
+                store
+                    .runnable_heads(i64::MAX)
+                    .expect("runnable query")
+                    .is_empty()
+            );
+        }
+
+        let fixture = tempfile::tempdir().expect("ambiguous crash fixture");
+        let database = fixture.path().join("agent.sqlite3");
+        let routes = fixture.path().join("routes");
+        let job_id = "01ARZ3NDEKTSV4RRFFQ69G5FAC";
+        let mut coordinator =
+            route_coordinator::RouteCoordinator::open(&routes).expect("coordinator");
+        coordinator
+            .reconcile(&[virtual_cloud_printer()], 1, Utc::now())
+            .expect("inventory");
+        let cloud = virtual_cloud_reservation(coordinator.route_id("fake-printer"), 4);
+        coordinator
+            .register_authoritative("legacy", "fake-printer", job_id, &cloud, Utc::now())
+            .expect("authority");
+        let mut store = AgentStore::open(&database).expect("queue");
+        prepare_virtual_cloud_spool_intent(&mut store, job_id, "legacy", &cloud);
+        drop(store);
+        drop(coordinator);
+
+        let mut store = AgentStore::open(&database).expect("restarted queue");
+        let mut coordinator =
+            route_coordinator::RouteCoordinator::open(&routes).expect("restarted coordinator");
+        reconcile_authoritative_route_state(&mut store, &mut coordinator, "legacy", Utc::now())
+            .expect("unknown native result reconciliation");
+        assert_eq!(
+            store
+                .get_job(job_id)
+                .expect("query ambiguous job")
+                .expect("ambiguous job")
+                .state,
+            "delivery_uncertain"
+        );
+        assert!(
+            store
+                .cloud_route_proof(job_id)
+                .expect("proof query")
+                .is_some(),
+            "minimal non-lease route proof remains until explicit authority resolves ambiguity"
+        );
+        let handoffs = coordinator.handoffs_for_connector("legacy", 0);
+        assert_eq!(handoffs.len(), 1);
+        assert_eq!(
+            handoffs[0].outcome,
+            piqae_protocol::agent::NativeHandoffOutcome::Ambiguous
+        );
+        assert!(
+            coordinator
+                .reserve("legacy", "fake-printer", "alternate-job", 1)
+                .is_err(),
+            "unknown native outcome keeps the route fenced for operator resolution"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "release, confirm, cursor replay, and fresh authority are one ambiguous command safety proof"
+    )]
+    async fn ambiguous_command_projects_queue_state_and_only_fresh_release_can_print() {
+        let release = tempfile::tempdir().expect("release fixture");
+        let release_database = release.path().join("agent.sqlite3");
+        let release_routes = release.path().join("routes");
+        let release_job = "job_01ARZ3NDEKTSV4RRFFQ69G5FAD";
+        let mut coordinator =
+            route_coordinator::RouteCoordinator::open(&release_routes).expect("coordinator");
+        coordinator
+            .reconcile(&[virtual_cloud_printer()], 1, Utc::now())
+            .expect("inventory");
+        let first = virtual_cloud_reservation(coordinator.route_id("fake-printer"), 4);
+        let reserved = coordinator
+            .register_authoritative("legacy", "fake-printer", release_job, &first, Utc::now())
+            .expect("authority")
+            .reservation;
+        let mut store = AgentStore::open(&release_database).expect("queue");
+        prepare_virtual_cloud_spool_intent(&mut store, release_job, "legacy", &first);
+        coordinator
+            .finish(
+                "legacy",
+                release_job,
+                &reserved,
+                piqae_protocol::agent::NativeHandoffOutcome::Ambiguous,
+                None,
+                Utc::now(),
+            )
+            .expect("ambiguous handoff");
+        reconcile_authoritative_route_state(&mut store, &mut coordinator, "legacy", Utc::now())
+            .expect("project uncertainty");
+        let through = coordinator.handoffs_for_connector("legacy", 0)[0].sequence;
+        coordinator
+            .acknowledge_handoffs("legacy", through)
+            .expect("acknowledge outbound evidence");
+        drop(coordinator);
+        drop(store);
+
+        let mut coordinator =
+            route_coordinator::RouteCoordinator::open(&release_routes).expect("restart route");
+        coordinator
+            .resolve_ambiguous_handoff(
+                "legacy",
+                release_job,
+                &first.local_route_key,
+                first.reservation_id,
+                first.generation,
+                piqae_protocol::agent::AmbiguousHandoffResolution::ReleaseForRetry,
+            )
+            .expect("coordinator commit before simulated crash");
+        drop(coordinator);
+        let coordinator = Arc::new(Mutex::new(
+            route_coordinator::RouteCoordinator::open(&release_routes).expect("reopen route"),
+        ));
+        let mut store = AgentStore::open(&release_database).expect("reopen queue");
+        let paused = AtomicBool::new(false);
+        let release_command = AgentCommand::ResolveAmbiguousHandoff {
+            job_id: release_job.parse().expect("job id"),
+            local_route_key: first.local_route_key.clone(),
+            reservation_id: first.reservation_id,
+            generation: first.generation,
+            resolution: piqae_protocol::agent::AmbiguousHandoffResolution::ReleaseForRetry,
+        };
+        assert_eq!(
+            store
+                .get_job(release_job)
+                .expect("query pre-command")
+                .expect("pre-command job")
+                .state,
+            "delivery_uncertain"
+        );
+        coordinator
+            .lock()
+            .await
+            .resolve_ambiguous_handoff(
+                "legacy",
+                release_job,
+                &first.local_route_key,
+                first.reservation_id,
+                first.generation,
+                piqae_protocol::agent::AmbiguousHandoffResolution::ReleaseForRetry,
+            )
+            .expect("coordinator resolution is replayable after restart");
+        assert_eq!(
+            apply_commands(
+                &mut store,
+                &paused,
+                &coordinator,
+                "legacy",
+                vec![release_command.clone()],
+                Some("release-1".into()),
+            )
+            .await
+            .expect("repair queue after coordinator-first crash"),
+            CloudCommandApplication::complete()
+        );
+        assert_eq!(
+            store
+                .get_job(release_job)
+                .expect("query")
+                .expect("job")
+                .state,
+            "failed_retryable"
+        );
+        assert!(store.runnable_heads(i64::MAX).expect("runnable").is_empty());
+        drop(store);
+        drop(coordinator);
+
+        let coordinator = Arc::new(Mutex::new(
+            route_coordinator::RouteCoordinator::open(&release_routes)
+                .expect("second reopen route"),
+        ));
+        let mut store = AgentStore::open(&release_database).expect("second reopen queue");
+        assert_eq!(
+            apply_commands(
+                &mut store,
+                &paused,
+                &coordinator,
+                "legacy",
+                vec![release_command],
+                Some("release-1".into()),
+            )
+            .await
+            .expect("idempotent command/cursor replay"),
+            CloudCommandApplication::complete()
+        );
+        assert!(
+            coordinator
+                .lock()
+                .await
+                .register_authoritative("legacy", "fake-printer", release_job, &first, Utc::now(),)
+                .is_err(),
+            "consumed old authority cannot submit"
+        );
+        let fresh = virtual_cloud_reservation(first.local_route_key.clone(), 5);
+        coordinator
+            .lock()
+            .await
+            .register_authoritative("legacy", "fake-printer", release_job, &fresh, Utc::now())
+            .expect("strictly fresher authority");
+        let cloud_job = AcceptedJob {
+            job_id: release_job.into(),
+            submission_id: format!("sub-{release_job}"),
+            printer_id: "virtual-printer".into(),
+            printer_native_id: "fake-printer".into(),
+            title: "virtual crash boundary".into(),
+            content_sha256: format!("digest-{release_job}"),
+            content_path: "/virtual/not-read".into(),
+            content_kind: "pdf".into(),
+            options_json: "{}".into(),
+            expires_unix_ms: None,
+            accepted_unix_ms: Utc::now().timestamp_millis(),
+            cloud_managed: true,
+        };
+        store
+            .prepare_cloud_job_with_facts(
+                &cloud_job,
+                "fresh-lease",
+                "fresh-capability",
+                i64::MAX,
+                &CloudRouteProof {
+                    reservation_id: fresh.reservation_id.to_string(),
+                    generation: fresh.generation,
+                    fencing_token: fresh.fencing_token.clone(),
+                },
+                &JobPersistenceFacts {
+                    route_connector_id: Some("legacy".into()),
+                    ..JobPersistenceFacts::default()
+                },
+            )
+            .expect("fresh preparation");
+        store
+            .confirm_cloud_accept(release_job, Utc::now().timestamp_millis())
+            .expect("fresh accept");
+        store
+            .activate_cloud_job(release_job, Utc::now().timestamp_millis())
+            .expect("fresh activation");
+        drop(coordinator);
+        let mut engine = AgentEngine::new(
+            store,
+            virtual_route_executor(&release_routes, "local", FakeExecutor::default()),
+            SystemClock,
+        );
+        assert_eq!(engine.run_once().await.expect("fresh fake print"), 1);
+        let runtime = engine.executor_mut().runtime.lock().await;
+        let RuntimeExecutor::Fake(fake) = &*runtime else {
+            panic!("fake executor expected");
+        };
+        assert_eq!(fake.submitted.len(), 1);
+        drop(runtime);
+
+        let confirm = tempfile::tempdir().expect("confirm fixture");
+        let confirm_database = confirm.path().join("agent.sqlite3");
+        let confirm_routes = confirm.path().join("routes");
+        let confirm_job = "job_01ARZ3NDEKTSV4RRFFQ69G5FAE";
+        let mut coordinator =
+            route_coordinator::RouteCoordinator::open(&confirm_routes).expect("coordinator");
+        coordinator
+            .reconcile(&[virtual_cloud_printer()], 1, Utc::now())
+            .expect("inventory");
+        let proof = virtual_cloud_reservation(coordinator.route_id("fake-printer"), 7);
+        let reserved = coordinator
+            .register_authoritative("legacy", "fake-printer", confirm_job, &proof, Utc::now())
+            .expect("authority")
+            .reservation;
+        let mut store = AgentStore::open(&confirm_database).expect("queue");
+        prepare_virtual_cloud_spool_intent(&mut store, confirm_job, "legacy", &proof);
+        coordinator
+            .finish(
+                "legacy",
+                confirm_job,
+                &reserved,
+                piqae_protocol::agent::NativeHandoffOutcome::Ambiguous,
+                None,
+                Utc::now(),
+            )
+            .expect("ambiguous");
+        reconcile_authoritative_route_state(&mut store, &mut coordinator, "legacy", Utc::now())
+            .expect("project uncertainty");
+        coordinator
+            .resolve_ambiguous_handoff(
+                "legacy",
+                confirm_job,
+                &proof.local_route_key,
+                proof.reservation_id,
+                proof.generation,
+                piqae_protocol::agent::AmbiguousHandoffResolution::ConfirmAccepted,
+            )
+            .expect("coordinator confirm before crash");
+        drop(coordinator);
+        let coordinator = Arc::new(Mutex::new(
+            route_coordinator::RouteCoordinator::open(&confirm_routes).expect("reopen route"),
+        ));
+        let command = AgentCommand::ResolveAmbiguousHandoff {
+            job_id: confirm_job.parse().expect("job id"),
+            local_route_key: proof.local_route_key.clone(),
+            reservation_id: proof.reservation_id,
+            generation: proof.generation,
+            resolution: piqae_protocol::agent::AmbiguousHandoffResolution::ConfirmAccepted,
+        };
+        assert_eq!(
+            apply_commands(
+                &mut store,
+                &paused,
+                &coordinator,
+                "legacy",
+                vec![command],
+                Some("confirm-1".into()),
+            )
+            .await
+            .expect("repair confirmed queue"),
+            CloudCommandApplication::complete()
+        );
+        assert_eq!(
+            store
+                .get_job(confirm_job)
+                .expect("query")
+                .expect("job")
+                .state,
+            "delivery_uncertain"
+        );
+        assert!(store.runnable_heads(i64::MAX).expect("runnable").is_empty());
+        assert!(
+            coordinator
+                .lock()
+                .await
+                .register_authoritative(
+                    "legacy",
+                    "fake-printer",
+                    confirm_job,
+                    &virtual_cloud_reservation(proof.local_route_key, 8),
+                    Utc::now(),
+                )
+                .is_err(),
+            "confirmed acceptance is terminal even for a higher generation"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the real acceptor fixture proves registration, activation, replay, and retained fence together"
+    )]
+    async fn installed_duplicate_offer_after_activation_preserves_authoritative_fence() {
+        let fixture = tempfile::tempdir().expect("installed duplicate fixture");
+        let coordinator = Arc::new(Mutex::new(
+            route_coordinator::RouteCoordinator::open(fixture.path().join("routes"))
+                .expect("coordinator"),
+        ));
+        let local_route_key = {
+            let mut coordinator = coordinator.lock().await;
+            coordinator
+                .reconcile(&[virtual_cloud_printer()], 1, Utc::now())
+                .expect("inventory");
+            coordinator.route_id("fake-printer")
+        };
+        let connector_id = "ncon_installed_fixture";
+        let stores = Arc::new(Mutex::new(InstalledConnectorStores {
+            queue: AgentStore::in_memory().expect("queue"),
+            inventory: AgentStore::in_memory().expect("inventory"),
+            native_binding_session: Arc::new(PrinterNativeBindingSession::fixture(
+                "installed-duplicate-session",
+            )),
+        }));
+        let mut acceptor = InstalledOfferAcceptor {
+            stores: Arc::clone(&stores),
+            route_coordinator: Arc::clone(&coordinator),
+            connector_id: connector_id.into(),
+            admission: StopSignal::default(),
+        };
+        let job_id = JobId::new();
+        let cloud = virtual_cloud_reservation(local_route_key, 7);
+        let offer = JobOffer {
+            job: piqae_domain::Job {
+                id: job_id,
+                workspace_id: piqae_domain::WorkspaceId::new(),
+                environment_id: piqae_domain::EnvironmentId::new(),
+                printer_id: piqae_domain::PrinterId::new(),
+                title: "virtual duplicate offer".into(),
+                source: None,
+                content_kind: ContentKind::Pdf,
+                content: piqae_domain::ContentSource::Base64 {
+                    data: STANDARD.encode(b"virtual"),
+                },
+                options: piqae_domain::JobOptions::default(),
+                metadata: std::collections::BTreeMap::new(),
+                deliveries: 1,
+                state: JobState::WaitingForAgent,
+                created_at: Utc::now(),
+                expires_at: Utc::now() + chrono::Duration::minutes(5),
+                delivery_uncertain_since: None,
+            },
+            expected_capability_revision: None,
+            resolved_ticket_digest: None,
+            lease_id: uuid::Uuid::new_v4(),
+            lease_token: "virtual-duplicate-lease-capability".into(),
+            lease_expires_at: Utc::now() + chrono::Duration::minutes(1),
+            content: ContentDescriptor::InlineBase64 {
+                data: STANDARD.encode(b"virtual"),
+                sha256: None,
+                bytes: Some(7),
+            },
+            route_reservation: Some(cloud.clone()),
+        };
+        let materialized = || InstalledMaterializedOffer {
+            stored: piqae_agent_core::StoredContent {
+                sha256: "virtual-duplicate-digest".into(),
+                path: PathBuf::from("/virtual/not-read"),
+                bytes: 7,
+            },
+            printer: StoredPrinter {
+                printer_id: offer.job.printer_id.to_string(),
+                native_id: "fake-printer".into(),
+                name: "Virtual printer".into(),
+                state: "idle".into(),
+                is_default: true,
+                present: true,
+                exposed: true,
+                capabilities_json: "{}".into(),
+                native_options_json: "{}".into(),
+                profile_revision: 1,
+                observed_unix_ms: 1,
+            },
+            profile_pin: None,
+            profile_snapshot_json: None,
+            printer_native_binding: None,
+        };
+
+        acceptor
+            .prepare(&offer, materialized())
+            .await
+            .expect("initial prepare");
+        acceptor
+            .confirm_remote_accept(job_id)
+            .await
+            .expect("remote accept");
+        acceptor.activate(job_id).await.expect("activation");
+        assert_eq!(
+            coordinator
+                .lock()
+                .await
+                .authoritative_reservations_for_connector(connector_id)
+                .len(),
+            1
+        );
+
+        acceptor
+            .prepare(&offer, materialized())
+            .await
+            .expect("post-activation duplicate is idempotent");
+        let reservations = coordinator
+            .lock()
+            .await
+            .authoritative_reservations_for_connector(connector_id);
+        assert_eq!(reservations.len(), 1);
+        assert!(reservations[0].1.matches_cloud_proof(
+            &cloud.reservation_id.to_string(),
+            cloud.generation,
+            &cloud.fencing_token,
+        ));
+        let stores = stores.lock().await;
+        assert_eq!(
+            stores
+                .queue
+                .get_job(&job_id.to_string())
+                .expect("query duplicate job")
+                .expect("duplicate job")
+                .state,
+            "queued_local"
+        );
+        assert!(
+            stores
+                .queue
+                .pending_cloud_accepts()
+                .expect("token query")
+                .is_empty()
+        );
+        drop(stores);
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "upgrade repair, orphan compensation, and accepted/ambiguous preservation form one startup safety proof"
+    )]
+    fn startup_route_reconciliation_is_proof_backed_and_preserves_handoff_barriers() {
+        let upgrade = tempfile::tempdir().expect("upgrade fixture");
+        let mut coordinator =
+            route_coordinator::RouteCoordinator::open(upgrade.path()).expect("route coordinator");
+        coordinator
+            .reconcile(&[virtual_cloud_printer()], 1, Utc::now())
+            .expect("inventory");
+        let cloud = virtual_cloud_reservation(coordinator.route_id("fake-printer"), 1);
+        let upgrade_job = "01ARZ3NDEKTSV4RRFFQ69G5FAB";
+        coordinator
+            .register_authoritative("legacy", "fake-printer", upgrade_job, &cloud, Utc::now())
+            .expect("authoritative route");
+        let mut store = AgentStore::in_memory().expect("queue");
+        store
+            .accept_job_with_facts(
+                &AcceptedJob {
+                    job_id: upgrade_job.into(),
+                    submission_id: "sub-upgrade-job".into(),
+                    printer_id: "virtual-printer".into(),
+                    printer_native_id: "fake-printer".into(),
+                    title: "upgrade owner".into(),
+                    content_sha256: "upgrade-digest".into(),
+                    content_path: "/virtual/not-read".into(),
+                    content_kind: "pdf".into(),
+                    options_json: "{}".into(),
+                    expires_unix_ms: None,
+                    accepted_unix_ms: 1,
+                    cloud_managed: true,
+                },
+                &JobPersistenceFacts::default(),
+            )
+            .expect("pre-owner durable job");
+        let (repaired, unresolved) =
+            reconcile_authoritative_route_state(&mut store, &mut coordinator, "legacy", Utc::now())
+                .expect("proof-backed repair");
+        assert_eq!((repaired, unresolved), (1, 0));
+        assert_eq!(
+            store
+                .get_job(upgrade_job)
+                .expect("query upgraded job")
+                .expect("upgraded job")
+                .route_connector_id
+                .as_deref(),
+            Some("legacy")
+        );
+
+        let orphan = tempfile::tempdir().expect("orphan fixture");
+        let mut coordinator =
+            route_coordinator::RouteCoordinator::open(orphan.path()).expect("route coordinator");
+        coordinator
+            .reconcile(&[virtual_cloud_printer()], 1, Utc::now())
+            .expect("inventory");
+        let route_key = coordinator.route_id("fake-printer");
+        let cloud = virtual_cloud_reservation(route_key.clone(), 1);
+        let orphan_job = "01ARZ3NDEKTSV4RRFFQ69G5FAC";
+        coordinator
+            .register_authoritative("legacy", "fake-printer", orphan_job, &cloud, Utc::now())
+            .expect("orphan crash boundary");
+        let mut empty = AgentStore::in_memory().expect("empty queue");
+        reconcile_authoritative_route_state(&mut empty, &mut coordinator, "legacy", Utc::now())
+            .expect("release exact orphan");
+        assert_eq!(
+            coordinator.handoffs_for_connector("legacy", 0)[0].outcome,
+            piqae_protocol::agent::NativeHandoffOutcome::RejectedBeforeHandoff
+        );
+        coordinator
+            .register_authoritative(
+                "legacy",
+                "fake-printer",
+                "01ARZ3NDEKTSV4RRFFQ69G5FAD",
+                &virtual_cloud_reservation(route_key, 1),
+                Utc::now(),
+            )
+            .expect("later server-authorized work progresses");
+
+        for (job_id, outcome, state) in [
+            (
+                "01ARZ3NDEKTSV4RRFFQ69G5FAE",
+                piqae_protocol::agent::NativeHandoffOutcome::Accepted,
+                "accepted_by_spooler",
+            ),
+            (
+                "01ARZ3NDEKTSV4RRFFQ69G5FAF",
+                piqae_protocol::agent::NativeHandoffOutcome::Ambiguous,
+                "delivery_uncertain",
+            ),
+        ] {
+            let fixture = tempfile::tempdir().expect("handoff fixture");
+            let mut coordinator = route_coordinator::RouteCoordinator::open(fixture.path())
+                .expect("route coordinator");
+            coordinator
+                .reconcile(&[virtual_cloud_printer()], 1, Utc::now())
+                .expect("inventory");
+            let cloud = virtual_cloud_reservation(coordinator.route_id("fake-printer"), 1);
+            let reservation = coordinator
+                .register_authoritative("legacy", "fake-printer", job_id, &cloud, Utc::now())
+                .expect("authoritative route")
+                .reservation;
+            let mut queue = AgentStore::in_memory().expect("queue");
+            let job = AcceptedJob {
+                job_id: job_id.into(),
+                submission_id: format!("sub-{job_id}"),
+                printer_id: "virtual-printer".into(),
+                printer_native_id: "fake-printer".into(),
+                title: job_id.into(),
+                content_sha256: format!("digest-{job_id}"),
+                content_path: "/virtual/not-read".into(),
+                content_kind: "pdf".into(),
+                options_json: "{}".into(),
+                expires_unix_ms: None,
+                accepted_unix_ms: 1,
+                cloud_managed: true,
+            };
+            queue
+                .accept_job_with_facts(
+                    &job,
+                    &JobPersistenceFacts {
+                        route_connector_id: Some("legacy".into()),
+                        ..JobPersistenceFacts::default()
+                    },
+                )
+                .expect("durable job");
+            queue
+                .append_next_event("terminal-event", job_id, state, None, None, "{}", 2)
+                .expect("durable handoff state");
+            coordinator
+                .finish("legacy", job_id, &reservation, outcome, None, Utc::now())
+                .expect("handoff journal");
+            reconcile_authoritative_route_state(&mut queue, &mut coordinator, "legacy", Utc::now())
+                .expect("startup reconciliation");
+            let evidence = coordinator.handoffs_for_connector("legacy", 0);
+            assert_eq!(evidence.len(), 1);
+            assert_eq!(evidence[0].outcome, outcome);
+            if outcome == piqae_protocol::agent::NativeHandoffOutcome::Ambiguous {
+                assert!(
+                    coordinator
+                        .reserve("legacy", "fake-printer", "other", 3)
+                        .is_err(),
+                    "ambiguous handoff keeps its exclusion fence"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn startup_owner_backfill_is_isolated_to_the_expected_connector_store() {
+        let fixture = tempfile::tempdir().expect("route fixture");
+        let mut coordinator =
+            route_coordinator::RouteCoordinator::open(fixture.path()).expect("coordinator");
+        coordinator
+            .reconcile(&[virtual_cloud_printer()], 1, Utc::now())
+            .expect("inventory");
+        let job_id = "01ARZ3NDEKTSV4RRFFQ69G5FAG";
+        let cloud = virtual_cloud_reservation(coordinator.route_id("fake-printer"), 1);
+        coordinator
+            .register_authoritative("connector-a", "fake-printer", job_id, &cloud, Utc::now())
+            .expect("connector A authority");
+        let job = AcceptedJob {
+            job_id: job_id.into(),
+            submission_id: format!("sub-{job_id}"),
+            printer_id: "virtual-printer".into(),
+            printer_native_id: "fake-printer".into(),
+            title: "isolated same-id job".into(),
+            content_sha256: "isolated-digest".into(),
+            content_path: "/virtual/not-read".into(),
+            content_kind: "pdf".into(),
+            options_json: "{}".into(),
+            expires_unix_ms: None,
+            accepted_unix_ms: 1,
+            cloud_managed: true,
+        };
+        let mut store_a = AgentStore::in_memory().expect("store A");
+        let mut store_b = AgentStore::in_memory().expect("store B");
+        store_a
+            .accept_job_with_facts(&job, &JobPersistenceFacts::default())
+            .expect("ownerless A upgrade row");
+        store_b
+            .accept_job_with_facts(&job, &JobPersistenceFacts::default())
+            .expect("ownerless B upgrade row");
+
+        assert_eq!(
+            reconcile_authoritative_route_state(
+                &mut store_b,
+                &mut coordinator,
+                "connector-b",
+                Utc::now(),
+            )
+            .expect("B remains isolated"),
+            (0, 1)
+        );
+        assert!(
+            store_b
+                .get_job(job_id)
+                .expect("query B")
+                .expect("B job")
+                .route_connector_id
+                .is_none()
+        );
+        assert!(
+            store_b
+                .runnable_heads(2)
+                .expect("B runnable query")
+                .is_empty(),
+            "B cannot execute work fenced to connector A"
+        );
+
+        assert_eq!(
+            reconcile_authoritative_route_state(
+                &mut store_a,
+                &mut coordinator,
+                "connector-a",
+                Utc::now(),
+            )
+            .expect("A exact repair"),
+            (1, 0)
+        );
+        assert_eq!(
+            store_a
+                .get_job(job_id)
+                .expect("query A")
+                .expect("A job")
+                .route_connector_id
+                .as_deref(),
+            Some("connector-a")
+        );
+        assert_eq!(
+            store_a.runnable_heads(2).expect("A runnable query").len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -8781,6 +11212,7 @@ mod tests {
                     cloud_managed: true,
                 },
                 &JobPersistenceFacts {
+                    route_connector_id: Some("local".into()),
                     printer_native_binding: Some(pin),
                     ..JobPersistenceFacts::default()
                 },

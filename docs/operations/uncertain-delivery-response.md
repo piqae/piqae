@@ -23,10 +23,14 @@ complete, and uncertain is a product invariant, not an implementation detail;
 see [`jobs-and-statuses.md`](../printing/jobs-and-statuses.md) and
 [ADR-0001](../architecture/adr-0001-rust-postgres-durable-edges.md).
 
-The delivery attempt is terminal. `JobState::is_terminal` includes it and the
-transition table in `crates/domain/src/job.rs` has no edge out of it. An
-operator resolution is a separate audited record; it never rewrites the
-attempt's physical evidence or automatically moves the original job again.
+The cloud delivery attempt is terminal. `JobState::is_terminal` includes it
+and the transition table in `crates/domain/src/job.rs` has no automatic edge
+out of it. An operator resolution is a separate audited record; it never
+rewrites the attempt's physical evidence. A local-only node also has a narrower
+authenticated route-fence action for uncertainty in its private SQLite queue:
+an operator may explicitly release that exact fenced attempt for retry, or
+confirm native acceptance while keeping it non-runnable. Restart recovery
+never invokes that action automatically.
 
 ### How a job gets there
 
@@ -49,6 +53,16 @@ not a configurable timer.
 The node never automatically resubmits after an ambiguous handoff. A blind
 retry can produce a duplicate physical label, invoice, cheque, or dispatch
 document, and Piqae cannot tell the difference afterwards.
+
+For a local-only node, use the authenticated loopback operation documented in
+[`local-agent-control.md`](../architecture/local-agent-control.md) only after
+the same physical inspection described below. `release_for_retry` is the
+explicit retry authority; `confirm_accepted` preserves uncertainty and prevents
+replay. Read the current opaque ambiguity ID immediately before deciding and
+send that exact ID with the resolution. A stale request is idempotent for its
+old attempt and can never resolve a newer route ambiguity for the same job.
+Cloud-managed jobs reject this local operation and remain owned by the
+server-side resolution flow.
 
 ## Why this is not an error, and not a Sentry issue
 

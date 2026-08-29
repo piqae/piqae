@@ -17,6 +17,8 @@ use std::path::Path;
 use thiserror::Error;
 
 const SCHEMA: &str = include_str!("../schema.sql");
+pub const LOCAL_HANDOFF_RELEASE_FOR_RETRY: &str = "release_for_retry";
+pub const LOCAL_HANDOFF_CONFIRM_ACCEPTED: &str = "confirm_accepted";
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -138,6 +140,7 @@ pub struct PrinterNativeBindingPin {
 /// selected from the shared node inventory.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JobPersistenceFacts {
+    pub route_connector_id: Option<String>,
     pub target_id: Option<String>,
     pub binding_id: Option<String>,
     pub profile_id: Option<String>,
@@ -172,6 +175,7 @@ pub struct LocalJob {
     pub cloud_managed: bool,
     pub profile_snapshot_json: Option<String>,
     pub printer_native_binding: Option<PrinterNativeBindingPin>,
+    pub route_connector_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -808,6 +812,7 @@ impl AgentStore {
             ensure_column(&connection, "printer_profiles", name, definition)?;
         }
         for (name, definition) in [
+            ("route_connector_id", "TEXT"),
             ("target_id", "TEXT"),
             ("binding_id", "TEXT"),
             ("profile_id", "TEXT"),
@@ -899,6 +904,273 @@ impl AgentStore {
                 params![key, serde_json::to_string(&value)?],
             )?;
         }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Atomically records a local-only retryable pre-handoff failure and its
+    /// retry deadline so a crash cannot bypass the bounded pause.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the job is a local-only `spool_intent`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_local_retryable_failure(
+        &mut self,
+        event_id: &str,
+        job_id: &str,
+        reason: &str,
+        message: &str,
+        details_json: &str,
+        observed_unix_ms: i64,
+        next_attempt_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        let _: serde_json::Value = serde_json::from_str(details_json)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let sequence: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(job_sequence), 0) + 1
+             FROM job_events WHERE job_id = ?1",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        append_event_tx(
+            &transaction,
+            event_id,
+            job_id,
+            sequence,
+            "failed_retryable",
+            Some(reason),
+            Some(message),
+            details_json,
+            observed_unix_ms,
+        )?;
+        let changed = transaction.execute(
+            "UPDATE jobs
+             SET state = 'failed_retryable',
+                 next_attempt_unix_ms = ?2,
+                 attempt_count = attempt_count + 1,
+                 updated_unix_ms = ?3
+             WHERE job_id = ?1 AND state = 'spool_intent' AND cloud_managed = 0",
+            params![job_id, next_attempt_unix_ms, observed_unix_ms],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::InvalidLocalEvent(format!(
+                "job {job_id} cannot record a local retryable failure"
+            )));
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Atomically preserves an ambiguous local native handoff after a crash
+    /// between the coordinator journal and the normal queue projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the job is a local-only `spool_intent`.
+    pub fn record_local_handoff_uncertainty(
+        &mut self,
+        event_id: &str,
+        job_id: &str,
+        observed_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let sequence: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(job_sequence), 0) + 1
+             FROM job_events WHERE job_id = ?1",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        append_event_tx(
+            &transaction,
+            event_id,
+            job_id,
+            sequence,
+            "delivery_uncertain",
+            Some("ambiguous_handoff"),
+            Some("Native handoff outcome is uncertain after restart"),
+            "{}",
+            observed_unix_ms,
+        )?;
+        let changed = transaction.execute(
+            "UPDATE jobs SET state = 'delivery_uncertain', updated_unix_ms = ?2
+             WHERE job_id = ?1 AND state = 'spool_intent' AND cloud_managed = 0",
+            params![job_id, observed_unix_ms],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::InvalidLocalEvent(format!(
+                "job {job_id} has no local spool intent to quarantine"
+            )));
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Returns the explicit local resolution durably bound to one opaque exact
+    /// ambiguity identity. Later queue events and later route generations do
+    /// not change or reuse this marker.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable event history cannot be queried.
+    pub fn local_handoff_resolution(
+        &self,
+        job_id: &str,
+        ambiguity_id: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let resolution = self
+            .connection
+            .query_row(
+                "SELECT resolution FROM local_handoff_resolutions
+                 WHERE job_id = ?1 AND ambiguity_id = ?2",
+                params![job_id, ambiguity_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(resolution)
+    }
+
+    /// Atomically releases an explicitly selected local delivery uncertainty
+    /// for a bounded local retry. The operator action is the retry authority;
+    /// ordinary restart recovery never calls this method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the job is local and delivery-uncertain (or the
+    /// exact resolution already committed), or the transaction cannot commit.
+    pub fn release_uncertain_local_handoff_for_retry(
+        &mut self,
+        job_id: &str,
+        ambiguity_id: &str,
+        observed_unix_ms: i64,
+        next_attempt_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        if let Some(existing) = self.local_handoff_resolution(job_id, ambiguity_id)? {
+            return if existing == LOCAL_HANDOFF_RELEASE_FOR_RETRY {
+                Ok(())
+            } else {
+                Err(StorageError::InvalidLocalEvent(format!(
+                    "local ambiguity {ambiguity_id} was already resolved differently"
+                )))
+            };
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let sequence: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(job_sequence), 0) + 1
+             FROM job_events WHERE job_id = ?1",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        append_event_tx(
+            &transaction,
+            &EventId::new().to_string(),
+            job_id,
+            sequence,
+            "failed_retryable",
+            Some("ambiguous_handoff_released"),
+            Some("Local operator released the uncertain handoff for retry"),
+            "{}",
+            observed_unix_ms,
+        )?;
+        let changed = transaction.execute(
+            "UPDATE jobs
+             SET state = 'failed_retryable', next_attempt_unix_ms = ?2,
+                 attempt_count = attempt_count + 1, updated_unix_ms = ?3
+             WHERE job_id = ?1 AND cloud_managed = 0
+               AND state = 'delivery_uncertain'",
+            params![job_id, next_attempt_unix_ms, observed_unix_ms],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::InvalidLocalEvent(format!(
+                "local job {job_id} has no uncertainty to release"
+            )));
+        }
+        transaction.execute(
+            "INSERT INTO local_handoff_resolutions(
+               ambiguity_id, job_id, resolution, observed_unix_ms
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                ambiguity_id,
+                job_id,
+                LOCAL_HANDOFF_RELEASE_FOR_RETRY,
+                observed_unix_ms
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Atomically records that a local operator confirmed the uncertain native
+    /// handoff as accepted. The job intentionally remains delivery-uncertain:
+    /// native acceptance is still not proof that output reached paper.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the job is local and delivery-uncertain (or the
+    /// exact resolution already committed), or the transaction cannot commit.
+    pub fn confirm_uncertain_local_handoff_accepted(
+        &mut self,
+        job_id: &str,
+        ambiguity_id: &str,
+        observed_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        if let Some(existing) = self.local_handoff_resolution(job_id, ambiguity_id)? {
+            return if existing == LOCAL_HANDOFF_CONFIRM_ACCEPTED {
+                Ok(())
+            } else {
+                Err(StorageError::InvalidLocalEvent(format!(
+                    "local ambiguity {ambiguity_id} was already resolved differently"
+                )))
+            };
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let sequence: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(job_sequence), 0) + 1
+             FROM job_events WHERE job_id = ?1",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        append_event_tx(
+            &transaction,
+            &EventId::new().to_string(),
+            job_id,
+            sequence,
+            "delivery_uncertain",
+            Some("ambiguous_handoff_confirmed"),
+            Some("Local operator confirmed native acceptance"),
+            "{}",
+            observed_unix_ms,
+        )?;
+        let changed = transaction.execute(
+            "UPDATE jobs SET updated_unix_ms = ?2
+             WHERE job_id = ?1 AND cloud_managed = 0
+               AND state = 'delivery_uncertain'",
+            params![job_id, observed_unix_ms],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::InvalidLocalEvent(format!(
+                "local job {job_id} has no uncertainty to confirm"
+            )));
+        }
+        transaction.execute(
+            "INSERT INTO local_handoff_resolutions(
+               ambiguity_id, job_id, resolution, observed_unix_ms
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                ambiguity_id,
+                job_id,
+                LOCAL_HANDOFF_CONFIRM_ACCEPTED,
+                observed_unix_ms
+            ],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -2444,10 +2716,10 @@ impl AgentStore {
               accepted_unix_ms, updated_unix_ms, cloud_managed,
               target_id, binding_id, profile_id, profile_revision, stock_id,
               loaded_media_snapshot_json, profile_snapshot_json,
-              printer_native_binding_json)
+              printer_native_binding_json, route_connector_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                      'queued_local', ?11, ?12, ?12, ?13, ?14, ?15, ?16,
-                     ?17, ?18, ?19, ?20, ?21)",
+                     ?17, ?18, ?19, ?20, ?21, ?22)",
             params![
                 job.job_id,
                 job.submission_id,
@@ -2470,6 +2742,7 @@ impl AgentStore {
                 facts.loaded_media_snapshot_json,
                 facts.profile_snapshot_json,
                 encode_native_binding(facts)?,
+                facts.route_connector_id,
             ],
         )?;
         append_event_tx(
@@ -2551,17 +2824,57 @@ impl AgentStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(existing) = query_job(&transaction, &job.job_id)? {
-            let same = accepted_job_matches(&existing, job)
-                && job_persistence_facts_match(&existing, facts);
+        if let Some(mut existing) = query_job(&transaction, &job.job_id)? {
+            let same_without_owner = accepted_job_matches(&existing, job)
+                && job_persistence_facts_match_without_route_owner(&existing, facts);
+            let same = same_without_owner
+                && (existing.route_connector_id == facts.route_connector_id
+                    || existing.route_connector_id.is_none()
+                    || existing.state == "failed_retryable");
             if !same {
                 return Err(StorageError::JobConflict(job.job_id.clone()));
             }
-            if existing.state != "cloud_accept_pending" {
+            if !matches!(
+                existing.state.as_str(),
+                "cloud_accept_pending" | "failed_retryable"
+            ) {
+                if query_cloud_route_proof(&transaction, &job.job_id)?
+                    .as_ref()
+                    .is_some_and(|proof| cloud_route_proof_matches(proof, route))
+                {
+                    transaction.commit()?;
+                    return Ok(existing);
+                }
                 return Err(StorageError::InvalidLocalEvent(format!(
                     "cloud job {} is already in local state {}",
                     job.job_id, existing.state
                 )));
+            }
+            let replaces_consumed_attempt = existing.state == "failed_retryable";
+            let changed = transaction.execute(
+                "UPDATE jobs
+                 SET state = 'cloud_accept_pending', route_connector_id = ?2,
+                     next_attempt_unix_ms = NULL, updated_unix_ms = ?3
+                 WHERE job_id = ?1
+                   AND state IN ('cloud_accept_pending', 'failed_retryable')
+                   AND cloud_managed = 1",
+                params![job.job_id, facts.route_connector_id, job.accepted_unix_ms],
+            )?;
+            if changed != 1 {
+                return Err(StorageError::InvalidLocalEvent(format!(
+                    "cloud job {} cannot prepare a new authoritative attempt",
+                    job.job_id
+                )));
+            }
+            existing.state = "cloud_accept_pending".into();
+            existing
+                .route_connector_id
+                .clone_from(&facts.route_connector_id);
+            if replaces_consumed_attempt {
+                transaction.execute(
+                    "DELETE FROM cloud_accept_intents WHERE job_id = ?1",
+                    [&job.job_id],
+                )?;
             }
             upsert_cloud_accept_intent(
                 &transaction,
@@ -2572,6 +2885,7 @@ impl AgentStore {
                 route,
                 job.accepted_unix_ms,
             )?;
+            upsert_cloud_route_proof(&transaction, &job.job_id, route)?;
             transaction.commit()?;
             return Ok(existing);
         }
@@ -2627,10 +2941,10 @@ impl AgentStore {
               confidential, confidential_delete_after_unix_ms,
               target_id, binding_id, profile_id, profile_revision, stock_id,
               loaded_media_snapshot_json, profile_snapshot_json,
-              printer_native_binding_json)
+              printer_native_binding_json, route_connector_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                      'cloud_accept_pending', ?11, ?12, ?12, 1, ?13, NULL,
-                     ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                     ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
             params![
                 job.job_id,
                 job.submission_id,
@@ -2653,6 +2967,7 @@ impl AgentStore {
                 facts.loaded_media_snapshot_json,
                 facts.profile_snapshot_json,
                 encode_native_binding(facts)?,
+                facts.route_connector_id,
             ],
         )?;
         let local = query_job(&transaction, &job.job_id)?
@@ -2666,6 +2981,7 @@ impl AgentStore {
             route,
             job.accepted_unix_ms,
         )?;
+        upsert_cloud_route_proof(&transaction, &job.job_id, route)?;
         transaction.commit()?;
         self.get_job(&job.job_id)?
             .ok_or_else(|| StorageError::JobNotFound(job.job_id.clone()))
@@ -2851,6 +3167,15 @@ impl AgentStore {
         )?;
         let rows = statement.query_map([], row_to_cloud_accept_intent)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Returns only the non-lease route proof retained for crash recovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable proof cannot be read or decoded.
+    pub fn cloud_route_proof(&self, job_id: &str) -> Result<Option<CloudRouteProof>, StorageError> {
+        query_cloud_route_proof(&self.connection, job_id)
     }
 
     /// Marks a durable prepared intent after the authority has accepted it.
@@ -3151,11 +3476,17 @@ impl AgentStore {
              WHERE job_id = ?1",
             params![job_id, observed_unix_ms],
         )?;
+        let sequence: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(job_sequence), 0) + 1
+             FROM job_events WHERE job_id = ?1",
+            [job_id],
+            |row| row.get(0),
+        )?;
         append_event_tx(
             &transaction,
             &EventId::new().to_string(),
             job_id,
-            1,
+            sequence,
             "queued_local",
             None,
             Some("Job is durable in the local queue"),
@@ -3201,6 +3532,7 @@ impl AgentStore {
                 current.state
             )));
         }
+        transaction.execute("DELETE FROM cloud_route_proofs WHERE job_id = ?1", [job_id])?;
         transaction.execute(
             "DELETE FROM cloud_accept_intents WHERE job_id = ?1",
             [job_id],
@@ -3220,6 +3552,147 @@ impl AgentStore {
     /// Returns an error when `SQLite` cannot execute or decode the query.
     pub fn get_job(&self, job_id: &str) -> Result<Option<LocalJob>, StorageError> {
         Ok(query_job(&self.connection, job_id)?)
+    }
+
+    /// Returns a bounded inventory of cloud jobs upgraded before exact route
+    /// connector ownership was persisted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot read the bounded inventory.
+    pub fn cloud_jobs_missing_route_owner(&self) -> Result<Vec<LocalJob>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT jobs.job_id, submission_id, printer_id, printer_native_id,
+                    printer_sequence, title, content_sha256, content_path,
+                    content_kind, options_json, state, expires_unix_ms,
+                    native_job_id, target_id, binding_id, profile_id,
+                    profile_revision, stock_id, loaded_media_snapshot_json,
+                    cloud_managed, profile_snapshot_json, printer_native_binding_json,
+                    route_connector_id
+             FROM jobs
+             WHERE cloud_managed = 1 AND route_connector_id IS NULL
+               AND state IN ('cloud_accept_pending','queued_local','preparing',
+                             'rendering','spool_intent','failed_retryable')
+             ORDER BY accepted_unix_ms, job_id LIMIT 513",
+        )?;
+        let jobs = statement
+            .query_map([], row_to_job)?
+            .collect::<Result<Vec<_>, _>>()?;
+        if jobs.len() > 512 {
+            return Err(StorageError::InvalidLocalEvent(
+                "ownerless cloud job inventory exceeds reconciliation bounds".into(),
+            ));
+        }
+        Ok(jobs)
+    }
+
+    /// Returns bounded cloud jobs whose cross-file native handoff still has a
+    /// minimal route proof requiring startup reconciliation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the bounded inventory cannot be read or decoded.
+    pub fn cloud_handoff_recovery_candidates(&self) -> Result<Vec<LocalJob>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT jobs.job_id, submission_id, printer_id, printer_native_id,
+                    printer_sequence, title, content_sha256, content_path,
+                    content_kind, options_json, state, expires_unix_ms,
+                    native_job_id, target_id, binding_id, profile_id,
+                    profile_revision, stock_id, loaded_media_snapshot_json,
+                    cloud_managed, profile_snapshot_json, printer_native_binding_json,
+                    route_connector_id
+             FROM jobs
+             JOIN cloud_route_proofs proof ON proof.job_id = jobs.job_id
+             WHERE jobs.cloud_managed = 1
+               AND jobs.state IN ('spool_intent', 'delivery_uncertain')
+             ORDER BY jobs.accepted_unix_ms, jobs.job_id LIMIT 513",
+        )?;
+        let jobs = statement
+            .query_map([], row_to_job)?
+            .collect::<Result<Vec<_>, _>>()?;
+        if jobs.len() > 512 {
+            return Err(StorageError::InvalidLocalEvent(
+                "cloud spool intent inventory exceeds reconciliation bounds".into(),
+            ));
+        }
+        Ok(jobs)
+    }
+
+    /// Deletes the minimal recovery proof after the matching coordinator
+    /// evidence is durable and `SQLite` already records delivery uncertainty.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the job is cloud-managed, delivery-uncertain,
+    /// and still owns an exact minimal recovery proof.
+    pub fn finalize_uncertain_cloud_handoff_recovery(
+        &self,
+        job_id: &str,
+    ) -> Result<(), StorageError> {
+        let changed = self.connection.execute(
+            "DELETE FROM cloud_route_proofs
+             WHERE job_id = ?1
+               AND EXISTS (
+                 SELECT 1 FROM jobs
+                 WHERE jobs.job_id = cloud_route_proofs.job_id
+                   AND jobs.cloud_managed = 1
+                   AND jobs.state = 'delivery_uncertain'
+               )",
+            [job_id],
+        )?;
+        let already_finalized = if changed == 1 {
+            true
+        } else {
+            self.get_job(job_id)?
+                .is_some_and(|job| job.cloud_managed && job.state == "delivery_uncertain")
+                && self.cloud_route_proof(job_id)?.is_none()
+        };
+        if !already_finalized {
+            return Err(StorageError::InvalidLocalEvent(format!(
+                "cloud job {job_id} has no uncertain handoff proof to finalize"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Backfills an exact owner only onto an ownerless cloud job. The caller
+    /// must derive it from the durable authoritative route journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid owner, conflicting job state, or `SQLite`
+    /// persistence failure.
+    pub fn backfill_cloud_route_owner(
+        &self,
+        job_id: &str,
+        connector_id: &str,
+        observed_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        if connector_id.is_empty()
+            || connector_id.len() > 128
+            || connector_id.chars().any(char::is_control)
+        {
+            return Err(StorageError::InvalidLocalEvent(
+                "route connector owner is invalid".into(),
+            ));
+        }
+        let changed = self.connection.execute(
+            "UPDATE jobs SET route_connector_id = ?2, updated_unix_ms = ?3
+             WHERE job_id = ?1 AND cloud_managed = 1 AND route_connector_id IS NULL",
+            params![job_id, connector_id, observed_unix_ms],
+        )?;
+        if changed != 1 {
+            let current = self.get_job(job_id)?;
+            if current.as_ref().is_some_and(|job| {
+                job.cloud_managed && job.route_connector_id.as_deref() == Some(connector_id)
+            }) {
+                return Ok(());
+            }
+            return Err(StorageError::InvalidLocalEvent(format!(
+                "cloud job {job_id} cannot backfill route ownership"
+            )));
+        }
+        Ok(())
     }
 
     /// Returns aggregate local queue counts for health and backpressure.
@@ -3266,7 +3739,8 @@ impl AgentStore {
                     content_kind, options_json, state, expires_unix_ms,
                     native_job_id, target_id, binding_id, profile_id,
                     profile_revision, stock_id, loaded_media_snapshot_json,
-                    cloud_managed, profile_snapshot_json, printer_native_binding_json
+                    cloud_managed, profile_snapshot_json, printer_native_binding_json,
+                    route_connector_id
              FROM jobs WHERE printer_id = ?1
              ORDER BY printer_sequence DESC LIMIT ?2",
         )?;
@@ -3295,7 +3769,8 @@ impl AgentStore {
                     content_kind, options_json, state, expires_unix_ms,
                     native_job_id, target_id, binding_id, profile_id,
                     profile_revision, stock_id, loaded_media_snapshot_json,
-                    cloud_managed, profile_snapshot_json, printer_native_binding_json
+                    cloud_managed, profile_snapshot_json, printer_native_binding_json,
+                    route_connector_id
              FROM jobs ORDER BY accepted_unix_ms DESC, job_id DESC LIMIT ?1 OFFSET ?2",
         )?;
         let rows = statement.query_map(params![bounded_limit, bounded_offset], row_to_job)?;
@@ -3345,9 +3820,14 @@ impl AgentStore {
                     j.native_job_id, j.target_id, j.binding_id, j.profile_id,
                     j.profile_revision, j.stock_id,
                     j.loaded_media_snapshot_json, j.cloud_managed,
-                    j.profile_snapshot_json, j.printer_native_binding_json
+                    j.profile_snapshot_json, j.printer_native_binding_json,
+                    j.route_connector_id
              FROM jobs j
-             WHERE j.state IN ('queued_local', 'failed_retryable')
+             WHERE (
+                    j.state = 'queued_local'
+                    OR (j.state = 'failed_retryable' AND j.cloud_managed = 0)
+                   )
+               AND (j.cloud_managed = 0 OR j.route_connector_id IS NOT NULL)
                AND (j.next_attempt_unix_ms IS NULL OR j.next_attempt_unix_ms <= ?1)
                AND (j.expires_unix_ms IS NULL OR j.expires_unix_ms > ?1)
                AND NOT EXISTS (
@@ -3359,7 +3839,11 @@ impl AgentStore {
                AND j.printer_sequence = (
                  SELECT MIN(head.printer_sequence) FROM jobs head
                  WHERE head.printer_id = j.printer_id
-                   AND head.state IN ('queued_local', 'failed_retryable')
+                   AND (
+                        head.state = 'queued_local'
+                        OR (head.state = 'failed_retryable' AND head.cloud_managed = 0)
+                       )
+                   AND (head.cloud_managed = 0 OR head.route_connector_id IS NOT NULL)
                )
              ORDER BY j.accepted_unix_ms, j.job_id",
         )?;
@@ -3518,6 +4002,120 @@ impl AgentStore {
                uncertainty_deadline_unix_ms = excluded.uncertainty_deadline_unix_ms",
             params![job_id, next_observe_unix_ms, uncertainty_deadline_unix_ms],
         )?;
+        transaction.execute("DELETE FROM cloud_route_proofs WHERE job_id = ?1", [job_id])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Projects an explicit authoritative ambiguous-handoff release into a
+    /// non-runnable cloud retry state. Only a later fresh server offer can
+    /// prepare it again.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the job is the matching cloud uncertainty (or
+    /// an idempotently released retry), or the transaction cannot commit.
+    pub fn release_uncertain_cloud_handoff_for_retry(
+        &mut self,
+        job_id: &str,
+        observed_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        if self
+            .get_job(job_id)?
+            .is_some_and(|job| job.cloud_managed && job.state == "failed_retryable")
+        {
+            return Ok(());
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let sequence: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(job_sequence), 0) + 1
+             FROM job_events WHERE job_id = ?1",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        append_event_tx(
+            &transaction,
+            &EventId::new().to_string(),
+            job_id,
+            sequence,
+            "failed_retryable",
+            Some("ambiguous_handoff_released"),
+            Some("Authority released the uncertain handoff for a fresh offer"),
+            "{}",
+            observed_unix_ms,
+        )?;
+        let changed = transaction.execute(
+            "UPDATE jobs SET state = 'failed_retryable', updated_unix_ms = ?2
+             WHERE job_id = ?1 AND cloud_managed = 1
+               AND state = 'delivery_uncertain'",
+            params![job_id, observed_unix_ms],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::InvalidLocalEvent(format!(
+                "cloud job {job_id} has no uncertainty to release"
+            )));
+        }
+        transaction.execute("DELETE FROM cloud_route_proofs WHERE job_id = ?1", [job_id])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Atomically reconciles a cloud spool intent that reached a terminal or
+    /// ambiguous coordinator outcome before `SQLite` was updated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid recovery state, a non-cloud/non-intent
+    /// job, malformed event data, or a failed transaction.
+    pub fn record_cloud_handoff_recovery(
+        &mut self,
+        event_id: &str,
+        job_id: &str,
+        state: &str,
+        reason: &str,
+        message: &str,
+        observed_unix_ms: i64,
+    ) -> Result<(), StorageError> {
+        if !matches!(state, "failed_retryable" | "delivery_uncertain") {
+            return Err(StorageError::InvalidLocalEvent(
+                "cloud handoff recovery state is invalid".into(),
+            ));
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let sequence: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(job_sequence), 0) + 1
+             FROM job_events WHERE job_id = ?1",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        append_event_tx(
+            &transaction,
+            event_id,
+            job_id,
+            sequence,
+            state,
+            Some(reason),
+            Some(message),
+            "{}",
+            observed_unix_ms,
+        )?;
+        let changed = transaction.execute(
+            "UPDATE jobs SET state = ?2, updated_unix_ms = ?3
+             WHERE job_id = ?1 AND state = 'spool_intent' AND cloud_managed = 1",
+            params![job_id, state, observed_unix_ms],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::InvalidLocalEvent(format!(
+                "cloud job {job_id} has no spool intent to reconcile"
+            )));
+        }
+        if state == "failed_retryable" {
+            transaction.execute("DELETE FROM cloud_route_proofs WHERE job_id = ?1", [job_id])?;
+        }
         transaction.commit()?;
         Ok(())
     }
@@ -3580,6 +4178,7 @@ impl AgentStore {
                uncertainty_deadline_unix_ms = excluded.uncertainty_deadline_unix_ms",
             params![job_id, next_observe_unix_ms, uncertainty_deadline_unix_ms],
         )?;
+        transaction.execute("DELETE FROM cloud_route_proofs WHERE job_id = ?1", [job_id])?;
         transaction.commit()?;
         Ok(())
     }
@@ -3602,7 +4201,7 @@ impl AgentStore {
                     j.native_job_id, j.target_id, j.binding_id, j.profile_id,
                     j.profile_revision, j.stock_id, j.loaded_media_snapshot_json,
                     j.cloud_managed, j.profile_snapshot_json,
-                    j.printer_native_binding_json,
+                    j.printer_native_binding_json, j.route_connector_id,
                     r.next_observe_unix_ms,
                     r.uncertainty_deadline_unix_ms, r.attempt_count,
                     r.cancel_requested
@@ -3641,11 +4240,12 @@ impl AgentStore {
                     cloud_managed: row.get(19)?,
                     profile_snapshot_json: row.get(20)?,
                     printer_native_binding: decode_native_binding(row, 21)?,
+                    route_connector_id: row.get(22)?,
                 },
-                next_observe_unix_ms: row.get(22)?,
-                uncertainty_deadline_unix_ms: row.get(23)?,
-                attempt_count: row.get(24)?,
-                cancel_requested: row.get(25)?,
+                next_observe_unix_ms: row.get(23)?,
+                uncertainty_deadline_unix_ms: row.get(24)?,
+                attempt_count: row.get(25)?,
+                cancel_requested: row.get(26)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -4038,7 +4638,8 @@ fn query_job(connection: &Connection, job_id: &str) -> Result<Option<LocalJob>, 
                     content_kind, options_json, state, expires_unix_ms,
                     native_job_id, target_id, binding_id, profile_id,
                     profile_revision, stock_id, loaded_media_snapshot_json,
-                    cloud_managed, profile_snapshot_json, printer_native_binding_json
+                    cloud_managed, profile_snapshot_json, printer_native_binding_json,
+                    route_connector_id
              FROM jobs WHERE job_id = ?1",
             [job_id],
             row_to_job,
@@ -4305,16 +4906,7 @@ fn upsert_cloud_accept_intent(
     route: &CloudRouteProof,
     prepared_unix_ms: i64,
 ) -> Result<(), StorageError> {
-    let existing = connection
-        .query_row(
-            "SELECT job_id, lease_id, lease_token, lease_expires_unix_ms,
-                    content_sha256, local_sequence, route_reservation_id,
-                    route_generation, route_fencing_token, acceptance_state
-             FROM cloud_accept_intents WHERE job_id = ?1",
-            [&job.job_id],
-            row_to_cloud_accept_intent,
-        )
-        .optional()?;
+    let existing = query_cloud_accept_intent(connection, &job.job_id)?;
     if existing.as_ref().is_some_and(|intent| {
         intent.remote_accept_confirmed
             && !cloud_accept_evidence_matches(intent, job, lease_id, lease_token, route)
@@ -4358,6 +4950,82 @@ fn upsert_cloud_accept_intent(
         ],
     )?;
     Ok(())
+}
+
+fn query_cloud_accept_intent(
+    connection: &Connection,
+    job_id: &str,
+) -> Result<Option<CloudAcceptIntent>, StorageError> {
+    connection
+        .query_row(
+            "SELECT job_id, lease_id, lease_token, lease_expires_unix_ms,
+                    content_sha256, local_sequence, route_reservation_id,
+                    route_generation, route_fencing_token, acceptance_state
+             FROM cloud_accept_intents WHERE job_id = ?1",
+            [job_id],
+            row_to_cloud_accept_intent,
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn upsert_cloud_route_proof(
+    connection: &Connection,
+    job_id: &str,
+    route: &CloudRouteProof,
+) -> Result<(), StorageError> {
+    connection.execute(
+        "INSERT INTO cloud_route_proofs
+           (job_id, reservation_id, generation, fencing_token)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(job_id) DO UPDATE SET
+           reservation_id = excluded.reservation_id,
+           generation = excluded.generation,
+           fencing_token = excluded.fencing_token",
+        params![
+            job_id,
+            route.reservation_id,
+            i64::try_from(route.generation).map_err(|_| StorageError::InvalidLocalEvent(
+                "route generation exceeds durable storage bounds".into()
+            ))?,
+            route.fencing_token,
+        ],
+    )?;
+    Ok(())
+}
+
+fn query_cloud_route_proof(
+    connection: &Connection,
+    job_id: &str,
+) -> Result<Option<CloudRouteProof>, StorageError> {
+    connection
+        .query_row(
+            "SELECT reservation_id, generation, fencing_token
+             FROM cloud_route_proofs WHERE job_id = ?1",
+            [job_id],
+            |row| {
+                let generation: i64 = row.get(1)?;
+                Ok(CloudRouteProof {
+                    reservation_id: row.get(0)?,
+                    generation: u64::try_from(generation).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Integer,
+                            Box::new(error),
+                        )
+                    })?,
+                    fencing_token: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn cloud_route_proof_matches(left: &CloudRouteProof, right: &CloudRouteProof) -> bool {
+    constant_time_str_eq(&left.reservation_id, &right.reservation_id)
+        && left.generation == right.generation
+        && constant_time_str_eq(&left.fencing_token, &right.fencing_token)
 }
 
 fn cloud_accept_evidence_matches(
@@ -4430,6 +5098,13 @@ fn accepted_job_matches(existing: &LocalJob, offered: &AcceptedJob) -> bool {
 }
 
 fn validate_job_persistence_facts(facts: &JobPersistenceFacts) -> Result<(), StorageError> {
+    if facts.route_connector_id.as_deref().is_some_and(|value| {
+        value.is_empty() || value.len() > 128 || value.chars().any(char::is_control)
+    }) {
+        return Err(StorageError::InvalidLocalEvent(
+            "route connector identity is invalid".into(),
+        ));
+    }
     if facts.profile_id.is_some() != facts.profile_revision.is_some() {
         return Err(StorageError::InvalidLocalEvent(
             "profile identity and revision must be pinned together".into(),
@@ -4540,6 +5215,14 @@ fn validate_profile_fact_tx(
 }
 
 fn job_persistence_facts_match(existing: &LocalJob, facts: &JobPersistenceFacts) -> bool {
+    existing.route_connector_id == facts.route_connector_id
+        && job_persistence_facts_match_without_route_owner(existing, facts)
+}
+
+fn job_persistence_facts_match_without_route_owner(
+    existing: &LocalJob,
+    facts: &JobPersistenceFacts,
+) -> bool {
     existing.target_id == facts.target_id
         && existing.binding_id == facts.binding_id
         && existing.profile_id == facts.profile_id
@@ -4592,6 +5275,7 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> Result<LocalJob, rusqlite::Error> {
         cloud_managed: row.get(19)?,
         profile_snapshot_json: row.get(20)?,
         printer_native_binding: decode_native_binding(row, 21)?,
+        route_connector_id: row.get(22)?,
     })
 }
 
@@ -4708,12 +5392,16 @@ mod tests {
         let mut later = job("job-later", "p1", 4);
         later.cloud_managed = true;
         restarted
-            .prepare_cloud_job(
+            .prepare_cloud_job_with_facts(
                 &later,
                 "lease-later",
                 "redacted-later",
                 30,
                 &cloud_route_proof(),
+                &JobPersistenceFacts {
+                    route_connector_id: Some("legacy".into()),
+                    ..JobPersistenceFacts::default()
+                },
             )
             .unwrap();
         restarted.confirm_cloud_accept("job-later", 5).unwrap();
@@ -4844,6 +5532,83 @@ mod tests {
     }
 
     #[test]
+    fn activation_drops_lease_capability_but_retains_minimal_crash_proof() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let mut cloud = job("cloud-minimal-proof", "p1", 10);
+        cloud.cloud_managed = true;
+        let proof = cloud_route_proof();
+        store
+            .prepare_cloud_job_with_facts(
+                &cloud,
+                "lease-secret-id",
+                "lease-secret-capability",
+                60_000,
+                &proof,
+                &JobPersistenceFacts {
+                    route_connector_id: Some("legacy".into()),
+                    ..JobPersistenceFacts::default()
+                },
+            )
+            .unwrap();
+        store.confirm_cloud_accept(&cloud.job_id, 11).unwrap();
+        store.activate_cloud_job(&cloud.job_id, 12).unwrap();
+        let retained_tokens: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM cloud_accept_intents WHERE job_id = ?1",
+                [&cloud.job_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            retained_tokens, 0,
+            "activation must delete lease capability"
+        );
+        assert_eq!(store.cloud_route_proof(&cloud.job_id).unwrap(), Some(proof));
+        let duplicate = store
+            .prepare_cloud_job_with_facts(
+                &cloud,
+                "lease-secret-id",
+                "lease-secret-capability",
+                60_000,
+                &cloud_route_proof(),
+                &JobPersistenceFacts {
+                    route_connector_id: Some("legacy".into()),
+                    ..JobPersistenceFacts::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(duplicate.state, "queued_local");
+        assert!(store.pending_cloud_accepts().unwrap().is_empty());
+
+        for (state, at) in [("preparing", 13), ("rendering", 14), ("spool_intent", 15)] {
+            store
+                .append_next_event(
+                    &format!("minimal-proof-event-{at}"),
+                    &cloud.job_id,
+                    state,
+                    None,
+                    None,
+                    "{}",
+                    at,
+                )
+                .unwrap();
+        }
+        store
+            .record_cloud_handoff_recovery(
+                "minimal-proof-recovery",
+                &cloud.job_id,
+                "failed_retryable",
+                "authoritative_rejected_before_handoff",
+                "rejected",
+                16,
+            )
+            .unwrap();
+        assert!(store.cloud_route_proof(&cloud.job_id).unwrap().is_none());
+        assert!(store.pending_cloud_accepts().unwrap().is_empty());
+    }
+
+    #[test]
     fn cloud_execution_facts_are_atomic_durable_and_exactly_idempotent() {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("atomic-facts.sqlite");
@@ -4917,6 +5682,86 @@ mod tests {
             ),
             Err(StorageError::JobConflict(_))
         ));
+    }
+
+    #[test]
+    fn pending_upgrade_replay_backfills_exact_owner_and_new_attempt_appends_history() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let mut cloud = job("cloud-reoffer", "p1", 10);
+        cloud.cloud_managed = true;
+        store
+            .prepare_cloud_job_with_facts(
+                &cloud,
+                "lease-old",
+                "token-old",
+                100,
+                &cloud_route_proof(),
+                &JobPersistenceFacts::default(),
+            )
+            .unwrap();
+        let facts = JobPersistenceFacts {
+            route_connector_id: Some("legacy".into()),
+            ..JobPersistenceFacts::default()
+        };
+        let replay = store
+            .prepare_cloud_job_with_facts(
+                &cloud,
+                "lease-old",
+                "token-old",
+                100,
+                &cloud_route_proof(),
+                &facts,
+            )
+            .unwrap();
+        assert_eq!(replay.route_connector_id.as_deref(), Some("legacy"));
+        store.confirm_cloud_accept("cloud-reoffer", 11).unwrap();
+        store.activate_cloud_job("cloud-reoffer", 12).unwrap();
+        for (state, observed) in [
+            ("preparing", 13),
+            ("rendering", 14),
+            ("spool_intent", 15),
+            ("failed_retryable", 16),
+        ] {
+            store
+                .append_next_event(
+                    &format!("event-{state}"),
+                    "cloud-reoffer",
+                    state,
+                    None,
+                    None,
+                    "{}",
+                    observed,
+                )
+                .unwrap();
+        }
+
+        let mut new_proof = cloud_route_proof();
+        new_proof.generation += 1;
+        new_proof.reservation_id = "new-reservation".into();
+        let new_facts = JobPersistenceFacts {
+            route_connector_id: Some("ncon_new_authority".into()),
+            ..JobPersistenceFacts::default()
+        };
+        store
+            .prepare_cloud_job_with_facts(
+                &cloud,
+                "lease-new",
+                "token-new",
+                200,
+                &new_proof,
+                &new_facts,
+            )
+            .unwrap();
+        store.confirm_cloud_accept("cloud-reoffer", 17).unwrap();
+        let activated = store.activate_cloud_job("cloud-reoffer", 18).unwrap();
+        assert_eq!(activated.state, "queued_local");
+        assert_eq!(
+            activated.route_connector_id.as_deref(),
+            Some("ncon_new_authority")
+        );
+        let events = store.pending_cloud_events(0, 20).unwrap();
+        assert_eq!(events.last().unwrap().job_sequence, 6);
+        assert_eq!(events.last().unwrap().state, "queued_local");
     }
 
     #[test]
@@ -5018,12 +5863,16 @@ mod tests {
         {
             let mut store = AgentStore::open(&database).unwrap();
             let prepared = store
-                .prepare_cloud_job(
+                .prepare_cloud_job_with_facts(
                     &cloud,
                     lease_id,
                     "secret-token",
                     30_000,
                     &cloud_route_proof(),
+                    &JobPersistenceFacts {
+                        route_connector_id: Some("legacy".into()),
+                        ..JobPersistenceFacts::default()
+                    },
                 )
                 .unwrap();
             assert_eq!(prepared.state, "cloud_accept_pending");
@@ -6328,7 +7177,13 @@ mod tests {
             ),
             (
                 "jobs",
-                vec!["target_id", "profile_id", "profile_revision", "stock_id"],
+                vec![
+                    "target_id",
+                    "profile_id",
+                    "profile_revision",
+                    "stock_id",
+                    "route_connector_id",
+                ],
             ),
         ] {
             let mut statement = store

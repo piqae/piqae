@@ -20,8 +20,22 @@ print drivers directly.
 
 Implemented V1 operations include status, printer/profile/queue reads, exposure,
 pause/resume, local job/test submission, native profile capture
-authorization/commit/cancel/validation, and loaded-media confirmation. See
-`crates/local-api` for the exact route contract.
+authorization/commit/cancel/validation, loaded-media confirmation, and explicit
+resolution of a local native-handoff uncertainty. See `crates/local-api` for
+the exact route contract.
+
+`GET /v1/local/jobs/{job_id}/resolve-ambiguous-handoff` returns the opaque
+`ambiguity_id` for the current exact local route fence. `POST` to the same path
+requires that ID and accepts exactly one of `release_for_retry` or
+`confirm_accepted`; both operations require the normal loopback bearer token.
+It applies only to a local-only `delivery_uncertain` job. Cloud-managed jobs
+must be resolved by their authenticated remote authority. A release is an
+explicit operator authorization for a bounded local retry; confirmation keeps
+the truthful `delivery_uncertain` queue state and makes the attempt
+non-runnable. The decision is durably bound to that ambiguity ID, so a delayed
+replay cannot release a newer uncertain attempt for the same job. Both
+decisions are idempotent across restart. The endpoint never exposes the route
+fencing token or treats native acceptance as proof that paper was produced.
 
 Native shells open the node queue by authenticating `POST
 /v1/local/dashboard-sessions` with `local.token` and opening the returned URL.

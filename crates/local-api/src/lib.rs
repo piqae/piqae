@@ -15,11 +15,12 @@ use piqae_local_ipc::{
     SessionAuthenticator,
 };
 pub use piqae_node_runtime::command::{
-    CommandFailure as ControlFailure, ConfirmLoadedMediaRequest, DeleteProfileQuery,
-    ExposureUpdate, HostLifecycleRequest, LocalConnectorDetail, LocalContent, LocalCreateJob,
-    LocalHistoryJob, LocalJobAccepted, LocalJobHistory, NodeIdentityUpdate, NodeIdentityUpdated,
-    ProfileCaptureBeginRequest, ProfileCreate, ProfileUpdate, RuntimeCommand as ControlRequest,
-    TestPageRequest, ValidateProfileRequest,
+    AmbiguousHandoffResolution, CommandFailure as ControlFailure, ConfirmLoadedMediaRequest,
+    DeleteProfileQuery, ExposureUpdate, HostLifecycleRequest, LocalAmbiguousHandoff,
+    LocalConnectorDetail, LocalContent, LocalCreateJob, LocalHistoryJob, LocalJobAccepted,
+    LocalJobHistory, NodeIdentityUpdate, NodeIdentityUpdated, ProfileCaptureBeginRequest,
+    ProfileCreate, ProfileUpdate, RuntimeCommand as ControlRequest, TestPageRequest,
+    ValidateProfileRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -37,6 +38,13 @@ struct ReprintRequest {
     idempotency_key: String,
     #[serde(default)]
     confirmed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolveAmbiguousHandoffRequest {
+    ambiguity_id: String,
+    resolution: AmbiguousHandoffResolution,
 }
 
 #[derive(Debug, Serialize)]
@@ -158,6 +166,10 @@ pub fn router(state: LocalApiState) -> Router {
         .route(
             "/local/history/jobs/{job_id}/reprint",
             post(dashboard_reprint),
+        )
+        .route(
+            "/v1/local/jobs/{job_id}/resolve-ambiguous-handoff",
+            get(local_ambiguous_handoff).post(resolve_local_ambiguous_handoff),
         )
         .route("/v1/local/printers/{printer_id}/test-page", post(test_page))
         .route("/v1/local/pause", post(pause))
@@ -875,6 +887,59 @@ async fn resume(State(state): State<LocalApiState>, headers: HeaderMap) -> Respo
     .await
 }
 
+async fn resolve_local_ambiguous_handoff(
+    State(state): State<LocalApiState>,
+    Path(job_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<ResolveAmbiguousHandoffRequest>,
+) -> Response {
+    if !valid_local_job_reference(&job_id) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    if request.ambiguity_id.len() != 36
+        || !request.ambiguity_id.starts_with("amb_")
+        || !request.ambiguity_id[4..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    control_action(state, headers, |respond_to| {
+        ControlRequest::ResolveLocalAmbiguousHandoff {
+            job_id,
+            ambiguity_id: request.ambiguity_id,
+            resolution: request.resolution,
+            respond_to,
+        }
+    })
+    .await
+}
+
+async fn local_ambiguous_handoff(
+    State(state): State<LocalApiState>,
+    Path(job_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !valid_local_job_reference(&job_id) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    request_response(
+        state,
+        headers,
+        |respond_to| ControlRequest::LocalAmbiguousHandoff { job_id, respond_to },
+        StatusCode::OK,
+    )
+    .await
+}
+
+fn valid_local_job_reference(job_id: &str) -> bool {
+    !job_id.is_empty()
+        && job_id.len() <= 128
+        && job_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
 async fn reload_connectors(State(state): State<LocalApiState>, headers: HeaderMap) -> Response {
     control_action(state, headers, |respond_to| {
         ControlRequest::ReloadConnectors { respond_to }
@@ -990,10 +1055,13 @@ async fn request_response<T: Serialize>(
 fn failure_status(code: &str) -> StatusCode {
     match code {
         "printer_not_found"
+        | "job_not_found"
         | "profile_not_found"
         | "profile_capture_not_found"
         | "broker_authorization_not_found" => StatusCode::NOT_FOUND,
-        "profile_revision_conflict" | "node_identity_revision_conflict" => StatusCode::CONFLICT,
+        "profile_revision_conflict"
+        | "node_identity_revision_conflict"
+        | "local_handoff_revision_conflict" => StatusCode::CONFLICT,
         "profile_capture_token_invalid" => StatusCode::UNAUTHORIZED,
         "profile_capture_timed_out"
         | "profile_capture_cancelled"
@@ -1550,6 +1618,79 @@ mod tests {
                     .uri("/v1/local/connectors/reload")
                     .header("authorization", "Bearer secret")
                     .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        responder.await.expect("responder");
+    }
+
+    #[tokio::test]
+    async fn local_ambiguity_resolution_requires_auth_and_dispatches_exact_decision() {
+        let job_id = "job_reprint_0123456789abcdef0123456789abcdef";
+        let ambiguity_id = "amb_0123456789abcdef0123456789abcdef";
+        let (state, mut receive) = test_state();
+        let unauthorized = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/local/jobs/{job_id}/resolve-ambiguous-handoff"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"ambiguity_id":"{ambiguity_id}","resolution":"release_for_retry"}}"#
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        assert!(receive.try_recv().is_err());
+
+        let responder = tokio::spawn(async move {
+            if let Some(ControlRequest::LocalAmbiguousHandoff { job_id, respond_to }) =
+                receive.recv().await
+            {
+                assert_eq!(job_id, "job_reprint_0123456789abcdef0123456789abcdef");
+                let _ = respond_to.send(Ok(LocalAmbiguousHandoff {
+                    ambiguity_id: "amb_0123456789abcdef0123456789abcdef".into(),
+                }));
+            }
+            if let Some(ControlRequest::ResolveLocalAmbiguousHandoff {
+                job_id,
+                ambiguity_id,
+                resolution,
+                respond_to,
+            }) = receive.recv().await
+            {
+                assert_eq!(job_id, "job_reprint_0123456789abcdef0123456789abcdef");
+                assert_eq!(ambiguity_id, "amb_0123456789abcdef0123456789abcdef");
+                assert_eq!(resolution, AmbiguousHandoffResolution::ReleaseForRetry);
+                let _ = respond_to.send(Ok(()));
+            }
+        });
+        let target = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/local/jobs/{job_id}/resolve-ambiguous-handoff"))
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(target.status(), StatusCode::OK);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/local/jobs/{job_id}/resolve-ambiguous-handoff"))
+                    .header("authorization", "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"ambiguity_id":"{ambiguity_id}","resolution":"release_for_retry"}}"#
+                    )))
                     .expect("request"),
             )
             .await

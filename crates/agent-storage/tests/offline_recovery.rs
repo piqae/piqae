@@ -3,7 +3,7 @@
     reason = "fault-test setup and assertions must fail immediately with local context"
 )]
 
-use piqae_agent_storage::{AcceptedJob, AgentStore, CloudRouteProof};
+use piqae_agent_storage::{AcceptedJob, AgentStore, CloudRouteProof, JobPersistenceFacts};
 use std::collections::HashSet;
 
 fn cloud_job() -> AcceptedJob {
@@ -39,6 +39,13 @@ fn route_proof() -> CloudRouteProof {
     }
 }
 
+fn route_facts() -> JobPersistenceFacts {
+    JobPersistenceFacts {
+        route_connector_id: Some("legacy".into()),
+        ..JobPersistenceFacts::default()
+    }
+}
+
 #[test]
 fn acceptance_intent_queue_and_event_cursor_survive_separate_restart_windows() {
     let directory = tempfile::tempdir().expect("isolated state");
@@ -47,12 +54,13 @@ fn acceptance_intent_queue_and_event_cursor_survive_separate_restart_windows() {
     {
         let mut store = AgentStore::open(&database).expect("initial store");
         let prepared = store
-            .prepare_cloud_job(
+            .prepare_cloud_job_with_facts(
                 &cloud_job(),
                 "lease-1",
                 "redacted-token",
                 30_000,
                 &route_proof(),
+                &route_facts(),
             )
             .expect("durable acceptance intent");
         assert_eq!(prepared.state, "cloud_accept_pending");
@@ -130,12 +138,13 @@ fn accelerated_disconnect_retry_soak_has_no_loss_or_duplicate_activation() {
         {
             let mut store = AgentStore::open(&database).expect("connect to prepare");
             store
-                .prepare_cloud_job(
+                .prepare_cloud_job_with_facts(
                     &numbered_cloud_job(number),
                     &format!("lease-{number}"),
                     "redacted-token",
                     60_000,
                     &route_proof(),
+                    &route_facts(),
                 )
                 .expect("persist acceptance intent before disconnect");
         }
