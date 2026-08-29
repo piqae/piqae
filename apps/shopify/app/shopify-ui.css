@@ -279,6 +279,105 @@
 .piqae-canvas-grid > .piqae-document-flow {
   display: contents;
 }
+.piqae-canvas-insertion-slot {
+  position: relative;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 0.5rem;
+  margin: -0.25rem 0;
+  transition:
+    height 120ms ease,
+    margin 120ms ease;
+}
+.piqae-canvas-insertion-slot:hover,
+.piqae-canvas-insertion-slot:focus-within,
+.piqae-canvas-insertion-slot.is-drag-over {
+  height: 1.75rem;
+  margin: 0;
+}
+.piqae-canvas-insertion-line {
+  position: absolute;
+  inset-inline: 0;
+  top: 50%;
+  height: 2px;
+  background: #458fff;
+  opacity: 0;
+  transform: scaleX(0.96);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+.piqae-canvas-insertion-button {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  border: 1px solid #005bd3;
+  border-radius: 999px;
+  background: #fff;
+  color: #005bd3;
+  opacity: 0;
+  transform: scale(0.8);
+  cursor: pointer;
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+.piqae-canvas-insertion-slot:hover .piqae-canvas-insertion-line,
+.piqae-canvas-insertion-slot:focus-within .piqae-canvas-insertion-line,
+.piqae-canvas-insertion-slot.is-drag-over .piqae-canvas-insertion-line,
+.piqae-canvas-insertion-slot:hover .piqae-canvas-insertion-button,
+.piqae-canvas-insertion-slot:focus-within .piqae-canvas-insertion-button,
+.piqae-canvas-insertion-slot.is-drag-over .piqae-canvas-insertion-button {
+  opacity: 1;
+  transform: scale(1);
+}
+.piqae-canvas-insertion-slot.is-drag-over .piqae-canvas-insertion-line {
+  height: 3px;
+  transform: scaleX(1);
+}
+.piqae-canvas-insertion-menu {
+  position: absolute;
+  z-index: 42;
+  top: calc(50% + 1rem);
+  left: 50%;
+  display: flex;
+  gap: 0.2rem;
+  padding: 0.3rem;
+  border-radius: 9px;
+  background: Canvas;
+  color: CanvasText;
+  box-shadow:
+    0 1px 2px rgb(26 26 26 / 8%),
+    0 6px 20px rgb(26 26 26 / 16%);
+  transform: translateX(-50%);
+}
+.piqae-canvas-insertion-menu button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-height: 2rem;
+  padding: 0 0.5rem;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.75rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.piqae-canvas-insertion-menu button:hover,
+.piqae-canvas-insertion-menu button:focus-visible {
+  background: #eaf1ff;
+  color: #005bd3;
+}
 .piqae-canvas-table {
   position: relative;
   width: 100%;
@@ -1058,6 +1157,12 @@
 }
 .piqae-tool-button:hover:not(:disabled) {
   background: #f1f2f4;
+}
+.piqae-tool-button[draggable="true"] {
+  cursor: grab;
+}
+.piqae-tool-button[draggable="true"]:active {
+  cursor: grabbing;
 }
 .piqae-tool-button:disabled {
   opacity: 0.35;

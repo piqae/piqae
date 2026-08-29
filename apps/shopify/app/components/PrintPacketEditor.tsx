@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useEffect,
   useId,
   useRef,
@@ -37,6 +38,16 @@ import { documentHasPageBreak } from "../core/template-model";
 import type { ShopifyPrintTarget } from "../core/shopify-print-targets";
 
 type DesignStock = ShopifyPrintTarget["stock"];
+
+const PIQAE_BLOCK_DRAG_TYPE = "application/x-piqae-printpacket-block";
+const QUICK_INSERT_TYPES = [
+  "paragraph",
+  "heading",
+  "image",
+  "divider",
+  "spacer",
+] as const;
+type QuickInsertType = (typeof QUICK_INSERT_TYPES)[number];
 
 const schema = new Schema({
   nodes: {
@@ -245,6 +256,18 @@ export function PrintPacketEditor({
     onChange(nextDocument);
     instance.focus();
   };
+  const insertAtPath = (block: Block, path: BlockPath) => {
+    const body = canonicalizeShopifyEditorBody(
+      insertBlockAtPath(latest.current.body, path, block),
+    );
+    const nextDocument = { ...latest.current, body };
+    latest.current = nextDocument;
+    view.current?.updateState(
+      EditorState.create({ schema, doc: blocksToDoc(body) }),
+    );
+    setSelection({ position: -1, path, block });
+    onChange(nextDocument);
+  };
   const insertVariable = (path: string) =>
     insert(
       schema.nodes.variable!.create({
@@ -367,6 +390,7 @@ export function PrintPacketEditor({
                 icon="text"
                 label="Text"
                 disabled={disabled}
+                dragBlock={() => quickInsertBlock("paragraph")}
                 onClick={() =>
                   insert(
                     schema.nodes.paragraph!.create(
@@ -380,6 +404,7 @@ export function PrintPacketEditor({
                 icon="heading"
                 label="Heading"
                 disabled={disabled}
+                dragBlock={() => quickInsertBlock("heading")}
                 onClick={() =>
                   insert(
                     schema.nodes.heading!.create(
@@ -401,18 +426,21 @@ export function PrintPacketEditor({
                 icon="table"
                 label="Line items"
                 disabled={disabled}
+                dragBlock={defaultTable}
                 onClick={() => insertBlock(defaultTable())}
               />
               <ToolButton
                 icon="repeat"
                 label="Repeating content"
                 disabled={disabled}
+                dragBlock={defaultRepeat}
                 onClick={() => insertBlock(defaultRepeat())}
               />
               <ToolButton
                 icon="condition"
                 label="Conditional section"
                 disabled={disabled}
+                dragBlock={defaultConditional}
                 onClick={() => insertBlock(defaultConditional())}
               />
             </div>
@@ -422,6 +450,7 @@ export function PrintPacketEditor({
                 icon="image"
                 label="Image"
                 disabled={disabled}
+                dragBlock={() => quickInsertBlock("image")}
                 onClick={() =>
                   insertBlock({
                     type: "image",
@@ -436,28 +465,15 @@ export function PrintPacketEditor({
                 icon="qr"
                 label="QR code"
                 disabled={disabled}
-                onClick={() =>
-                  insertBlock({
-                    type: "qr",
-                    value: currentPathExpression("statusUrl"),
-                    size_mm: 24,
-                  })
-                }
+                dragBlock={defaultQrCode}
+                onClick={() => insertBlock(defaultQrCode())}
               />
               <ToolButton
                 icon="barcode"
                 label="Barcode"
                 disabled={disabled}
-                onClick={() =>
-                  insertBlock({
-                    type: "barcode",
-                    value: currentPathExpression("name"),
-                    symbology: "code128",
-                    width_mm: 48,
-                    height_mm: 16,
-                    human_readable: true,
-                  })
-                }
+                dragBlock={defaultBarcode}
+                onClick={() => insertBlock(defaultBarcode())}
               />
             </div>
             <span className="piqae-tool-divider" />
@@ -466,30 +482,35 @@ export function PrintPacketEditor({
                 icon="columns"
                 label="Columns"
                 disabled={disabled}
+                dragBlock={defaultGrid}
                 onClick={() => insertBlock(defaultGrid())}
               />
               <ToolButton
                 icon="stack"
                 label="Stack"
                 disabled={disabled}
+                dragBlock={() => defaultContainer("stack")}
                 onClick={() => insertBlock(defaultContainer("stack"))}
               />
               <ToolButton
                 icon="row"
                 label="Row"
                 disabled={disabled}
+                dragBlock={() => defaultContainer("row")}
                 onClick={() => insertBlock(defaultContainer("row"))}
               />
               <ToolButton
                 icon="divider"
                 label="Divider"
                 disabled={disabled}
+                dragBlock={() => quickInsertBlock("divider")}
                 onClick={() => insert(schema.nodes.divider!.create())}
               />
               <ToolButton
                 icon="spacer"
                 label="Spacing"
                 disabled={disabled}
+                dragBlock={() => quickInsertBlock("spacer")}
                 onClick={() => insertBlock({ type: "spacer", height_mm: 6 })}
               />
             </div>
@@ -577,12 +598,14 @@ export function PrintPacketEditor({
             <SafeAreaGuide value={value} stock={stock} />
             <DocumentCanvas
               blocks={canonicalBody}
+              insertionSlots={false}
               selectedPath={selection?.path}
               editable={!disabled}
               authoringFields={allAuthoringFields}
               onSelect={(block, path) =>
                 setSelection({ position: -1, block, path })
               }
+              onInsert={insertAtPath}
               onChange={(block, path) => {
                 setSelection({ position: -1, block, path });
                 const body = canonicalizeShopifyEditorBody(
@@ -783,7 +806,9 @@ function DocumentCanvas({
   selectedPath,
   authoringFields = AUTHORING_FIELDS,
   scope = "order",
+  insertionSlots = true,
   onSelect,
+  onInsert,
   onChange,
 }: {
   blocks: Block[];
@@ -793,25 +818,46 @@ function DocumentCanvas({
   selectedPath?: BlockPath;
   authoringFields?: readonly ShopifyDocumentField[];
   scope?: ShopifyAuthoringScope;
+  insertionSlots?: boolean;
   onSelect(block: Block, path: BlockPath): void;
+  onInsert?(block: Block, path: BlockPath): void;
   onChange(block: Block, path: BlockPath): void;
 }) {
+  const insertionPath = (index: number): BlockPath => [
+    ...path,
+    { branch, index },
+  ];
   return (
     <div className="piqae-document-flow">
-      {blocks.map((block, index) => (
-        <CanvasBlock
-          key={`${path.map((part) => `${part.branch}-${part.index}`).join("/")}-${branch}-${index}`}
-          block={block}
-          path={[...path, { branch, index }]}
-          editable={editable}
-          selectedPath={selectedPath}
-          selected={sameBlockPath(selectedPath, [...path, { branch, index }])}
-          authoringFields={authoringFields}
-          scope={scope}
-          onSelect={onSelect}
-          onChange={onChange}
+      {blocks.map((block, index) => {
+        const blockPath = insertionPath(index);
+        const key = `${path.map((part) => `${part.branch}-${part.index}`).join("/")}-${branch}-${index}`;
+        return (
+          <Fragment key={key}>
+            {editable && insertionSlots && onInsert ? (
+              <CanvasInsertionSlot path={blockPath} onInsert={onInsert} />
+            ) : null}
+            <CanvasBlock
+              block={block}
+              path={blockPath}
+              editable={editable}
+              selectedPath={selectedPath}
+              selected={sameBlockPath(selectedPath, blockPath)}
+              authoringFields={authoringFields}
+              scope={scope}
+              onSelect={onSelect}
+              onInsert={onInsert}
+              onChange={onChange}
+            />
+          </Fragment>
+        );
+      })}
+      {editable && insertionSlots && onInsert ? (
+        <CanvasInsertionSlot
+          path={insertionPath(blocks.length)}
+          onInsert={onInsert}
         />
-      ))}
+      ) : null}
     </div>
   );
 }
@@ -825,6 +871,7 @@ function CanvasBlock({
   authoringFields,
   scope,
   onSelect,
+  onInsert,
   onChange,
 }: {
   block: Block;
@@ -835,6 +882,7 @@ function CanvasBlock({
   authoringFields: readonly ShopifyDocumentField[];
   scope: ShopifyAuthoringScope;
   onSelect(block: Block, path: BlockPath): void;
+  onInsert?(block: Block, path: BlockPath): void;
   onChange(block: Block, path: BlockPath): void;
 }) {
   const [editingText, setEditingText] = useState(false);
@@ -1242,6 +1290,7 @@ function CanvasBlock({
             authoringFields={authoringFields}
             scope={scope}
             onSelect={onSelect}
+            onInsert={onInsert}
             onChange={onChange}
           />
         ) : (
@@ -1263,6 +1312,7 @@ function CanvasBlock({
               authoringFields={authoringFields}
               scope={scope}
               onSelect={onSelect}
+              onInsert={onInsert}
               onChange={onChange}
             />
           </>
@@ -1309,7 +1359,9 @@ function CanvasBlock({
           selectedPath={selectedPath}
           authoringFields={authoringFields}
           scope={childScope}
+          insertionSlots={block.type !== "grid" && block.type !== "row"}
           onSelect={onSelect}
+          onInsert={onInsert}
           onChange={onChange}
         />
       ) : (
@@ -1324,6 +1376,96 @@ function CanvasBlock({
         />
       )}
     </section>
+  );
+}
+
+function CanvasInsertionSlot({
+  path,
+  onInsert,
+}: {
+  path: BlockPath;
+  onInsert(block: Block, path: BlockPath): void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const insert = (block: Block) => {
+    onInsert(block, path);
+    setOpen(false);
+    setDragOver(false);
+  };
+  return (
+    <span
+      className={`piqae-canvas-insertion-slot${dragOver ? " is-drag-over" : ""}`}
+      data-insertion-index={path.at(-1)?.index}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+          setOpen(false);
+      }}
+      onDragEnter={(event) => {
+        if (!hasPiqaeBlockDrag(event.dataTransfer)) return;
+        event.preventDefault();
+        setDragOver(true);
+      }}
+      onDragOver={(event) => {
+        if (!hasPiqaeBlockDrag(event.dataTransfer)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        setDragOver(true);
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+          setDragOver(false);
+      }}
+      onDrop={(event) => {
+        event.preventDefault();
+        const block = draggedBlock(event.dataTransfer);
+        if (block) insert(block);
+        else setDragOver(false);
+      }}
+    >
+      <span className="piqae-canvas-insertion-line" aria-hidden="true" />
+      <button
+        className="piqae-canvas-insertion-button"
+        type="button"
+        aria-label="Add content here"
+        aria-expanded={open}
+        aria-haspopup="menu"
+        onClick={(event) => {
+          event.stopPropagation();
+          setOpen((value) => !value);
+        }}
+      >
+        <Icon name="plus" />
+      </button>
+      {open ? (
+        <span
+          className="piqae-canvas-insertion-menu"
+          role="menu"
+          aria-label="Add content"
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              setOpen(false);
+            }
+          }}
+        >
+          {QUICK_INSERT_TYPES.map((type) => (
+            <button
+              key={type}
+              type="button"
+              role="menuitem"
+              onClick={(event) => {
+                event.stopPropagation();
+                insert(quickInsertBlock(type));
+              }}
+            >
+              <Icon name={quickInsertIcon(type)} />
+              {quickInsertLabel(type)}
+            </button>
+          ))}
+        </span>
+      ) : null}
+    </span>
   );
 }
 
@@ -1414,12 +1556,14 @@ function ToolButton({
   label,
   tone,
   disabled,
+  dragBlock,
   onClick,
 }: {
   icon: IconName;
   label: string;
   tone?: "critical";
   disabled?: boolean;
+  dragBlock?: () => Block;
   onClick(): void;
 }) {
   return (
@@ -1429,6 +1573,18 @@ function ToolButton({
       aria-label={label}
       data-tooltip={label}
       disabled={disabled}
+      draggable={Boolean(dragBlock) && !disabled}
+      onDragStart={(event) => {
+        if (!dragBlock || disabled) {
+          event.preventDefault();
+          return;
+        }
+        event.dataTransfer.effectAllowed = "copy";
+        event.dataTransfer.setData(
+          PIQAE_BLOCK_DRAG_TYPE,
+          JSON.stringify(dragBlock()),
+        );
+      }}
       onClick={onClick}
     >
       <Icon name={icon} />
@@ -2630,6 +2786,39 @@ export function insertBlockAfterPath(
     return block;
   });
 }
+export function insertBlockAtPath(
+  blocks: Block[],
+  path: BlockPath,
+  inserted: Block,
+): Block[] {
+  const [part, ...rest] = path;
+  if (!part) return [...blocks, inserted];
+  if (!rest.length) {
+    const next = [...blocks];
+    next.splice(Math.min(Math.max(part.index, 0), next.length), 0, inserted);
+    return next;
+  }
+  return blocks.map((block, index) => {
+    if (index !== part.index) return block;
+    const nextPart = rest[0]!;
+    if (nextPart.branch === "children" && "children" in block)
+      return {
+        ...block,
+        children: insertBlockAtPath(block.children, rest, inserted),
+      };
+    if (nextPart.branch === "then" && block.type === "conditional")
+      return {
+        ...block,
+        then: insertBlockAtPath(block.then, rest, inserted),
+      };
+    if (nextPart.branch === "else" && block.type === "conditional")
+      return {
+        ...block,
+        else: insertBlockAtPath(block.else ?? [], rest, inserted),
+      };
+    return block;
+  });
+}
 export function removeBlockAtPath(blocks: Block[], path: BlockPath): Block[] {
   const [part, ...rest] = path;
   if (!part) return blocks;
@@ -3049,6 +3238,95 @@ function authoringExpressionLabel(
   return value.type === "current_path"
     ? [scope, ...value.path].join(".")
     : expressionLabel(value);
+}
+function hasPiqaeBlockDrag(dataTransfer: DataTransfer) {
+  return Array.from(dataTransfer.types).includes(PIQAE_BLOCK_DRAG_TYPE);
+}
+function draggedBlock(dataTransfer: DataTransfer): Block | null {
+  const source = dataTransfer.getData(PIQAE_BLOCK_DRAG_TYPE);
+  if (!source || source.length > 65_536) return null;
+  try {
+    const value = JSON.parse(source) as unknown;
+    if (!value || typeof value !== "object") return null;
+    const type = (value as { type?: unknown }).type;
+    if (typeof type !== "string" || !DRAGGABLE_BLOCK_TYPES.has(type))
+      return null;
+    return value as Block;
+  } catch {
+    return null;
+  }
+}
+const DRAGGABLE_BLOCK_TYPES = new Set([
+  "section",
+  "stack",
+  "row",
+  "box",
+  "paragraph",
+  "heading",
+  "grid",
+  "table",
+  "repeat",
+  "data_list",
+  "conditional",
+  "spacer",
+  "divider",
+  "page_break",
+  "keep_together",
+  "image",
+  "image_value",
+  "qr",
+  "barcode",
+]);
+function quickInsertBlock(type: QuickInsertType): Block {
+  if (type === "paragraph")
+    return {
+      type: "paragraph",
+      content: [{ type: "text", value: "Start typing…" }],
+    };
+  if (type === "heading")
+    return {
+      type: "heading",
+      level: 2,
+      content: [{ type: "text", value: "Heading" }],
+    };
+  if (type === "image")
+    return {
+      type: "image",
+      resource: "shop.logo",
+      width_mm: 42,
+      height_mm: 18,
+      fit: "contain",
+    };
+  if (type === "divider") return { type: "divider" };
+  return { type: "spacer", height_mm: 6 };
+}
+function quickInsertIcon(type: QuickInsertType): IconName {
+  if (type === "paragraph") return "text";
+  if (type === "heading") return "heading";
+  return type;
+}
+function quickInsertLabel(type: QuickInsertType) {
+  if (type === "paragraph") return "Text";
+  if (type === "heading") return "Heading";
+  if (type === "spacer") return "Spacing";
+  return type[0]!.toUpperCase() + type.slice(1);
+}
+function defaultQrCode(): Block {
+  return {
+    type: "qr",
+    value: currentPathExpression("statusUrl"),
+    size_mm: 24,
+  };
+}
+function defaultBarcode(): Block {
+  return {
+    type: "barcode",
+    value: currentPathExpression("name"),
+    symbology: "code128",
+    width_mm: 48,
+    height_mm: 16,
+    human_readable: true,
+  };
 }
 function defaultTable(): Block {
   const current = (key: string): Expression =>

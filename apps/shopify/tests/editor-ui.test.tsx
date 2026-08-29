@@ -4,7 +4,10 @@ import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { createRoutesStub } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PrintPacketEditor } from "../app/components/PrintPacketEditor";
+import {
+  insertBlockAtPath,
+  PrintPacketEditor,
+} from "../app/components/PrintPacketEditor";
 import type { PrintPacket } from "../app/core/template-model";
 import Templates from "../app/routes/app.templates";
 import {
@@ -390,5 +393,103 @@ describe("Shopify document editor layout", () => {
         >
       ).columns.map((column) => column.cell),
     );
+  });
+
+  it("quick-adds common content into the hovered gap", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={packet} onChange={onChange} />,
+    );
+    const slots = page.querySelectorAll<HTMLElement>(
+      ".piqae-canvas-insertion-slot",
+    );
+    expect(slots).toHaveLength(3);
+
+    await act(async () => {
+      slots[1]
+        ?.querySelector<HTMLButtonElement>('[aria-label="Add content here"]')
+        ?.click();
+    });
+    const menu = slots[1]?.querySelector('[role="menu"]');
+    expect(menu?.textContent).toContain("Text");
+    expect(menu?.textContent).toContain("Heading");
+
+    await act(async () => {
+      Array.from(menu?.querySelectorAll("button") ?? [])
+        .find((button) => button.textContent?.includes("Heading"))
+        ?.click();
+    });
+    const next = onChange.mock.lastCall?.[0] as PrintPacket;
+    expect(authoredBody(next).map((block) => block.type)).toEqual([
+      "paragraph",
+      "heading",
+      "image",
+    ]);
+  });
+
+  it("makes toolbar blocks draggable into an exact insertion slot", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={packet} onChange={onChange} />,
+    );
+    const textTool = page.querySelector<HTMLButtonElement>(
+      'button[aria-label="Text"]',
+    );
+    const finalSlot = page.querySelectorAll<HTMLElement>(
+      ".piqae-canvas-insertion-slot",
+    )[2];
+    const values = new Map<string, string>();
+    const dataTransfer = {
+      effectAllowed: "none",
+      dropEffect: "none",
+      get types() {
+        return [...values.keys()];
+      },
+      setData(type: string, value: string) {
+        values.set(type, value);
+      },
+      getData(type: string) {
+        return values.get(type) ?? "";
+      },
+    } as DataTransfer;
+
+    expect(textTool?.draggable).toBe(true);
+    await act(async () => {
+      const dragStart = new Event("dragstart", { bubbles: true });
+      Object.defineProperty(dragStart, "dataTransfer", { value: dataTransfer });
+      textTool?.dispatchEvent(dragStart);
+      const drop = new Event("drop", { bubbles: true, cancelable: true });
+      Object.defineProperty(drop, "dataTransfer", { value: dataTransfer });
+      finalSlot?.dispatchEvent(drop);
+    });
+    const next = onChange.mock.lastCall?.[0] as PrintPacket;
+    expect(authoredBody(next).map((block) => block.type)).toEqual([
+      "paragraph",
+      "image",
+      "paragraph",
+    ]);
+  });
+
+  it("inserts at nested branch paths without flattening the document", () => {
+    const conditional = {
+      type: "conditional" as const,
+      condition: { type: "literal" as const, value: true },
+      then: [packet.body[0]!],
+      else: [],
+    };
+    const next = insertBlockAtPath(
+      [conditional],
+      [
+        { branch: "root", index: 0 },
+        { branch: "then", index: 0 },
+      ],
+      { type: "divider" },
+    );
+    expect(next[0]?.type).toBe("conditional");
+    if (next[0]?.type !== "conditional") throw new Error("unreachable");
+    expect(next[0].then.map((block) => block.type)).toEqual([
+      "divider",
+      "paragraph",
+    ]);
   });
 });
