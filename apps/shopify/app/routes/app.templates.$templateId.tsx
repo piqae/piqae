@@ -765,13 +765,14 @@ export default function TemplateEditor() {
                 ))}
               </div>
             ) : null}
-            {workspace === "visual" ? null : (
+            {workspace === "liquid" ? (
               <div className="piqae-workspace-toolbar">{workspaceControls}</div>
-            )}
+            ) : null}
             {workspace === "preview" ? (
               <PrintPacketPreview
                 value={document}
                 stock={selectedTarget?.stock}
+                workspaceControls={workspaceControls}
               />
             ) : workspace === "visual" ? (
               <PrintPacketEditor

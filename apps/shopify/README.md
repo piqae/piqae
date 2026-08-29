@@ -54,6 +54,21 @@ cannot be fabricated from profile dimensions. Printing sends the saved target
 id and exact design-specification revision so the control plane can revalidate
 the binding and stock immediately before handoff.
 
+## Editor preview data
+
+The in-editor Preview is a source and layout preview. It renders one
+representative pass through collection-driven content and keeps Shopify data
+bindings visible; it never fetches customer records merely because a merchant
+opens an editor. The authenticated print flow remains the authority for a
+data-resolved PDF.
+
+A recent-order preview of an unsaved draft requires a server-render endpoint
+that accepts that bounded draft plus authenticated order input. The current
+preview endpoint intentionally accepts only immutable published revisions, and
+the browser does not carry a second, partial PrintPacket evaluator. Until that
+contract exists, the editor must not imitate a rendered order with a divergent
+client-side implementation or serialize buyer data into the page by default.
+
 ## Piqae test runtime
 
 `PIQAE_SHOPIFY_RUNTIME` is explicit: `fake` uses only the loopback virtual
