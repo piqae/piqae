@@ -6,6 +6,65 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class CiReleaseContractTest(unittest.TestCase):
+    def test_shopify_image_builds_and_resolves_every_workspace_dependency(self) -> None:
+        dockerfile = (ROOT / "deploy/docker/Dockerfile.shopify").read_text(
+            encoding="utf-8"
+        )
+        manifest = dockerfile.index(
+            "COPY sdk/printpacket/package.json sdk/printpacket/package.json"
+        )
+        sdk_manifest = dockerfile.index(
+            "COPY sdk/typescript/package.json sdk/typescript/package.json"
+        )
+        install = dockerfile.index("RUN pnpm install --frozen-lockfile")
+        source = dockerfile.index("COPY sdk/printpacket sdk/printpacket")
+        sdk_source = dockerfile.index("COPY sdk/typescript sdk/typescript")
+        build = dockerfile.index("RUN pnpm --filter @printpacket/core build")
+        sdk_build = dockerfile.index("RUN pnpm --filter @piqae/sdk build")
+        workspace_resolve = dockerfile.index("await import('@printpacket/core')")
+        application = dockerfile.index("COPY apps/shopify apps/shopify")
+        deploy = dockerfile.index(
+            "RUN pnpm --filter @piqae/shopify-app --prod deploy --legacy /app"
+        )
+        production_resolve = dockerfile.index(
+            "RUN cd /app && node --input-type=module"
+        )
+        final_copy = dockerfile.index(
+            "COPY --from=shopify-production-build --chown=node:node /app /app"
+        )
+        self.assertLess(manifest, install)
+        self.assertLess(sdk_manifest, install)
+        self.assertLess(install, source)
+        self.assertLess(install, sdk_source)
+        self.assertLess(source, build)
+        self.assertLess(sdk_source, sdk_build)
+        self.assertLess(build, workspace_resolve)
+        self.assertLess(sdk_build, application)
+        self.assertLess(workspace_resolve, application)
+        self.assertLess(application, deploy)
+        self.assertLess(deploy, production_resolve)
+        self.assertLess(production_resolve, final_copy)
+
+        clean_target = (
+            "docker build --target shopify-production-build "
+            "--file deploy/docker/Dockerfile.shopify ."
+        )
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        xtask = (ROOT / "xtask/src/main.rs").read_text(encoding="utf-8")
+        railway_runbook = (
+            ROOT / "docs/operations/shopify-release.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn(clean_target, workflow)
+        self.assertIn("/sdk/printpacket/**", railway_runbook)
+        for argument in (
+            '"docker"',
+            '"build"',
+            '"--target"',
+            '"shopify-production-build"',
+            '"deploy/docker/Dockerfile.shopify"',
+        ):
+            self.assertIn(argument, xtask)
+
     def test_postgres_evidence_checkout_includes_release_tags(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         postgres = workflow.split("\n  rust-postgres:", 1)[1].split("\n  rust-macos:", 1)[0]

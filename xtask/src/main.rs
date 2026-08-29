@@ -953,6 +953,7 @@ const CHECKS: &[Check] = &[
         needs: &[
             Need::Tool("pnpm"),
             Need::Tool("bash"),
+            Need::Tool("docker"),
             Need::Tool("grep"),
             Need::Postgres,
         ],
@@ -961,6 +962,15 @@ const CHECKS: &[Check] = &[
             &["pnpm", "--filter", "@piqae/sdk", "build"],
             &["pnpm", "--filter", "@piqae/shopify-app", "check"],
             &["pnpm", "--filter", "@piqae/shopify-app", "test"],
+            &[
+                "docker",
+                "build",
+                "--target",
+                "shopify-production-build",
+                "--file",
+                "deploy/docker/Dockerfile.shopify",
+                ".",
+            ],
             &[
                 "bash",
                 "-c",

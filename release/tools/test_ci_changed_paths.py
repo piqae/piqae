@@ -45,6 +45,20 @@ class CiChangedPathsTests(unittest.TestCase):
         self.assertTrue(selected["shopify"] and selected["release_tooling"])
         self.assertFalse(selected["sdk"])
 
+    def test_shopify_image_selects_build_and_release_checks(self) -> None:
+        selected = classify(["deploy/docker/Dockerfile.shopify"])
+        self.assertEqual(
+            {group for group, enabled in selected.items() if enabled},
+            {"shopify", "release_tooling"},
+        )
+
+    def test_shopify_release_runbook_selects_its_contract_check(self) -> None:
+        selected = classify(["docs/operations/shopify-release.md"])
+        self.assertEqual(
+            {group for group, enabled in selected.items() if enabled},
+            {"release_tooling"},
+        )
+
     def test_every_checked_in_crate_selects_linux_rust(self) -> None:
         repository_root = Path(__file__).resolve().parents[2]
         crate_manifests = sorted((repository_root / "crates").glob("*/Cargo.toml"))
