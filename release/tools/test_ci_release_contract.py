@@ -71,6 +71,13 @@ class CiReleaseContractTest(unittest.TestCase):
         self.assertIn("fetch-depth: 0", postgres)
         self.assertIn("fetch-tags: true", postgres)
 
+    def test_railway_migration_lane_invokes_the_container_binary(self) -> None:
+        migrate = (ROOT / "railway.migrate.toml").read_text(encoding="utf-8")
+        self.assertIn(
+            'startCommand = "/usr/local/bin/piqae-server migrate"', migrate
+        )
+        self.assertIn('restartPolicyType = "NEVER"', migrate)
+
     def test_apple_app_and_sdk_share_one_explicit_linked_artifact(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         apple = workflow.split("\n  macos-shell:", 1)[1].split("\n  rust-windows:", 1)[0]
