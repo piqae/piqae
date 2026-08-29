@@ -44,8 +44,23 @@ checksum, and GitHub provenance all cover the exact published bytes.
 The manual **Piqae release** workflow defaults to `publish=false` and the
 `macos` artifact scope, producing a private, short-lived candidate. The
 explicit `all` scope retains Windows, Linux, container, Apple SDK, and Windows
-SDK builds for full certification. A protected `v*` tag uses the macOS lane;
-stable publication still accepts only a tag whose commit is already on `main`.
+SDK builds for full certification. A protected `v*` tag always selects `all`
+and fails closed unless every selected artifact succeeds; stable publication
+still accepts only a tag whose commit is already on `main`. Use the manual
+macOS scope before tagging when a faster signed candidate is required.
+The macOS candidate is built and audited in parallel with the selected sibling
+artifacts, but its protected promotion, appcast, stable manifest, and GitHub
+release remain blocked until the aggregate gate proves every selected job
+succeeded. Matrix jobs use `fail-fast: false`, and independent sibling jobs are
+not cancelled when another candidate fails, so their evidence remains useful
+without permitting a partial publication.
+
+Windows-only and Linux-only selectors are intentionally not exposed yet.
+Windows desktop remains Disabled in the support matrix, while the Linux bundle
+does not have an independent signed update-feed publisher. Adding either choice
+before those platform-specific publication contracts exist would create a
+selector that could build artifacts but could not truthfully complete a stable
+release. Use `all` for their current certification evidence.
 
 Before tagging:
 

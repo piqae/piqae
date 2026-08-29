@@ -15,6 +15,15 @@ on:
         description: Promote after the native-release environment gate
         required: true
         type: boolean
+    outputs:
+      artifact_name:
+        value: ${{ jobs.candidate.outputs.artifact_name }}
+      build_number:
+        value: ${{ jobs.candidate.outputs.build_number }}
+      release_mode:
+        value: ${{ jobs.candidate.outputs.release_mode }}
+      version:
+        value: ${{ jobs.candidate.outputs.version }}
 permissions:
   contents: read
 

@@ -63,16 +63,18 @@ jobs:
           REQUESTED_BUILD: ${{ inputs.build_number }}
           REQUESTED_PUBLISH: ${{ inputs.publish }}
           REQUESTED_VERSION: ${{ inputs.version }}
-          REQUESTED_PLATFORM: ${{ inputs.platform || 'macos' }}
+          REQUESTED_PLATFORM: ${{ inputs.platform }}
         run: |
           if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/tags/v* ]]; then
             version=${GITHUB_REF_NAME#v}
             build_number=$GITHUB_RUN_NUMBER
             tag=$GITHUB_REF_NAME
+            platform=all
           elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             version=$REQUESTED_VERSION
             build_number=$REQUESTED_BUILD
             tag=$GITHUB_REF_NAME
+            platform=${REQUESTED_PLATFORM:-macos}
             if [[ "$version" != "${GITHUB_REF_NAME#v}" ]]; then
               echo "Requested version must match the selected tag $GITHUB_REF_NAME." >&2
               exit 2
@@ -81,6 +83,7 @@ jobs:
             version=$REQUESTED_VERSION
             build_number=$REQUESTED_BUILD
             tag=""
+            platform=${REQUESTED_PLATFORM:-macos}
           fi
           if [[ ! "$version" =~ ^[0-9]+([.][0-9]+){2}([.-][0-9A-Za-z.-]+)?$ ]]; then
             echo "Version must be a safe SemVer-like value without a leading v." >&2
@@ -100,7 +103,6 @@ jobs:
             echo "Publication requires selecting a protected v* tag ref." >&2
             exit 1
           fi
-          platform=$REQUESTED_PLATFORM
           python3 release/tools/release_platform.py "$platform" >/dev/null
           if [[ "$publish" == true ]]; then
             ruby release/tools/check_product_release.rb \
@@ -178,6 +180,8 @@ jobs:
           cache: pnpm
       - name: Install CUPS development library
         run: sudo apt-get update && sudo apt-get install --yes libcups2-dev
+      - name: Install locked JavaScript workspace dependencies
+        run: pnpm install --frozen-lockfile
       - name: Run shared protocol, database, SDK and policy gates once
         run: cargo xtask release check --platform core
 
@@ -193,7 +197,9 @@ jobs:
     with:
       version: ${{ needs.prepare.outputs.version }}
       build_number: ${{ needs.prepare.outputs.build_number }}
-      publish: ${{ needs.prepare.outputs.publish == 'true' }}
+      # Promotion is deferred until every selected sibling has succeeded; this
+      # reusable call produces only the signed candidate and release evidence.
+      publish: false
     secrets: inherit
 
   windows:
@@ -465,18 +471,57 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
-  finalize:
-    name: Publish GitHub prerelease
+  promote_macos:
+    name: Promote verified macOS candidate after aggregate gate
     needs: [prepare, macos, windows, apple_sdk, windows_sdk, linux, server]
     if: >-
       always() && needs.prepare.outputs.publish == 'true'
       && needs.prepare.result == 'success'
       && needs.macos.result == 'success'
-      && (needs.windows.result == 'success' || needs.windows.result == 'skipped')
-      && (needs.apple_sdk.result == 'success' || needs.apple_sdk.result == 'skipped')
-      && (needs.windows_sdk.result == 'success' || needs.windows_sdk.result == 'skipped')
-      && (needs.linux.result == 'success' || needs.linux.result == 'skipped')
-      && (needs.server.result == 'success' || needs.server.result == 'skipped')
+      && (
+        (
+          needs.prepare.outputs.platform == 'macos'
+          && needs.windows.result == 'skipped'
+          && needs.apple_sdk.result == 'skipped'
+          && needs.windows_sdk.result == 'skipped'
+          && needs.linux.result == 'skipped'
+          && needs.server.result == 'skipped'
+        )
+        || (
+          needs.prepare.outputs.platform == 'all'
+          && (
+            (needs.prepare.outputs.windows_enabled == 'true' && needs.windows.result == 'success')
+            || (needs.prepare.outputs.windows_enabled == 'false' && needs.windows.result == 'skipped')
+          )
+          && needs.apple_sdk.result == 'success'
+          && needs.windows_sdk.result == 'success'
+          && needs.linux.result == 'success'
+          && needs.server.result == 'success'
+        )
+      )
+    permissions:
+      actions: read
+      attestations: read
+      contents: write
+    uses: ./.github/workflows/macos-promotion.yml
+    with:
+      source_run_id: ${{ github.run_id }}
+      source_sha: ${{ github.sha }}
+      tag: ${{ needs.prepare.outputs.tag }}
+      version: ${{ needs.macos.outputs.version }}
+      build_number: ${{ needs.macos.outputs.build_number }}
+      artifact_name: ${{ needs.macos.outputs.artifact_name }}
+      evidence_artifact_name: piqae-macos-${{ needs.macos.outputs.version }}-${{ needs.macos.outputs.build_number }}-evidence
+      recovery_mode: false
+    secrets: inherit
+
+  finalize:
+    name: Publish GitHub prerelease
+    needs: [prepare, promote_macos]
+    if: >-
+      always() && needs.prepare.outputs.publish == 'true'
+      && needs.prepare.result == 'success'
+      && needs.promote_macos.result == 'success'
     runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
