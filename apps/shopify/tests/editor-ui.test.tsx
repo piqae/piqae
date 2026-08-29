@@ -107,7 +107,8 @@ describe("Shopify document editor layout", () => {
         '[role="toolbar"][aria-label="Insert into document"]',
       ),
     ).not.toBeNull();
-    expect(toolbar?.querySelector(".piqae-selection-rail")).not.toBeNull();
+    expect(toolbar?.querySelector(".piqae-selection-rail")).toBeNull();
+    expect(toolbar?.children).toHaveLength(1);
 
     await act(async () => {
       page
@@ -117,6 +118,8 @@ describe("Shopify document editor layout", () => {
     expect(
       toolbar?.querySelector(".piqae-selection-title")?.textContent,
     ).toContain("Text");
+    expect(toolbar?.querySelector(".piqae-selection-rail")).not.toBeNull();
+    expect(toolbar?.children).toHaveLength(2);
     expect(toolbar?.querySelector("select.piqae-bar-input")).not.toBeNull();
 
     await act(async () => {
@@ -143,10 +146,18 @@ describe("Shopify document editor layout", () => {
     const card = page.querySelector(".piqae-editor-toolbar");
     const buttons = card?.querySelectorAll<HTMLButtonElement>("button") ?? [];
 
-    expect(card?.children).toHaveLength(2);
+    expect(card?.children).toHaveLength(1);
     expect(Array.from(buttons).every((button) => button.tabIndex >= 0)).toBe(
       true,
     );
     expect(page.querySelector(".piqae-page-sheet")).not.toBeNull();
+
+    await act(async () => {
+      page
+        .querySelector<HTMLElement>(".piqae-canvas-text")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(card?.children).toHaveLength(2);
+    expect(card?.querySelector(".piqae-selection-rail")).not.toBeNull();
   });
 });

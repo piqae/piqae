@@ -1158,13 +1158,6 @@
   padding-left: 0.3rem;
   border-left: 1px solid #e3e3e3;
 }
-.piqae-selection-hint {
-  align-self: center;
-  margin: 0;
-  padding: 0 0.55rem;
-  color: #616161;
-  font-size: 0.8rem;
-}
 .piqae-bar-fields {
   display: flex;
   flex-wrap: wrap;
