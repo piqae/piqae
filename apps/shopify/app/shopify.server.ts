@@ -35,6 +35,9 @@ const shopify = shopifyApp({
     .map((scope) => scope.trim())
     .filter(Boolean),
   distribution: configuredShopifyDistribution(),
+  future: {
+    expiringOfflineAccessTokens: true,
+  },
   sessionStorage,
   hooks: {
     afterAuth: async ({ session }) => {
