@@ -349,8 +349,9 @@ describe("Shopify document editor layout", () => {
       ".piqae-canvas-order-batch",
     );
 
-    expect(stage?.querySelector(".piqae-workspace-toolbar [role=group]")).not
-      .toBeNull;
+    expect(
+      stage?.querySelector(".piqae-workspace-toolbar [role=group]"),
+    ).not.toBeNull();
     expect(canvas).not.toBeNull();
     expect(canvas?.querySelector(".piqae-canvas-selectable")).toBeNull();
     expect(canvas?.querySelector(".piqae-canvas-badge")).toBeNull();
