@@ -256,9 +256,24 @@ export function PrintPacketEditor({
     if (!instance) return;
     const inserted = docToBlocks(schema.nodes.doc!.create(null, [node]))[0];
     if (!inserted) return;
-    const authoredBody = selection?.path
-      ? insertBlockAfterPath(latest.current.body, selection.path, inserted)
-      : [...latest.current.body, inserted];
+    const selectedPath = selection?.path;
+    const authoredBody = selectedPath
+      ? isProtectedOrderPageBreakPath(
+          latest.current.body,
+          selectedPath,
+          latest.current.media.kind,
+        )
+        ? insertBeforeTerminalOrderPageBreak(
+            latest.current.body,
+            inserted,
+            latest.current.media.kind,
+          )
+        : insertBlockAfterPath(latest.current.body, selectedPath, inserted)
+      : insertBeforeTerminalOrderPageBreak(
+          latest.current.body,
+          inserted,
+          latest.current.media.kind,
+        );
     const body = canonicalizeShopifyEditorBody(authoredBody);
     const nextDocument = { ...latest.current, body };
     latest.current = nextDocument;
@@ -293,6 +308,16 @@ export function PrintPacketEditor({
     const instance = view.current;
     if (!instance || !selection) return;
     if (selection.path) {
+      if (
+        isProtectedOrderPageBreakPath(
+          latest.current.body,
+          selection.path,
+          latest.current.media.kind,
+        )
+      ) {
+        setSelection(null);
+        return;
+      }
       const body = canonicalizeShopifyEditorBody(
         replaceBlockAtPath(latest.current.body, selection.path, block),
       );
@@ -326,6 +351,16 @@ export function PrintPacketEditor({
     const instance = view.current;
     if (!instance || !selection) return;
     if (selection.path) {
+      if (
+        isProtectedOrderPageBreakPath(
+          latest.current.body,
+          selection.path,
+          latest.current.media.kind,
+        )
+      ) {
+        setSelection(null);
+        return;
+      }
       const body = canonicalizeShopifyEditorBody(
         removeBlockAtPath(latest.current.body, selection.path),
       );
@@ -350,6 +385,15 @@ export function PrintPacketEditor({
   };
   const moveSelected = (direction: -1 | 1) => {
     if (!selection?.path) return;
+    if (
+      !canMoveBlockAtPath(
+        latest.current.body,
+        selection.path,
+        direction,
+        latest.current.media.kind,
+      )
+    )
+      return;
     const body = canonicalizeShopifyEditorBody(
       moveBlockAtPath(latest.current.body, selection.path, direction),
     );
@@ -363,11 +407,25 @@ export function PrintPacketEditor({
     view.current?.updateState(
       EditorState.create({ schema, doc: blocksToDoc(body) }),
     );
-    setSelection({ position: -1, path: nextPath, block: selection.block });
+    setSelection(
+      isProtectedOrderPageBreakPath(body, nextPath, latest.current.media.kind)
+        ? null
+        : { position: -1, path: nextPath, block: selection.block },
+    );
     onChange(nextDocument);
   };
   const duplicateSelected = () => {
     if (!selection?.path) return;
+    if (
+      isProtectedOrderPageBreakPath(
+        latest.current.body,
+        selection.path,
+        latest.current.media.kind,
+      )
+    ) {
+      setSelection(null);
+      return;
+    }
     const body = canonicalizeShopifyEditorBody(
       insertBlockAfterPath(
         latest.current.body,
@@ -550,7 +608,12 @@ export function PrintPacketEditor({
                   disabled={
                     disabled ||
                     !selection.path ||
-                    selection.path.at(-1)?.index === 0
+                    !canMoveBlockAtPath(
+                      canonicalBody,
+                      selection.path,
+                      -1,
+                      value.media.kind,
+                    )
                   }
                   onClick={() => moveSelected(-1)}
                 />
@@ -560,22 +623,44 @@ export function PrintPacketEditor({
                   disabled={
                     disabled ||
                     !selection.path ||
-                    selection.path.at(-1)?.index ===
-                      siblingsAtPath(value.body, selection.path).length - 1
+                    !canMoveBlockAtPath(
+                      canonicalBody,
+                      selection.path,
+                      1,
+                      value.media.kind,
+                    )
                   }
                   onClick={() => moveSelected(1)}
                 />
                 <ToolButton
                   icon="duplicate"
                   label="Duplicate"
-                  disabled={disabled || !selection.path}
+                  disabled={
+                    disabled ||
+                    !selection.path ||
+                    isProtectedOrderPageBreakPath(
+                      canonicalBody,
+                      selection.path,
+                      value.media.kind,
+                    )
+                  }
                   onClick={duplicateSelected}
                 />
                 <ToolButton
                   icon="trash"
                   label="Delete"
                   tone="critical"
-                  disabled={disabled}
+                  disabled={
+                    disabled ||
+                    Boolean(
+                      selection.path &&
+                      isProtectedOrderPageBreakPath(
+                        canonicalBody,
+                        selection.path,
+                        value.media.kind,
+                      ),
+                    )
+                  }
                   onClick={removeSelected}
                 />
               </span>
@@ -2902,6 +2987,92 @@ function gridBoundaryPercent(columns: number[], index: number) {
   const right = columns[index + 1] ?? 1;
   return Math.round((left / Math.max(left + right, 0.01)) * 100);
 }
+
+function rootOrderRepeat(
+  blocks: Block[],
+): Extract<Block, { type: "repeat" }> | null {
+  const block = blocks.length === 1 ? blocks[0] : undefined;
+  return block?.type === "repeat" &&
+    block.items.type === "path" &&
+    block.items.path.length === 1 &&
+    block.items.path[0] === "orders"
+    ? block
+    : null;
+}
+
+/** Inserts author content before the non-editable page separator, when present. */
+export function insertBeforeTerminalOrderPageBreak(
+  blocks: Block[],
+  inserted: Block,
+  mediaKind: PrintPacket["media"]["kind"],
+): Block[] {
+  const repeat = rootOrderRepeat(blocks);
+  if (
+    mediaKind !== "paged" ||
+    !repeat ||
+    repeat.children.at(-1)?.type !== "page_break"
+  )
+    return [...blocks, inserted];
+  return [
+    {
+      ...repeat,
+      children: [
+        ...repeat.children.slice(0, -1),
+        inserted,
+        repeat.children.at(-1)!,
+      ],
+    },
+  ];
+}
+
+/** True only for the structural separator at the end of the root orders batch. */
+export function isProtectedOrderPageBreakPath(
+  blocks: Block[],
+  path: BlockPath,
+  mediaKind: PrintPacket["media"]["kind"],
+) {
+  if (mediaKind !== "paged" || path.length !== 2) return false;
+  const [rootPart, childPart] = path;
+  const repeat = rootOrderRepeat(blocks);
+  return Boolean(
+    repeat &&
+    rootPart?.branch === "root" &&
+    rootPart.index === 0 &&
+    childPart?.branch === "children" &&
+    childPart.index === repeat.children.length - 1 &&
+    repeat.children.at(-1)?.type === "page_break",
+  );
+}
+
+/** Prevents content from being moved across the structural order separator. */
+export function canMoveBlockAtPath(
+  blocks: Block[],
+  path: BlockPath,
+  direction: -1 | 1,
+  mediaKind: PrintPacket["media"]["kind"],
+) {
+  const part = path.at(-1);
+  if (!part || isProtectedOrderPageBreakPath(blocks, path, mediaKind))
+    return false;
+  const siblings = siblingsAtPath(blocks, path);
+  const target = part.index + direction;
+  if (target < 0 || target >= siblings.length) return false;
+  const repeat = rootOrderRepeat(blocks);
+  const isRootOrderChild =
+    path.length === 2 &&
+    path[0]?.branch === "root" &&
+    path[0]?.index === 0 &&
+    part.branch === "children";
+  return !(
+    direction === 1 &&
+    mediaKind === "paged" &&
+    repeat &&
+    isRootOrderChild &&
+    repeat.children.at(-1)?.type === "page_break" &&
+    target === repeat.children.length - 1
+  );
+}
+
 /** The list a path's final segment indexes into, so move limits are accurate. */
 export function siblingsAtPath(blocks: Block[], path: BlockPath): Block[] {
   const [part, ...rest] = path;

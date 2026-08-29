@@ -243,6 +243,40 @@ describe("Shopify document editor layout", () => {
     expect(nextRepeat.children.at(-2)?.type).toBe("paragraph");
   });
 
+  it("keeps toolbar insertion and movement inside the terminal order separator", async () => {
+    const invoice = structuredClone(
+      starterTemplates.find(({ id }) => id === "invoice")!.specification,
+    );
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={invoice} onChange={onChange} />,
+    );
+    const framing = page.querySelector<HTMLElement>(
+      ".piqae-canvas-protected-framing",
+    )!;
+    const finalAuthorSlot = framing.previousElementSibling as HTMLElement;
+    const finalAuthorBlock =
+      finalAuthorSlot.previousElementSibling as HTMLElement;
+
+    await act(async () => {
+      page
+        .querySelector<HTMLButtonElement>('button[aria-label="Text"]')
+        ?.click();
+    });
+    const inserted = onChange.mock.lastCall?.[0] as PrintPacket;
+    const insertedRepeat = inserted.body[0];
+    expect(insertedRepeat?.type).toBe("repeat");
+    if (insertedRepeat?.type !== "repeat") return;
+    expect(insertedRepeat.children.at(-1)?.type).toBe("page_break");
+    expect(insertedRepeat.children.at(-2)?.type).toBe("paragraph");
+
+    await act(async () => finalAuthorBlock.click());
+    expect(
+      page.querySelector<HTMLButtonElement>('button[aria-label="Move down"]')
+        ?.disabled,
+    ).toBe(true);
+  });
+
   it("keeps Preview chrome-free and aligned with the editor workspace", async () => {
     const invoice = starterTemplates.find(
       ({ id }) => id === "invoice",

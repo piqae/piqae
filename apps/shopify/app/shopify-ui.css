@@ -376,7 +376,7 @@
   display: flex;
   box-sizing: border-box;
   width: max-content;
-  max-width: min(28rem, calc(100vw - 2rem));
+  max-width: min(28rem, 100%);
   flex-wrap: wrap;
   justify-content: center;
   gap: 0.2rem;
