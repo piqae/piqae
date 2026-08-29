@@ -151,12 +151,14 @@ export function PrintPacketEditor({
   disabled,
   customFields = [],
   stock = null,
+  workspaceControls,
   onChange,
 }: {
   value: PrintPacket;
   disabled?: boolean;
   customFields?: readonly ShopifyDocumentField[];
   stock?: DesignStock;
+  workspaceControls?: ReactNode;
   onChange(document: PrintPacket): void;
 }) {
   const allAuthoringFields = [...AUTHORING_FIELDS, ...customFields];
@@ -347,141 +349,204 @@ export function PrintPacketEditor({
   };
   return (
     <div className="piqae-word-editor">
-      <div
-        className="piqae-tool-rail"
-        role="toolbar"
-        aria-label="Insert into document"
-      >
-        <div className="piqae-tool-group">
-          <ToolButton
-            icon="text"
-            label="Text"
-            disabled={disabled}
-            onClick={() =>
-              insert(
-                schema.nodes.paragraph!.create(
-                  {},
-                  schema.text("Start typing…"),
-                ),
-              )
-            }
-          />
-          <ToolButton
-            icon="heading"
-            label="Heading"
-            disabled={disabled}
-            onClick={() =>
-              insert(
-                schema.nodes.heading!.create(
-                  { level: 2 },
-                  schema.text("Heading"),
-                ),
-              )
-            }
-          />
-          <InsertDataButton
-            fields={insertionFields}
-            disabled={disabled}
-            onInsert={insertVariable}
-          />
+      <div className="piqae-editor-toolbar">
+        <div className="piqae-editor-toolbar-primary">
+          {workspaceControls ? (
+            <div className="piqae-editor-toolbar-workspaces">
+              {workspaceControls}
+            </div>
+          ) : null}
+          {workspaceControls ? <span className="piqae-tool-divider" /> : null}
+          <div
+            className="piqae-tool-rail"
+            role="toolbar"
+            aria-label="Insert into document"
+          >
+            <div className="piqae-tool-group">
+              <ToolButton
+                icon="text"
+                label="Text"
+                disabled={disabled}
+                onClick={() =>
+                  insert(
+                    schema.nodes.paragraph!.create(
+                      {},
+                      schema.text("Start typing…"),
+                    ),
+                  )
+                }
+              />
+              <ToolButton
+                icon="heading"
+                label="Heading"
+                disabled={disabled}
+                onClick={() =>
+                  insert(
+                    schema.nodes.heading!.create(
+                      { level: 2 },
+                      schema.text("Heading"),
+                    ),
+                  )
+                }
+              />
+              <InsertDataButton
+                fields={insertionFields}
+                disabled={disabled}
+                onInsert={insertVariable}
+              />
+            </div>
+            <span className="piqae-tool-divider" />
+            <div className="piqae-tool-group">
+              <ToolButton
+                icon="table"
+                label="Line items"
+                disabled={disabled}
+                onClick={() => insertBlock(defaultTable())}
+              />
+              <ToolButton
+                icon="repeat"
+                label="Repeating content"
+                disabled={disabled}
+                onClick={() => insertBlock(defaultRepeat())}
+              />
+              <ToolButton
+                icon="condition"
+                label="Conditional section"
+                disabled={disabled}
+                onClick={() => insertBlock(defaultConditional())}
+              />
+            </div>
+            <span className="piqae-tool-divider" />
+            <div className="piqae-tool-group">
+              <ToolButton
+                icon="image"
+                label="Image"
+                disabled={disabled}
+                onClick={() =>
+                  insertBlock({
+                    type: "image",
+                    resource: "shop.logo",
+                    width_mm: 42,
+                    height_mm: 18,
+                    fit: "contain",
+                  })
+                }
+              />
+              <ToolButton
+                icon="qr"
+                label="QR code"
+                disabled={disabled}
+                onClick={() =>
+                  insertBlock({
+                    type: "qr",
+                    value: currentPathExpression("statusUrl"),
+                    size_mm: 24,
+                  })
+                }
+              />
+              <ToolButton
+                icon="barcode"
+                label="Barcode"
+                disabled={disabled}
+                onClick={() =>
+                  insertBlock({
+                    type: "barcode",
+                    value: currentPathExpression("name"),
+                    symbology: "code128",
+                    width_mm: 48,
+                    height_mm: 16,
+                    human_readable: true,
+                  })
+                }
+              />
+            </div>
+            <span className="piqae-tool-divider" />
+            <div className="piqae-tool-group">
+              <ToolButton
+                icon="columns"
+                label="Columns"
+                disabled={disabled}
+                onClick={() => insertBlock(defaultGrid())}
+              />
+              <ToolButton
+                icon="stack"
+                label="Stack"
+                disabled={disabled}
+                onClick={() => insertBlock(defaultContainer("stack"))}
+              />
+              <ToolButton
+                icon="row"
+                label="Row"
+                disabled={disabled}
+                onClick={() => insertBlock(defaultContainer("row"))}
+              />
+              <ToolButton
+                icon="divider"
+                label="Divider"
+                disabled={disabled}
+                onClick={() => insert(schema.nodes.divider!.create())}
+              />
+              <ToolButton
+                icon="spacer"
+                label="Spacing"
+                disabled={disabled}
+                onClick={() => insertBlock({ type: "spacer", height_mm: 6 })}
+              />
+            </div>
+          </div>
         </div>
-        <span className="piqae-tool-divider" />
-        <div className="piqae-tool-group">
-          <ToolButton
-            icon="table"
-            label="Line items"
-            disabled={disabled}
-            onClick={() => insertBlock(defaultTable())}
-          />
-          <ToolButton
-            icon="repeat"
-            label="Repeating content"
-            disabled={disabled}
-            onClick={() => insertBlock(defaultRepeat())}
-          />
-          <ToolButton
-            icon="condition"
-            label="Conditional section"
-            disabled={disabled}
-            onClick={() => insertBlock(defaultConditional())}
-          />
-        </div>
-        <span className="piqae-tool-divider" />
-        <div className="piqae-tool-group">
-          <ToolButton
-            icon="image"
-            label="Image"
-            disabled={disabled}
-            onClick={() =>
-              insertBlock({
-                type: "image",
-                resource: "shop.logo",
-                width_mm: 42,
-                height_mm: 18,
-                fit: "contain",
-              })
-            }
-          />
-          <ToolButton
-            icon="qr"
-            label="QR code"
-            disabled={disabled}
-            onClick={() =>
-              insertBlock({
-                type: "qr",
-                value: currentPathExpression("statusUrl"),
-                size_mm: 24,
-              })
-            }
-          />
-          <ToolButton
-            icon="barcode"
-            label="Barcode"
-            disabled={disabled}
-            onClick={() =>
-              insertBlock({
-                type: "barcode",
-                value: currentPathExpression("name"),
-                symbology: "code128",
-                width_mm: 48,
-                height_mm: 16,
-                human_readable: true,
-              })
-            }
-          />
-        </div>
-        <span className="piqae-tool-divider" />
-        <div className="piqae-tool-group">
-          <ToolButton
-            icon="columns"
-            label="Columns"
-            disabled={disabled}
-            onClick={() => insertBlock(defaultGrid())}
-          />
-          <ToolButton
-            icon="stack"
-            label="Stack"
-            disabled={disabled}
-            onClick={() => insertBlock(defaultContainer("stack"))}
-          />
-          <ToolButton
-            icon="row"
-            label="Row"
-            disabled={disabled}
-            onClick={() => insertBlock(defaultContainer("row"))}
-          />
-          <ToolButton
-            icon="divider"
-            label="Divider"
-            disabled={disabled}
-            onClick={() => insert(schema.nodes.divider!.create())}
-          />
-          <ToolButton
-            icon="spacer"
-            label="Spacing"
-            disabled={disabled}
-            onClick={() => insertBlock({ type: "spacer", height_mm: 6 })}
-          />
+        <div className="piqae-selection-rail" aria-live="polite">
+          {selection?.path ? (
+            <div className="piqae-selection-bar">
+              <span className="piqae-selection-title">
+                <Icon name={blockIcon(selection.block)} />
+                {blockTitle(selection.block)}
+              </span>
+              <SelectionSettings
+                block={selection.block}
+                disabled={disabled}
+                authoringFields={insertionFields}
+                scope={insertionScope}
+                onChange={updateSelected}
+              />
+              <span className="piqae-selection-spacer" />
+              <span className="piqae-selection-actions">
+                <ToolButton
+                  icon="up"
+                  label="Move up"
+                  disabled={disabled || selection.path.at(-1)?.index === 0}
+                  onClick={() => moveSelected(-1)}
+                />
+                <ToolButton
+                  icon="down"
+                  label="Move down"
+                  disabled={
+                    disabled ||
+                    selection.path.at(-1)?.index ===
+                      siblingsAtPath(value.body, selection.path).length - 1
+                  }
+                  onClick={() => moveSelected(1)}
+                />
+                <ToolButton
+                  icon="duplicate"
+                  label="Duplicate"
+                  disabled={disabled}
+                  onClick={duplicateSelected}
+                />
+                <ToolButton
+                  icon="trash"
+                  label="Delete"
+                  tone="critical"
+                  disabled={disabled}
+                  onClick={removeSelected}
+                />
+              </span>
+            </div>
+          ) : (
+            <p className="piqae-selection-hint">
+              Select anything on the page to edit it, or add content above.
+            </p>
+          )}
         </div>
       </div>
       <div className="piqae-editor-workspace">
@@ -493,60 +558,6 @@ export function PrintPacketEditor({
         ) : null}
         <MediaRuler value={value} stock={stock} />
         <div className="piqae-canvas-wrap">
-          <div className="piqae-selection-rail" aria-live="polite">
-            {selection?.path ? (
-              <div className="piqae-selection-bar">
-                <span className="piqae-selection-title">
-                  <Icon name={blockIcon(selection.block)} />
-                  {blockTitle(selection.block)}
-                </span>
-                <SelectionSettings
-                  block={selection.block}
-                  disabled={disabled}
-                  authoringFields={insertionFields}
-                  scope={insertionScope}
-                  onChange={updateSelected}
-                />
-                <span className="piqae-selection-spacer" />
-                <span className="piqae-selection-actions">
-                  <ToolButton
-                    icon="up"
-                    label="Move up"
-                    disabled={disabled || selection.path.at(-1)?.index === 0}
-                    onClick={() => moveSelected(-1)}
-                  />
-                  <ToolButton
-                    icon="down"
-                    label="Move down"
-                    disabled={
-                      disabled ||
-                      selection.path.at(-1)?.index ===
-                        siblingsAtPath(value.body, selection.path).length - 1
-                    }
-                    onClick={() => moveSelected(1)}
-                  />
-                  <ToolButton
-                    icon="duplicate"
-                    label="Duplicate"
-                    disabled={disabled}
-                    onClick={duplicateSelected}
-                  />
-                  <ToolButton
-                    icon="trash"
-                    label="Delete"
-                    tone="critical"
-                    disabled={disabled}
-                    onClick={removeSelected}
-                  />
-                </span>
-              </div>
-            ) : (
-              <p className="piqae-selection-hint">
-                Select anything on the page to edit it, or add content from the
-                toolbar above.
-              </p>
-            )}
-          </div>
           <div
             className={`piqae-page-sheet piqae-rendered-canvas piqae-media-${value.media.kind}`}
             style={canvasStyle(value)}
