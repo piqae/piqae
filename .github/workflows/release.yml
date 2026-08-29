@@ -19,6 +19,14 @@ on:
         type: boolean
         required: true
         default: false
+      platform:
+        description: Artifact scope; macOS is the fast native lane, all is full certification
+        type: choice
+        options:
+          - macos
+          - all
+        required: true
+        default: macos
 
 permissions:
   contents: read
@@ -41,6 +49,7 @@ jobs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
       windows_enabled: ${{ steps.release.outputs.windows_enabled }}
+      platform: ${{ steps.release.outputs.platform }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -54,6 +63,7 @@ jobs:
           REQUESTED_BUILD: ${{ inputs.build_number }}
           REQUESTED_PUBLISH: ${{ inputs.publish }}
           REQUESTED_VERSION: ${{ inputs.version }}
+          REQUESTED_PLATFORM: ${{ inputs.platform || 'macos' }}
         run: |
           if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/tags/v* ]]; then
             version=${GITHUB_REF_NAME#v}
@@ -90,6 +100,8 @@ jobs:
             echo "Publication requires selecting a protected v* tag ref." >&2
             exit 1
           fi
+          platform=$REQUESTED_PLATFORM
+          python3 release/tools/release_platform.py "$platform" >/dev/null
           if [[ "$publish" == true ]]; then
             ruby release/tools/check_product_release.rb \
               --product --release-version "$version"
@@ -114,6 +126,7 @@ jobs:
             echo "build_number=$build_number"
             echo "publish=$publish"
             echo "tag=$tag"
+            python3 release/tools/release_platform.py "$platform"
             windows_tier=$(ruby -e 'require "yaml"; puts YAML.load_file("release/support-matrix.yaml").fetch("platforms").fetch("windows_10_11_x86_64").fetch("tier")')
             if [[ "$windows_tier" == disabled ]]; then
               echo "windows_enabled=false"
@@ -122,9 +135,55 @@ jobs:
             fi
           } >> "$GITHUB_OUTPUT"
 
+  core:
+    name: Shared release gates
+    needs: prepare
+    runs-on: ${{ vars.PIQAE_CI_RUST_RUNNER || vars.PIQAE_CI_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 50
+    services:
+      postgres:
+        image: postgres:16@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_DB: piqae_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d piqae_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PIQAE_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/piqae_test
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.88.0
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: release-core
+          save-if: ${{ github.ref_type == 'tag' }}
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - name: Install CUPS development library
+        run: sudo apt-get update && sudo apt-get install --yes libcups2-dev
+      - name: Run shared protocol, database, SDK and policy gates once
+        run: cargo xtask release check --platform core
+
   macos:
     name: macOS signed candidate and promotion
-    needs: prepare
+    needs: [prepare, core]
     permissions:
       actions: read
       attestations: write
@@ -139,8 +198,8 @@ jobs:
 
   windows:
     name: Windows signed candidate and promotion
-    needs: prepare
-    if: needs.prepare.outputs.windows_enabled == 'true'
+    needs: [prepare, core]
+    if: needs.prepare.outputs.platform == 'all' && needs.prepare.outputs.windows_enabled == 'true'
     permissions:
       actions: read
       attestations: write
@@ -154,7 +213,8 @@ jobs:
 
   apple_sdk:
     name: Apple embedded node SDK candidate
-    needs: prepare
+    needs: [prepare, core]
+    if: needs.prepare.outputs.platform == 'all'
     runs-on: ${{ vars.PIQAE_RELEASE_MACOS_RUNNER || 'macos-15' }}
     timeout-minutes: 45
     permissions:
@@ -212,7 +272,8 @@ jobs:
 
   windows_sdk:
     name: Windows embedded node SDK candidate
-    needs: prepare
+    needs: [prepare, core]
+    if: needs.prepare.outputs.platform == 'all'
     runs-on: ${{ vars.PIQAE_RELEASE_WINDOWS_RUNNER || 'windows-latest' }}
     timeout-minutes: 45
     permissions:
@@ -274,7 +335,8 @@ jobs:
 
   linux:
     name: Linux (${{ matrix.artifact }})
-    needs: prepare
+    needs: [prepare, core]
+    if: needs.prepare.outputs.platform == 'all'
     strategy:
       fail-fast: false
       matrix:
@@ -353,7 +415,8 @@ jobs:
 
   server:
     name: Container (${{ matrix.name }})
-    needs: prepare
+    needs: [prepare, core]
+    if: needs.prepare.outputs.platform == 'all'
     runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     strategy:
@@ -410,10 +473,10 @@ jobs:
       && needs.prepare.result == 'success'
       && needs.macos.result == 'success'
       && (needs.windows.result == 'success' || needs.windows.result == 'skipped')
-      && needs.apple_sdk.result == 'success'
-      && needs.windows_sdk.result == 'success'
-      && needs.linux.result == 'success'
-      && needs.server.result == 'success'
+      && (needs.apple_sdk.result == 'success' || needs.apple_sdk.result == 'skipped')
+      && (needs.windows_sdk.result == 'success' || needs.windows_sdk.result == 'skipped')
+      && (needs.linux.result == 'success' || needs.linux.result == 'skipped')
+      && (needs.server.result == 'success' || needs.server.result == 'skipped')
     runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
@@ -421,16 +484,19 @@ jobs:
       contents: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.prepare.outputs.platform == 'all'
         with:
           pattern: piqae-linux-*
           path: linux-artifacts
           merge-multiple: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.prepare.outputs.platform == 'all'
         with:
           pattern: piqae-node-*-sdk
           path: sdk-artifacts
           merge-multiple: true
       - name: Attach Linux and SDK assets and publish the draft prerelease
+        if: needs.prepare.outputs.platform == 'all'
         env:
           CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'piqae/piqae' }}
           GH_REPO: ${{ github.repository }}
@@ -446,3 +512,19 @@ jobs:
           gh release upload "$RELEASE_TAG" linux-artifacts/* --clobber
           gh release upload "$RELEASE_TAG" sdk-artifacts/* --clobber
           gh release edit "$RELEASE_TAG" --draft=false --prerelease
+      - name: Publish the macOS-only draft prerelease
+        if: needs.prepare.outputs.platform == 'macos'
+        env:
+          CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'piqae/piqae' }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REPOSITORY" != "$CANONICAL_REPOSITORY" ]]; then
+            echo "GitHub release publishing is enabled only in $CANONICAL_REPOSITORY." >&2
+            exit 1
+          fi
+          gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' | grep -Fx true
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease \
+            --notes "macOS Preview release. This release intentionally contains only the signed, notarised universal macOS package, updater, checksums, SBOM, and provenance. Windows, Linux, container, and embedded SDK artifacts require the all-platform certification lane."

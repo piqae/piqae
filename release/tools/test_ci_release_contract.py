@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import unittest
 
 
@@ -118,6 +119,37 @@ class CiReleaseContractTest(unittest.TestCase):
             windows_pack.index("dotnet pack"),
         )
         self.assertIn("/p:PiqaeThirdPartyLicenses=", windows_pack)
+
+    def test_release_workflow_has_bounded_macos_and_explicit_full_scopes(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn("platform:\n        description: Artifact scope", workflow)
+        self.assertIn("default: macos", workflow)
+        self.assertIn('release_platform.py "$platform"', workflow)
+        self.assertEqual(
+            workflow.count("cargo xtask release check --platform core"), 1
+        )
+        self.assertIn("needs: [prepare, core]", workflow)
+        for job in ("windows", "apple_sdk", "windows_sdk", "linux", "server"):
+            match = re.search(rf"(?ms)^  {job}:.*?(?=^  [a-z_]+:|\Z)", workflow)
+            self.assertIsNotNone(match)
+            section = match.group(0)
+            self.assertIn("needs.prepare.outputs.platform == 'all'", section)
+        self.assertIn("Publish the macOS-only draft prerelease", workflow)
+        self.assertIn("intentionally contains only", workflow)
+
+    def test_apple_xcframework_honors_cargo_target_directory(self) -> None:
+        script = (ROOT / "sdk/apple/scripts/build-xcframework.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('cargo_target_directory=$(cargo metadata', script)
+        self.assertIn(
+            '"$cargo_target_directory/aarch64-apple-darwin/release/libpiqae_node_ffi.a"',
+            script,
+        )
+        self.assertNotIn(
+            '"$repository_root/target/aarch64-apple-darwin/release/libpiqae_node_ffi.a"',
+            script,
+        )
 
 
 if __name__ == "__main__":

@@ -24,6 +24,23 @@ for command in cargo rustup lipo python3 xcodebuild swift shasum xattr zip; do
   fi
 done
 
+# Cargo may place target output outside the checkout when CI or a developer
+# supplies CARGO_TARGET_DIR. Resolve the authoritative directory through Cargo
+# instead of assuming repository_root/target, and keep every lookup below it.
+cargo_target_directory=$(cargo metadata \
+  --manifest-path "$repository_root/Cargo.toml" \
+  --locked \
+  --no-deps \
+  --format-version 1 \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
+case "$cargo_target_directory" in
+  /*) ;;
+  *)
+    echo "Cargo returned a non-absolute target directory." >&2
+    exit 2
+    ;;
+esac
+
 for target in \
   aarch64-apple-darwin \
   x86_64-apple-darwin \
@@ -66,14 +83,14 @@ macos_library="$temporary_directory/libPiqaeNode-macos.a"
 simulator_library="$temporary_directory/libPiqaeNode-simulator.a"
 device_library="$temporary_directory/libPiqaeNode-device.a"
 lipo -create \
-  "$repository_root/target/aarch64-apple-darwin/release/libpiqae_node_ffi.a" \
-  "$repository_root/target/x86_64-apple-darwin/release/libpiqae_node_ffi.a" \
+  "$cargo_target_directory/aarch64-apple-darwin/release/libpiqae_node_ffi.a" \
+  "$cargo_target_directory/x86_64-apple-darwin/release/libpiqae_node_ffi.a" \
   -output "$macos_library"
 lipo -create \
-  "$repository_root/target/aarch64-apple-ios-sim/release/libpiqae_node_ffi.a" \
-  "$repository_root/target/x86_64-apple-ios/release/libpiqae_node_ffi.a" \
+  "$cargo_target_directory/aarch64-apple-ios-sim/release/libpiqae_node_ffi.a" \
+  "$cargo_target_directory/x86_64-apple-ios/release/libpiqae_node_ffi.a" \
   -output "$simulator_library"
-cp "$repository_root/target/aarch64-apple-ios/release/libpiqae_node_ffi.a" "$device_library"
+cp "$cargo_target_directory/aarch64-apple-ios/release/libpiqae_node_ffi.a" "$device_library"
 
 xcodebuild -create-xcframework \
   -library "$macos_library" -headers "$headers" \

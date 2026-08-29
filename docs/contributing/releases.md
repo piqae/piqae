@@ -9,6 +9,14 @@ Release support is evidence-gated. Run:
 cargo xtask release check
 ```
 
+The default is the explicit full-certification scope, equivalent to
+`cargo xtask release check --platform all`. A macOS release operator can use
+`--platform macos` to run the shared database, protocol, JavaScript, licence,
+and source-policy gates plus the macOS shell and linked Apple runtime checks,
+while excluding Windows and Linux native packages. CI uses
+`--platform core` for the shared gates exactly once before platform packaging;
+that internal scope does not produce a releasable native candidate by itself.
+
 The command performs the full non-physical test suite, builds the JavaScript
 workspace, checks dependency policy when `cargo-deny` is available, validates
 license declarations, and requires a clean working tree.
@@ -33,9 +41,11 @@ appcast for publication. A user-facing package is rebuilt from the reviewed tag
 on the target hosted runner so its platform signature, update signature, SBOM,
 checksum, and GitHub provenance all cover the exact published bytes.
 
-The manual **Piqae release** workflow defaults to `publish=false` and produces
-private, short-lived candidates. Stable publication accepts only a protected
-`v*` tag whose commit is already on `main`.
+The manual **Piqae release** workflow defaults to `publish=false` and the
+`macos` artifact scope, producing a private, short-lived candidate. The
+explicit `all` scope retains Windows, Linux, container, Apple SDK, and Windows
+SDK builds for full certification. A protected `v*` tag uses the macOS lane;
+stable publication still accepts only a tag whose commit is already on `main`.
 
 Before tagging:
 
@@ -55,13 +65,16 @@ Then:
 2. Create and push `v<version>` at that merged commit.
 3. Review the candidate evidence and approve the protected `native-release`
    environment.
-4. Let the single **Piqae release** workflow publish the signed macOS and
-   Windows packages, Linux bundles, container images, stable appcasts, release
-   manifest, provenance-bearing Apple/Windows embedded SDK candidates, and
-   GitHub prerelease. Embedded SDK candidates remain unsigned Preview assets
-   until their package-signing gates are configured; the workflow does not
-   publish them to a package registry. Never start the platform workflows
-   separately for the same version.
+4. Let the single **Piqae release** workflow publish exactly the selected
+   artifact scope. `macos` publishes the signed universal macOS package,
+   updater, appcast, checksum, SBOM, provenance, stable manifest entry, and a
+   macOS-only GitHub prerelease. It does not claim or attach Windows, Linux,
+   container, or embedded SDK artifacts. `all` additionally builds and attaches
+   the Windows packages, Linux bundles, container images, and provenance-bearing
+   Apple/Windows embedded SDK candidates. Embedded SDK candidates remain
+   unsigned Preview assets until their package-signing gates are configured;
+   the workflow does not publish them to a package registry. Never start the
+   platform workflows separately for the same version.
 5. Confirm the public-feed smoke checks, then canary the release before widening
    availability.
 
@@ -85,3 +98,10 @@ cryptographic verification against the expected repository identity.
 
 Runner selection and cost controls are documented in
 [CI and release operations](../operations/ci-and-release.md).
+
+Release caches are platform-scoped (`release-core`, macOS universal, Apple SDK,
+Windows SDK, and per-Linux-target keys) so a fast macOS run does not restore or
+evict unrelated native outputs. Apple XCFramework construction resolves Cargo's
+authoritative target directory, including an absolute `CARGO_TARGET_DIR`, and
+keeps its temporary consumer and reproducibility builds in trap-cleaned bounded
+directories. Hosted artifacts retain their existing 14-day limit.

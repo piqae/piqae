@@ -41,7 +41,9 @@ fn execute(arguments: &[String]) -> TaskResult {
         [command, scope] if command == "test" && scope == "all" => test_all(&root),
         [command, options @ ..] if command == "preflight" => preflight(&root, options),
         [command, action] if command == "fixture" && action == "reset" => fixture_reset(&root),
-        [command, action] if command == "release" && action == "check" => release_check(&root),
+        [command, action, options @ ..] if command == "release" && action == "check" => {
+            release_check(&root, ReleasePlatform::parse(options)?)
+        }
         [] | [..] if arguments.iter().any(|argument| argument == "--help") => {
             print_help();
             Ok(())
@@ -65,7 +67,7 @@ Usage:
   cargo xtask test all
   cargo xtask preflight [--all] [--list]
   cargo xtask fixture reset
-  cargo xtask release check
+  cargo xtask release check [--platform core|macos|all]
 
 `preflight` reproduces the CI jobs this change selects, names any missing
 prerequisite before it spends time, and never claims a pass for a job it
@@ -353,6 +355,53 @@ fn test_rust_workspace(root: &Path) -> TaskResult {
     run(command(root, "cargo", ["test", "--workspace", "--locked"]))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReleasePlatform {
+    Core,
+    Macos,
+    All,
+}
+
+impl ReleasePlatform {
+    fn parse(arguments: &[String]) -> TaskResult<Self> {
+        match arguments {
+            [] => Ok(Self::All),
+            [flag, value] if flag == "--platform" => match value.as_str() {
+                "core" => Ok(Self::Core),
+                "macos" => Ok(Self::Macos),
+                "all" => Ok(Self::All),
+                _ => Err(TaskError(
+                    "release platform must be one of: core, macos, all".into(),
+                )),
+            },
+            _ => Err(TaskError(
+                "usage: cargo xtask release check [--platform core|macos|all]".into(),
+            )),
+        }
+    }
+}
+
+const NON_MACOS_NATIVE_PACKAGES: &[&str] = &[
+    "piqae-executor-windows",
+    "piqae-shell-linux",
+    "piqae-shell-windows",
+];
+
+fn test_release_core(root: &Path) -> TaskResult {
+    run(command(root, "cargo", ["fmt", "--all", "--", "--check"]))?;
+    for action in ["clippy", "test"] {
+        let mut arguments = vec![action, "--workspace", "--all-targets", "--locked"];
+        for package in NON_MACOS_NATIVE_PACKAGES {
+            arguments.extend(["--exclude", package]);
+        }
+        if action == "clippy" {
+            arguments.extend(["--", "-D", "warnings"]);
+        }
+        run(command(root, "cargo", arguments))?;
+    }
+    test_javascript(root)
+}
+
 fn test_javascript(root: &Path) -> TaskResult {
     run(command(root, "pnpm", ["check"]))?;
     run(command(root, "pnpm", ["test"]))
@@ -390,7 +439,7 @@ fn fixture_reset(root: &Path) -> TaskResult {
     Ok(())
 }
 
-fn release_check(root: &Path) -> TaskResult {
+fn release_check(root: &Path, platform: ReleasePlatform) -> TaskResult {
     run(command(
         root,
         "python3",
@@ -401,7 +450,19 @@ fn release_check(root: &Path) -> TaskResult {
         "python3",
         ["release/tools/check_postgres_release_tests.py"],
     ))?;
-    test_all(root)?;
+    match platform {
+        ReleasePlatform::All => test_all(root)?,
+        ReleasePlatform::Core => test_release_core(root)?,
+        ReleasePlatform::Macos => {
+            if !cfg!(target_os = "macos") {
+                return Err(TaskError(
+                    "the macos release check must run on a macOS host".into(),
+                ));
+            }
+            test_release_core(root)?;
+            test_macos(root)?;
+        }
+    }
     let mut build = command(root, "pnpm", ["build"]);
     if env::var_os("PAYLOAD_SECRET").is_none() {
         build.env(
@@ -1246,6 +1307,35 @@ mod tests {
         let source = include_str!("main.rs");
         assert!(source.contains("No command submits a physical print job."));
         assert!(!source.contains("\"print\" =>"));
+    }
+
+    #[test]
+    fn release_platform_is_explicit_and_defaults_to_full_certification() {
+        assert!(matches!(
+            ReleasePlatform::parse(&[]),
+            Ok(ReleasePlatform::All)
+        ));
+        assert!(matches!(
+            ReleasePlatform::parse(&["--platform".into(), "macos".into()]),
+            Ok(ReleasePlatform::Macos)
+        ));
+        assert!(matches!(
+            ReleasePlatform::parse(&["--platform".into(), "core".into()]),
+            Ok(ReleasePlatform::Core)
+        ));
+        assert!(ReleasePlatform::parse(&["--platform".into(), "windows".into()]).is_err());
+    }
+
+    #[test]
+    fn macos_release_core_excludes_other_native_shells() {
+        assert_eq!(
+            NON_MACOS_NATIVE_PACKAGES,
+            [
+                "piqae-executor-windows",
+                "piqae-shell-linux",
+                "piqae-shell-windows"
+            ]
+        );
     }
 
     #[test]
