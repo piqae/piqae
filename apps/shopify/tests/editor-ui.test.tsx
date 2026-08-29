@@ -33,6 +33,41 @@ const packet: PrintPacket = {
   ],
 };
 
+const tablePacket: PrintPacket = {
+  format: "printpacket/v1",
+  media: { kind: "paged", size: "a4" },
+  body: [
+    {
+      type: "table",
+      items: { type: "path", path: ["order", "lineItems"] },
+      columns: [
+        {
+          header: [{ type: "text", value: "Item" }],
+          cell: [
+            {
+              type: "value",
+              value: { type: "current_path", path: ["title"] },
+            },
+          ],
+          width: 1,
+          align: "left",
+        },
+        {
+          header: [{ type: "text", value: "Quantity" }],
+          cell: [
+            {
+              type: "value",
+              value: { type: "current_path", path: ["quantity"] },
+            },
+          ],
+          width: 1,
+          align: "right",
+        },
+      ],
+    },
+  ],
+};
+
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
 
@@ -42,6 +77,15 @@ async function render(node: ReactNode) {
   root = createRoot(host);
   await act(async () => root?.render(node));
   return host;
+}
+
+function authoredBody(value: PrintPacket) {
+  const wrapper = value.body[0];
+  return wrapper?.type === "repeat" &&
+    wrapper.items.type === "path" &&
+    wrapper.items.path.join(".") === "orders"
+    ? wrapper.children
+    : value.body;
 }
 
 afterEach(async () => {
@@ -159,5 +203,192 @@ describe("Shopify document editor layout", () => {
     });
     expect(card?.children).toHaveLength(2);
     expect(card?.querySelector(".piqae-selection-rail")).not.toBeNull();
+  });
+
+  it("selects top-level text once and edits only on double-click or keyboard intent", async () => {
+    const page = await render(
+      <PrintPacketEditor value={packet} onChange={() => undefined} />,
+    );
+    const text = page.querySelector<HTMLElement>(".piqae-canvas-text")!;
+    const editor = text.querySelector<HTMLElement>("[role='textbox']")!;
+
+    expect(text.tabIndex).toBe(0);
+    expect(editor.getAttribute("contenteditable")).toBe("false");
+    await act(async () => text.click());
+    expect(page.querySelector(".piqae-selection-title")?.textContent).toContain(
+      "Text",
+    );
+    expect(editor.getAttribute("contenteditable")).toBe("false");
+
+    await act(async () => {
+      text.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    });
+    expect(editor.getAttribute("contenteditable")).toBe("true");
+    expect(document.activeElement).toBe(editor);
+
+    await act(async () => {
+      editor.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    expect(editor.getAttribute("contenteditable")).toBe("false");
+
+    await act(async () => {
+      text.focus();
+      text.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "F2", bubbles: true }),
+      );
+    });
+    expect(editor.getAttribute("contenteditable")).toBe("true");
+
+    await act(async () => {
+      editor.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    await act(async () => {
+      text.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    });
+    expect(editor.getAttribute("contenteditable")).toBe("true");
+  });
+
+  it("uses the same select-then-edit behavior for top-level headings", async () => {
+    const headingPacket: PrintPacket = {
+      ...packet,
+      body: [
+        {
+          type: "heading",
+          level: 2,
+          content: [{ type: "text", value: "Order summary" }],
+        },
+      ],
+    };
+    const page = await render(
+      <PrintPacketEditor value={headingPacket} onChange={() => undefined} />,
+    );
+    const heading = page.querySelector<HTMLElement>(".piqae-canvas-text")!;
+    const editor = heading.querySelector<HTMLElement>("[role='textbox']")!;
+
+    await act(async () => heading.click());
+    expect(page.querySelector(".piqae-selection-title")?.textContent).toContain(
+      "Heading",
+    );
+    expect(editor.getAttribute("contenteditable")).toBe("false");
+    await act(async () => {
+      heading.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    });
+    expect(editor.getAttribute("contenteditable")).toBe("true");
+  });
+
+  it("removes a selected non-editing block from keyboard or contextual delete", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={packet} onChange={onChange} />,
+    );
+    const text = page.querySelector<HTMLElement>(".piqae-canvas-text")!;
+
+    await act(async () => text.click());
+    await act(async () => {
+      text.focus();
+      text.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Delete", bubbles: true }),
+      );
+    });
+    const keyboardDocument = onChange.mock.lastCall?.[0] as PrintPacket;
+    expect(authoredBody(keyboardDocument).map((block) => block.type)).toEqual([
+      "image",
+    ]);
+
+    onChange.mockClear();
+    await act(async () =>
+      root?.render(<PrintPacketEditor value={packet} onChange={onChange} />),
+    );
+    const rerenderedText =
+      page.querySelector<HTMLElement>(".piqae-canvas-text")!;
+    await act(async () => rerenderedText.click());
+    const deleteAction = page.querySelector<HTMLButtonElement>(
+      'button[aria-label="Delete"]',
+    )!;
+    expect(deleteAction.disabled).toBe(false);
+    expect(deleteAction.tabIndex).toBeGreaterThanOrEqual(0);
+    await act(async () => deleteAction.click());
+    const contextualDocument = onChange.mock.lastCall?.[0] as PrintPacket;
+    expect(authoredBody(contextualDocument).map((block) => block.type)).toEqual(
+      ["image"],
+    );
+  });
+
+  it("keeps table cells directly editable and moves add-column into the header", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={tablePacket} onChange={onChange} />,
+    );
+    const table = page.querySelector(".piqae-canvas-table")!;
+    const header = table.querySelector(".piqae-canvas-table-head")!;
+    const addColumn = table.querySelector<HTMLButtonElement>(
+      'button[aria-label="Add table column"]',
+    )!;
+
+    expect(header.contains(addColumn)).toBe(true);
+    expect(addColumn.textContent).not.toContain("Add column");
+    expect(
+      table
+        .querySelector<HTMLElement>("strong[contenteditable]")
+        ?.getAttribute("contenteditable"),
+    ).toBe("true");
+    expect(
+      table
+        .querySelector<HTMLElement>(
+          ".piqae-canvas-table-binding-row [role='textbox']",
+        )
+        ?.getAttribute("contenteditable"),
+    ).toBe("true");
+
+    await act(async () => addColumn.click());
+    const nextDocument = onChange.mock.lastCall?.[0] as PrintPacket;
+    const nextTable = authoredBody(nextDocument)[0];
+    expect(nextTable.type).toBe("table");
+    if (nextTable.type === "table") expect(nextTable.columns).toHaveLength(3);
+  });
+
+  it("resizes table columns from an accessible keyboard separator without changing expressions", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={tablePacket} onChange={onChange} />,
+    );
+    const separator = page.querySelector<HTMLElement>(
+      '[role="separator"][aria-label="Resize Item column"]',
+    )!;
+
+    expect(separator.getAttribute("aria-orientation")).toBe("vertical");
+    expect(separator.getAttribute("aria-valuenow")).toBe("50");
+    expect(separator.tabIndex).toBe(0);
+    await act(async () => {
+      separator.focus();
+      separator.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
+      );
+    });
+
+    const nextDocument = onChange.mock.lastCall?.[0] as PrintPacket;
+    const nextTable = authoredBody(nextDocument)[0];
+    expect(nextTable.type).toBe("table");
+    if (nextTable.type !== "table") return;
+    expect(nextTable.columns[0]?.width).toBeCloseTo(1.1);
+    expect(nextTable.columns[1]?.width).toBeCloseTo(0.9);
+    expect(nextTable.items).toEqual({
+      type: "current_path",
+      path: ["lineItems"],
+    });
+    expect(nextTable.columns.map((column) => column.cell)).toEqual(
+      (
+        tablePacket.body[0] as Extract<
+          PrintPacket["body"][number],
+          { type: "table" }
+        >
+      ).columns.map((column) => column.cell),
+    );
   });
 });

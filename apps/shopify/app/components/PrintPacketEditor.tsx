@@ -562,6 +562,17 @@ export function PrintPacketEditor({
           <div
             className={`piqae-page-sheet piqae-rendered-canvas piqae-media-${value.media.kind}`}
             style={canvasStyle(value)}
+            onKeyDown={(event) => {
+              if (
+                disabled ||
+                !selection ||
+                (event.key !== "Delete" && event.key !== "Backspace") ||
+                isEditingTarget(event.target)
+              )
+                return;
+              event.preventDefault();
+              removeSelected();
+            }}
           >
             <SafeAreaGuide value={value} stock={stock} />
             <DocumentCanvas
@@ -826,6 +837,20 @@ function CanvasBlock({
   onSelect(block: Block, path: BlockPath): void;
   onChange(block: Block, path: BlockPath): void;
 }) {
+  const [editingText, setEditingText] = useState(false);
+  const textBlockElement = useRef<HTMLElement | null>(null);
+  const resizeDrag = useRef<{
+    index: number;
+    startX: number;
+    tableWidth: number;
+    columns: Extract<Block, { type: "table" }>["columns"];
+  } | null>(null);
+  const topLevelText =
+    isTopLevelAuthoringPath(path) &&
+    (block.type === "paragraph" || block.type === "heading");
+  useEffect(() => {
+    if (!selected) setEditingText(false);
+  }, [selected]);
   const select = (event: React.MouseEvent) => {
     event.stopPropagation();
     onSelect(block, path);
@@ -835,15 +860,55 @@ function CanvasBlock({
       block.type === "heading" ? (`h${block.level ?? 2}` as "h1") : "p";
     return (
       <Tag
+        ref={(element) => {
+          textBlockElement.current = element;
+        }}
         className={`piqae-canvas-text${selected ? " piqae-canvas-selected" : ""}`}
         style={{ textAlign: block.style?.align ?? "left" }}
+        tabIndex={topLevelText && editable ? 0 : undefined}
+        aria-label={
+          topLevelText && editable
+            ? `${block.type === "heading" ? "Heading" : "Text"} block: ${inlineLabel(block.content)}. Press Enter or F2 to edit.`
+            : undefined
+        }
         onClick={select}
+        onFocus={(event) => {
+          if (topLevelText && event.target === event.currentTarget)
+            onSelect(block, path);
+        }}
+        onDoubleClick={(event) => {
+          if (!topLevelText || !editable) return;
+          event.stopPropagation();
+          onSelect(block, path);
+          setEditingText(true);
+        }}
+        onKeyDown={(event) => {
+          if (
+            topLevelText &&
+            editable &&
+            !editingText &&
+            (event.key === "Enter" || event.key === "F2")
+          ) {
+            event.preventDefault();
+            event.stopPropagation();
+            onSelect(block, path);
+            setEditingText(true);
+          }
+        }}
       >
         <ExpressionEditor
           value={editableInlineWithScope(block.content, scope)}
           fields={contextualFieldSuggestions(authoringFields, scope)}
-          disabled={!editable}
+          disabled={!editable || (topLevelText && !editingText)}
           multiline
+          autoFocus={topLevelText && editingText}
+          onEscape={() => {
+            setEditingText(false);
+            requestAnimationFrame(() => textBlockElement.current?.focus());
+          }}
+          onBlur={() => {
+            if (topLevelText) setEditingText(false);
+          }}
           onChange={(source) =>
             onChange(
               {
@@ -954,59 +1019,170 @@ function CanvasBlock({
                 {inlineLabel(column.header)}
               </strong>
               {editable ? (
-                <span className="piqae-canvas-column-actions">
-                  <button
-                    type="button"
-                    disabled={index === 0}
-                    aria-label={`Move ${inlineLabel(column.header)} left`}
-                    onClick={() =>
-                      onChange(
-                        {
-                          ...block,
-                          columns: moveItem(block.columns, index, -1),
-                        },
-                        path,
-                      )
-                    }
-                  >
-                    ←
-                  </button>
-                  <button
-                    type="button"
-                    disabled={index === block.columns.length - 1}
-                    aria-label={`Move ${inlineLabel(column.header)} right`}
-                    onClick={() =>
-                      onChange(
-                        {
-                          ...block,
-                          columns: moveItem(block.columns, index, 1),
-                        },
-                        path,
-                      )
-                    }
-                  >
-                    →
-                  </button>
-                  <button
-                    type="button"
-                    disabled={block.columns.length === 1}
-                    aria-label={`Remove ${inlineLabel(column.header)} column`}
-                    onClick={() =>
-                      onChange(
-                        {
-                          ...block,
-                          columns: block.columns.filter((_, i) => i !== index),
-                        },
-                        path,
-                      )
-                    }
-                  >
-                    ×
-                  </button>
-                </span>
+                <>
+                  <span className="piqae-canvas-column-actions">
+                    <button
+                      type="button"
+                      disabled={index === 0}
+                      aria-label={`Move ${inlineLabel(column.header)} left`}
+                      onClick={() =>
+                        onChange(
+                          {
+                            ...block,
+                            columns: moveItem(block.columns, index, -1),
+                          },
+                          path,
+                        )
+                      }
+                    >
+                      ←
+                    </button>
+                    <button
+                      type="button"
+                      disabled={index === block.columns.length - 1}
+                      aria-label={`Move ${inlineLabel(column.header)} right`}
+                      onClick={() =>
+                        onChange(
+                          {
+                            ...block,
+                            columns: moveItem(block.columns, index, 1),
+                          },
+                          path,
+                        )
+                      }
+                    >
+                      →
+                    </button>
+                    <button
+                      type="button"
+                      disabled={block.columns.length === 1}
+                      aria-label={`Remove ${inlineLabel(column.header)} column`}
+                      onClick={() =>
+                        onChange(
+                          {
+                            ...block,
+                            columns: block.columns.filter(
+                              (_, i) => i !== index,
+                            ),
+                          },
+                          path,
+                        )
+                      }
+                    >
+                      ×
+                    </button>
+                  </span>
+                  {index < block.columns.length - 1 ? (
+                    <span
+                      className="piqae-canvas-column-resize"
+                      role="separator"
+                      aria-orientation="vertical"
+                      aria-label={`Resize ${inlineLabel(column.header)} column`}
+                      aria-valuemin={10}
+                      aria-valuemax={90}
+                      aria-valuenow={columnBoundaryPercent(
+                        block.columns,
+                        index,
+                      )}
+                      tabIndex={0}
+                      onClick={(event) => event.stopPropagation()}
+                      onKeyDown={(event) => {
+                        if (
+                          event.key !== "ArrowLeft" &&
+                          event.key !== "ArrowRight"
+                        )
+                          return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        onChange(
+                          {
+                            ...block,
+                            columns: resizeColumns(
+                              block.columns,
+                              index,
+                              (event.key === "ArrowRight" ? 1 : -1) *
+                                adjacentColumnWidth(block.columns, index) *
+                                0.05,
+                            ),
+                          },
+                          path,
+                        );
+                      }}
+                      onPointerDown={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        const table = event.currentTarget.closest(
+                          ".piqae-canvas-table",
+                        );
+                        resizeDrag.current = {
+                          index,
+                          startX: event.clientX,
+                          tableWidth: Math.max(
+                            1,
+                            table?.getBoundingClientRect().width ?? 1,
+                          ),
+                          columns: block.columns,
+                        };
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                      }}
+                      onPointerMove={(event) => {
+                        const drag = resizeDrag.current;
+                        if (!drag || drag.index !== index) return;
+                        const total = drag.columns.reduce(
+                          (sum, item) => sum + (item.width ?? 1),
+                          0,
+                        );
+                        onChange(
+                          {
+                            ...block,
+                            columns: resizeColumns(
+                              drag.columns,
+                              index,
+                              ((event.clientX - drag.startX) /
+                                drag.tableWidth) *
+                                total,
+                            ),
+                          },
+                          path,
+                        );
+                      }}
+                      onPointerUp={(event) => {
+                        if (resizeDrag.current?.index === index)
+                          resizeDrag.current = null;
+                        if (
+                          event.currentTarget.hasPointerCapture(event.pointerId)
+                        )
+                          event.currentTarget.releasePointerCapture(
+                            event.pointerId,
+                          );
+                      }}
+                      onPointerCancel={() => {
+                        if (resizeDrag.current?.index === index)
+                          resizeDrag.current = null;
+                      }}
+                    />
+                  ) : null}
+                </>
               ) : null}
             </span>
           ))}
+          {editable ? (
+            <button
+              className="piqae-canvas-add-column"
+              type="button"
+              aria-label="Add table column"
+              data-tooltip="Add column"
+              onClick={(event) => {
+                event.stopPropagation();
+                onChange(
+                  { ...block, columns: [...block.columns, defaultColumn()] },
+                  path,
+                );
+              }}
+            >
+              <Icon name="plus" />
+            </button>
+          ) : null}
         </div>
         <div className="piqae-canvas-table-row piqae-canvas-table-binding-row">
           {block.columns.map((column, index) => (
@@ -1045,21 +1221,6 @@ function CanvasBlock({
             </div>
           ))}
         </div>
-        {editable ? (
-          <button
-            className="piqae-canvas-add-column"
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              onChange(
-                { ...block, columns: [...block.columns, defaultColumn()] },
-                path,
-              );
-            }}
-          >
-            + Add column
-          </button>
-        ) : null}
       </div>
     );
   if (block.type === "conditional")
@@ -1457,7 +1618,10 @@ function ExpressionEditor({
   fields,
   disabled,
   multiline = false,
+  autoFocus = false,
   placeholder,
+  onBlur,
+  onEscape,
   onChange,
   ...attributes
 }: {
@@ -1465,7 +1629,10 @@ function ExpressionEditor({
   fields: readonly ShopifyDocumentField[];
   disabled?: boolean;
   multiline?: boolean;
+  autoFocus?: boolean;
   placeholder?: string;
+  onBlur?(): void;
+  onEscape?(): void;
   onChange(value: string): void;
   "aria-label"?: string;
 }) {
@@ -1479,6 +1646,11 @@ function ExpressionEditor({
     editor.current.textContent = value;
     if (focused) placeCaretAtEnd(editor.current);
   }, [value]);
+  useEffect(() => {
+    if (!autoFocus || disabled || !editor.current) return;
+    editor.current.focus();
+    placeCaretAtEnd(editor.current);
+  }, [autoFocus, disabled]);
   const update = (source: string) => {
     onChange(source);
     const nextQuery = incompleteExpressionQuery(source);
@@ -1504,11 +1676,18 @@ function ExpressionEditor({
         aria-multiline={multiline}
         aria-autocomplete="list"
         aria-expanded={query !== null}
+        aria-readonly={disabled || undefined}
         data-placeholder={placeholder}
         contentEditable={!disabled}
         suppressContentEditableWarning
         onInput={(event) => update(event.currentTarget.textContent ?? "")}
         onKeyDown={(event) => {
+          if (event.key === "Escape" && query === null && onEscape) {
+            event.preventDefault();
+            event.stopPropagation();
+            onEscape();
+            return;
+          }
           if (query === null) {
             if (!multiline && event.key === "Enter") event.preventDefault();
             return;
@@ -1531,7 +1710,10 @@ function ExpressionEditor({
           } else if (!multiline && event.key === "Enter")
             event.preventDefault();
         }}
-        onBlur={() => setTimeout(() => setQuery(null), 100)}
+        onBlur={() => {
+          setTimeout(() => setQuery(null), 100);
+          onBlur?.();
+        }}
       />
       {query !== null ? (
         <span className="piqae-expression-menu" role="listbox">
@@ -2259,12 +2441,64 @@ function placeCaretAtEnd(element: HTMLElement | null) {
   selection?.removeAllRanges();
   selection?.addRange(range);
 }
+
+function isEditingTarget(target: EventTarget | null) {
+  return (
+    target instanceof HTMLElement &&
+    Boolean(
+      target.closest(
+        '[contenteditable="true"], input, textarea, select, button, a[href]',
+      ),
+    )
+  );
+}
+
 function moveItem<T>(items: T[], index: number, direction: -1 | 1) {
   const target = index + direction;
   if (target < 0 || target >= items.length) return items;
   const next = [...items];
   [next[index], next[target]] = [next[target]!, next[index]!];
   return next;
+}
+
+function resizeColumns(
+  columns: Extract<Block, { type: "table" }>["columns"],
+  index: number,
+  delta: number,
+) {
+  const left = columns[index];
+  const right = columns[index + 1];
+  if (!left || !right) return columns;
+  const leftWidth = left.width ?? 1;
+  const rightWidth = right.width ?? 1;
+  const minimum = adjacentColumnWidth(columns, index) * 0.1;
+  const boundedDelta = Math.max(
+    minimum - leftWidth,
+    Math.min(rightWidth - minimum, delta),
+  );
+  return columns.map((column, columnIndex) =>
+    columnIndex === index
+      ? { ...column, width: leftWidth + boundedDelta }
+      : columnIndex === index + 1
+        ? { ...column, width: rightWidth - boundedDelta }
+        : column,
+  );
+}
+
+function adjacentColumnWidth(
+  columns: Extract<Block, { type: "table" }>["columns"],
+  index: number,
+) {
+  return (columns[index]?.width ?? 1) + (columns[index + 1]?.width ?? 1);
+}
+
+function columnBoundaryPercent(
+  columns: Extract<Block, { type: "table" }>["columns"],
+  index: number,
+) {
+  const left = columns[index]?.width ?? 1;
+  const right = columns[index + 1]?.width ?? 1;
+  return Math.round((left / Math.max(left + right, 0.01)) * 100);
 }
 /** The list a path's final segment indexes into, so move limits are accurate. */
 export function siblingsAtPath(blocks: Block[], path: BlockPath): Block[] {
@@ -2293,6 +2527,18 @@ function sameBlockPath(left?: BlockPath, right?: BlockPath) {
     ),
   );
 }
+
+/** Treat the mandatory orders repeat as document framing, not author content. */
+function isTopLevelAuthoringPath(path: BlockPath) {
+  return (
+    (path.length === 1 && path[0]?.branch === "root") ||
+    (path.length === 2 &&
+      path[0]?.branch === "root" &&
+      path[0].index === 0 &&
+      path[1]?.branch === "children")
+  );
+}
+
 export function moveBlockAtPath(
   blocks: Block[],
   path: BlockPath,
