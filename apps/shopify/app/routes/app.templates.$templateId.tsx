@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { Form, redirect, useActionData, useLoaderData } from "react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import shopify from "../shopify.server";
 import {
   bounded,
@@ -51,6 +51,23 @@ export const canSubmitTemplateMode = (
 ) => document != null;
 export const customizedTemplateName = (name: string) =>
   `${name} — customized`.slice(0, 200);
+export const editorTitleBarActions = (starter: boolean) =>
+  starter
+    ? {
+        primary: { label: "Save as copy", intent: "draft" as const },
+        secondary: { label: "Publish copy", intent: "publish" as const },
+      }
+    : {
+        primary: { label: "Publish", intent: "publish" as const },
+        secondary: { label: "Save draft", intent: "draft" as const },
+      };
+export const documentNameError = (
+  name: string,
+  intent: "draft" | "publish" | "delete",
+) =>
+  intent === "delete" || name.trim()
+    ? null
+    : "Enter a document name in Settings before saving.";
 export const editorLiquidForMode = (
   _mode: TemplateEditorMode,
   liquid: string,
@@ -426,299 +443,292 @@ export default function TemplateEditor() {
     if (next !== "preview") switchMode(next);
     setWorkspace(next);
   };
+  const formRef = useRef<HTMLFormElement>(null);
+  const intentRef = useRef<HTMLInputElement>(null);
+  const submitWithIntent = (intent: "draft" | "publish" | "delete") => {
+    if (!formRef.current || !intentRef.current) return;
+    const nameError = documentNameError(name, intent);
+    if (nameError) {
+      setError(nameError);
+      return;
+    }
+    setError("");
+    intentRef.current.value = intent;
+    formRef.current.requestSubmit();
+  };
+  const workspaceControls = (
+    <div className="piqae-segmented" role="group" aria-label="Editor workspace">
+      {WORKSPACES.map(([key, label, icon]) => (
+        <button
+          key={key}
+          type="button"
+          aria-pressed={workspace === key}
+          onClick={() => switchWorkspace(key)}
+        >
+          <Icon name={icon} />
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+  const flowNote = templateFlowNote(template, starter);
+  const titleBarActions = editorTitleBarActions(starter);
   return (
-    <s-page heading={template?.name ?? "New template"} inlineSize="large">
-      <s-section>
-        <Form method="post">
-          <div className="piqae-actionbar">
-            <div className="piqae-actionbar-lead">
-              <input
-                className="piqae-doc-title"
-                name="name"
-                required
-                maxLength={200}
-                aria-label="Document name"
-                placeholder="Untitled document"
-                value={name}
-                onChange={(event) => setName(event.currentTarget.value)}
-              />
-              <span className="piqae-doc-state">
-                {templateStateLabel(template, starter)}
-              </span>
-            </div>
-            <div
-              className="piqae-segmented"
-              role="group"
-              aria-label="Editor workspace"
-            >
-              {WORKSPACES.map(([key, label, icon]) => (
-                <button
-                  key={key}
-                  type="button"
-                  aria-pressed={workspace === key}
-                  onClick={() => switchWorkspace(key)}
+    <Form method="post" ref={formRef} className="piqae-editor-form">
+      <s-page heading={name.trim() || "Untitled document"} inlineSize="large">
+        <s-badge slot="accessory" tone="info">
+          {templateStateLabel(template, starter)}
+        </s-badge>
+        <s-button
+          slot="primary-action"
+          variant="primary"
+          type="button"
+          onClick={() => submitWithIntent(titleBarActions.primary.intent)}
+        >
+          {titleBarActions.primary.label}
+        </s-button>
+        <s-button
+          slot="secondary-actions"
+          type="button"
+          onClick={() => submitWithIntent(titleBarActions.secondary.intent)}
+        >
+          {titleBarActions.secondary.label}
+        </s-button>
+        <s-button
+          slot="secondary-actions"
+          type="button"
+          icon="settings"
+          commandFor="piqae-document-settings"
+        >
+          Settings
+        </s-button>
+        <s-popover id="piqae-document-settings" inlineSize="420px">
+          <s-box padding="base">
+            <div className="piqae-settings-panel piqae-settings-popover">
+              <label className="piqae-field piqae-field-wide">
+                <span>Document name</span>
+                <input
+                  name="name"
+                  maxLength={200}
+                  placeholder="Untitled document"
+                  value={name}
+                  onChange={(event) => setName(event.currentTarget.value)}
+                />
+              </label>
+              <label className="piqae-field">
+                <span>Document type</span>
+                <select
+                  name="kind"
+                  value={kind}
+                  onChange={(event) => {
+                    const nextKind = event.currentTarget.value;
+                    setKind(nextKind);
+                    if (nextKind === "receipt")
+                      setDocument({
+                        ...document,
+                        media: mediaForPageSize("80mm"),
+                      });
+                    else if (nextKind === "label")
+                      setDocument({
+                        ...document,
+                        media: mediaForPageSize("100x50mm"),
+                      });
+                    else if (
+                      nextKind !== "custom" &&
+                      document.media.kind !== "paged"
+                    )
+                      setDocument({
+                        ...document,
+                        media: mediaForPageSize("A4"),
+                      });
+                  }}
                 >
-                  <Icon name={icon} />
-                  {label}
-                </button>
-              ))}
-            </div>
-            <div className="piqae-actionbar-trail">
-              <details className="piqae-menu">
-                <summary
-                  className="piqae-button"
-                  aria-label="Document settings"
-                  title="Document settings"
+                  <option value="invoice">Invoice</option>
+                  <option value="packing_slip">Packing slip</option>
+                  <option value="receipt">Receipt</option>
+                  <option value="credit_note">Credit note</option>
+                  <option value="label">Label</option>
+                  <option value="returns">Returns form</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </label>
+              <label className="piqae-field">
+                <span>Media</span>
+                <select
+                  name="pageSize"
+                  value={mediaPresetForDocument(document)}
+                  onChange={(event) => {
+                    const media = mediaForPageSize(event.currentTarget.value);
+                    setDocument({
+                      ...document,
+                      media,
+                    });
+                    if (media.kind === "continuous") setKind("receipt");
+                    else if (media.kind === "label") setKind("label");
+                    else if (kind === "receipt" || kind === "label")
+                      setKind("custom");
+                  }}
                 >
-                  <Icon name="settings" />
-                  Settings
-                </summary>
-                <div className="piqae-menu-panel piqae-settings-panel">
-                  <label className="piqae-field">
-                    <span>Document type</span>
-                    <select
-                      name="kind"
-                      value={kind}
-                      onChange={(event) => {
-                        const nextKind = event.currentTarget.value;
-                        setKind(nextKind);
-                        if (nextKind === "receipt")
-                          setDocument({
-                            ...document,
-                            media: mediaForPageSize("80mm"),
-                          });
-                        else if (nextKind === "label")
-                          setDocument({
-                            ...document,
-                            media: mediaForPageSize("100x50mm"),
-                          });
-                        else if (
-                          nextKind !== "custom" &&
-                          document.media.kind !== "paged"
-                        )
-                          setDocument({
-                            ...document,
-                            media: mediaForPageSize("A4"),
-                          });
-                      }}
-                    >
-                      <option value="invoice">Invoice</option>
-                      <option value="packing_slip">Packing slip</option>
-                      <option value="receipt">Receipt</option>
-                      <option value="credit_note">Credit note</option>
-                      <option value="label">Label</option>
-                      <option value="returns">Returns form</option>
-                      <option value="custom">Custom</option>
-                    </select>
-                  </label>
-                  <label className="piqae-field">
-                    <span>Media</span>
-                    <select
-                      name="pageSize"
-                      value={mediaPresetForDocument(document)}
-                      onChange={(event) => {
-                        const media = mediaForPageSize(
-                          event.currentTarget.value,
-                        );
-                        setDocument({
-                          ...document,
-                          media,
-                        });
-                        if (media.kind === "continuous") setKind("receipt");
-                        else if (media.kind === "label") setKind("label");
-                        else if (kind === "receipt" || kind === "label")
-                          setKind("custom");
-                      }}
-                    >
-                      <option>A4</option>
-                      <option>A5</option>
-                      <option>Letter</option>
-                      <option value="80mm">80 mm receipt</option>
-                      <option value="custom-continuous">
-                        Custom roll width
-                      </option>
-                      <option value="100x50mm">100 × 50 mm label</option>
-                      <option value="custom-label">Custom fixed label</option>
-                    </select>
-                  </label>
-                  {document.media.kind === "paged" ? (
-                    <label className="piqae-field">
-                      <span>Orientation</span>
-                      <select
-                        name="orientation"
-                        value={document.media.orientation ?? "portrait"}
-                        onChange={(event) => {
-                          const orientation =
-                            event.currentTarget.value === "landscape"
-                              ? "landscape"
-                              : "portrait";
-                          setDocument((current) =>
-                            current.media.kind !== "paged"
-                              ? current
-                              : {
-                                  ...current,
-                                  media: {
-                                    ...current.media,
-                                    orientation,
-                                  },
-                                },
-                          );
-                        }}
-                      >
-                        <option value="portrait">Portrait</option>
-                        <option value="landscape">Landscape</option>
-                      </select>
-                    </label>
-                  ) : null}
-                  {document.media.kind !== "paged" ? (
-                    <label className="piqae-field">
-                      <span>Width (mm)</span>
-                      <input
-                        type="number"
-                        min="10"
-                        max="1000"
-                        step="0.1"
-                        value={document.media.width_mm}
-                        onChange={(event) => {
-                          const width = event.currentTarget.valueAsNumber;
-                          if (Number.isFinite(width))
-                            setDocument((current) =>
-                              current.media.kind === "paged"
-                                ? current
-                                : {
-                                    ...current,
-                                    media: {
-                                      ...current.media,
-                                      width_mm: width,
-                                    },
-                                  },
-                            );
-                        }}
-                      />
-                    </label>
-                  ) : null}
-                  {document.media.kind === "label" ? (
-                    <label className="piqae-field">
-                      <span>Height (mm)</span>
-                      <input
-                        type="number"
-                        min="5"
-                        max="1000"
-                        step="0.1"
-                        value={document.media.height_mm}
-                        onChange={(event) => {
-                          const height = event.currentTarget.valueAsNumber;
-                          if (Number.isFinite(height))
-                            setDocument((current) =>
-                              current.media.kind !== "label"
-                                ? current
-                                : {
-                                    ...current,
-                                    media: {
-                                      ...current.media,
-                                      height_mm: height,
-                                    },
-                                  },
-                            );
-                        }}
-                      />
-                    </label>
-                  ) : null}
-                  <label className="piqae-field">
-                    <span>Find print target</span>
-                    <input
-                      type="search"
-                      value={targetSearch}
-                      placeholder="Printer, target, or stock"
-                      onChange={(event) =>
-                        setTargetSearch(event.currentTarget.value)
-                      }
-                    />
-                  </label>
-                  <label className="piqae-field">
-                    <span>Print target</span>
-                    <select
-                      name="designTargetId"
-                      value={designTargetId}
-                      onChange={(event) =>
-                        setDesignTargetId(event.currentTarget.value)
-                      }
-                    >
-                      <option value="">Choose at print time</option>
-                      {compatibleTargets.map((target) => (
-                        <option key={target.id} value={target.id}>
-                          {target.name} ·{" "}
-                          {target.stock?.name ?? "stock not configured"}
-                        </option>
-                      ))}
-                      {selectedTarget &&
-                      !compatibleTargets.some(
-                        ({ id }) => id === selectedTarget.id,
-                      ) ? (
-                        <option value={selectedTarget.id} disabled>
-                          {selectedTarget.name} · incompatible with current
-                          media
-                        </option>
-                      ) : null}
-                    </select>
-                  </label>
-                  {printTargetError ? (
-                    <p className="piqae-menu-note">{printTargetError}</p>
-                  ) : null}
-                  {selectedTarget ? (
-                    <TargetStatus
-                      target={selectedTarget}
-                      document={document}
-                      savedSpecificationRevision={
-                        template?.designSpecificationRevision ?? null
-                      }
-                    />
-                  ) : null}
-                  <DocumentSettingsFields
-                    value={document}
-                    onChange={setDocument}
-                  />
-                  <p className="piqae-menu-note">
-                    Content reflows across pages automatically.
-                  </p>
-                </div>
-              </details>
-              <button className="piqae-button" name="intent" value="draft">
-                {starter ? "Save as copy" : "Save draft"}
-              </button>
-              <button
-                className="piqae-button piqae-button-primary"
-                name="intent"
-                value="publish"
-              >
-                Publish
-              </button>
-              {template?.state === "draft" ? (
-                <details className="piqae-menu piqae-menu-end">
-                  <summary
-                    className="piqae-button piqae-button-icon"
-                    aria-label="More actions"
-                    title="More actions"
+                  <option>A4</option>
+                  <option>A5</option>
+                  <option>Letter</option>
+                  <option value="80mm">80 mm receipt</option>
+                  <option value="custom-continuous">Custom roll width</option>
+                  <option value="100x50mm">100 × 50 mm label</option>
+                  <option value="custom-label">Custom fixed label</option>
+                </select>
+              </label>
+              {document.media.kind === "paged" ? (
+                <label className="piqae-field">
+                  <span>Orientation</span>
+                  <select
+                    name="orientation"
+                    value={document.media.orientation ?? "portrait"}
+                    onChange={(event) => {
+                      const orientation =
+                        event.currentTarget.value === "landscape"
+                          ? "landscape"
+                          : "portrait";
+                      setDocument((current) =>
+                        current.media.kind !== "paged"
+                          ? current
+                          : {
+                              ...current,
+                              media: {
+                                ...current.media,
+                                orientation,
+                              },
+                            },
+                      );
+                    }}
                   >
-                    <Icon name="more" />
-                  </summary>
-                  <div className="piqae-menu-panel">
-                    <button
-                      className="piqae-menu-item piqae-menu-critical"
-                      name="intent"
-                      value="delete"
-                    >
-                      <Icon name="trash" />
-                      Delete draft
-                    </button>
-                  </div>
-                </details>
+                    <option value="portrait">Portrait</option>
+                    <option value="landscape">Landscape</option>
+                  </select>
+                </label>
+              ) : null}
+              {document.media.kind !== "paged" ? (
+                <label className="piqae-field">
+                  <span>Width (mm)</span>
+                  <input
+                    type="number"
+                    min="10"
+                    max="1000"
+                    step="0.1"
+                    value={document.media.width_mm}
+                    onChange={(event) => {
+                      const width = event.currentTarget.valueAsNumber;
+                      if (Number.isFinite(width))
+                        setDocument((current) =>
+                          current.media.kind === "paged"
+                            ? current
+                            : {
+                                ...current,
+                                media: {
+                                  ...current.media,
+                                  width_mm: width,
+                                },
+                              },
+                        );
+                    }}
+                  />
+                </label>
+              ) : null}
+              {document.media.kind === "label" ? (
+                <label className="piqae-field">
+                  <span>Height (mm)</span>
+                  <input
+                    type="number"
+                    min="5"
+                    max="1000"
+                    step="0.1"
+                    value={document.media.height_mm}
+                    onChange={(event) => {
+                      const height = event.currentTarget.valueAsNumber;
+                      if (Number.isFinite(height))
+                        setDocument((current) =>
+                          current.media.kind !== "label"
+                            ? current
+                            : {
+                                ...current,
+                                media: {
+                                  ...current.media,
+                                  height_mm: height,
+                                },
+                              },
+                        );
+                    }}
+                  />
+                </label>
+              ) : null}
+              <label className="piqae-field">
+                <span>Find print target</span>
+                <input
+                  type="search"
+                  value={targetSearch}
+                  placeholder="Printer, target, or stock"
+                  onChange={(event) =>
+                    setTargetSearch(event.currentTarget.value)
+                  }
+                />
+              </label>
+              <label className="piqae-field">
+                <span>Print target</span>
+                <select
+                  name="designTargetId"
+                  value={designTargetId}
+                  onChange={(event) =>
+                    setDesignTargetId(event.currentTarget.value)
+                  }
+                >
+                  <option value="">Choose at print time</option>
+                  {compatibleTargets.map((target) => (
+                    <option key={target.id} value={target.id}>
+                      {target.name} ·{" "}
+                      {target.stock?.name ?? "stock not configured"}
+                    </option>
+                  ))}
+                  {selectedTarget &&
+                  !compatibleTargets.some(
+                    ({ id }) => id === selectedTarget.id,
+                  ) ? (
+                    <option value={selectedTarget.id} disabled>
+                      {selectedTarget.name} · incompatible with current media
+                    </option>
+                  ) : null}
+                </select>
+              </label>
+              {printTargetError ? (
+                <p className="piqae-menu-note">{printTargetError}</p>
+              ) : null}
+              {selectedTarget ? (
+                <TargetStatus
+                  target={selectedTarget}
+                  document={document}
+                  savedSpecificationRevision={
+                    template?.designSpecificationRevision ?? null
+                  }
+                />
+              ) : null}
+              <DocumentSettingsFields value={document} onChange={setDocument} />
+              <p className="piqae-menu-note">
+                Content reflows across pages automatically.
+              </p>
+              {template?.state === "draft" ? (
+                <button
+                  className="piqae-menu-item piqae-menu-critical piqae-field-wide"
+                  type="button"
+                  onClick={() => submitWithIntent("delete")}
+                >
+                  <Icon name="trash" />
+                  Delete draft
+                </button>
               ) : null}
             </div>
-          </div>
-          <p className="piqae-actionbar-note">
-            {templateFlowNote(template, starter)}
-          </p>
+          </s-box>
+        </s-popover>
+        <s-section padding="none">
+          {flowNote ? <p className="piqae-actionbar-note">{flowNote}</p> : null}
           <s-stack direction="block" gap="base">
             {result?.ok ? (
               <s-banner tone="success">
@@ -755,6 +765,9 @@ export default function TemplateEditor() {
                 ))}
               </div>
             ) : null}
+            {workspace === "visual" ? null : (
+              <div className="piqae-workspace-toolbar">{workspaceControls}</div>
+            )}
             {workspace === "preview" ? (
               <PrintPacketPreview
                 value={document}
@@ -766,6 +779,7 @@ export default function TemplateEditor() {
                 disabled={false}
                 customFields={customFields}
                 stock={selectedTarget?.stock}
+                workspaceControls={workspaceControls}
                 onChange={setDocument}
               />
             ) : (
@@ -807,9 +821,15 @@ export default function TemplateEditor() {
           {workspace === "liquid" ? null : (
             <input type="hidden" name="liquid" value={liquid} />
           )}
-        </Form>
-      </s-section>
-    </s-page>
+          <input
+            ref={intentRef}
+            type="hidden"
+            name="intent"
+            defaultValue={starter ? "draft" : "publish"}
+          />
+        </s-section>
+      </s-page>
+    </Form>
   );
 }
 
@@ -952,8 +972,7 @@ export function templateFlowNote(
   template: MerchantTemplate | null,
   starter: boolean,
 ) {
-  if (starter)
-    return "Starter document. Save as copy creates an editable document in your shop; the original stays untouched.";
+  if (starter) return null;
   if (!template)
     return "New document. Save draft keeps your work private; Publish makes this revision available to printing and automations.";
   return template.state === "published"

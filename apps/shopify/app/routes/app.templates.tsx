@@ -5,7 +5,6 @@ import shopify from "../shopify.server";
 import {
   bounded,
   newWorkflowId,
-  validateDocumentSource,
   workflows,
   type MerchantTemplate,
   type SaveMerchantTemplate,
@@ -55,51 +54,23 @@ export async function action({ request }: ActionFunctionArgs) {
   const { session, admin } = await shopify.authenticate.admin(request);
   const form = await request.formData();
   try {
-    if (form.get("intent") === "customize") {
-      const templateId = bounded(form, "templateId", 200, true);
-      const existing = await workflows().getTemplate(session.shop, templateId);
-      if (!existing) throw new Error("System document was not found");
-      const saved = await workflows().saveTemplate(
-        session.shop,
-        customizedSystemDraft(existing, newWorkflowId()),
-      );
-      await syncTemplateIndex(admin, workflows(), session.shop);
-      return redirect(`/app/templates/${encodeURIComponent(saved.id)}`, 303);
-    }
-    const raw = bounded(form, "import", 65536, true);
-    const parsed = JSON.parse(raw) as Partial<MerchantTemplate>;
-    if (
-      parsed.source === undefined ||
-      typeof parsed.source !== "string" ||
-      parsed.source.length > 65536
-    )
-      throw new Error("Imported template source is invalid");
-    const envelope = parseTemplateEnvelope(
-      validateDocumentSource(parsed.source),
+    if (form.get("intent") !== "customize")
+      throw new Error("Unsupported template action");
+    const templateId = bounded(form, "templateId", 200, true);
+    const existing = await workflows().getTemplate(session.shop, templateId);
+    if (!existing) throw new Error("System document was not found");
+    const saved = await workflows().saveTemplate(
+      session.shop,
+      customizedSystemDraft(existing, newWorkflowId()),
     );
-    removeSystemOwnership(envelope);
-    const source = serializeTemplateEnvelope(envelope);
-    const saved = await workflows().saveTemplate(session.shop, {
-      id: newWorkflowId(),
-      name:
-        typeof parsed.name === "string"
-          ? parsed.name.slice(0, 200)
-          : "Imported template",
-      kind: "custom",
-      pageSize: ["A4", "A5", "Letter", "80mm"].includes(String(parsed.pageSize))
-        ? String(parsed.pageSize)
-        : "A4",
-      state: "draft",
-      source,
-      revision: 1,
-    });
     await syncTemplateIndex(admin, workflows(), session.shop);
-    return { ok: true, error: "", id: saved.id };
+    return redirect(`/app/templates/${encodeURIComponent(saved.id)}`, 303);
   } catch (error) {
     return Response.json(
       {
         ok: false,
-        error: error instanceof Error ? error.message : "Import failed",
+        error:
+          error instanceof Error ? error.message : "Template action failed",
       },
       { status: 400 },
     );
@@ -107,7 +78,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 export default function Templates() {
   const data = useLoaderData<typeof loader>();
-  const result = useActionData<typeof action>();
+  const result = useActionData<{ error: string }>();
   const [query, setQuery] = useState("");
   const [scope, setScope] = useState<"all" | "starters" | "custom">("all");
   const visibleTemplates = useMemo(() => {
@@ -133,9 +104,7 @@ export default function Templates() {
         Create template
       </s-button>
       <s-section padding="none" accessibilityLabel="Templates table">
-        {result?.ok ? (
-          <s-banner tone="success">Template imported as a draft.</s-banner>
-        ) : result?.error ? (
+        {result?.error ? (
           <s-banner tone="critical">{result.error}</s-banner>
         ) : null}
         {visibleTemplates.length ? (
@@ -268,7 +237,7 @@ export default function Templates() {
                 <s-paragraph>
                   {data.templates.length
                     ? "Try a different name, type, page size, or status."
-                    : "Create a document template or import a portable Piqae template."}
+                    : "Create a document template to get started."}
                 </s-paragraph>
               </s-stack>
               <s-button-group>
@@ -279,23 +248,6 @@ export default function Templates() {
             </s-grid>
           </s-grid>
         )}
-      </s-section>
-      <s-section heading="Import template">
-        <details>
-          <summary>Import portable template JSON</summary>
-          <Form method="post">
-            <label>
-              Portable template
-              <textarea
-                className="piqae-code piqae-code-short"
-                name="import"
-                required
-                maxLength={65536}
-              />
-            </label>
-            <s-button type="submit">Import as draft</s-button>
-          </Form>
-        </details>
       </s-section>
     </s-page>
   );
