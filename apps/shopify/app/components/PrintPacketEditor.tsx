@@ -1450,6 +1450,9 @@ function CanvasBlock({
           Repeats for each {expressionLabel(block.items)}
         </span>
       ) : null}
+      {editable && block.type === "grid" ? (
+        <GridResizeHandles block={block} path={path} onChange={onChange} />
+      ) : null}
       {children.length ? (
         <DocumentCanvas
           blocks={children}
@@ -1479,6 +1482,110 @@ function CanvasBlock({
         />
       )}
     </section>
+  );
+}
+
+function GridResizeHandles({
+  block,
+  path,
+  onChange,
+}: {
+  block: Extract<Block, { type: "grid" }>;
+  path: BlockPath;
+  onChange(block: Block, path: BlockPath): void;
+}) {
+  const drag = useRef<{
+    index: number;
+    startX: number;
+    gridWidth: number;
+    columns: number[];
+  } | null>(null);
+  const total = block.columns.reduce((sum, width) => sum + width, 0);
+  let cumulative = 0;
+  return (
+    <>
+      {block.columns.slice(0, -1).map((width, index) => {
+        cumulative += width;
+        const position = (cumulative / Math.max(total, 0.01)) * 100;
+        return (
+          <span
+            key={index}
+            className="piqae-canvas-grid-resize"
+            style={{ left: `${position}%` }}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={`Resize column ${index + 1}`}
+            aria-valuemin={10}
+            aria-valuemax={90}
+            aria-valuenow={gridBoundaryPercent(block.columns, index)}
+            tabIndex={0}
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key !== "ArrowLeft" && event.key !== "ArrowRight")
+                return;
+              event.preventDefault();
+              event.stopPropagation();
+              onChange(
+                {
+                  ...block,
+                  columns: resizeGridColumns(
+                    block.columns,
+                    index,
+                    (event.key === "ArrowRight" ? 1 : -1) *
+                      adjacentGridWidth(block.columns, index) *
+                      0.05,
+                  ),
+                },
+                path,
+              );
+            }}
+            onPointerDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              const grid = event.currentTarget.closest(".piqae-canvas-grid");
+              drag.current = {
+                index,
+                startX: event.clientX,
+                gridWidth: Math.max(
+                  1,
+                  grid?.getBoundingClientRect().width ?? 1,
+                ),
+                columns: block.columns,
+              };
+              event.currentTarget.setPointerCapture(event.pointerId);
+            }}
+            onPointerMove={(event) => {
+              const active = drag.current;
+              if (!active || active.index !== index) return;
+              const activeTotal = active.columns.reduce(
+                (sum, item) => sum + item,
+                0,
+              );
+              onChange(
+                {
+                  ...block,
+                  columns: resizeGridColumns(
+                    active.columns,
+                    index,
+                    ((event.clientX - active.startX) / active.gridWidth) *
+                      activeTotal,
+                  ),
+                },
+                path,
+              );
+            }}
+            onPointerUp={(event) => {
+              if (drag.current?.index === index) drag.current = null;
+              if (event.currentTarget.hasPointerCapture(event.pointerId))
+                event.currentTarget.releasePointerCapture(event.pointerId);
+            }}
+            onPointerCancel={() => {
+              if (drag.current?.index === index) drag.current = null;
+            }}
+          />
+        );
+      })}
+    </>
   );
 }
 
@@ -2760,6 +2867,31 @@ function columnBoundaryPercent(
 ) {
   const left = columns[index]?.width ?? 1;
   const right = columns[index + 1]?.width ?? 1;
+  return Math.round((left / Math.max(left + right, 0.01)) * 100);
+}
+function resizeGridColumns(columns: number[], index: number, delta: number) {
+  const left = columns[index];
+  const right = columns[index + 1];
+  if (left === undefined || right === undefined) return columns;
+  const minimum = adjacentGridWidth(columns, index) * 0.1;
+  const boundedDelta = Math.max(
+    minimum - left,
+    Math.min(right - minimum, delta),
+  );
+  return columns.map((width, columnIndex) =>
+    columnIndex === index
+      ? left + boundedDelta
+      : columnIndex === index + 1
+        ? right - boundedDelta
+        : width,
+  );
+}
+function adjacentGridWidth(columns: number[], index: number) {
+  return (columns[index] ?? 1) + (columns[index + 1] ?? 1);
+}
+function gridBoundaryPercent(columns: number[], index: number) {
+  const left = columns[index] ?? 1;
+  const right = columns[index + 1] ?? 1;
   return Math.round((left / Math.max(left + right, 0.01)) * 100);
 }
 /** The list a path's final segment indexes into, so move limits are accurate. */

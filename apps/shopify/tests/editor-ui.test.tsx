@@ -74,6 +74,28 @@ const tablePacket: PrintPacket = {
   ],
 };
 
+const gridPacket: PrintPacket = {
+  format: "printpacket/v1",
+  media: { kind: "paged", size: "a4" },
+  body: [
+    {
+      type: "grid",
+      columns: [2, 1],
+      gap_mm: 8,
+      children: [
+        {
+          type: "paragraph",
+          content: [{ type: "text", value: "Left" }],
+        },
+        {
+          type: "paragraph",
+          content: [{ type: "text", value: "Right" }],
+        },
+      ],
+    },
+  ],
+};
+
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
 
@@ -495,6 +517,34 @@ describe("Shopify document editor layout", () => {
         >
       ).columns.map((column) => column.cell),
     );
+  });
+
+  it("resizes a visual columns layout directly on the canvas", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={gridPacket} onChange={onChange} />,
+    );
+    const separator = page.querySelector<HTMLElement>(
+      '[role="separator"][aria-label="Resize column 1"]',
+    )!;
+
+    expect(separator.getAttribute("aria-valuenow")).toBe("67");
+    expect(separator.tabIndex).toBe(0);
+    await act(async () => {
+      separator.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
+      );
+    });
+    const next = onChange.mock.lastCall?.[0] as PrintPacket;
+    const grid = authoredBody(next)[0];
+    expect(grid.type).toBe("grid");
+    if (grid.type !== "grid") throw new Error("unreachable");
+    expect(grid.columns[0]).toBeCloseTo(2.15);
+    expect(grid.columns[1]).toBeCloseTo(0.85);
+    expect(grid.children.map((child) => child.type)).toEqual([
+      "paragraph",
+      "paragraph",
+    ]);
   });
 
   it("quick-adds common content into the hovered gap", async () => {
