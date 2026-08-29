@@ -639,6 +639,32 @@
   padding: 0.55rem;
   border-left: 2px solid #91c0ff;
 }
+.piqae-canvas-data-list {
+  display: grid;
+  gap: 0.55rem;
+  min-width: 0;
+}
+.piqae-canvas-data-list-editor {
+  padding: 0.55rem;
+  border-left: 2px solid #91c0ff;
+}
+.piqae-canvas-collection-branch {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+.piqae-canvas-data-list-editor > .piqae-canvas-collection-branch,
+.piqae-canvas-table-empty {
+  padding: 0.4rem;
+  border: 1px dashed #d5d7da;
+  border-radius: 0.35rem;
+}
+.piqae-canvas-table-empty {
+  margin: 0.55rem 0;
+}
+.piqae-presentation-canvas .piqae-canvas-collection-branch {
+  display: contents;
+}
 .piqae-canvas-code {
   display: inline-grid;
   justify-items: center;

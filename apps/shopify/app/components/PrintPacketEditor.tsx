@@ -729,7 +729,7 @@ export function PrintPacketEditor({
 }
 
 export type BlockPathPart = {
-  branch: "root" | "children" | "then" | "else";
+  branch: "root" | "children" | "then" | "else" | "header" | "item" | "empty";
   index: number;
 };
 export type BlockPath = BlockPathPart[];
@@ -1437,7 +1437,103 @@ function CanvasBlock({
             </div>
           ))}
         </div>
+        {!preview ? (
+          <div
+            className="piqae-canvas-collection-branch piqae-canvas-table-empty"
+            data-collection-branch="empty"
+          >
+            <span className="piqae-canvas-badge">Empty state</span>
+            {block.empty?.length ? (
+              <DocumentCanvas
+                blocks={block.empty}
+                path={path}
+                branch="empty"
+                editable={editable}
+                mediaKind={mediaKind}
+                preview={preview}
+                selectedPath={selectedPath}
+                authoringFields={authoringFields}
+                scope={scope}
+                onSelect={onSelect}
+                onInsert={onInsert}
+                onChange={onChange}
+              />
+            ) : (
+              <AddContentSlot
+                label="Add empty state"
+                editable={editable}
+                onAdd={(child) => onChange({ ...block, empty: [child] }, path)}
+              />
+            )}
+          </div>
+        ) : null}
       </div>
+    );
+  if (block.type === "data_list")
+    return (
+      <section
+        className={`piqae-canvas-data-list${preview ? "" : " piqae-canvas-data-list-editor"}${selectableClass}${selected ? " piqae-canvas-selected" : ""}`}
+        onClick={select}
+      >
+        {preview ? null : (
+          <span className="piqae-canvas-badge">
+            Data list · {expressionLabel(block.items)}
+          </span>
+        )}
+        <CollectionCanvasBranch
+          label="List header"
+          emptyLabel="Add list header"
+          blocks={block.header ?? []}
+          path={path}
+          branch="header"
+          editable={editable}
+          mediaKind={mediaKind}
+          preview={preview}
+          selectedPath={selectedPath}
+          authoringFields={authoringFields}
+          scope={scope}
+          onSelect={onSelect}
+          onInsert={onInsert}
+          onChange={onChange}
+          onAdd={(child) => onChange({ ...block, header: [child] }, path)}
+        />
+        <CollectionCanvasBranch
+          label="Representative item"
+          emptyLabel="Add item content"
+          blocks={block.item}
+          path={path}
+          branch="item"
+          editable={editable}
+          mediaKind={mediaKind}
+          preview={preview}
+          selectedPath={selectedPath}
+          authoringFields={authoringFields}
+          scope="item"
+          onSelect={onSelect}
+          onInsert={onInsert}
+          onChange={onChange}
+          onAdd={(child) => onChange({ ...block, item: [child] }, path)}
+        />
+        {preview ? null : (
+          <CollectionCanvasBranch
+            label="Empty state"
+            emptyLabel="Add empty state"
+            blocks={block.empty ?? []}
+            path={path}
+            branch="empty"
+            editable={editable}
+            mediaKind={mediaKind}
+            preview={preview}
+            selectedPath={selectedPath}
+            authoringFields={authoringFields}
+            scope={scope}
+            onSelect={onSelect}
+            onInsert={onInsert}
+            onChange={onChange}
+            onAdd={(child) => onChange({ ...block, empty: [child] }, path)}
+          />
+        )}
+      </section>
     );
   if (block.type === "conditional")
     return (
@@ -1578,6 +1674,73 @@ function CanvasBlock({
         />
       )}
     </section>
+  );
+}
+
+function CollectionCanvasBranch({
+  label,
+  emptyLabel,
+  blocks,
+  path,
+  branch,
+  editable,
+  mediaKind,
+  preview,
+  selectedPath,
+  authoringFields,
+  scope,
+  onSelect,
+  onInsert,
+  onChange,
+  onAdd,
+}: {
+  label: string;
+  emptyLabel: string;
+  blocks: Block[];
+  path: BlockPath;
+  branch: "header" | "item" | "empty";
+  editable: boolean;
+  mediaKind: PrintPacket["media"]["kind"];
+  preview: boolean;
+  selectedPath?: BlockPath;
+  authoringFields: readonly ShopifyDocumentField[];
+  scope: ShopifyAuthoringScope;
+  onSelect(block: Block, path: BlockPath): void;
+  onInsert?(block: Block, path: BlockPath): void;
+  onChange(block: Block, path: BlockPath): void;
+  onAdd(block: Block): void;
+}) {
+  if (preview && !blocks.length) return null;
+  return (
+    <div
+      className="piqae-canvas-collection-branch"
+      data-collection-branch={branch}
+    >
+      {preview ? null : <span className="piqae-canvas-badge">{label}</span>}
+      {blocks.length ? (
+        <DocumentCanvas
+          blocks={blocks}
+          path={path}
+          branch={branch}
+          editable={editable}
+          mediaKind={mediaKind}
+          preview={preview}
+          selectedPath={selectedPath}
+          authoringFields={authoringFields}
+          scope={scope}
+          onSelect={onSelect}
+          onInsert={onInsert}
+          onChange={onChange}
+        />
+      ) : (
+        <AddContentSlot
+          label={emptyLabel}
+          editable={editable}
+          preview={preview}
+          onAdd={onAdd}
+        />
+      )}
+    </div>
   );
 }
 
@@ -3073,6 +3236,47 @@ export function canMoveBlockAtPath(
   );
 }
 
+type NestedBlockBranch = Exclude<BlockPathPart["branch"], "root">;
+
+function blocksInBranch(
+  block: Block,
+  branch: BlockPathPart["branch"],
+): Block[] | null {
+  if (branch === "children" && "children" in block) return block.children;
+  if (branch === "then" && block.type === "conditional") return block.then;
+  if (branch === "else" && block.type === "conditional")
+    return block.else ?? [];
+  if (branch === "header" && block.type === "data_list")
+    return block.header ?? [];
+  if (branch === "item" && block.type === "data_list") return block.item;
+  if (branch === "empty" && block.type === "data_list")
+    return block.empty ?? [];
+  if (branch === "empty" && block.type === "table") return block.empty ?? [];
+  return null;
+}
+
+function withBlocksInBranch(
+  block: Block,
+  branch: NestedBlockBranch,
+  blocks: Block[],
+): Block {
+  if (branch === "children" && "children" in block)
+    return { ...block, children: blocks };
+  if (branch === "then" && block.type === "conditional")
+    return { ...block, then: blocks };
+  if (branch === "else" && block.type === "conditional")
+    return { ...block, else: blocks };
+  if (branch === "header" && block.type === "data_list")
+    return { ...block, header: blocks };
+  if (branch === "item" && block.type === "data_list")
+    return { ...block, item: blocks };
+  if (branch === "empty" && block.type === "data_list")
+    return { ...block, empty: blocks };
+  if (branch === "empty" && block.type === "table")
+    return { ...block, empty: blocks };
+  return block;
+}
+
 /** The list a path's final segment indexes into, so move limits are accurate. */
 export function siblingsAtPath(blocks: Block[], path: BlockPath): Block[] {
   const [part, ...rest] = path;
@@ -3080,13 +3284,8 @@ export function siblingsAtPath(blocks: Block[], path: BlockPath): Block[] {
   const block = blocks[part.index];
   if (!block) return blocks;
   const next = rest[0]!;
-  if (next.branch === "children" && "children" in block)
-    return siblingsAtPath(block.children, rest);
-  if (next.branch === "then" && block.type === "conditional")
-    return siblingsAtPath(block.then, rest);
-  if (next.branch === "else" && block.type === "conditional")
-    return siblingsAtPath(block.else ?? [], rest);
-  return blocks;
+  const nested = blocksInBranch(block, next.branch);
+  return nested ? siblingsAtPath(nested, rest) : blocks;
 }
 function sameBlockPath(left?: BlockPath, right?: BlockPath) {
   return Boolean(
@@ -3112,22 +3311,15 @@ export function moveBlockAtPath(
   return blocks.map((block, index) => {
     if (index !== part.index) return block;
     const nextPart = rest[0]!;
-    if (nextPart.branch === "children" && "children" in block)
-      return {
-        ...block,
-        children: moveBlockAtPath(block.children, rest, direction),
-      };
-    if (nextPart.branch === "then" && block.type === "conditional")
-      return {
-        ...block,
-        then: moveBlockAtPath(block.then, rest, direction),
-      };
-    if (nextPart.branch === "else" && block.type === "conditional")
-      return {
-        ...block,
-        else: moveBlockAtPath(block.else ?? [], rest, direction),
-      };
-    return block;
+    if (nextPart.branch === "root") return block;
+    const nested = blocksInBranch(block, nextPart.branch);
+    return nested
+      ? withBlocksInBranch(
+          block,
+          nextPart.branch,
+          moveBlockAtPath(nested, rest, direction),
+        )
+      : block;
   });
 }
 export function replaceBlockAtPath(
@@ -3141,22 +3333,15 @@ export function replaceBlockAtPath(
     if (index !== part.index) return block;
     if (!rest.length) return replacement;
     const nextPart = rest[0]!;
-    if (nextPart.branch === "children" && "children" in block)
-      return {
-        ...block,
-        children: replaceBlockAtPath(block.children, rest, replacement),
-      };
-    if (nextPart.branch === "then" && block.type === "conditional")
-      return {
-        ...block,
-        then: replaceBlockAtPath(block.then, rest, replacement),
-      };
-    if (nextPart.branch === "else" && block.type === "conditional")
-      return {
-        ...block,
-        else: replaceBlockAtPath(block.else ?? [], rest, replacement),
-      };
-    return block;
+    if (nextPart.branch === "root") return block;
+    const nested = blocksInBranch(block, nextPart.branch);
+    return nested
+      ? withBlocksInBranch(
+          block,
+          nextPart.branch,
+          replaceBlockAtPath(nested, rest, replacement),
+        )
+      : block;
   });
 }
 export function insertBlockAfterPath(
@@ -3174,22 +3359,15 @@ export function insertBlockAfterPath(
   return blocks.map((block, index) => {
     if (index !== part.index) return block;
     const nextPart = rest[0]!;
-    if (nextPart.branch === "children" && "children" in block)
-      return {
-        ...block,
-        children: insertBlockAfterPath(block.children, rest, inserted),
-      };
-    if (nextPart.branch === "then" && block.type === "conditional")
-      return {
-        ...block,
-        then: insertBlockAfterPath(block.then, rest, inserted),
-      };
-    if (nextPart.branch === "else" && block.type === "conditional")
-      return {
-        ...block,
-        else: insertBlockAfterPath(block.else ?? [], rest, inserted),
-      };
-    return block;
+    if (nextPart.branch === "root") return block;
+    const nested = blocksInBranch(block, nextPart.branch);
+    return nested
+      ? withBlocksInBranch(
+          block,
+          nextPart.branch,
+          insertBlockAfterPath(nested, rest, inserted),
+        )
+      : block;
   });
 }
 export function insertBlockAtPath(
@@ -3207,22 +3385,15 @@ export function insertBlockAtPath(
   return blocks.map((block, index) => {
     if (index !== part.index) return block;
     const nextPart = rest[0]!;
-    if (nextPart.branch === "children" && "children" in block)
-      return {
-        ...block,
-        children: insertBlockAtPath(block.children, rest, inserted),
-      };
-    if (nextPart.branch === "then" && block.type === "conditional")
-      return {
-        ...block,
-        then: insertBlockAtPath(block.then, rest, inserted),
-      };
-    if (nextPart.branch === "else" && block.type === "conditional")
-      return {
-        ...block,
-        else: insertBlockAtPath(block.else ?? [], rest, inserted),
-      };
-    return block;
+    if (nextPart.branch === "root") return block;
+    const nested = blocksInBranch(block, nextPart.branch);
+    return nested
+      ? withBlocksInBranch(
+          block,
+          nextPart.branch,
+          insertBlockAtPath(nested, rest, inserted),
+        )
+      : block;
   });
 }
 export function removeBlockAtPath(blocks: Block[], path: BlockPath): Block[] {
@@ -3232,13 +3403,15 @@ export function removeBlockAtPath(blocks: Block[], path: BlockPath): Block[] {
   return blocks.map((block, index) => {
     if (index !== part.index) return block;
     const nextPart = rest[0]!;
-    if (nextPart.branch === "children" && "children" in block)
-      return { ...block, children: removeBlockAtPath(block.children, rest) };
-    if (nextPart.branch === "then" && block.type === "conditional")
-      return { ...block, then: removeBlockAtPath(block.then, rest) };
-    if (nextPart.branch === "else" && block.type === "conditional")
-      return { ...block, else: removeBlockAtPath(block.else ?? [], rest) };
-    return block;
+    if (nextPart.branch === "root") return block;
+    const nested = blocksInBranch(block, nextPart.branch);
+    return nested
+      ? withBlocksInBranch(
+          block,
+          nextPart.branch,
+          removeBlockAtPath(nested, rest),
+        )
+      : block;
   });
 }
 function rgbToHex(color: { red: number; green: number; blue: number }) {
@@ -3414,6 +3587,7 @@ function structuredBlockDOM(block: Block, fallback?: string): DOMOutputSpec {
 function blockTitle(block: Block) {
   const labels: Partial<Record<Block["type"], string>> = {
     table: "Line-item table",
+    data_list: "Data list",
     conditional: "Conditional section",
     grid: "Columns",
     stack: "Vertical stack",
@@ -3435,6 +3609,7 @@ function blockTitle(block: Block) {
 function blockIcon(block: Block): IconName {
   const icons: Partial<Record<Block["type"], IconName>> = {
     table: "table",
+    data_list: "repeat",
     repeat: "repeat",
     conditional: "condition",
     grid: "columns",
@@ -3470,14 +3645,8 @@ function scopeForBlockPath(
       isLineItemsExpression(block.items, scope)
     )
       scope = "item";
-    siblings =
-      next.branch === "then" && block.type === "conditional"
-        ? block.then
-        : next.branch === "else" && block.type === "conditional"
-          ? (block.else ?? [])
-          : "children" in block
-            ? block.children
-            : [];
+    if (block.type === "data_list" && next.branch === "item") scope = "item";
+    siblings = blocksInBranch(block, next.branch) ?? [];
   }
   return scope;
 }

@@ -5,9 +5,14 @@ import { createRoot, type Root } from "react-dom/client";
 import { createRoutesStub } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  insertBlockAfterPath,
   insertBlockAtPath,
+  moveBlockAtPath,
   PrintPacketEditor,
   PrintPacketPreview,
+  removeBlockAtPath,
+  replaceBlockAtPath,
+  siblingsAtPath,
   orderBatchPresentation,
 } from "../app/components/PrintPacketEditor";
 import type { PrintPacket } from "../app/core/template-model";
@@ -90,6 +95,53 @@ const gridPacket: PrintPacket = {
         {
           type: "paragraph",
           content: [{ type: "text", value: "Right" }],
+        },
+      ],
+    },
+  ],
+};
+
+const collectionPacket: PrintPacket = {
+  format: "printpacket/v1",
+  media: { kind: "paged", size: "a4" },
+  body: [
+    {
+      type: "data_list",
+      items: { type: "path", path: ["order", "lineItems"] },
+      header: [
+        {
+          type: "paragraph",
+          content: [{ type: "text", value: "List header" }],
+        },
+      ],
+      item: [
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", value: "Item " },
+            {
+              type: "value",
+              value: { type: "current_path", path: ["title"] },
+            },
+          ],
+        },
+      ],
+      empty: [
+        {
+          type: "paragraph",
+          content: [{ type: "text", value: "No list items" }],
+        },
+      ],
+    },
+    {
+      ...(tablePacket.body[0] as Extract<
+        PrintPacket["body"][number],
+        { type: "table" }
+      >),
+      empty: [
+        {
+          type: "paragraph",
+          content: [{ type: "text", value: "No table items" }],
         },
       ],
     },
@@ -305,6 +357,23 @@ describe("Shopify document editor layout", () => {
     expect(canvas?.querySelector(".piqae-canvas-page-break")).toBeNull();
     expect(canvas?.querySelector(".piqae-canvas-empty")).toBeNull();
     expect(batch?.style.gap).toBe("");
+  });
+
+  it("previews collection headers and one representative item without empty-state chrome", async () => {
+    const page = await render(<PrintPacketPreview value={collectionPacket} />);
+    const canvas = page.querySelector<HTMLElement>(
+      ".piqae-presentation-canvas",
+    )!;
+    const list = canvas.querySelector<HTMLElement>(".piqae-canvas-data-list")!;
+    const table = canvas.querySelector<HTMLElement>(".piqae-canvas-table")!;
+
+    expect(list.textContent).toContain("List header");
+    expect(list.textContent).toContain("Item");
+    expect(list.textContent).not.toContain("No list items");
+    expect(table.textContent).not.toContain("No table items");
+    expect(canvas.querySelector(".piqae-canvas-badge")).toBeNull();
+    expect(canvas.querySelector('[data-collection-branch="empty"]')).toBeNull();
+    expect(canvas.querySelector(".piqae-canvas-insertion-slot")).toBeNull();
   });
 
   it("keeps starter and editable actions in the Shopify title bar contract", () => {
@@ -524,6 +593,88 @@ describe("Shopify document editor layout", () => {
     expect(grid.children[0]?.type).toBe("paragraph");
   });
 
+  it("selects and deletes a nested data-list item without changing its other branches", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={collectionPacket} onChange={onChange} />,
+    );
+    const list = page.querySelector<HTMLElement>(".piqae-canvas-data-list")!;
+    const itemText = list.querySelector<HTMLElement>(
+      '[data-collection-branch="item"] .piqae-canvas-text',
+    )!;
+
+    expect(list.textContent).toContain("List header");
+    expect(list.textContent).toContain("Representative item");
+    expect(list.textContent).toContain("Empty state");
+    await act(async () => itemText.click());
+    expect(page.querySelector(".piqae-selection-title")?.textContent).toContain(
+      "Text",
+    );
+    await act(async () => {
+      itemText.focus();
+      itemText.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Delete", bubbles: true }),
+      );
+    });
+
+    const next = onChange.mock.lastCall?.[0] as PrintPacket;
+    const listBlock = authoredBody(next)[0];
+    expect(listBlock.type).toBe("data_list");
+    if (listBlock.type !== "data_list") return;
+    expect(listBlock.items).toEqual({
+      type: "current_path",
+      path: ["lineItems"],
+    });
+    expect(listBlock.header?.[0]).toMatchObject({ type: "paragraph" });
+    expect(listBlock.item).toEqual([]);
+    expect(listBlock.empty?.[0]).toMatchObject({ type: "paragraph" });
+  });
+
+  it("inserts into the representative data-list item and preserves scoped expressions", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={collectionPacket} onChange={onChange} />,
+    );
+    const itemBranch = page.querySelector<HTMLElement>(
+      '.piqae-canvas-data-list [data-collection-branch="item"]',
+    )!;
+    const finalSlot = Array.from(
+      itemBranch.querySelectorAll<HTMLElement>(".piqae-canvas-insertion-slot"),
+    ).at(-1)!;
+
+    await act(async () => {
+      finalSlot
+        .querySelector<HTMLButtonElement>('[aria-label="Add content here"]')
+        ?.click();
+    });
+    await act(async () => {
+      Array.from(finalSlot.querySelectorAll("[role=menuitem]"))
+        .find((item) => item.textContent?.includes("Heading"))
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const next = onChange.mock.lastCall?.[0] as PrintPacket;
+    const listBlock = authoredBody(next)[0];
+    expect(listBlock.type).toBe("data_list");
+    if (listBlock.type !== "data_list") return;
+    expect(listBlock.item.map((block) => block.type)).toEqual([
+      "paragraph",
+      "heading",
+    ]);
+    expect(listBlock.item[0]).toMatchObject({
+      type: "paragraph",
+      content: [
+        { type: "text", value: "Item " },
+        {
+          type: "value",
+          value: { type: "current_path", path: ["title"] },
+        },
+      ],
+    });
+    expect(listBlock.header?.[0]).toMatchObject({ type: "paragraph" });
+    expect(listBlock.empty?.[0]).toMatchObject({ type: "paragraph" });
+  });
+
   it("removes a selected non-editing block from keyboard or contextual delete", async () => {
     const onChange = vi.fn();
     const page = await render(
@@ -593,6 +744,44 @@ describe("Shopify document editor layout", () => {
     const nextTable = authoredBody(nextDocument)[0];
     expect(nextTable.type).toBe("table");
     if (nextTable.type === "table") expect(nextTable.columns).toHaveLength(3);
+  });
+
+  it("selects and removes table empty-state content without changing the table", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={collectionPacket} onChange={onChange} />,
+    );
+    const table = page.querySelector<HTMLElement>(".piqae-canvas-table")!;
+    const emptyText = table.querySelector<HTMLElement>(
+      '[data-collection-branch="empty"] .piqae-canvas-text',
+    )!;
+
+    expect(table.textContent).toContain("Empty state");
+    await act(async () => emptyText.click());
+    await act(async () => {
+      emptyText.focus();
+      emptyText.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Backspace", bubbles: true }),
+      );
+    });
+
+    const next = onChange.mock.lastCall?.[0] as PrintPacket;
+    const tableBlock = authoredBody(next)[1];
+    expect(tableBlock.type).toBe("table");
+    if (tableBlock.type !== "table") return;
+    expect(tableBlock.empty).toEqual([]);
+    expect(tableBlock.items).toEqual({
+      type: "current_path",
+      path: ["lineItems"],
+    });
+    expect(tableBlock.columns).toEqual(
+      (
+        tablePacket.body[0] as Extract<
+          PrintPacket["body"][number],
+          { type: "table" }
+        >
+      ).columns,
+    );
   });
 
   it("resizes table columns from an accessible keyboard separator without changing expressions", async () => {
@@ -780,5 +969,95 @@ describe("Shopify document editor layout", () => {
       "divider",
       "paragraph",
     ]);
+  });
+
+  it("applies every nested path operation to data-list and table collection branches", () => {
+    const paragraph = {
+      type: "paragraph" as const,
+      content: [{ type: "text" as const, value: "Original" }],
+    };
+    const replacement = {
+      type: "heading" as const,
+      level: 2,
+      content: [{ type: "text" as const, value: "Replacement" }],
+    };
+    const list = {
+      type: "data_list" as const,
+      items: { type: "path" as const, path: ["order", "lineItems"] },
+      header: [paragraph, { type: "divider" as const }],
+      item: [paragraph, { type: "divider" as const }],
+      empty: [paragraph, { type: "divider" as const }],
+    };
+    const branchBlocks = (
+      block: typeof list,
+      branch: "header" | "item" | "empty",
+    ) => block[branch];
+
+    for (const branch of ["header", "item", "empty"] as const) {
+      const path = [
+        { branch: "root" as const, index: 0 },
+        { branch, index: 0 },
+      ];
+      expect(siblingsAtPath([list], path)).toEqual(branchBlocks(list, branch));
+      const moved = moveBlockAtPath([list], path, 1)[0];
+      const replaced = replaceBlockAtPath([list], path, replacement)[0];
+      const inserted = insertBlockAtPath(
+        [list],
+        [
+          { branch: "root", index: 0 },
+          { branch, index: 1 },
+        ],
+        { type: "spacer", height_mm: 4 },
+      )[0];
+      const insertedAfter = insertBlockAfterPath([list], path, {
+        type: "spacer",
+        height_mm: 4,
+      })[0];
+      const removed = removeBlockAtPath([list], path)[0];
+      expect(moved?.type).toBe("data_list");
+      expect(replaced?.type).toBe("data_list");
+      expect(inserted?.type).toBe("data_list");
+      expect(insertedAfter?.type).toBe("data_list");
+      expect(removed?.type).toBe("data_list");
+      if (
+        moved?.type !== "data_list" ||
+        replaced?.type !== "data_list" ||
+        inserted?.type !== "data_list" ||
+        insertedAfter?.type !== "data_list" ||
+        removed?.type !== "data_list"
+      )
+        throw new Error("unreachable");
+      expect(branchBlocks(moved, branch).map((block) => block.type)).toEqual([
+        "divider",
+        "paragraph",
+      ]);
+      expect(branchBlocks(replaced, branch)[0]).toEqual(replacement);
+      expect(branchBlocks(inserted, branch).map((block) => block.type)).toEqual(
+        ["paragraph", "spacer", "divider"],
+      );
+      expect(
+        branchBlocks(insertedAfter, branch).map((block) => block.type),
+      ).toEqual(["paragraph", "spacer", "divider"]);
+      expect(branchBlocks(removed, branch).map((block) => block.type)).toEqual([
+        "divider",
+      ]);
+    }
+
+    const table = {
+      ...(tablePacket.body[0] as Extract<
+        PrintPacket["body"][number],
+        { type: "table" }
+      >),
+      empty: [paragraph, { type: "divider" as const }],
+    };
+    const tablePath = [
+      { branch: "root" as const, index: 0 },
+      { branch: "empty" as const, index: 0 },
+    ];
+    expect(siblingsAtPath([table], tablePath)).toEqual(table.empty);
+    const nextTable = removeBlockAtPath([table], tablePath)[0];
+    expect(nextTable?.type).toBe("table");
+    if (nextTable?.type === "table")
+      expect(nextTable.empty).toEqual([{ type: "divider" }]);
   });
 });
