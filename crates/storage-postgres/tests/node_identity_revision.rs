@@ -186,7 +186,7 @@ async fn node_identity_upgrades_43_and_fences_tenants_revisions_and_invalid_rows
         .fetch_one(&pool)
         .await
         .expect("schema version");
-    assert_eq!(latest, 45);
+    assert_eq!(latest, 46);
 
     pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
@@ -209,7 +209,7 @@ async fn node_identity_upgrades_43_and_fences_tenants_revisions_and_invalid_rows
             .fetch_one(&fresh)
             .await
             .expect("fresh schema version");
-    assert_eq!(fresh_latest, 45);
+    assert_eq!(fresh_latest, 46);
     fresh.close().await;
     sqlx::query(&format!("DROP SCHEMA {fresh_schema} CASCADE"))
         .execute(&admin)

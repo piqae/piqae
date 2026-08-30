@@ -149,13 +149,13 @@ async fn capability_recovery_checks_migrate_fresh_and_0044_with_tenant_fences() 
         PostgresStore::from_pool(pool.clone())
             .migrate()
             .await
-            .expect("migrate to 0045");
+            .expect("migrate through version 46");
         let latest: i64 =
             sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
                 .fetch_one(&pool)
                 .await
                 .expect("latest migration");
-        assert_eq!(latest, 45);
+        assert_eq!(latest, 46);
 
         if mode == "fresh" {
             seed_tenant(&pool, "a", false).await;
