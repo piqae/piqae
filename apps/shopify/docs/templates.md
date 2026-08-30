@@ -20,6 +20,9 @@ documents use their declared width and grow with content; page breaks are
 diagnosed and rejected. Fixed labels use their exact, editable width and height,
 including non-preset label sizes. Receipt and label document types select the
 corresponding media model, while paged invoice and fulfilment types start on A4.
+The Product Label starter renders every expanded line item as one atomic
+100 x 50 mm fixed-label page. Shopify does not currently select sheet or
+continuous stock for that starter; sheet-cell imposition remains future work.
 When a selected target declares safe-area, gap, or registration-mark facts, the
 editor shows those production guides without copying them into the document.
 

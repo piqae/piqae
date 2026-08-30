@@ -1546,14 +1546,16 @@ fn layout_nodes(nodes: &[Node], state: &mut State, depth: usize) -> Result<(), R
                     state.doc.theme.font_size_pt,
                     state.doc.theme.line_height,
                 )?;
-                if h <= state.y - state.bottom {
-                    layout_nodes(children, state, depth + 1)?
-                } else if h
-                    <= state.nominal_height - mm(state.margins.top_mm + state.margins.bottom_mm)
-                {
+                if h > state.y - state.bottom {
+                    if h > state.nominal_height - mm(state.margins.top_mm + state.margins.bottom_mm)
+                    {
+                        return Err(RenderError::Limit("keep-together block height"));
+                    }
                     new_page(state)?;
-                    layout_nodes(children, state, depth + 1)?
-                } else {
+                }
+                let page_count = state.pages.len();
+                layout_nodes(children, state, depth + 1)?;
+                if state.pages.len() != page_count {
                     return Err(RenderError::Limit("keep-together block height"));
                 }
             }
@@ -3563,6 +3565,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(output.page_count, 250);
+    }
+
+    #[test]
+    fn keep_together_rejects_dynamic_content_that_would_split_across_labels() {
+        let mut d = document(vec![Node::KeepTogether {
+            children: vec![Node::Paragraph {
+                content: vec![Inline::Value {
+                    value: Expr::Path {
+                        path: vec!["description".into()],
+                    },
+                    style: TextStyle::default(),
+                }],
+                style: TextStyle::default(),
+            }],
+        }]);
+        d.media = Media::Label {
+            width_mm: 50.0,
+            height_mm: 30.0,
+            margins: Edges {
+                top_mm: 2.0,
+                right_mm: 2.0,
+                bottom_mm: 2.0,
+                left_mm: 2.0,
+            },
+        };
+        let description = std::iter::repeat_n("word", 30)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            render(
+                &d,
+                &json!({"description": description}),
+                RenderLimits::default()
+            ),
+            Err(RenderError::Limit("keep-together block height"))
+        );
     }
 
     #[test]

@@ -169,12 +169,76 @@ const AUTHORING_FIELDS: readonly ShopifyDocumentField[] =
   SHOPIFY_DOCUMENT_FIELDS;
 export const SHOPIFY_VARIABLES = AUTHORING_FIELDS.map((field) => field.path);
 
+const EDITOR_HISTORY_LIMIT = 100;
+type EditorHistoryEntry = { document: PrintPacket; key: string };
+type EditorDocumentHistory = {
+  past: EditorHistoryEntry[];
+  present: EditorHistoryEntry;
+  future: EditorHistoryEntry[];
+};
+
+/**
+ * A document-scoped history owner. Keep this object above workspace routing so
+ * temporarily unmounting Design (for example, while showing Preview) does not
+ * discard the merchant's undo stack.
+ */
+export type PrintPacketEditorHistory = EditorDocumentHistory;
+
+function editorHistoryEntry(document: PrintPacket): EditorHistoryEntry {
+  const snapshot = structuredClone(document);
+  return { document: snapshot, key: JSON.stringify(snapshot) };
+}
+
+function createEditorHistory(document: PrintPacket): EditorDocumentHistory {
+  return { past: [], present: editorHistoryEntry(document), future: [] };
+}
+
+export function createPrintPacketEditorHistory(
+  document: PrintPacket,
+): PrintPacketEditorHistory {
+  return createEditorHistory(document);
+}
+
+function recordEditorHistory(
+  historyState: EditorDocumentHistory,
+  document: PrintPacket,
+) {
+  const next = editorHistoryEntry(document);
+  if (next.key === historyState.present.key) return false;
+  historyState.past.push(historyState.present);
+  if (historyState.past.length > EDITOR_HISTORY_LIMIT)
+    historyState.past.splice(
+      0,
+      historyState.past.length - EDITOR_HISTORY_LIMIT,
+    );
+  historyState.present = next;
+  historyState.future = [];
+  return true;
+}
+
+function stepEditorHistory(
+  historyState: EditorDocumentHistory,
+  direction: "undo" | "redo",
+) {
+  const source = direction === "undo" ? historyState.past : historyState.future;
+  const next = source.pop();
+  if (!next) return null;
+  const destination =
+    direction === "undo" ? historyState.future : historyState.past;
+  destination.push(historyState.present);
+  if (destination.length > EDITOR_HISTORY_LIMIT)
+    destination.splice(0, destination.length - EDITOR_HISTORY_LIMIT);
+  historyState.present = next;
+  return structuredClone(next.document);
+}
+
 export function PrintPacketEditor({
   value,
   disabled,
   customFields = [],
   stock = null,
   workspaceControls,
+  history: sharedHistory,
   onChange,
 }: {
   value: PrintPacket;
@@ -182,16 +246,32 @@ export function PrintPacketEditor({
   customFields?: readonly ShopifyDocumentField[];
   stock?: DesignStock;
   workspaceControls?: ReactNode;
+  history?: PrintPacketEditorHistory;
   onChange(document: PrintPacket): void;
 }) {
   const allAuthoringFields = [...AUTHORING_FIELDS, ...customFields];
   const canonicalBody = canonicalizeShopifyEditorBody(value.body);
+  const currentDocument = { ...value, body: canonicalBody };
+  const currentDocumentKey = JSON.stringify(currentDocument);
   const continuousPageBreaks =
-    value.media.kind !== "paged" && documentHasPageBreak(value);
+    value.media.kind === "continuous" && documentHasPageBreak(value);
   const editorRoot = useRef<HTMLDivElement>(null);
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
-  const latest = useRef(value);
+  const latest = useRef(currentDocument);
+  const observedValueKey = useRef(currentDocumentKey);
+  const localHistory = useRef<EditorDocumentHistory | null>(null);
+  if (!localHistory.current)
+    localHistory.current = createEditorHistory(currentDocument);
+  const documentHistory = sharedHistory ?? localHistory.current;
+  if (observedValueKey.current !== currentDocumentKey) {
+    observedValueKey.current = currentDocumentKey;
+    latest.current = currentDocument;
+  }
+  const [historyAvailability, setHistoryAvailability] = useState(() => ({
+    canUndo: documentHistory.past.length > 0,
+    canRedo: documentHistory.future.length > 0,
+  }));
   const [selection, setSelection] = useState<{
     position: number;
     block: Block;
@@ -204,7 +284,73 @@ export function PrintPacketEditor({
     allAuthoringFields,
     insertionScope,
   );
-  latest.current = { ...value, body: canonicalBody };
+  const syncHistoryAvailability = () => {
+    setHistoryAvailability({
+      canUndo: documentHistory.past.length > 0,
+      canRedo: documentHistory.future.length > 0,
+    });
+  };
+  const publishEditorDocument = (document: PrintPacket) => {
+    latest.current = document;
+    if (!recordEditorHistory(documentHistory, document)) return;
+    syncHistoryAvailability();
+    onChange(document);
+  };
+  const applyHistoryStep = (direction: "undo" | "redo") => {
+    const document = stepEditorHistory(documentHistory, direction);
+    if (!document) return;
+    latest.current = document;
+    view.current?.updateState(
+      EditorState.create({
+        schema,
+        doc: blocksToDoc(document.body),
+        plugins: [
+          history(),
+          keymap({ "Mod-z": undo, "Shift-Mod-z": redo }),
+          keymap(baseKeymap),
+        ],
+      }),
+    );
+    setSelection(null);
+    syncHistoryAvailability();
+    onChange(document);
+  };
+  const undoDocument = () => applyHistoryStep("undo");
+  const redoDocument = () => applyHistoryStep("redo");
+  const handleHistoryShortcut = (event: React.KeyboardEvent) => {
+    if (
+      disabled ||
+      event.defaultPrevented ||
+      event.altKey ||
+      nativeHistoryTarget(event.target)
+    )
+      return;
+    const key = event.key.toLowerCase();
+    const modified = event.metaKey || event.ctrlKey;
+    const wantsUndo = modified && key === "z" && !event.shiftKey;
+    const wantsRedo =
+      (modified && key === "z" && event.shiftKey) ||
+      (event.ctrlKey && !event.metaKey && !event.shiftKey && key === "y");
+    if (
+      (!wantsUndo && !wantsRedo) ||
+      (wantsUndo && !historyAvailability.canUndo) ||
+      (wantsRedo && !historyAvailability.canRedo)
+    )
+      return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (wantsUndo) undoDocument();
+    else redoDocument();
+  };
+  useEffect(() => {
+    if (documentHistory.present.key === currentDocumentKey) return;
+    const reset = createEditorHistory(currentDocument);
+    documentHistory.past = reset.past;
+    documentHistory.present = reset.present;
+    documentHistory.future = reset.future;
+    setHistoryAvailability({ canUndo: false, canRedo: false });
+    setSelection(null);
+  }, [currentDocumentKey, documentHistory]);
   useEffect(() => {
     if (!selection) return;
     const clearSelectionOnEscape = (event: KeyboardEvent) => {
@@ -286,7 +432,7 @@ export function PrintPacketEditor({
         );
         const body = canonicalizeShopifyEditorBody(docToBlocks(next.doc));
         latest.current = { ...latest.current, body };
-        onChange(latest.current);
+        publishEditorDocument(latest.current);
       },
     });
     return () => {
@@ -323,7 +469,7 @@ export function PrintPacketEditor({
     instance.updateState(
       EditorState.create({ schema, doc: blocksToDoc(body) }),
     );
-    onChange(nextDocument);
+    publishEditorDocument(nextDocument);
     instance.focus();
   };
   const insertAtPath = (block: Block, path: BlockPath) => {
@@ -336,7 +482,7 @@ export function PrintPacketEditor({
       EditorState.create({ schema, doc: blocksToDoc(body) }),
     );
     setSelection({ position: -1, path, block });
-    onChange(nextDocument);
+    publishEditorDocument(nextDocument);
   };
   const insertVariable = (path: string) =>
     insert(
@@ -378,7 +524,7 @@ export function PrintPacketEditor({
         }),
       );
       setSelection({ position: -1, path: selection.path, block });
-      onChange(nextDocument);
+      publishEditorDocument(nextDocument);
       return;
     }
     instance.dispatch(
@@ -412,7 +558,7 @@ export function PrintPacketEditor({
       instance.updateState(
         EditorState.create({ schema, doc: blocksToDoc(body) }),
       );
-      onChange(nextDocument);
+      publishEditorDocument(nextDocument);
       setSelection(null);
       return;
     }
@@ -455,7 +601,7 @@ export function PrintPacketEditor({
         ? null
         : { position: -1, path: nextPath, block: selection.block },
     );
-    onChange(nextDocument);
+    publishEditorDocument(nextDocument);
   };
   const duplicateSelected = () => {
     if (!selection?.path) return;
@@ -481,10 +627,14 @@ export function PrintPacketEditor({
     view.current?.updateState(
       EditorState.create({ schema, doc: blocksToDoc(body) }),
     );
-    onChange(nextDocument);
+    publishEditorDocument(nextDocument);
   };
   return (
-    <div className="piqae-word-editor" ref={editorRoot}>
+    <div
+      className="piqae-word-editor"
+      ref={editorRoot}
+      onKeyDown={handleHistoryShortcut}
+    >
       <div className="piqae-editor-toolbar">
         <div className="piqae-editor-toolbar-primary">
           {workspaceControls ? (
@@ -496,8 +646,29 @@ export function PrintPacketEditor({
           <div
             className="piqae-tool-rail"
             role="toolbar"
-            aria-label="Insert into document"
+            aria-label="Edit document"
           >
+            <div
+              className="piqae-tool-group"
+              role="group"
+              aria-label="Document history"
+            >
+              <ToolButton
+                icon="undo"
+                label="Undo"
+                ariaKeyShortcuts="Control+Z Meta+Z"
+                disabled={disabled || !historyAvailability.canUndo}
+                onClick={undoDocument}
+              />
+              <ToolButton
+                icon="redo"
+                label="Redo"
+                ariaKeyShortcuts="Control+Y Control+Shift+Z Meta+Shift+Z"
+                disabled={disabled || !historyAvailability.canRedo}
+                onClick={redoDocument}
+              />
+            </div>
+            <span className="piqae-tool-divider" />
             <div className="piqae-tool-group">
               <ToolButton
                 icon="text"
@@ -756,7 +927,7 @@ export function PrintPacketEditor({
                 view.current?.updateState(
                   EditorState.create({ schema, doc: blocksToDoc(body) }),
                 );
-                onChange({ ...latest.current, body });
+                publishEditorDocument({ ...latest.current, body });
               }}
             />
           </div>
@@ -1235,7 +1406,8 @@ function CanvasBlock({
         <small>{expressionLabel(block.value)}</small>
       </div>
     );
-  if (block.type === "table")
+  if (block.type === "table") {
+    const staticRows = staticTableRows(block);
     return (
       <div
         className={`piqae-canvas-table${selectableClass}${selected ? " piqae-canvas-selected" : ""}`}
@@ -1282,6 +1454,7 @@ function CanvasBlock({
                   <span className="piqae-canvas-column-actions">
                     <button
                       type="button"
+                      title={`Move ${inlineLabel(column.header)} left`}
                       disabled={index === 0}
                       aria-label={`Move ${inlineLabel(column.header)} left`}
                       onClick={() =>
@@ -1298,6 +1471,7 @@ function CanvasBlock({
                     </button>
                     <button
                       type="button"
+                      title={`Move ${inlineLabel(column.header)} right`}
                       disabled={index === block.columns.length - 1}
                       aria-label={`Move ${inlineLabel(column.header)} right`}
                       onClick={() =>
@@ -1314,6 +1488,7 @@ function CanvasBlock({
                     </button>
                     <button
                       type="button"
+                      title={`Remove ${inlineLabel(column.header)} column`}
                       disabled={block.columns.length === 1}
                       aria-label={`Remove ${inlineLabel(column.header)} column`}
                       onClick={() =>
@@ -1426,60 +1601,160 @@ function CanvasBlock({
             </span>
           ))}
           {editable ? (
-            <button
-              className="piqae-canvas-add-column"
-              type="button"
-              aria-label="Add table column"
-              data-tooltip="Add column"
-              onClick={(event) => {
-                event.stopPropagation();
-                onChange(
-                  { ...block, columns: [...block.columns, defaultColumn()] },
-                  path,
-                );
-              }}
+            <div
+              className="piqae-canvas-column-insertion-layer"
+              role="group"
+              aria-label="Table column insertion controls"
             >
-              <Icon name="plus" />
-            </button>
+              {Array.from({ length: block.columns.length + 1 }, (_, index) => {
+                const label = tableColumnInsertionLabel(block.columns, index);
+                return (
+                  <div
+                    key={index}
+                    className="piqae-canvas-column-insertion-boundary"
+                    data-column-insertion-index={index}
+                    style={{
+                      left: `${tableColumnBoundaryPercent(block.columns, index)}%`,
+                    }}
+                  >
+                    <div
+                      className="piqae-canvas-column-insertion-guide"
+                      aria-hidden="true"
+                    />
+                    <button
+                      className="piqae-canvas-add-column"
+                      type="button"
+                      aria-label={label}
+                      title={label}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onChange(insertTableColumnAt(block, index), path);
+                      }}
+                    >
+                      <Icon name="plus" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
           ) : null}
         </div>
-        <div className="piqae-canvas-table-row piqae-canvas-table-binding-row">
-          {block.columns.map((column, index) => (
-            <div
-              key={index}
-              style={{ flex: column.width ?? 1, textAlign: column.align }}
-              onClick={(event) => event.stopPropagation()}
-            >
-              <ExpressionEditor
-                aria-label={`${inlineLabel(column.header)} value`}
-                value={editableInlineWithScope(column.cell, "item")}
-                fields={contextualFieldSuggestions(authoringFields, "item")}
-                disabled={!editable}
-                placeholder="{{ item.title }}"
-                onChange={(source) =>
-                  onChange(
-                    {
-                      ...block,
-                      columns: block.columns.map((item, itemIndex) =>
-                        itemIndex === index
-                          ? {
-                              ...item,
-                              cell: parseContextualInline(
-                                source,
-                                item.cell,
-                                "item",
-                              ),
-                            }
-                          : item,
-                      ),
-                    },
-                    path,
-                  )
+        {staticRows ? (
+          <div
+            className="piqae-canvas-table-static-body"
+            aria-label="Static table rows"
+          >
+            {editable ? (
+              <TableRowInsertionBoundary
+                index={0}
+                location="before first row"
+                onInsert={() =>
+                  onChange(insertStaticTableRowAt(block, 0), path)
                 }
               />
-            </div>
-          ))}
-        </div>
+            ) : null}
+            {staticRows.length ? (
+              staticRows.map((row, rowIndex) => (
+                <div
+                  className="piqae-canvas-table-row piqae-canvas-table-static-row"
+                  data-table-row-index={rowIndex}
+                  key={rowIndex}
+                >
+                  {block.columns.map((column, columnIndex) => {
+                    const editablePath = editableStaticCellPath(column.cell);
+                    return (
+                      <span
+                        key={columnIndex}
+                        className="piqae-canvas-table-static-cell"
+                        style={{
+                          flex: column.width ?? 1,
+                          textAlign: column.align,
+                        }}
+                        role="textbox"
+                        aria-label={`${inlineLabel(column.header)} row ${rowIndex + 1}`}
+                        aria-readonly={!editable || !editablePath}
+                        contentEditable={Boolean(editable && editablePath)}
+                        suppressContentEditableWarning
+                        onClick={(event) => event.stopPropagation()}
+                        onBlur={(event) => {
+                          if (!editable || !editablePath) return;
+                          const next = updateStaticTableCell(
+                            block,
+                            rowIndex,
+                            editablePath,
+                            event.currentTarget.textContent ?? "",
+                          );
+                          if (next !== block) onChange(next, path);
+                        }}
+                      >
+                        {staticTableCellLabel(column.cell, row)}
+                      </span>
+                    );
+                  })}
+                  {editable ? (
+                    <TableRowInsertionBoundary
+                      index={rowIndex + 1}
+                      location={
+                        rowIndex === staticRows.length - 1
+                          ? "after last row"
+                          : `between rows ${rowIndex + 1} and ${rowIndex + 2}`
+                      }
+                      onInsert={() =>
+                        onChange(
+                          insertStaticTableRowAt(block, rowIndex + 1),
+                          path,
+                        )
+                      }
+                    />
+                  ) : null}
+                </div>
+              ))
+            ) : (
+              <div className="piqae-canvas-table-static-empty">No rows</div>
+            )}
+          </div>
+        ) : (
+          <div
+            className="piqae-canvas-table-row piqae-canvas-table-binding-row"
+            aria-label={`Repeating table row from ${expressionLabel(block.items)}`}
+          >
+            {block.columns.map((column, index) => (
+              <div
+                key={index}
+                style={{ flex: column.width ?? 1, textAlign: column.align }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <ExpressionEditor
+                  aria-label={`${inlineLabel(column.header)} value`}
+                  value={editableInlineWithScope(column.cell, "item")}
+                  fields={contextualFieldSuggestions(authoringFields, "item")}
+                  disabled={!editable}
+                  placeholder="{{ item.title }}"
+                  onChange={(source) =>
+                    onChange(
+                      {
+                        ...block,
+                        columns: block.columns.map((item, itemIndex) =>
+                          itemIndex === index
+                            ? {
+                                ...item,
+                                cell: parseContextualInline(
+                                  source,
+                                  item.cell,
+                                  "item",
+                                ),
+                              }
+                            : item,
+                        ),
+                      },
+                      path,
+                    )
+                  }
+                />
+              </div>
+            ))}
+          </div>
+        )}
         {!preview ? (
           <div
             className="piqae-canvas-collection-branch piqae-canvas-table-empty"
@@ -1512,6 +1787,7 @@ function CanvasBlock({
         ) : null}
       </div>
     );
+  }
   if (block.type === "data_list")
     return (
       <section
@@ -1717,6 +1993,38 @@ function CanvasBlock({
         />
       )}
     </section>
+  );
+}
+
+function TableRowInsertionBoundary({
+  index,
+  location,
+  onInsert,
+}: {
+  index: number;
+  location: string;
+  onInsert(): void;
+}) {
+  const label = `Add table row ${location}`;
+  return (
+    <div
+      className="piqae-canvas-row-insertion-boundary"
+      data-row-insertion-index={index}
+    >
+      <div className="piqae-canvas-row-insertion-guide" aria-hidden="true" />
+      <button
+        className="piqae-canvas-add-row"
+        type="button"
+        aria-label={label}
+        title={label}
+        onClick={(event) => {
+          event.stopPropagation();
+          onInsert();
+        }}
+      >
+        <Icon name="plus" />
+      </button>
+    </div>
   );
 }
 
@@ -2059,6 +2367,8 @@ const ICON_PATHS = {
   row: "M2.5 8h11M5 5.5 2.5 8 5 10.5M11 5.5 13.5 8 11 10.5",
   up: "M8 12.8V3.6M4.6 7 8 3.6 11.4 7",
   down: "M8 3.2v9.2M4.6 9 8 12.4 11.4 9",
+  undo: "M6 4.2 2.8 7.4 6 10.6M3 7.4h5.3a4.2 4.2 0 0 1 4.2 4.2",
+  redo: "M10 4.2 13.2 7.4 10 10.6M13 7.4H7.7a4.2 4.2 0 0 0-4.2 4.2",
   duplicate: "M5.6 5.6h7.8v7.8H5.6zM10.6 5.6V2.6H2.8v7.8h2.8",
   trash: "M2.8 4.4h10.4M6.3 4.4V2.9h3.4v1.5M4.4 4.4l.6 8.7h6l.6-8.7",
   settings: "M2.6 5.2h10.8M2.6 10.8h10.8M6 3.6v3.2M10.4 9.2v3.2",
@@ -2095,6 +2405,7 @@ export function Icon({ name }: { name: IconName }) {
 function ToolButton({
   icon,
   label,
+  ariaKeyShortcuts,
   tone,
   disabled,
   dragType,
@@ -2102,6 +2413,7 @@ function ToolButton({
 }: {
   icon: IconName;
   label: string;
+  ariaKeyShortcuts?: string;
   tone?: "critical";
   disabled?: boolean;
   dragType?: DragInsertType;
@@ -2112,6 +2424,7 @@ function ToolButton({
       className={`piqae-tool-button${tone === "critical" ? " piqae-tool-critical" : ""}`}
       type="button"
       aria-label={label}
+      aria-keyshortcuts={ariaKeyShortcuts}
       data-tooltip={label}
       disabled={disabled}
       draggable={Boolean(dragType) && !disabled}
@@ -3186,12 +3499,178 @@ function editorInputTarget(target: EventTarget | null) {
     : null;
 }
 
+function nativeHistoryTarget(target: EventTarget | null) {
+  const editingControl = editorInputTarget(target);
+  return Boolean(
+    editingControl && !editingControl.closest(".piqae-prosemirror-source"),
+  );
+}
+
 function moveItem<T>(items: T[], index: number, direction: -1 | 1) {
   const target = index + direction;
   if (target < 0 || target >= items.length) return items;
   const next = [...items];
   [next[index], next[target]] = [next[target]!, next[index]!];
   return next;
+}
+
+type TableBlock = Extract<Block, { type: "table" }>;
+type TableColumn = TableBlock["columns"][number];
+
+/**
+ * Adds a column at an exact visual boundary. The control layer is separate from
+ * the flex columns, so merely revealing it cannot alter the table geometry.
+ */
+export function insertTableColumnAt(
+  block: TableBlock,
+  requestedIndex: number,
+): TableBlock {
+  const index = Math.min(
+    Math.max(Math.trunc(requestedIndex), 0),
+    block.columns.length,
+  );
+  const columns = [...block.columns];
+  columns.splice(index, 0, defaultColumn());
+  return { ...block, columns };
+}
+
+/** Literal arrays are the PrintPacket/v1 representation of non-repeating rows. */
+function staticTableRows(block: TableBlock): unknown[] | null {
+  return block.items.type === "literal" && Array.isArray(block.items.value)
+    ? block.items.value
+    : null;
+}
+
+/** Dynamic collection tables stay read-only at the row model level. */
+export function insertStaticTableRowAt(
+  block: TableBlock,
+  requestedIndex: number,
+): TableBlock {
+  const rows = staticTableRows(block);
+  if (!rows) return block;
+  const index = Math.min(Math.max(Math.trunc(requestedIndex), 0), rows.length);
+  const nextRows = [...rows];
+  nextRows.splice(index, 0, {});
+  return {
+    ...block,
+    items: { type: "literal", value: nextRows },
+  };
+}
+
+function tableColumnInsertionLabel(columns: TableColumn[], index: number) {
+  if (index === 0)
+    return `Add table column before ${inlineLabel(columns[0]?.header ?? [])}`;
+  if (index === columns.length)
+    return `Add table column after ${inlineLabel(columns.at(-1)?.header ?? [])}`;
+  return `Add table column between ${inlineLabel(columns[index - 1]?.header ?? [])} and ${inlineLabel(columns[index]?.header ?? [])}`;
+}
+
+function tableColumnBoundaryPercent(columns: TableColumn[], index: number) {
+  const total = columns.reduce(
+    (sum, column) => sum + Math.max(column.width ?? 1, 0.01),
+    0,
+  );
+  const before = columns
+    .slice(0, index)
+    .reduce((sum, column) => sum + Math.max(column.width ?? 1, 0.01), 0);
+  return total > 0 ? (before / total) * 100 : 0;
+}
+
+function editableStaticCellPath(content: Inline[]) {
+  const only = content.length === 1 ? content[0] : undefined;
+  return only?.type === "value" && only.value.type === "current_path"
+    ? only.value.path
+    : null;
+}
+
+function staticTableCellLabel(content: Inline[], row: unknown) {
+  return content
+    .map((item) => {
+      if (item.type === "text") return item.value;
+      if (item.type === "line_break") return "\n";
+      if (item.value.type !== "current_path")
+        return `{{ ${expressionLabel(item.value)} }}`;
+      return printableLiteralValue(literalValueAtPath(row, item.value.path));
+    })
+    .join("");
+}
+
+function literalValueAtPath(value: unknown, path: string[]): unknown {
+  let current = value;
+  for (const part of path) {
+    if (!isLiteralRecord(current)) return undefined;
+    current = current[part];
+  }
+  return current;
+}
+
+function printableLiteralValue(value: unknown) {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  if (
+    typeof value === "number" ||
+    typeof value === "boolean" ||
+    typeof value === "bigint"
+  )
+    return String(value);
+  return JSON.stringify(value);
+}
+
+function updateStaticTableCell(
+  block: TableBlock,
+  rowIndex: number,
+  path: string[],
+  value: string,
+): TableBlock {
+  const rows = staticTableRows(block);
+  if (!rows || rows[rowIndex] === undefined || !path.length) return block;
+  const previous = literalValueAtPath(rows[rowIndex], path);
+  if (value === printableLiteralValue(previous)) return block;
+  const nextValue = staticCellValueFromEdit(previous, value);
+  if (Object.is(previous, nextValue)) return block;
+  const nextRows = rows.map((row, index) =>
+    index === rowIndex ? setLiteralValueAtPath(row, path, nextValue) : row,
+  );
+  return {
+    ...block,
+    items: { type: "literal", value: nextRows },
+  };
+}
+
+function setLiteralValueAtPath(
+  current: unknown,
+  path: string[],
+  value: string | number | boolean,
+): Record<string, unknown> {
+  const [head, ...rest] = path;
+  const source = isLiteralRecord(current) ? current : {};
+  if (!head) return { ...source };
+  return {
+    ...source,
+    [head]: rest.length
+      ? setLiteralValueAtPath(source[head], rest, value)
+      : value,
+  };
+}
+
+function staticCellValueFromEdit(
+  previous: unknown,
+  source: string,
+): string | number | boolean {
+  const trimmed = source.trim();
+  if (typeof previous === "number" && trimmed) {
+    const parsed = Number(trimmed);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  if (typeof previous === "boolean") {
+    if (trimmed.toLowerCase() === "true") return true;
+    if (trimmed.toLowerCase() === "false") return false;
+  }
+  return source;
+}
+
+function isLiteralRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function resizeColumns(

@@ -1044,69 +1044,110 @@
             },
             "children": [
               {
-                "type": "paragraph",
-                "content": [
+                "type": "keep_together",
+                "children": [
                   {
-                    "type": "value",
-                    "value": {
-                      "type": "current_path",
-                      "path": ["title"]
+                    "type": "stack",
+                    "gap_mm": 1,
+                    "children": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "value",
+                            "value": {
+                              "type": "current_path",
+                              "path": ["title"]
+                            },
+                            "style": {
+                              "bold": true
+                            }
+                          }
+                        ]
+                      },
+                      {
+                        "type": "conditional",
+                        "condition": {
+                          "type": "exists",
+                          "value": {
+                            "type": "current_path",
+                            "path": ["variant", "title"]
+                          }
+                        },
+                        "then": [
+                          {
+                            "type": "paragraph",
+                            "content": [
+                              {
+                                "type": "value",
+                                "value": {
+                                  "type": "current_path",
+                                  "path": ["variant", "title"]
+                                },
+                                "style": {}
+                              }
+                            ]
+                          }
+                        ],
+                        "else": []
+                      },
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "value",
+                            "value": {
+                              "type": "format_money",
+                              "amount": {
+                                "type": "current_path",
+                                "path": ["unitPrice"]
+                              },
+                              "currency": {
+                                "type": "current_path",
+                                "path": ["currency"]
+                              }
+                            },
+                            "style": {
+                              "bold": true,
+                              "font_size_pt": 14
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "spacer",
+                    "height_mm": 2
+                  },
+                  {
+                    "type": "conditional",
+                    "condition": {
+                      "type": "exists",
+                      "value": {
+                        "type": "current_path",
+                        "path": ["labelCode128"]
+                      }
                     },
-                    "style": {
-                      "bold": true
-                    }
+                    "then": [
+                      {
+                        "type": "barcode",
+                        "value": {
+                          "type": "current_path",
+                          "path": ["labelCode128"]
+                        },
+                        "symbology": "code128",
+                        "width_mm": 70,
+                        "height_mm": 12,
+                        "human_readable": true
+                      }
+                    ],
+                    "else": []
                   }
                 ]
               },
               {
-                "type": "conditional",
-                "condition": {
-                  "type": "exists",
-                  "value": {
-                    "type": "current_path",
-                    "path": ["variant", "title"]
-                  }
-                },
-                "then": [
-                  {
-                    "type": "paragraph",
-                    "content": [
-                      {
-                        "type": "value",
-                        "value": {
-                          "type": "current_path",
-                          "path": ["variant", "title"]
-                        },
-                        "style": {}
-                      }
-                    ]
-                  }
-                ],
-                "else": []
-              },
-              {
-                "type": "conditional",
-                "condition": {
-                  "type": "exists",
-                  "value": {
-                    "type": "current_path",
-                    "path": ["labelCode128"]
-                  }
-                },
-                "then": [
-                  {
-                    "type": "barcode",
-                    "value": {
-                      "type": "current_path",
-                      "path": ["labelCode128"]
-                    },
-                    "symbology": "code128",
-                    "width_mm": 70,
-                    "height_mm": 12,
-                    "human_readable": true
-                  }
-                ],
-                "else": []
+                "type": "page_break"
               }
             ]
           }

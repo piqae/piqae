@@ -184,7 +184,7 @@ export function validatePrintPacket(document: PrintPacket): void {
   };
   const regions = documentRegions(document);
   walk(regions, 0);
-  if (document.media.kind !== "paged" && blocksHavePageBreak(regions))
+  if (document.media.kind === "continuous" && blocksHavePageBreak(regions))
     throw new Error(
       `Page breaks are not supported on ${document.media.kind} media`,
     );

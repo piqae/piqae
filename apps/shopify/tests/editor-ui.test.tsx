@@ -1,15 +1,20 @@
 // @vitest-environment jsdom
 
-import { act, type ReactNode } from "react";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { createRoutesStub } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   insertBlockAfterPath,
   insertBlockAtPath,
+  insertStaticTableRowAt,
+  insertTableColumnAt,
   moveBlockAtPath,
   PrintPacketEditor,
   PrintPacketPreview,
+  createPrintPacketEditorHistory,
   removeBlockAtPath,
   replaceBlockAtPath,
   siblingsAtPath,
@@ -75,6 +80,63 @@ const tablePacket: PrintPacket = {
           align: "right",
         },
       ],
+    },
+  ],
+};
+
+const staticTablePacket: PrintPacket = {
+  format: "printpacket/v1",
+  media: { kind: "paged", size: "a4" },
+  body: [
+    {
+      ...(tablePacket.body[0] as Extract<
+        PrintPacket["body"][number],
+        { type: "table" }
+      >),
+      items: {
+        type: "literal",
+        value: [
+          { title: "Coffee", quantity: 2 },
+          { title: "Filters", quantity: 1 },
+        ],
+      },
+    },
+  ],
+};
+
+const typedStaticTablePacket: PrintPacket = {
+  ...staticTablePacket,
+  body: [
+    {
+      ...(staticTablePacket.body[0] as Extract<
+        PrintPacket["body"][number],
+        { type: "table" }
+      >),
+      columns: [
+        ...(
+          staticTablePacket.body[0] as Extract<
+            PrintPacket["body"][number],
+            { type: "table" }
+          >
+        ).columns,
+        {
+          header: [{ type: "text", value: "Active" }],
+          cell: [
+            {
+              type: "value",
+              value: { type: "current_path", path: ["active"] },
+            },
+          ],
+          width: 1,
+        },
+      ],
+      items: {
+        type: "literal",
+        value: [
+          { title: "Coffee", quantity: 2, active: true },
+          { title: "Filters", quantity: 1, active: false },
+        ],
+      },
     },
   ],
 };
@@ -168,6 +230,71 @@ function authoredBody(value: PrintPacket) {
     : value.body;
 }
 
+function testInlineLabel(
+  content: Extract<
+    PrintPacket["body"][number],
+    { type: "table" }
+  >["columns"][number]["header"],
+) {
+  return content
+    .map((item) => (item.type === "text" ? item.value : "Value"))
+    .join("");
+}
+
+function StatefulPrintPacketEditor({
+  initial = packet,
+  onChange,
+}: {
+  initial?: PrintPacket;
+  onChange?(document: PrintPacket): void;
+}) {
+  const [document, setDocument] = useState(initial);
+  return (
+    <PrintPacketEditor
+      value={document}
+      onChange={(next) => {
+        onChange?.(next);
+        setDocument(next);
+      }}
+    />
+  );
+}
+
+function StatefulEditorWorkspace({
+  initial = packet,
+  onChange,
+}: {
+  initial?: PrintPacket;
+  onChange?(document: PrintPacket): void;
+}) {
+  const [document, setDocument] = useState(initial);
+  const [workspace, setWorkspace] = useState<"design" | "preview">("design");
+  const [history] = useState(() => createPrintPacketEditorHistory(initial));
+  const controls = (
+    <div role="group" aria-label="Editor workspace">
+      <button type="button" onClick={() => setWorkspace("design")}>
+        Design
+      </button>
+      <button type="button" onClick={() => setWorkspace("preview")}>
+        Preview
+      </button>
+    </div>
+  );
+  return workspace === "design" ? (
+    <PrintPacketEditor
+      value={document}
+      history={history}
+      workspaceControls={controls}
+      onChange={(next) => {
+        onChange?.(next);
+        setDocument(next);
+      }}
+    />
+  ) : (
+    <PrintPacketPreview value={document} workspaceControls={controls} />
+  );
+}
+
 afterEach(async () => {
   await act(async () => root?.unmount());
   host?.remove();
@@ -185,6 +312,9 @@ describe("Shopify document editor layout", () => {
     )!.specification;
     const receipt = starterTemplates.find(
       ({ id }) => id === "receipt",
+    )!.specification;
+    const label = starterTemplates.find(
+      ({ id }) => id === "product-label",
     )!.specification;
     const rootPath = [{ branch: "root" as const, index: 0 }];
 
@@ -210,6 +340,9 @@ describe("Shopify document editor layout", () => {
         receipt.media.kind,
       ),
     ).toBe("continuous");
+    expect(
+      orderBatchPresentation(label.body[0]!, rootPath, label.media.kind),
+    ).toBe("fixed_media");
 
     const flowingInvoice = structuredClone(invoice);
     const repeat = flowingInvoice.body[0];
@@ -220,6 +353,29 @@ describe("Shopify document editor layout", () => {
     expect(
       orderBatchPresentation(repeat, rootPath, flowingInvoice.media.kind),
     ).toBe("flowing_pages");
+  });
+
+  it("accepts fixed-label page boundaries but diagnoses them on continuous media", async () => {
+    const label = starterTemplates.find(
+      ({ id }) => id === "product-label",
+    )!.specification;
+    const page = await render(
+      <PrintPacketEditor value={label} onChange={() => undefined} />,
+    );
+    expect(page.querySelector(".piqae-media-diagnostic")).toBeNull();
+
+    const receipt = structuredClone(
+      starterTemplates.find(({ id }) => id === "receipt")!.specification,
+    );
+    receipt.body.push({ type: "page_break" });
+    await act(async () => {
+      root?.render(
+        <PrintPacketEditor value={receipt} onChange={() => undefined} />,
+      );
+    });
+    expect(
+      page.querySelector(".piqae-media-diagnostic")?.textContent,
+    ).toContain("continuous media");
   });
 
   it("presents the order batch as document structure, not editable content", async () => {
@@ -428,9 +584,7 @@ describe("Shopify document editor layout", () => {
       "Design Code Preview",
     );
     expect(
-      toolbar?.querySelector(
-        '[role="toolbar"][aria-label="Insert into document"]',
-      ),
+      toolbar?.querySelector('[role="toolbar"][aria-label="Edit document"]'),
     ).not.toBeNull();
     expect(toolbar?.querySelector(".piqae-selection-rail")).toBeNull();
     expect(toolbar?.children).toHaveLength(1);
@@ -484,6 +638,214 @@ describe("Shopify document editor layout", () => {
     });
     expect(card?.children).toHaveLength(2);
     expect(card?.querySelector(".piqae-selection-rail")).not.toBeNull();
+  });
+
+  it("undoes and redoes document mutations from accessible toolbar actions", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <StatefulPrintPacketEditor onChange={onChange} />,
+    );
+    const undo = page.querySelector<HTMLButtonElement>(
+      'button[aria-label="Undo"]',
+    )!;
+    const redo = page.querySelector<HTMLButtonElement>(
+      'button[aria-label="Redo"]',
+    )!;
+
+    expect(undo.disabled).toBe(true);
+    expect(redo.disabled).toBe(true);
+    expect(undo.dataset.tooltip).toBe("Undo");
+    expect(redo.dataset.tooltip).toBe("Redo");
+    expect(undo.getAttribute("aria-keyshortcuts")).toBe("Control+Z Meta+Z");
+    expect(redo.getAttribute("aria-keyshortcuts")).toContain("Control+Y");
+
+    await act(async () => {
+      page
+        .querySelector<HTMLButtonElement>('button[aria-label="Text"]')
+        ?.click();
+    });
+    expect(
+      authoredBody(onChange.mock.lastCall?.[0]).map(({ type }) => type),
+    ).toEqual(["paragraph", "image", "paragraph"]);
+    expect(undo.disabled).toBe(false);
+    expect(redo.disabled).toBe(true);
+
+    await act(async () => undo.click());
+    expect(
+      authoredBody(onChange.mock.lastCall?.[0]).map(({ type }) => type),
+    ).toEqual(["paragraph", "image"]);
+    expect(undo.disabled).toBe(true);
+    expect(redo.disabled).toBe(false);
+
+    await act(async () => redo.click());
+    expect(
+      authoredBody(onChange.mock.lastCall?.[0]).map(({ type }) => type),
+    ).toEqual(["paragraph", "image", "paragraph"]);
+    expect(undo.disabled).toBe(false);
+    expect(redo.disabled).toBe(true);
+  });
+
+  it("keeps document undo history across Preview and Design", async () => {
+    const onChange = vi.fn();
+    const page = await render(<StatefulEditorWorkspace onChange={onChange} />);
+
+    await act(async () => {
+      page
+        .querySelector<HTMLButtonElement>('button[aria-label="Heading"]')
+        ?.click();
+    });
+    expect(authoredBody(onChange.mock.lastCall?.[0])).toHaveLength(3);
+
+    await act(async () => {
+      Array.from(page.querySelectorAll<HTMLButtonElement>("button"))
+        .find((button) => button.textContent?.includes("Preview"))
+        ?.click();
+    });
+    expect(page.querySelector(".piqae-preview-stage")).not.toBeNull();
+
+    await act(async () => {
+      Array.from(page.querySelectorAll<HTMLButtonElement>("button"))
+        .find((button) => button.textContent?.includes("Design"))
+        ?.click();
+    });
+    const undo = page.querySelector<HTMLButtonElement>(
+      'button[aria-label="Undo"]',
+    )!;
+    expect(undo.disabled).toBe(false);
+
+    await act(async () => undo.click());
+    expect(authoredBody(onChange.mock.lastCall?.[0])).toHaveLength(2);
+  });
+
+  it("supports platform undo and redo shortcuts for document mutations", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <StatefulPrintPacketEditor onChange={onChange} />,
+    );
+    await act(async () => {
+      page
+        .querySelector<HTMLButtonElement>('button[aria-label="Heading"]')
+        ?.click();
+    });
+    const editor = page.querySelector<HTMLElement>(".piqae-word-editor")!;
+    const shortcut = async (
+      key: string,
+      modifiers: Pick<KeyboardEventInit, "ctrlKey" | "metaKey" | "shiftKey">,
+    ) => {
+      const event = new KeyboardEvent("keydown", {
+        key,
+        bubbles: true,
+        cancelable: true,
+        ...modifiers,
+      });
+      await act(async () => editor.dispatchEvent(event));
+      return event;
+    };
+
+    expect((await shortcut("z", { metaKey: true })).defaultPrevented).toBe(
+      true,
+    );
+    expect(authoredBody(onChange.mock.lastCall?.[0])).toHaveLength(2);
+    expect(
+      (await shortcut("z", { metaKey: true, shiftKey: true })).defaultPrevented,
+    ).toBe(true);
+    expect(authoredBody(onChange.mock.lastCall?.[0])).toHaveLength(3);
+    expect((await shortcut("z", { ctrlKey: true })).defaultPrevented).toBe(
+      true,
+    );
+    expect(authoredBody(onChange.mock.lastCall?.[0])).toHaveLength(2);
+    expect((await shortcut("y", { ctrlKey: true })).defaultPrevented).toBe(
+      true,
+    );
+    expect(authoredBody(onChange.mock.lastCall?.[0])).toHaveLength(3);
+  });
+
+  it("leaves native text undo alone and clears selection on document undo", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <StatefulPrintPacketEditor onChange={onChange} />,
+    );
+    await act(async () => {
+      page
+        .querySelector<HTMLButtonElement>('button[aria-label="Divider"]')
+        ?.click();
+    });
+    const text = page.querySelector<HTMLElement>(".piqae-canvas-text")!;
+    const textEditor = text.querySelector<HTMLElement>('[role="textbox"]')!;
+
+    await act(async () => {
+      text.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    });
+    const nativeUndo = new KeyboardEvent("keydown", {
+      key: "z",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    const callsBeforeNativeUndo = onChange.mock.calls.length;
+    await act(async () => textEditor.dispatchEvent(nativeUndo));
+    expect(nativeUndo.defaultPrevented).toBe(false);
+    expect(onChange).toHaveBeenCalledTimes(callsBeforeNativeUndo);
+    expect(
+      page.querySelector<HTMLButtonElement>('button[aria-label="Undo"]')
+        ?.disabled,
+    ).toBe(false);
+
+    await act(async () => {
+      textEditor.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    await act(
+      () =>
+        new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    );
+    await act(async () => text.click());
+    expect(page.querySelector(".piqae-selection-rail")).not.toBeNull();
+
+    const documentUndo = new KeyboardEvent("keydown", {
+      key: "z",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => text.dispatchEvent(documentUndo));
+    expect(documentUndo.defaultPrevented).toBe(true);
+    expect(page.querySelector(".piqae-selection-rail")).toBeNull();
+    expect(authoredBody(onChange.mock.lastCall?.[0])).toHaveLength(2);
+  });
+
+  it("invalidates redo after a divergent document edit", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <StatefulPrintPacketEditor onChange={onChange} />,
+    );
+    const tool = (label: string) =>
+      page.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
+
+    await act(async () => tool("Text").click());
+    await act(async () => tool("Undo").click());
+    expect(tool("Redo").disabled).toBe(false);
+    await act(async () => tool("Divider").click());
+    expect(tool("Redo").disabled).toBe(true);
+
+    const callsBeforeRedo = onChange.mock.calls.length;
+    const redo = new KeyboardEvent("keydown", {
+      key: "y",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () =>
+      page
+        .querySelector<HTMLElement>(".piqae-word-editor")
+        ?.dispatchEvent(redo),
+    );
+    expect(redo.defaultPrevented).toBe(false);
+    expect(onChange).toHaveBeenCalledTimes(callsBeforeRedo);
+    expect(
+      authoredBody(onChange.mock.lastCall?.[0]).map(({ type }) => type),
+    ).toEqual(["paragraph", "image", "divider"]);
   });
 
   it("selects top-level text once and edits only on double-click or keyboard intent", async () => {
@@ -705,7 +1067,13 @@ describe("Shopify document editor layout", () => {
 
     onChange.mockClear();
     await act(async () =>
-      root?.render(<PrintPacketEditor value={packet} onChange={onChange} />),
+      root?.render(
+        <PrintPacketEditor
+          key="contextual-delete"
+          value={packet}
+          onChange={onChange}
+        />,
+      ),
     );
     const rerenderedText =
       page.querySelector<HTMLElement>(".piqae-canvas-text")!;
@@ -722,19 +1090,52 @@ describe("Shopify document editor layout", () => {
     );
   });
 
-  it("keeps table cells directly editable and moves add-column into the header", async () => {
+  it("overlays accessible insertion controls at every table column boundary", async () => {
     const onChange = vi.fn();
     const page = await render(
       <PrintPacketEditor value={tablePacket} onChange={onChange} />,
     );
     const table = page.querySelector(".piqae-canvas-table")!;
     const header = table.querySelector(".piqae-canvas-table-head")!;
-    const addColumn = table.querySelector<HTMLButtonElement>(
-      'button[aria-label="Add table column"]',
+    const insertionLayer = header.querySelector<HTMLElement>(
+      '.piqae-canvas-column-insertion-layer[role="group"]',
     )!;
+    const boundaries = [
+      ...insertionLayer.querySelectorAll<HTMLElement>(
+        ".piqae-canvas-column-insertion-boundary",
+      ),
+    ];
+    const addColumns = boundaries.map(
+      (boundary) => boundary.querySelector<HTMLButtonElement>("button")!,
+    );
 
-    expect(header.contains(addColumn)).toBe(true);
-    expect(addColumn.textContent).not.toContain("Add column");
+    expect(insertionLayer.parentElement).toBe(header);
+    expect(boundaries.map((item) => item.dataset.columnInsertionIndex)).toEqual(
+      ["0", "1", "2"],
+    );
+    expect(boundaries.map((item) => item.style.left)).toEqual([
+      "0%",
+      "50%",
+      "100%",
+    ]);
+    expect(
+      addColumns.map((button) => button.getAttribute("aria-label")),
+    ).toEqual([
+      "Add table column before Item",
+      "Add table column between Item and Quantity",
+      "Add table column after Quantity",
+    ]);
+    expect(addColumns.every((button) => button.tabIndex === 0)).toBe(true);
+    expect(
+      addColumns.every(
+        (button) => button.title === button.getAttribute("aria-label"),
+      ),
+    ).toBe(true);
+    expect(
+      table.querySelector(
+        ".piqae-canvas-table-column .piqae-canvas-add-column",
+      ),
+    ).toBeNull();
     expect(
       table
         .querySelector<HTMLElement>("strong[contenteditable]")
@@ -748,11 +1149,258 @@ describe("Shopify document editor layout", () => {
         ?.getAttribute("contenteditable"),
     ).toBe("true");
 
-    await act(async () => addColumn.click());
+    await act(async () => addColumns[1]!.click());
     const nextDocument = onChange.mock.lastCall?.[0] as PrintPacket;
     const nextTable = authoredBody(nextDocument)[0];
     expect(nextTable.type).toBe("table");
-    if (nextTable.type === "table") expect(nextTable.columns).toHaveLength(3);
+    if (nextTable.type === "table") {
+      expect(nextTable.columns).toHaveLength(3);
+      expect(
+        nextTable.columns.map((column) => testInlineLabel(column.header)),
+      ).toEqual(["Item", "Column", "Quantity"]);
+    }
+  });
+
+  it("bridges the pointer path from a column to its overlaid action popover", () => {
+    const css = readFileSync(join(process.cwd(), "app/shopify-ui.css"), "utf8");
+    const bridge = css.match(
+      /\.piqae-canvas-column-actions::after\s*\{(?<rules>[^}]+)\}/,
+    )?.groups?.rules;
+
+    expect(bridge).toContain("top: 100%");
+    expect(bridge).toContain("height: 0.35rem");
+    expect(bridge).toContain('content: ""');
+  });
+
+  it("inserts columns at exact model boundaries without mutating the source", () => {
+    const table = tablePacket.body[0];
+    if (table?.type !== "table") throw new Error("table missing");
+
+    const atStart = insertTableColumnAt(table, 0);
+    const between = insertTableColumnAt(table, 1);
+    const atEnd = insertTableColumnAt(table, 2);
+
+    expect(table.columns).toHaveLength(2);
+    expect(
+      atStart.columns.map((column) => testInlineLabel(column.header)),
+    ).toEqual(["Column", "Item", "Quantity"]);
+    expect(
+      between.columns.map((column) => testInlineLabel(column.header)),
+    ).toEqual(["Item", "Column", "Quantity"]);
+    expect(
+      atEnd.columns.map((column) => testInlineLabel(column.header)),
+    ).toEqual(["Item", "Quantity", "Column"]);
+  });
+
+  it("adds static rows before, between and after with overlaid accessible boundaries", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={staticTablePacket} onChange={onChange} />,
+    );
+    const table = page.querySelector<HTMLElement>(".piqae-canvas-table")!;
+    const body = table.querySelector<HTMLElement>(
+      '.piqae-canvas-table-static-body[aria-label="Static table rows"]',
+    )!;
+    const boundaries = [
+      ...body.querySelectorAll<HTMLElement>(
+        ".piqae-canvas-row-insertion-boundary",
+      ),
+    ];
+    const buttons = boundaries.map(
+      (boundary) => boundary.querySelector<HTMLButtonElement>("button")!,
+    );
+
+    expect(boundaries.map((item) => item.dataset.rowInsertionIndex)).toEqual([
+      "0",
+      "1",
+      "2",
+    ]);
+    expect(buttons.map((button) => button.getAttribute("aria-label"))).toEqual([
+      "Add table row before first row",
+      "Add table row between rows 1 and 2",
+      "Add table row after last row",
+    ]);
+    expect(buttons.every((button) => button.tabIndex === 0)).toBe(true);
+    expect(
+      body.querySelectorAll(".piqae-canvas-row-insertion-guide"),
+    ).toHaveLength(3);
+
+    await act(async () => buttons[1]!.click());
+    const nextDocument = onChange.mock.lastCall?.[0] as PrintPacket;
+    const nextTable = authoredBody(nextDocument)[0];
+    expect(nextTable.type).toBe("table");
+    if (nextTable.type !== "table" || nextTable.items.type !== "literal")
+      return;
+    expect(nextTable.items.value).toEqual([
+      { title: "Coffee", quantity: 2 },
+      {},
+      { title: "Filters", quantity: 1 },
+    ]);
+  });
+
+  it("inserts static rows at exact model boundaries without mutating source rows", () => {
+    const table = staticTablePacket.body[0];
+    if (
+      table?.type !== "table" ||
+      table.items.type !== "literal" ||
+      !Array.isArray(table.items.value)
+    )
+      throw new Error("static table missing");
+
+    const atStart = insertStaticTableRowAt(table, 0);
+    const between = insertStaticTableRowAt(table, 1);
+    const atEnd = insertStaticTableRowAt(table, 2);
+    const rows = (candidate: typeof table) =>
+      candidate.items.type === "literal" && Array.isArray(candidate.items.value)
+        ? candidate.items.value
+        : [];
+
+    expect(table.items.value).toEqual([
+      { title: "Coffee", quantity: 2 },
+      { title: "Filters", quantity: 1 },
+    ]);
+    expect(rows(atStart)).toEqual([
+      {},
+      { title: "Coffee", quantity: 2 },
+      { title: "Filters", quantity: 1 },
+    ]);
+    expect(rows(between)).toEqual([
+      { title: "Coffee", quantity: 2 },
+      {},
+      { title: "Filters", quantity: 1 },
+    ]);
+    expect(rows(atEnd)).toEqual([
+      { title: "Coffee", quantity: 2 },
+      { title: "Filters", quantity: 1 },
+      {},
+    ]);
+  });
+
+  it("edits simple current-path cells in a static table without changing row order", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={staticTablePacket} onChange={onChange} />,
+    );
+    const cell = page.querySelector<HTMLElement>(
+      '[data-table-row-index="0"] [role="textbox"][aria-label="Item row 1"]',
+    )!;
+
+    expect(cell.getAttribute("contenteditable")).toBe("true");
+    expect(cell.getAttribute("aria-readonly")).toBe("false");
+    await act(async () => {
+      cell.textContent = "Tea";
+      cell.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+
+    const nextDocument = onChange.mock.lastCall?.[0] as PrintPacket;
+    const nextTable = authoredBody(nextDocument)[0];
+    expect(nextTable.type).toBe("table");
+    if (nextTable.type !== "table" || nextTable.items.type !== "literal")
+      return;
+    expect(nextTable.items.value).toEqual([
+      { title: "Tea", quantity: 2 },
+      { title: "Filters", quantity: 1 },
+    ]);
+  });
+
+  it("does not publish an unchanged static-cell blur into editor history", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={staticTablePacket} onChange={onChange} />,
+    );
+    const cell = page.querySelector<HTMLElement>(
+      '[data-table-row-index="0"] [role="textbox"][aria-label="Item row 1"]',
+    )!;
+
+    await act(async () => {
+      cell.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("preserves numeric and boolean primitives when static cells receive valid edits", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={typedStaticTablePacket} onChange={onChange} />,
+    );
+    const quantity = page.querySelector<HTMLElement>(
+      '[data-table-row-index="0"] [role="textbox"][aria-label="Quantity row 1"]',
+    )!;
+
+    await act(async () => {
+      quantity.textContent = "3.5";
+      quantity.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+    let nextDocument = onChange.mock.lastCall?.[0] as PrintPacket;
+    let nextTable = authoredBody(nextDocument)[0];
+    expect(nextTable.type).toBe("table");
+    if (nextTable.type !== "table" || nextTable.items.type !== "literal")
+      return;
+    expect(nextTable.items.value).toEqual([
+      { title: "Coffee", quantity: 3.5, active: true },
+      { title: "Filters", quantity: 1, active: false },
+    ]);
+
+    const active = page.querySelector<HTMLElement>(
+      '[data-table-row-index="0"] [role="textbox"][aria-label="Active row 1"]',
+    )!;
+    await act(async () => {
+      active.textContent = "FALSE";
+      active.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+    nextDocument = onChange.mock.lastCall?.[0] as PrintPacket;
+    nextTable = authoredBody(nextDocument)[0];
+    expect(nextTable.type).toBe("table");
+    if (nextTable.type !== "table" || nextTable.items.type !== "literal")
+      return;
+    expect(nextTable.items.value).toEqual([
+      { title: "Coffee", quantity: 2, active: false },
+      { title: "Filters", quantity: 1, active: false },
+    ]);
+  });
+
+  it("stores an invalid primitive edit as the explicit text the merchant entered", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={typedStaticTablePacket} onChange={onChange} />,
+    );
+    const quantity = page.querySelector<HTMLElement>(
+      '[data-table-row-index="0"] [role="textbox"][aria-label="Quantity row 1"]',
+    )!;
+
+    await act(async () => {
+      quantity.textContent = "many";
+      quantity.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+
+    const nextDocument = onChange.mock.lastCall?.[0] as PrintPacket;
+    const nextTable = authoredBody(nextDocument)[0];
+    expect(nextTable.type).toBe("table");
+    if (nextTable.type !== "table" || nextTable.items.type !== "literal")
+      return;
+    expect(nextTable.items.value).toEqual([
+      { title: "Coffee", quantity: "many", active: true },
+      { title: "Filters", quantity: 1, active: false },
+    ]);
+  });
+
+  it("does not expose or model arbitrary rows for repeating tables", async () => {
+    const table = tablePacket.body[0];
+    if (table?.type !== "table") throw new Error("table missing");
+    expect(insertStaticTableRowAt(table, 0)).toBe(table);
+
+    const page = await render(
+      <PrintPacketEditor value={tablePacket} onChange={vi.fn()} />,
+    );
+    expect(
+      page.querySelector(".piqae-canvas-row-insertion-boundary"),
+    ).toBeNull();
+    expect(
+      page
+        .querySelector(".piqae-canvas-table-binding-row")
+        ?.getAttribute("aria-label"),
+    ).toContain("Repeating table row from");
   });
 
   it("selects and removes table empty-state content without changing the table", async () => {

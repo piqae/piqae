@@ -306,23 +306,49 @@ const documents = {
           type: "repeat",
           items: current("lineItems"),
           children: [
-            currentValue(["title"], true),
-            optionalCurrentValue(["variant", "title"]),
             {
-              type: "conditional",
-              condition: { type: "exists", value: current("labelCode128") },
-              then: [
+              type: "keep_together",
+              children: [
                 {
-                  type: "barcode",
-                  value: current("labelCode128"),
-                  symbology: "code128",
-                  width_mm: 70,
-                  height_mm: 12,
-                  human_readable: true,
+                  type: "stack",
+                  gap_mm: 1,
+                  children: [
+                    currentValue(["title"], true),
+                    optionalCurrentValue(["variant", "title"]),
+                    {
+                      type: "paragraph",
+                      content: [
+                        {
+                          type: "value",
+                          value: currentMoney("unitPrice"),
+                          style: { bold: true, font_size_pt: 14 },
+                        },
+                      ],
+                    },
+                  ],
+                },
+                { type: "spacer", height_mm: 2 },
+                {
+                  type: "conditional",
+                  condition: {
+                    type: "exists",
+                    value: current("labelCode128"),
+                  },
+                  then: [
+                    {
+                      type: "barcode",
+                      value: current("labelCode128"),
+                      symbology: "code128",
+                      width_mm: 70,
+                      height_mm: 12,
+                      human_readable: true,
+                    },
+                  ],
+                  else: [],
                 },
               ],
-              else: [],
             },
+            { type: "page_break" },
           ],
         },
       ],

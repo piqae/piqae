@@ -13,6 +13,7 @@ import {
 import {
   PrintPacketEditor,
   PrintPacketPreview,
+  createPrintPacketEditorHistory,
   DocumentSettingsFields,
   Icon,
 } from "../components/PrintPacketEditor";
@@ -362,6 +363,9 @@ export default function TemplateEditor() {
   );
   if (!template) removeSystemOwnership(initial);
   const [document, setDocument] = useState(initial.document);
+  const [editorHistory] = useState(() =>
+    createPrintPacketEditorHistory(initial.document),
+  );
   const [kind, setKind] = useState(initialTemplate?.kind ?? "invoice");
   const [designTargetId, setDesignTargetId] = useState(
     initialTemplate?.designTargetId ?? "",
@@ -781,6 +785,7 @@ export default function TemplateEditor() {
                 customFields={customFields}
                 stock={selectedTarget?.stock}
                 workspaceControls={workspaceControls}
+                history={editorHistory}
                 onChange={setDocument}
               />
             ) : (
