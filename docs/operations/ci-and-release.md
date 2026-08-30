@@ -188,16 +188,34 @@ The `Piqae release` workflow is the sole `v*` tag trigger:
    Build the Apple and Windows embedded-node SDK candidates independently of
    the desktop support tier so their ABI/package checks cannot be skipped.
 3. Require complete signing credentials for tagged native candidates.
-4. Pause at the protected `native-release` environment.
+4. Let each selected publisher pause at the protected `native-release`
+   environment independently.
 5. Publish immutable packages before signed appcasts and promote the shared
-   manifest last.
-6. Dereference the public feeds.
-7. Publish the draft GitHub release as a prerelease only after every platform
-   stage succeeds.
+   manifest last for each platform.
+6. Dereference each platform's public feed before that platform reports
+   success.
+7. Publish a successful macOS or Windows lane as a narrowly labelled Preview
+   prerelease without waiting for unrelated candidates. For `all`, separately
+   fail aggregate certification unless every effective selected lane and
+   requested publisher succeeds; update the prerelease notes and attach
+   candidate-only evidence only after that aggregate passes.
 
-The platform `v*` release is a coordinated unit: server, web, migration image,
-native applications, embedded-node SDK candidates, manifest, and appcasts are
-all built from the same commit and version by `release.yml`. SDK candidates
+The macOS and enabled Windows GitHub prerelease finalizers use the same
+per-tag serialization group and idempotent state marker. Each accepts either
+the original draft or an already published prerelease, so either platform can
+finish first and one platform's failure cannot strand the successful sibling in
+a draft. The aggregate job always records Passed or Failed in that public state
+before returning; candidate-only aggregate assets are attached only on success.
+Direct `windows-release.yml` dispatch is candidate/unsigned-preview only and
+cannot bypass the canonical release workflow's shared core, product contract,
+support-tier, source-identity, and ancestry gates.
+
+The platform `v*` release keeps one immutable source identity: server, web,
+migration image, native applications, embedded-node SDK candidates, manifest,
+and appcasts are all built from the same commit and version by `release.yml`.
+Publication completion is recorded per platform rather than inferred from the
+slowest sibling; the optional `all` result remains the coordinated
+cross-platform certification unit. SDK candidates
 include checksums, SPDX SBOMs, and build provenance. They remain unsigned
 Preview artifacts and are not pushed to Swift or NuGet registries until their
 separate signing and registry-publication gates are enabled. Their clean

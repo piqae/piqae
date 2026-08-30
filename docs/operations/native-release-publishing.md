@@ -183,17 +183,40 @@ nodes. Do not rely on a GitHub secret as the only copy. Certificate and
 notarisation credentials must be rotated independently from the update keys.
 
 Unsigned manual builds remain private workflow artifacts. A tag or a manual
-`publish=true` request fails unless the complete platform signing set exists.
-Stable promotion then enters `native-release`, verifies each immutable S3
-object's SHA-256 and length, promotes the installer before its appcast, and
-promotes the combined manifest last.
+`publish=true` request fails unless the complete signing set for each requested
+publisher exists. Candidate-only Linux and embedded SDK scopes reject
+`publish=true`; Windows publication rejects a Disabled support tier. Each stable
+publisher enters `native-release`, verifies its immutable object SHA-256 and
+length, promotes the package before its appcast, and promotes the combined
+manifest last.
 
-`.github/workflows/release.yml` is the only tag entry point. It calls the
-macOS and Windows workflows as reusable stages, builds Linux and container
-artifacts once, waits for both public update-feed checks, then changes the
-draft GitHub release into a prerelease. The release bucket and signed appcasts
-remain the updater authority; GitHub Releases is the human-facing mirror and
-must never become a second independently built channel.
+`.github/workflows/release.yml` is the only tag entry point. It runs the shared
+gates once, calls selected macOS and Windows workflows as reusable stages, and
+builds selected Linux, container, and SDK candidates in parallel. macOS,
+Windows when enabled, and containers promote independently through their own
+verified path; one platform failure does not cancel or invalidate a successful
+sibling promotion. The explicit `all` lane separately requires every effective
+selected candidate and requested publisher before recording aggregate
+certification and attaching candidate-only assets. Serialized platform
+finalizers tolerate either a draft or an existing prerelease and merge their
+machine-readable publication state, so macOS-first and Windows-first completion
+produce the same notes without a last-writer-wins race. Aggregate failure
+records **Failed** before the certification job fails. A selected-lane policy
+failure does not begin aggregate attachment; an attachment failure certifies
+none of the candidate-only assets even if GitHub accepted a partial upload.
+
+Direct dispatch of `windows-release.yml` can build a private candidate or use
+the explicit protected unsigned-preview tag flow only. It cannot request stable
+publication. Stable Windows promotion requires a reusable call from canonical
+`release.yml`, whose preparation and core jobs enforce product versioning,
+support tier, repository identity, protected tag, `main` ancestry, database,
+protocol, licence, SDK, and source-policy gates.
+The Windows entry-point job rejects any other stable caller before the
+`native-signing` environment or its credentials are reached.
+
+The release bucket and
+signed appcasts remain the updater authority; GitHub Releases is the
+human-facing mirror and must never become a second independently built channel.
 
 The `native-signing` environment may be used only from `main` and `v*` refs.
 The `native-release` environment permits only `v*` refs and requires a reviewer.

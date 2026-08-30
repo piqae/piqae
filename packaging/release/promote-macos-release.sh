@@ -129,7 +129,11 @@ curl --fail --location --silent --show-error --max-time 180 \
 
 tag="v$version"
 if gh release view "$tag" >/dev/null 2>&1; then
-  gh release view "$tag" --json isDraft --jq '.isDraft' | grep -Fx true
+  # Sibling platform promoters may already have made the shared release a
+  # prerelease. Accept only that public preview state or the original draft;
+  # a stable/non-preview release remains fail-closed.
+  gh release view "$tag" --json isDraft,isPrerelease \
+    --jq '(.isDraft == true) or (.isPrerelease == true)' | grep -Fx true
 else
   gh release create "$tag" --draft --verify-tag --title "Piqae $tag" \
     --notes "Preview candidate. Review checksums, provenance, signatures, notarisation evidence, and the support matrix before publishing."
