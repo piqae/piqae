@@ -440,7 +440,7 @@
   position: absolute;
   z-index: 6;
   bottom: calc(100% + 0.35rem);
-  left: 50%;
+  left: 100%;
   display: inline-flex;
   gap: 0.1rem;
   padding: 0.2rem;
@@ -629,6 +629,7 @@
   padding: 0;
   cursor: col-resize;
   touch-action: none;
+  will-change: transform;
 }
 .piqae-canvas-column-resize::after {
   position: absolute;
@@ -1511,11 +1512,23 @@
   font-size: 0.75rem;
 }
 .piqae-selection-rail {
+  position: absolute;
+  z-index: 11;
+  top: 100%;
+  left: 50%;
   display: flex;
+  box-sizing: border-box;
   justify-content: center;
+  width: max-content;
   min-height: 2.75rem;
+  min-width: 100%;
+  max-width: min(90rem, calc(100vw - 1.5rem));
   padding: 0.35rem;
   border-top: 1px solid #e3e3e3;
+  border-radius: 0 0 10px 10px;
+  background: Canvas;
+  box-shadow: 0 8px 18px rgb(26 26 26 / 10%);
+  transform: translateX(-50%);
 }
 .piqae-selection-bar {
   display: flex;
@@ -1684,14 +1697,16 @@
   }
   .piqae-workspace-toolbar,
   .piqae-editor-toolbar {
-    position: static;
     box-sizing: border-box;
     width: 100%;
   }
   .piqae-workspace-toolbar {
+    position: static;
     overflow: hidden;
   }
   .piqae-editor-toolbar {
+    position: relative;
+    top: auto;
     overflow: visible;
   }
   .piqae-editor-toolbar-primary,
@@ -1703,6 +1718,14 @@
   }
   .piqae-editor-toolbar-primary {
     align-items: stretch;
+  }
+  .piqae-selection-rail {
+    right: 0;
+    left: 0;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    transform: none;
   }
   .piqae-selection-bar {
     flex-wrap: nowrap;
