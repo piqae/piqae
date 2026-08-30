@@ -4355,6 +4355,9 @@ impl Repository for MemoryRepository {
             }
             return Ok(CreateDocumentResult::Existing(render.clone()));
         }
+        if state.document_renders.contains_key(id) {
+            return Err(RepositoryError::IdempotencyConflict);
+        }
         let now = Utc::now();
         let expires_at = now + chrono::Duration::seconds(expires_in_seconds);
         let render = StoredDocumentRender {
@@ -9430,6 +9433,56 @@ mod routing_repository_tests {
                 .await
                 .expect("claim after expiry")
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_render_id_collision_preserves_the_original() {
+        let repository = MemoryRepository::default();
+        let workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        repository
+            .register_preview_document_render(
+                workspace,
+                environment,
+                "dprv_collision_test",
+                b"encrypted-specification-one",
+                &"a".repeat(64),
+                b"encrypted-input-one",
+                &"b".repeat(64),
+                "preview-key-one",
+                &"c".repeat(64),
+                60,
+                &[],
+            )
+            .await
+            .expect("register original preview render");
+
+        assert!(matches!(
+            repository
+                .register_preview_document_render(
+                    workspace,
+                    environment,
+                    "dprv_collision_test",
+                    b"encrypted-specification-two",
+                    &"d".repeat(64),
+                    b"encrypted-input-two",
+                    &"e".repeat(64),
+                    "preview-key-two",
+                    &"f".repeat(64),
+                    60,
+                    &[],
+                )
+                .await,
+            Err(RepositoryError::IdempotencyConflict)
+        ));
+        let stored = repository
+            .get_document_render(workspace, environment, "dprv_collision_test")
+            .await
+            .expect("original preview remains stored");
+        assert_eq!(
+            stored.spec_ciphertext.as_deref(),
+            Some(b"encrypted-specification-one".as_slice())
         );
     }
 
