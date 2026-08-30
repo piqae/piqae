@@ -2,7 +2,10 @@
 
 use crate::{
     AppState,
-    documents::{artifact_key_aad, document_aad, render_input_aad},
+    documents::{
+        artifact_key_aad, document_aad, preview_render_input_aad, preview_render_spec_aad,
+        render_input_aad,
+    },
     repository::RepositoryError,
 };
 use bytes::{Bytes, BytesMut};
@@ -13,6 +16,7 @@ use printpacket_renderer::{
     validate_resolved_resources,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 
@@ -203,40 +207,10 @@ impl DocumentRenderWorker {
         &self,
         work: &DocumentRenderWork,
     ) -> Result<(), (&'static str, bool)> {
-        let revision = self
-            .state
-            .repository
-            .get_document_revision(
-                work.workspace_id,
-                work.environment_id,
-                &work.render.template_revision_id,
-            )
-            .await
-            .map_err(|_| ("revision_unavailable", true))?;
-        let revision_aad = document_aad(
-            &work.workspace_id.to_string(),
-            &work.environment_id.to_string(),
-            &revision.template_id,
-        );
-        let spec_bytes = self
-            .state
-            .document_secrets
-            .decrypt(&revision_aad, &revision.spec_ciphertext)
-            .map_err(|_| ("document_decryption_failed", false))?;
-        let input_aad = render_input_aad(
-            &work.workspace_id.to_string(),
-            &work.environment_id.to_string(),
-            &work.render.id,
-        );
-        let input_bytes = self
-            .state
-            .document_secrets
-            .decrypt(&input_aad, &work.render.input_ciphertext)
-            .map_err(|_| ("document_decryption_failed", false))?;
-        let spec: PrintPacketV1 =
-            serde_json::from_slice(&spec_bytes).map_err(|_| ("invalid_document_spec", false))?;
-        let input: Value =
-            serde_json::from_slice(&input_bytes).map_err(|_| ("invalid_document_input", false))?;
+        if work.render.purpose == "preview" && work.render.expires_at <= chrono::Utc::now() {
+            return Err(("preview_expired", false));
+        }
+        let (spec, input) = self.decrypt_render_payload(work).await?;
         let resolved = tokio::time::timeout(self.timeout, self.resolve_resources(work, &spec))
             .await
             .map_err(|_| ("document_resource_timeout", true))??;
@@ -256,43 +230,109 @@ impl DocumentRenderWorker {
             .map_err(|_| ("render_timeout", true))?
             .map_err(|_| ("render_worker_panic", true))?
             .map_err(|_| ("document_render_failed", false))?;
-        let object_key = format!(
-            "{}/{}/documents/{}.pdf",
-            work.workspace_id, work.environment_id, work.render.id
-        );
+        if work.render.purpose == "preview" && work.render.expires_at <= chrono::Utc::now() {
+            return Err(("preview_expired", false));
+        }
+        let object_key = render_artifact_object_key(work);
         let artifact = self
             .state
             .object_store
             .put(&object_key, Bytes::from(output.pdf), None)
             .await
             .map_err(|_| ("document_artifact_store_failed", true))?;
-        let encrypted_key = self
-            .state
-            .document_secrets
-            .encrypt(
-                &artifact_key_aad(
-                    &work.workspace_id.to_string(),
-                    &work.environment_id.to_string(),
-                    &work.render.id,
-                ),
-                artifact.key.as_bytes(),
-            )
-            .map_err(|_| ("document_encryption_failed", true))?;
+        let Ok(encrypted_key) = self.state.document_secrets.encrypt(
+            &artifact_key_aad(
+                &work.workspace_id.to_string(),
+                &work.environment_id.to_string(),
+                &work.render.id,
+            ),
+            artifact.key.as_bytes(),
+        ) else {
+            let _ = self.state.object_store.delete(&artifact.key).await;
+            return Err(("document_encryption_failed", true));
+        };
         let byte_length =
             i64::try_from(artifact.bytes).map_err(|_| ("document_artifact_too_large", false))?;
-        self.state
+        let page_count =
+            i32::try_from(output.page_count).map_err(|_| ("document_page_count_invalid", false))?;
+        if self
+            .state
             .repository
             .complete_claimed_document_render(
                 work,
                 &encrypted_key,
                 &artifact.sha256,
                 byte_length,
-                i32::try_from(output.page_count)
-                    .map_err(|_| ("document_page_count_invalid", false))?,
+                page_count,
             )
             .await
-            .map_err(|_| ("render_lease_lost", true))?;
+            .is_err()
+        {
+            let _ = self.state.object_store.delete(&artifact.key).await;
+            return Err(("render_lease_lost", true));
+        }
         Ok(())
+    }
+
+    async fn decrypt_render_payload(
+        &self,
+        work: &DocumentRenderWork,
+    ) -> Result<(PrintPacketV1, Value), (&'static str, bool)> {
+        let workspace = work.workspace_id.to_string();
+        let environment = work.environment_id.to_string();
+        let spec_bytes = if work.render.purpose == "preview" {
+            let ciphertext = work
+                .render
+                .spec_ciphertext
+                .as_deref()
+                .ok_or(("invalid_document_spec", false))?;
+            self.state
+                .document_secrets
+                .decrypt(
+                    &preview_render_spec_aad(&workspace, &environment, &work.render.id),
+                    ciphertext,
+                )
+                .map_err(|_| ("document_decryption_failed", false))?
+        } else {
+            let revision_id = work
+                .render
+                .template_revision_id
+                .as_deref()
+                .ok_or(("revision_unavailable", false))?;
+            let revision = self
+                .state
+                .repository
+                .get_document_revision(work.workspace_id, work.environment_id, revision_id)
+                .await
+                .map_err(|_| ("revision_unavailable", true))?;
+            self.state
+                .document_secrets
+                .decrypt(
+                    &document_aad(&workspace, &environment, &revision.template_id),
+                    &revision.spec_ciphertext,
+                )
+                .map_err(|_| ("document_decryption_failed", false))?
+        };
+        let input_aad = if work.render.purpose == "preview" {
+            preview_render_input_aad(&workspace, &environment, &work.render.id)
+        } else {
+            render_input_aad(&workspace, &environment, &work.render.id)
+        };
+        let input_ciphertext = work
+            .render
+            .input_ciphertext
+            .as_deref()
+            .ok_or(("invalid_document_input", false))?;
+        let input_bytes = self
+            .state
+            .document_secrets
+            .decrypt(&input_aad, input_ciphertext)
+            .map_err(|_| ("document_decryption_failed", false))?;
+        let spec: PrintPacketV1 =
+            serde_json::from_slice(&spec_bytes).map_err(|_| ("invalid_document_spec", false))?;
+        let input: Value =
+            serde_json::from_slice(&input_bytes).map_err(|_| ("invalid_document_input", false))?;
+        Ok((spec, input))
     }
 
     async fn resolve_resources(
@@ -365,6 +405,28 @@ impl DocumentRenderWorker {
             .map_err(|_| ("document_resource_integrity_failed", false))?;
         Ok(resolved)
     }
+}
+
+fn render_artifact_object_key(work: &DocumentRenderWork) -> String {
+    let lease_digest = hex::encode(Sha256::digest(
+        [
+            work.workspace_id.to_string().as_bytes(),
+            b"\0",
+            work.environment_id.to_string().as_bytes(),
+            b"\0",
+            work.render.id.as_bytes(),
+            b"\0",
+            work.lease_token.as_bytes(),
+        ]
+        .concat(),
+    ));
+    format!(
+        "{}/{}/documents/{}/{}.pdf",
+        work.workspace_id,
+        work.environment_id,
+        work.render.id,
+        &lease_digest[..32]
+    )
 }
 
 #[cfg(test)]
@@ -688,6 +750,27 @@ mod tests {
             .await?
             .remove(0);
         assert_ne!(first.lease_token, recovered.lease_token);
+        let first_key = render_artifact_object_key(&first);
+        let recovered_key = render_artifact_object_key(&recovered);
+        assert_ne!(first_key, recovered_key);
+        worker
+            .state
+            .object_store
+            .put(&first_key, Bytes::from_static(b"stale"), None)
+            .await?;
+        worker
+            .state
+            .object_store
+            .put(&recovered_key, Bytes::from_static(b"winner"), None)
+            .await?;
+        repo.complete_claimed_document_render(
+            &recovered,
+            b"winner-key",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            6,
+            1,
+        )
+        .await?;
         assert!(matches!(
             repo.complete_claimed_document_render(
                 &first,
@@ -699,7 +782,15 @@ mod tests {
             .await,
             Err(RepositoryError::ConcurrentStateChange)
         ));
-        assert_eq!(worker.run_once(10).await?, 0); // replacement still owns the live lease
+        worker.state.object_store.delete(&first_key).await?;
+        assert!(
+            worker
+                .state
+                .object_store
+                .get_stream(&recovered_key)
+                .await
+                .is_ok()
+        );
         Ok(())
     }
 

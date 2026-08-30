@@ -2466,6 +2466,63 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/printpacket/preview-renders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Render an unsaved PrintPacket document for expiring visual preview
+         * @description Registers an asynchronous, tenant-scoped PDF render directly from an unpublished PrintPacket specification and JSON input. At expiry the encrypted source and PDF become inaccessible immediately and are deleted by the bounded artifact lifecycle cleanup. Preview renders cannot be printed, approved, or published as template revisions.
+         */
+        post: operations["createPrintPacketPreviewRender"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/printpacket/preview-renders/{render_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Retrieve an expiring unsaved-document preview render */
+        get: operations["retrievePrintPacketPreviewRender"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/printpacket/preview-renders/{render_id}/artifact": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download an expiring unsaved-document preview PDF
+         * @description Authenticated same-origin download; object-store keys and signed URLs are never exposed.
+         */
+        get: operations["downloadPrintPacketPreviewRenderArtifact"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/printpacket/resources/{digest}": {
         parameters: {
             query?: never;
@@ -4886,6 +4943,36 @@ export interface components {
             input: {
                 [key: string]: unknown;
             };
+        };
+        CreatePrintPacketPreviewRender: {
+            specification: components["schemas"]["PrintPacketV1"];
+            input: {
+                [key: string]: unknown;
+            };
+            /**
+             * @description Lifetime of encrypted source material and the generated preview artifact.
+             * @default 900
+             */
+            expires_in_seconds?: number;
+        };
+        PrintPacketPreviewRender: {
+            id: string;
+            /** @constant */
+            purpose: "preview";
+            /** @enum {unknown} */
+            state: "registered" | "rendering" | "completed" | "failed_terminal" | "expiring" | "expired";
+            artifact_sha256?: string | null;
+            artifact_byte_length?: number | null;
+            /** @enum {string|null} */
+            artifact_media_type?: "application/pdf" | null;
+            page_count?: number | null;
+            failure_code?: string | null;
+            /** Format: date-time */
+            expires_at: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
         };
         PrintPacketRender: {
             id: string;
@@ -8892,6 +8979,97 @@ export interface operations {
             400: components["responses"]["Error"];
             404: components["responses"]["Error"];
             409: components["responses"]["Error"];
+        };
+    };
+    createPrintPacketPreviewRender: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreatePrintPacketPreviewRender"];
+            };
+        };
+        responses: {
+            /** @description Existing idempotent preview render registration. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrintPacketPreviewRender"];
+                };
+            };
+            /** @description Expiring preview render durably registered. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrintPacketPreviewRender"];
+                };
+            };
+            400: components["responses"]["Error"];
+            401: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+        };
+    };
+    retrievePrintPacketPreviewRender: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                render_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tenant-scoped preview render lifecycle and artifact metadata. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrintPacketPreviewRender"];
+                };
+            };
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+        };
+    };
+    downloadPrintPacketPreviewRenderArtifact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                render_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Integrity-verified PDF generated by the production PrintPacket renderer. */
+            200: {
+                headers: {
+                    "Content-Disposition"?: string;
+                    "Content-Length"?: number;
+                    Digest?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/pdf": string;
+                };
+            };
+            401: components["responses"]["Error"];
+            404: components["responses"]["Error"];
+            409: components["responses"]["Error"];
+            503: components["responses"]["Error"];
         };
     };
     putPrintPacketResource: {

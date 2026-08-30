@@ -22,6 +22,7 @@ class PostgresReleaseEvidenceTest(unittest.TestCase):
                 "platform_service_account_http",
                 "platform_accounts",
                 "migrations",
+                "ephemeral_printpacket_preview_renders",
                 "workos_identity",
                 "billing",
             ],

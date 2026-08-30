@@ -166,6 +166,21 @@ GATES = (
         expected_test="documents_migrate_and_enforce_tenant_scoped_references",
     ),
     Gate(
+        identifier="ephemeral_printpacket_preview_renders",
+        command=(
+            "cargo",
+            "test",
+            "-p",
+            "piqae-storage-postgres",
+            "--test",
+            "preview_renders",
+            "--locked",
+            "--",
+            "--nocapture",
+        ),
+        expected_test="preview_render_migrates_fresh_and_n_minus_one_with_hard_purpose_fences",
+    ),
+    Gate(
         identifier="workos_identity",
         command=(
             "cargo",

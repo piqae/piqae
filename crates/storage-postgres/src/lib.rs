@@ -873,7 +873,8 @@ pub struct StoredDocumentTemplateRevision {
 #[derive(Clone, Debug, Serialize)]
 pub struct StoredDocumentRender {
     pub id: String,
-    pub template_revision_id: String,
+    pub template_revision_id: Option<String>,
+    pub purpose: String,
     pub state: String,
     pub artifact_sha256: Option<String>,
     pub artifact_byte_length: Option<i64>,
@@ -882,10 +883,15 @@ pub struct StoredDocumentRender {
     pub failure_code: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
     #[serde(skip)]
-    pub input_ciphertext: Vec<u8>,
+    pub spec_ciphertext: Option<Vec<u8>>,
     #[serde(skip)]
-    pub input_sha256: String,
+    pub spec_sha256: Option<String>,
+    #[serde(skip)]
+    pub input_ciphertext: Option<Vec<u8>>,
+    #[serde(skip)]
+    pub input_sha256: Option<String>,
     #[serde(skip)]
     pub artifact_object_key_ciphertext: Option<Vec<u8>>,
     #[serde(skip)]
@@ -955,6 +961,8 @@ pub enum DocumentCiphertextField {
     TemplateDraft,
     TemplateRevision,
     RenderInput,
+    RenderPreviewInput,
+    RenderPreviewSpecification,
     RenderArtifactReference,
 }
 
@@ -6190,7 +6198,8 @@ impl PostgresStore {
              SELECT $1,$2,$3,$5,'application/pdf',$6,$7,'complete',$9,now(),$4,$8
                FROM document_renders
               WHERE id=$4 AND workspace_id=$2 AND environment_id=$3
-                AND state='completed' AND artifact_sha256=$6 AND artifact_byte_length=$7
+                AND state='completed' AND purpose='printable'
+                AND artifact_sha256=$6 AND artifact_byte_length=$7
              ON CONFLICT (workspace_id,environment_id,source_document_render_id,acquisition_sha256)
                WHERE source_document_render_id IS NOT NULL
              DO UPDATE SET expires_at=GREATEST(uploads.expires_at,EXCLUDED.expires_at)
@@ -10173,6 +10182,99 @@ impl PostgresStore {
         Ok(CreateDocumentResult::Existing(existing))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn register_preview_document_render(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        spec_ciphertext: &[u8],
+        spec_sha256: &str,
+        input_ciphertext: &[u8],
+        input_sha256: &str,
+        idempotency_key: &str,
+        request_sha256: &str,
+        expires_in_seconds: i64,
+        resource_digests: &[String],
+    ) -> Result<CreateDocumentResult<StoredDocumentRender>, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let inserted = sqlx::query(
+            "INSERT INTO document_renders
+             (id,workspace_id,environment_id,purpose,spec_ciphertext,spec_sha256,
+              input_ciphertext,input_sha256,idempotency_key,request_sha256,expires_at)
+             VALUES ($1,$2,$3,'preview',$4,$5,$6,$7,$8,$9,
+                     now()+make_interval(secs=>$10::double precision))
+             ON CONFLICT (workspace_id,environment_id,idempotency_key) DO NOTHING RETURNING *",
+        )
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .bind(environment_id.to_string())
+        .bind(spec_ciphertext)
+        .bind(spec_sha256)
+        .bind(input_ciphertext)
+        .bind(input_sha256)
+        .bind(idempotency_key)
+        .bind(request_sha256)
+        .bind(expires_in_seconds)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let (created, row) = if let Some(row) = inserted {
+            (true, row)
+        } else {
+            let row = sqlx::query(
+                "SELECT * FROM document_renders
+                 WHERE workspace_id=$1 AND environment_id=$2 AND idempotency_key=$3",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(idempotency_key)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if row.try_get::<String, _>("request_sha256")? != request_sha256
+                || row.try_get::<String, _>("purpose")? != "preview"
+            {
+                return Err(StorageError::IdempotencyConflict);
+            }
+            (false, row)
+        };
+        let render = document_render_from_row(&row)?;
+        for digest in resource_digests {
+            sqlx::query(
+                "INSERT INTO printpacket_resource_references
+                 (workspace_id,environment_id,render_id,resource_digest)
+                 SELECT $1,$2,$3,$4 FROM printpacket_resources
+                  WHERE workspace_id=$1 AND environment_id=$2 AND digest=$4
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(&render.id)
+            .bind(digest)
+            .execute(&mut *transaction)
+            .await?;
+            let updated = sqlx::query(
+                "UPDATE printpacket_resources SET last_used_at=now(),
+                   expires_at=GREATEST(expires_at,now()+interval '30 days'),
+                   cleanup_state='active',cleanup_lease_until=NULL,cleanup_lease_token=NULL
+                 WHERE workspace_id=$1 AND environment_id=$2 AND digest=$3",
+            )
+            .bind(workspace_id.to_string())
+            .bind(environment_id.to_string())
+            .bind(digest)
+            .execute(&mut *transaction)
+            .await?;
+            if updated.rows_affected() != 1 {
+                return Err(StorageError::NotFound);
+            }
+        }
+        transaction.commit().await?;
+        Ok(if created {
+            CreateDocumentResult::Created(render)
+        } else {
+            CreateDocumentResult::Existing(render)
+        })
+    }
+
     pub async fn get_document_render(
         &self,
         workspace_id: WorkspaceId,
@@ -10206,7 +10308,8 @@ impl PostgresStore {
             "INSERT INTO document_previews
              (id,workspace_id,environment_id,render_id,idempotency_key,request_sha256,expires_at)
              SELECT $1,$2,$3,$4,$5,$6,$7 FROM document_renders
-              WHERE id=$4 AND workspace_id=$2 AND environment_id=$3 AND state='completed'
+              WHERE id=$4 AND workspace_id=$2 AND environment_id=$3
+                AND state='completed' AND purpose='printable'
              ON CONFLICT (workspace_id,environment_id,idempotency_key) DO NOTHING RETURNING *",
         )
         .bind(id)
@@ -10528,7 +10631,30 @@ impl PostgresStore {
                      ON render.workspace_id=reference.workspace_id
                     AND render.environment_id=reference.environment_id
                     AND render.id=reference.resource_id
-                  WHERE reference.resource_type='render_input'
+                 WHERE reference.resource_type='render_input'
+                    AND render.input_ciphertext IS NOT NULL
+                    AND NOT (render.state='rendering' AND render.lease_expires_at > now())
+                 UNION ALL
+                 SELECT reference.workspace_id,reference.environment_id,render.id,render.id,
+                        reference.resource_type,render.input_ciphertext
+                   FROM key_refs reference
+                   JOIN document_renders render
+                     ON render.workspace_id=reference.workspace_id
+                    AND render.environment_id=reference.environment_id
+                    AND render.id=reference.resource_id
+                  WHERE reference.resource_type='render_preview_input'
+                    AND render.input_ciphertext IS NOT NULL
+                    AND NOT (render.state='rendering' AND render.lease_expires_at > now())
+                 UNION ALL
+                 SELECT reference.workspace_id,reference.environment_id,render.id,render.id,
+                        reference.resource_type,render.spec_ciphertext
+                   FROM key_refs reference
+                   JOIN document_renders render
+                     ON render.workspace_id=reference.workspace_id
+                    AND render.environment_id=reference.environment_id
+                    AND render.id=reference.resource_id
+                  WHERE reference.resource_type='render_preview_specification'
+                    AND render.spec_ciphertext IS NOT NULL
                     AND NOT (render.state='rendering' AND render.lease_expires_at > now())
                  UNION ALL
                  SELECT reference.workspace_id,reference.environment_id,render.id,render.id,
@@ -10576,6 +10702,20 @@ impl PostgresStore {
                 "UPDATE document_renders SET input_ciphertext=$6,updated_at=now()
                  WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND input_ciphertext=$4
                    AND document_ciphertext_key_id(input_ciphertext)=$5
+                   AND purpose='printable'
+                   AND NOT (state='rendering' AND lease_expires_at > now())"
+            }
+            DocumentCiphertextField::RenderPreviewInput => {
+                "UPDATE document_renders SET input_ciphertext=$6,updated_at=now()
+                 WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND input_ciphertext=$4
+                   AND document_ciphertext_key_id(input_ciphertext)=$5
+                   AND purpose='preview'
+                   AND NOT (state='rendering' AND lease_expires_at > now())"
+            }
+            DocumentCiphertextField::RenderPreviewSpecification => {
+                "UPDATE document_renders SET spec_ciphertext=$6,updated_at=now()
+                 WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND spec_ciphertext=$4
+                   AND document_ciphertext_key_id(spec_ciphertext)=$5
                    AND NOT (state='rendering' AND lease_expires_at > now())"
             }
             DocumentCiphertextField::RenderArtifactReference => {
@@ -10627,6 +10767,7 @@ impl PostgresStore {
                 SELECT id FROM document_renders
                 WHERE state IN ('registered','rendering')
                   AND available_at <= now()
+                  AND (purpose <> 'preview' OR expires_at > now())
                   AND (lease_expires_at IS NULL OR lease_expires_at <= now())
                   AND attempt < max_attempts
                 ORDER BY available_at, created_at, id
@@ -10668,7 +10809,7 @@ impl PostgresStore {
              failure_code=NULL,last_failure_code=NULL,completed_at=now(),lease_owner=NULL,
              lease_token=NULL,lease_expires_at=NULL,updated_at=now()
              WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND state='rendering'
-               AND lease_token=$4 RETURNING *",
+               AND lease_token=$4 AND (purpose <> 'preview' OR expires_at > now()) RETURNING *",
         )
         .bind(id)
         .bind(workspace_id.to_string())
@@ -10711,7 +10852,9 @@ impl PostgresStore {
         lease_seconds: i64,
     ) -> Result<Vec<ExpiredDocumentArtifactWork>, StorageError> {
         let rows = sqlx::query(
-            "WITH expired AS (SELECT r.id FROM document_renders r WHERE r.state IN ('completed','failed_terminal','expiring')
+            "WITH expired AS (SELECT r.id FROM document_renders r WHERE
+               ((r.purpose='preview' AND r.state IN ('registered','rendering','completed','failed_terminal','expiring'))
+                 OR (r.purpose='printable' AND r.state IN ('completed','failed_terminal','expiring')))
                AND r.expires_at <= now() AND (r.lease_expires_at IS NULL OR r.lease_expires_at <= now())
                AND NOT EXISTS (SELECT 1 FROM document_artifact_job_references ref
                  WHERE ref.workspace_id=r.workspace_id AND ref.environment_id=r.environment_id
@@ -10740,6 +10883,7 @@ impl PostgresStore {
         work: &ExpiredDocumentArtifactWork,
     ) -> Result<(), StorageError> {
         let result = sqlx::query("UPDATE document_renders SET state='expired',artifact_object_key_ciphertext=NULL,
+          input_ciphertext=NULL,input_sha256=NULL,spec_ciphertext=NULL,spec_sha256=NULL,
           lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now()
           WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND state='expiring' AND lease_token=$4")
           .bind(&work.render_id).bind(work.workspace_id.to_string()).bind(work.environment_id.to_string()).bind(work.lease_token)
@@ -10974,6 +11118,8 @@ fn document_ciphertext_record_from_row(
         "template_draft" => DocumentCiphertextField::TemplateDraft,
         "template_revision" => DocumentCiphertextField::TemplateRevision,
         "render_input" => DocumentCiphertextField::RenderInput,
+        "render_preview_input" => DocumentCiphertextField::RenderPreviewInput,
+        "render_preview_specification" => DocumentCiphertextField::RenderPreviewSpecification,
         "render_artifact_reference" => DocumentCiphertextField::RenderArtifactReference,
         value => {
             return Err(StorageError::InvalidData(format!(
@@ -11011,6 +11157,7 @@ fn document_render_from_row(row: &PgRow) -> Result<StoredDocumentRender, Storage
     Ok(StoredDocumentRender {
         id: row.try_get("id")?,
         template_revision_id: row.try_get("template_revision_id")?,
+        purpose: row.try_get("purpose")?,
         state: row.try_get("state")?,
         artifact_sha256: row.try_get("artifact_sha256")?,
         artifact_byte_length: row.try_get("artifact_byte_length")?,
@@ -11019,6 +11166,9 @@ fn document_render_from_row(row: &PgRow) -> Result<StoredDocumentRender, Storage
         failure_code: row.try_get("failure_code")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+        expires_at: row.try_get("expires_at")?,
+        spec_ciphertext: row.try_get("spec_ciphertext")?,
+        spec_sha256: row.try_get("spec_sha256")?,
         input_ciphertext: row.try_get("input_ciphertext")?,
         input_sha256: row.try_get("input_sha256")?,
         artifact_object_key_ciphertext: row.try_get("artifact_object_key_ciphertext")?,

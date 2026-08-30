@@ -19,8 +19,10 @@ import type {
   CreatedDeviceAuthorization,
   DeploymentMeta,
   CreatePrintPacketRender,
+  CreatePrintPacketPreviewRender,
   CreatePrintPacketTemplate,
   PrintPacketRender,
+  PrintPacketPreviewRender,
   PrintPacketRenderReadiness,
   EvaluatePrintPacketRenderReadiness,
   PrintPacketTemplate,
@@ -565,6 +567,32 @@ export class PiqaeClient {
           body: input,
           idempotencyKey
         }),
+      createPreviewDraft: (
+        input: CreatePrintPacketPreviewRender,
+        idempotencyKey: string
+      ) =>
+        this.request<PrintPacketPreviewRender>('POST', '/v1/printpacket/preview-renders', {
+          body: input,
+          idempotencyKey
+        }),
+      retrievePreviewDraft: (id: string) =>
+        this.request<PrintPacketPreviewRender>(
+          'GET',
+          `/v1/printpacket/preview-renders/${encodeURIComponent(id)}`
+        ),
+      /** Purpose-fenced, expiring preview PDF. It cannot enter a print flow. */
+      downloadPreviewDraft: (id: string) =>
+        this.requestBinary(
+          `/v1/printpacket/preview-renders/${encodeURIComponent(id)}/artifact`
+        ),
+      downloadPreviewDraftBytes: async (id: string) =>
+        new Uint8Array(
+          await (
+            await this.requestBinary(
+              `/v1/printpacket/preview-renders/${encodeURIComponent(id)}/artifact`
+            )
+          ).arrayBuffer()
+        ),
       retrieve: (id: string) =>
         this.request<PrintPacketRender>(
           'GET',

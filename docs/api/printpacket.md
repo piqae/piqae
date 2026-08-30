@@ -11,6 +11,29 @@ immutable revisions. Register an asynchronous render with
 can be downloaded, printed directly, or retained in an expiring preview approval
 gate. Preview, download, and print all refer to the same immutable bytes.
 
+## Unsaved editor previews
+
+An editor that needs the production PDF without saving or publishing a template
+uses `POST /v1/printpacket/preview-renders`. The request contains a validated
+`printpacket/v1` specification, a JSON object input, and an optional
+`expires_in_seconds` from 60 through 1800 (900 by default). Poll only
+`GET /v1/printpacket/preview-renders/{render_id}` and download only
+`GET /v1/printpacket/preview-renders/{render_id}/artifact`.
+
+This path creates no template, revision, approval, upload, or print job. Its
+worker uses the same renderer and PDF artifact path as a published render, but
+the render has a database-enforced `preview` purpose. Standard render,
+readiness, approval, upload, job, and print paths do not accept it. The packet
+and input are encrypted independently with workspace-, environment-, render-,
+and purpose-bound authenticated data. They are never returned by the API.
+
+At the expiry instant, both preview metadata and its PDF become inaccessible,
+including to a worker that has not completed its lease. Bounded lifecycle work
+then deletes the encrypted packet, encrypted input, and winning PDF artifact
+asynchronously. Callers should treat a not-found response after expiry as
+final and create a new preview; an idempotent replay never extends the original
+expiry.
+
 Print and preview approval accept `render_policy`: `automatic` (the default),
 `cloud_only`, `prefer_node`, or `require_node`. Automatic uses a conservative,
 versioned cost model with server-measured PDF and input byte lengths and the

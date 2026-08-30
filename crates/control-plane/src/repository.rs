@@ -152,6 +152,21 @@ pub trait Repository: Send + Sync + 'static {
         idempotency_key: &str,
         request_sha256: &str,
     ) -> Result<CreateDocumentResult<StoredDocumentRender>, RepositoryError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn register_preview_document_render(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        spec_ciphertext: &[u8],
+        spec_sha256: &str,
+        input_ciphertext: &[u8],
+        input_sha256: &str,
+        idempotency_key: &str,
+        request_sha256: &str,
+        expires_in_seconds: i64,
+        resource_digests: &[String],
+    ) -> Result<CreateDocumentResult<StoredDocumentRender>, RepositoryError>;
     async fn get_document_render(
         &self,
         workspace_id: WorkspaceId,
@@ -1650,6 +1665,37 @@ impl Repository for PostgresStore {
             input_sha256,
             idempotency_key,
             request_sha256,
+        )
+        .await
+        .map_err(Into::into)
+    }
+    async fn register_preview_document_render(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        spec_ciphertext: &[u8],
+        spec_sha256: &str,
+        input_ciphertext: &[u8],
+        input_sha256: &str,
+        idempotency_key: &str,
+        request_sha256: &str,
+        expires_in_seconds: i64,
+        resource_digests: &[String],
+    ) -> Result<CreateDocumentResult<StoredDocumentRender>, RepositoryError> {
+        PostgresStore::register_preview_document_render(
+            self,
+            workspace_id,
+            environment_id,
+            id,
+            spec_ciphertext,
+            spec_sha256,
+            input_ciphertext,
+            input_sha256,
+            idempotency_key,
+            request_sha256,
+            expires_in_seconds,
+            resource_digests,
         )
         .await
         .map_err(Into::into)
@@ -4066,6 +4112,7 @@ impl Repository for MemoryRepository {
                 || (render.state == "rendering"
                     && render.lease_expires_at.is_some_and(|expiry| expiry <= now)))
                 && render.attempt < render.max_attempts
+                && (render.purpose != "preview" || render.expires_at > now)
             {
                 let token = Uuid::new_v4();
                 render.state = "rendering".into();
@@ -4098,6 +4145,9 @@ impl Repository for MemoryRepository {
             .get_mut(&work.render.id)
             .ok_or(RepositoryError::NotFound)?;
         if render.state != "rendering" || render.lease_token != Some(work.lease_token) {
+            return Err(RepositoryError::ConcurrentStateChange);
+        }
+        if render.purpose == "preview" && render.expires_at <= Utc::now() {
             return Err(RepositoryError::ConcurrentStateChange);
         }
         render.state = "completed".into();
@@ -4247,7 +4297,8 @@ impl Repository for MemoryRepository {
         let now = Utc::now();
         let render = StoredDocumentRender {
             id: id.into(),
-            template_revision_id: template_revision_id.into(),
+            template_revision_id: Some(template_revision_id.into()),
+            purpose: "printable".into(),
             state: "registered".into(),
             artifact_sha256: None,
             artifact_byte_length: None,
@@ -4256,8 +4307,73 @@ impl Repository for MemoryRepository {
             failure_code: None,
             created_at: now,
             updated_at: now,
-            input_ciphertext: ciphertext.to_vec(),
-            input_sha256: input_sha256.into(),
+            expires_at: now + chrono::Duration::days(30),
+            spec_ciphertext: None,
+            spec_sha256: None,
+            input_ciphertext: Some(ciphertext.to_vec()),
+            input_sha256: Some(input_sha256.into()),
+            artifact_object_key_ciphertext: None,
+            attempt: 0,
+            max_attempts: 5,
+            lease_token: None,
+            lease_expires_at: None,
+        };
+        state.document_renders.insert(
+            id.into(),
+            (
+                workspace_id,
+                environment_id,
+                idempotency_key.into(),
+                request_sha256.into(),
+                render.clone(),
+            ),
+        );
+        Ok(CreateDocumentResult::Created(render))
+    }
+    async fn register_preview_document_render(
+        &self,
+        workspace_id: WorkspaceId,
+        environment_id: EnvironmentId,
+        id: &str,
+        spec_ciphertext: &[u8],
+        spec_sha256: &str,
+        input_ciphertext: &[u8],
+        input_sha256: &str,
+        idempotency_key: &str,
+        request_sha256: &str,
+        expires_in_seconds: i64,
+        _resource_digests: &[String],
+    ) -> Result<CreateDocumentResult<StoredDocumentRender>, RepositoryError> {
+        let mut state = self.state.write().await;
+        if let Some((_, _, _, hash, render)) =
+            state.document_renders.values().find(|(w, e, key, _, _)| {
+                *w == workspace_id && *e == environment_id && key == idempotency_key
+            })
+        {
+            if hash != request_sha256 || render.purpose != "preview" {
+                return Err(RepositoryError::IdempotencyConflict);
+            }
+            return Ok(CreateDocumentResult::Existing(render.clone()));
+        }
+        let now = Utc::now();
+        let expires_at = now + chrono::Duration::seconds(expires_in_seconds);
+        let render = StoredDocumentRender {
+            id: id.into(),
+            template_revision_id: None,
+            purpose: "preview".into(),
+            state: "registered".into(),
+            artifact_sha256: None,
+            artifact_byte_length: None,
+            artifact_media_type: None,
+            page_count: None,
+            failure_code: None,
+            created_at: now,
+            updated_at: now,
+            expires_at,
+            spec_ciphertext: Some(spec_ciphertext.to_vec()),
+            spec_sha256: Some(spec_sha256.into()),
+            input_ciphertext: Some(input_ciphertext.to_vec()),
+            input_sha256: Some(input_sha256.into()),
             artifact_object_key_ciphertext: None,
             attempt: 0,
             max_attempts: 5,
@@ -4304,11 +4420,9 @@ impl Repository for MemoryRepository {
         x: DateTime<Utc>,
     ) -> Result<CreateDocumentResult<StoredDocumentPreview>, RepositoryError> {
         let mut s = self.state.write().await;
-        if !s
-            .document_renders
-            .get(r)
-            .is_some_and(|(rw, re, _, _, v)| *rw == w && *re == e && v.state == "completed")
-        {
+        if !s.document_renders.get(r).is_some_and(|(rw, re, _, _, v)| {
+            *rw == w && *re == e && v.state == "completed" && v.purpose == "printable"
+        }) {
             return Err(RepositoryError::NotFound);
         }
         if let Some((_, _, _, p)) = s
@@ -6631,6 +6745,7 @@ impl Repository for MemoryRepository {
                 *w == workspace_id
                     && *e == environment_id
                     && render.state == "completed"
+                    && render.purpose == "printable"
                     && render.artifact_sha256.as_deref() == Some(artifact_sha256)
                     && render.artifact_byte_length == Some(artifact_bytes)
             })
@@ -9131,7 +9246,8 @@ mod routing_repository_tests {
         for render_id in ["render_one", "render_two"] {
             let render = StoredDocumentRender {
                 id: render_id.into(),
-                template_revision_id: "revision".into(),
+                template_revision_id: Some("revision".into()),
+                purpose: "printable".into(),
                 state: "completed".into(),
                 artifact_sha256: Some("a".repeat(64)),
                 artifact_byte_length: Some(1),
@@ -9140,8 +9256,11 @@ mod routing_repository_tests {
                 failure_code: None,
                 created_at: now,
                 updated_at: now,
-                input_ciphertext: vec![1],
-                input_sha256: "b".repeat(64),
+                expires_at: now + chrono::Duration::days(30),
+                spec_ciphertext: None,
+                spec_sha256: None,
+                input_ciphertext: Some(vec![1]),
+                input_sha256: Some("b".repeat(64)),
                 artifact_object_key_ciphertext: Some(vec![2]),
                 attempt: 1,
                 max_attempts: 5,
@@ -9245,6 +9364,76 @@ mod routing_repository_tests {
     }
 
     #[tokio::test]
+    async fn expired_preview_render_cannot_be_claimed_or_completed() {
+        let repository = MemoryRepository::default();
+        let workspace = WorkspaceId::new();
+        let environment = EnvironmentId::new();
+        let created = repository
+            .register_preview_document_render(
+                workspace,
+                environment,
+                "dprv_expiry_test",
+                b"encrypted-specification",
+                &"a".repeat(64),
+                b"encrypted-input",
+                &"b".repeat(64),
+                "preview-expiry-key",
+                &"c".repeat(64),
+                60,
+                &[],
+            )
+            .await
+            .expect("register preview render");
+        let render = match created {
+            CreateDocumentResult::Created(render) => render,
+            CreateDocumentResult::Existing(_) => panic!("new preview render"),
+        };
+        let work = repository
+            .claim_document_renders("worker", 1, 30)
+            .await
+            .expect("claim preview")
+            .pop()
+            .expect("preview work");
+        repository
+            .state
+            .write()
+            .await
+            .document_renders
+            .get_mut(&render.id)
+            .expect("preview fixture")
+            .4
+            .expires_at = Utc::now() - chrono::Duration::seconds(1);
+        assert!(matches!(
+            repository
+                .complete_claimed_document_render(
+                    &work,
+                    b"encrypted-artifact-key",
+                    &"d".repeat(64),
+                    10,
+                    1,
+                )
+                .await,
+            Err(RepositoryError::ConcurrentStateChange)
+        ));
+        repository
+            .state
+            .write()
+            .await
+            .document_renders
+            .get_mut(&render.id)
+            .expect("preview fixture")
+            .4
+            .state = "registered".into();
+        assert!(
+            repository
+                .claim_document_renders("other-worker", 1, 30)
+                .await
+                .expect("claim after expiry")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn artifact_acquisition_replay_returns_the_canonical_upload() {
         let repository = MemoryRepository::default();
         let workspace = WorkspaceId::new();
@@ -9252,7 +9441,8 @@ mod routing_repository_tests {
         let now = Utc::now();
         let render = StoredDocumentRender {
             id: "drnd_canonical".into(),
-            template_revision_id: "drev_fixture".into(),
+            template_revision_id: Some("drev_fixture".into()),
+            purpose: "printable".into(),
             state: "completed".into(),
             artifact_sha256: Some("a".repeat(64)),
             artifact_byte_length: Some(123),
@@ -9261,8 +9451,11 @@ mod routing_repository_tests {
             failure_code: None,
             created_at: now,
             updated_at: now,
-            input_ciphertext: vec![1],
-            input_sha256: "b".repeat(64),
+            expires_at: now + chrono::Duration::days(30),
+            spec_ciphertext: None,
+            spec_sha256: None,
+            input_ciphertext: Some(vec![1]),
+            input_sha256: Some("b".repeat(64)),
             artifact_object_key_ciphertext: Some(vec![2]),
             attempt: 1,
             max_attempts: 5,
