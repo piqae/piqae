@@ -254,7 +254,7 @@ export function PrintPacketEditor({
   const currentDocument = { ...value, body: canonicalBody };
   const currentDocumentKey = JSON.stringify(currentDocument);
   const continuousPageBreaks =
-    value.media.kind !== "paged" && documentHasPageBreak(value);
+    value.media.kind === "continuous" && documentHasPageBreak(value);
   const editorRoot = useRef<HTMLDivElement>(null);
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);

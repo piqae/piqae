@@ -84,6 +84,16 @@ describe("PrintPacket model", () => {
       height_mm: 12,
       human_readable: true,
     });
+    const lineItemRepeat = nodes.find(
+      (node) =>
+        node.type === "repeat" &&
+        node.items?.type === "current_path" &&
+        node.items.path?.join(".") === "lineItems",
+    );
+    expect(lineItemRepeat?.children).toMatchObject([
+      { type: "keep_together" },
+      { type: "page_break" },
+    ]);
   });
   it("rejects noncanonical packets and excessive nesting", () => {
     expect(() => parseTemplateEnvelope('{"schema":"unsupported"}')).toThrow(
@@ -122,38 +132,20 @@ describe("PrintPacket model", () => {
     ).toThrow("Document block is invalid");
   });
 
-  it("rejects page breaks recursively in every continuous-media region", () => {
+  it("rejects nested page breaks on continuous media", () => {
     const receipt = structuredClone(
       starterTemplates.find(({ id }) => id === "receipt")!.specification,
     );
-    receipt.header = { default: [{ type: "page_break" }] };
+    receipt.body = [
+      {
+        type: "conditional",
+        condition: { type: "path", path: ["order", "id"] },
+        then: [{ type: "section", children: [{ type: "page_break" }] }],
+      },
+    ];
     expect(documentHasPageBreak(receipt)).toBe(true);
     expect(() => validatePrintPacket(receipt)).toThrow(
       "not supported on continuous media",
-    );
-
-    const label = structuredClone(
-      starterTemplates.find(({ id }) => id === "product-label")!.specification,
-    );
-    label.header = {
-      last: [
-        {
-          type: "conditional",
-          condition: { type: "path", path: ["order", "id"] },
-          then: [{ type: "section", children: [{ type: "page_break" }] }],
-        },
-      ],
-    };
-    expect(documentHasPageBreak(label)).toBe(true);
-    expect(() => validatePrintPacket(label)).toThrow(
-      "not supported on label media",
-    );
-
-    const footerFirst = structuredClone(label);
-    footerFirst.header = {};
-    footerFirst.footer = { first: [{ type: "page_break" }] };
-    expect(() => validatePrintPacket(footerFirst)).toThrow(
-      "not supported on label media",
     );
   });
 
@@ -165,8 +157,8 @@ describe("PrintPacket model", () => {
     ["footer", "default"],
     ["footer", "last"],
   ] as const)("scans the %s.%s page region", (region, variant) => {
-    const label = structuredClone(
-      starterTemplates.find(({ id }) => id === "product-label")!.specification,
+    const receipt = structuredClone(
+      starterTemplates.find(({ id }) => id === "receipt")!.specification,
     );
     const nestedBreak = [
       {
@@ -186,11 +178,11 @@ describe("PrintPacket model", () => {
         : variant === "default"
           ? { default: nestedBreak }
           : { last: nestedBreak };
-    if (region === "header") label.header = variants;
-    else label.footer = variants;
-    expect(documentHasPageBreak(label)).toBe(true);
-    expect(() => validatePrintPacket(label)).toThrow(
-      "not supported on label media",
+    if (region === "header") receipt.header = variants;
+    else receipt.footer = variants;
+    expect(documentHasPageBreak(receipt)).toBe(true);
+    expect(() => validatePrintPacket(receipt)).toThrow(
+      "not supported on continuous media",
     );
   });
 

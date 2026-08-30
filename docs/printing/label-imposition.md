@@ -7,14 +7,22 @@ Status: product architecture note. Sheet-label imposition is not implemented.
 A label template describes one logical label in the open `printpacket/v1`
 format. It owns the label's content and nominal dimensions, but it does not
 embed Avery coordinates, sheet cells, printer-driver options, or copy ordering.
-The same design can therefore target a compatible die-cut roll, continuous
-stock, or sheet-label workflow without creating a second template language.
+A future imposition planner can therefore reuse the same logical design for
+compatible die-cut roll and sheet-label workflows without creating a second
+template language.
 
 The Shopify Product Label starter follows this rule. It is a 100 x 50 mm
 logical label containing the product title, optional variant title, localized
 unit price, and a normalized Code 128-safe barcode candidate. If Shopify data
 does not contain a candidate that is both encodable and able to fit the label,
 the barcode is omitted; generation must not invent or truncate a machine code.
+Each expanded line item is bounded by `keep_together` and `page_break`, so the
+current Shopify target is one complete 100 x 50 mm fixed-label page per item.
+
+Current Shopify label targets exclude sheet stock and continuous stock. Shopify
+does not yet impose logical labels into sheet cells or a continuous-roll plan;
+those target kinds must remain unavailable for this starter until the future
+planning contract below is implemented and validated.
 
 ## Impose labels during generation planning
 

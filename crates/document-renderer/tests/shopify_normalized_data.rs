@@ -40,6 +40,29 @@ fn render(specification: Value) -> (u32, Vec<u8>) {
     render_with_data(specification, &fixture_data())
 }
 
+fn pdf_page_streams(pdf: &[u8], page_count: u32) -> Vec<String> {
+    let pdf = String::from_utf8(pdf.to_vec())
+        .unwrap_or_else(|error| panic!("text-only label PDF must be UTF-8: {error}"));
+    (0..page_count)
+        .map(|page_index| {
+            let content_id = 4 + page_index as usize * 2;
+            let object_marker = format!("\n{content_id} 0 obj\n");
+            let object = pdf
+                .split_once(&object_marker)
+                .unwrap_or_else(|| panic!("page {page_index} content object must exist"))
+                .1;
+            object
+                .split_once("stream\n")
+                .unwrap_or_else(|| panic!("page {page_index} content stream must start"))
+                .1
+                .split_once("endstream")
+                .unwrap_or_else(|| panic!("page {page_index} content stream must end"))
+                .0
+                .to_owned()
+        })
+        .collect()
+}
+
 fn starter_specifications() -> BTreeMap<String, Value> {
     serde_json::from_str(include_str!(
         "../../../apps/shopify/tests/fixtures/printpacket/starter-specifications.json"
@@ -227,6 +250,55 @@ fn exact_product_label_starter_renders_variant_price_and_safe_barcode_data() {
     let (pages, pdf) = render_with_data(specification, &data);
     assert!(pages > 0, "product label must render variant data");
     assert!(pdf.starts_with(b"%PDF-1.4"));
+}
+
+#[test]
+fn product_label_renders_one_atomic_page_per_line_item_with_its_own_barcode() {
+    let specification = starter_specifications()
+        .remove("product-label")
+        .unwrap_or_else(|| panic!("product label starter must exist"));
+    let labels = [
+        ("ALPHA", "A-001", 1.25),
+        ("BRAVO", "B-002", 2.50),
+        ("CHARLIE", "C-003", 3.75),
+    ];
+    let data = json!({
+        "shop": { "name": "Fixture Coffee", "domain": "fixture-coffee.myshopify.com" },
+        "orders": [{
+            "lineItems": labels.iter().map(|(title, barcode, unit_price)| json!({
+                "title": title,
+                "variant": null,
+                "unitPrice": unit_price,
+                "currency": "NZD",
+                "labelCode128": barcode
+            })).collect::<Vec<_>>()
+        }]
+    });
+
+    let (page_count, pdf) = render_with_data(specification, &data);
+    assert_eq!(page_count as usize, labels.len());
+    let pages = pdf_page_streams(&pdf, page_count);
+    for (page_index, (title, barcode, _)) in labels.iter().enumerate() {
+        let page = &pages[page_index];
+        assert!(
+            page.contains(&format!("({title}) Tj")),
+            "label page {page_index} must contain its product title"
+        );
+        assert!(
+            page.contains(&format!("({barcode}) Tj")),
+            "label page {page_index} must contain its human-readable barcode"
+        );
+        for (other_index, (other_title, other_barcode, _)) in labels.iter().enumerate() {
+            if other_index == page_index {
+                continue;
+            }
+            assert!(
+                !page.contains(&format!("({other_title}) Tj"))
+                    && !page.contains(&format!("({other_barcode}) Tj")),
+                "label page {page_index} must not contain product or barcode data from item {other_index}"
+            );
+        }
+    }
 }
 
 #[test]

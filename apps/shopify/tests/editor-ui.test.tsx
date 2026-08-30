@@ -241,6 +241,9 @@ describe("Shopify document editor layout", () => {
     const receipt = starterTemplates.find(
       ({ id }) => id === "receipt",
     )!.specification;
+    const label = starterTemplates.find(
+      ({ id }) => id === "product-label",
+    )!.specification;
     const rootPath = [{ branch: "root" as const, index: 0 }];
 
     expect(
@@ -265,6 +268,9 @@ describe("Shopify document editor layout", () => {
         receipt.media.kind,
       ),
     ).toBe("continuous");
+    expect(
+      orderBatchPresentation(label.body[0]!, rootPath, label.media.kind),
+    ).toBe("fixed_media");
 
     const flowingInvoice = structuredClone(invoice);
     const repeat = flowingInvoice.body[0];
@@ -275,6 +281,29 @@ describe("Shopify document editor layout", () => {
     expect(
       orderBatchPresentation(repeat, rootPath, flowingInvoice.media.kind),
     ).toBe("flowing_pages");
+  });
+
+  it("accepts fixed-label page boundaries but diagnoses them on continuous media", async () => {
+    const label = starterTemplates.find(
+      ({ id }) => id === "product-label",
+    )!.specification;
+    const page = await render(
+      <PrintPacketEditor value={label} onChange={() => undefined} />,
+    );
+    expect(page.querySelector(".piqae-media-diagnostic")).toBeNull();
+
+    const receipt = structuredClone(
+      starterTemplates.find(({ id }) => id === "receipt")!.specification,
+    );
+    receipt.body.push({ type: "page_break" });
+    await act(async () => {
+      root?.render(
+        <PrintPacketEditor value={receipt} onChange={() => undefined} />,
+      );
+    });
+    expect(
+      page.querySelector(".piqae-media-diagnostic")?.textContent,
+    ).toContain("continuous media");
   });
 
   it("presents the order batch as document structure, not editable content", async () => {
