@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { createRoutesStub } from "react-router";
@@ -96,6 +98,43 @@ const staticTablePacket: PrintPacket = {
         value: [
           { title: "Coffee", quantity: 2 },
           { title: "Filters", quantity: 1 },
+        ],
+      },
+    },
+  ],
+};
+
+const typedStaticTablePacket: PrintPacket = {
+  ...staticTablePacket,
+  body: [
+    {
+      ...(staticTablePacket.body[0] as Extract<
+        PrintPacket["body"][number],
+        { type: "table" }
+      >),
+      columns: [
+        ...(
+          staticTablePacket.body[0] as Extract<
+            PrintPacket["body"][number],
+            { type: "table" }
+          >
+        ).columns,
+        {
+          header: [{ type: "text", value: "Active" }],
+          cell: [
+            {
+              type: "value",
+              value: { type: "current_path", path: ["active"] },
+            },
+          ],
+          width: 1,
+        },
+      ],
+      items: {
+        type: "literal",
+        value: [
+          { title: "Coffee", quantity: 2, active: true },
+          { title: "Filters", quantity: 1, active: false },
         ],
       },
     },
@@ -1122,6 +1161,17 @@ describe("Shopify document editor layout", () => {
     }
   });
 
+  it("bridges the pointer path from a column to its overlaid action popover", () => {
+    const css = readFileSync(join(process.cwd(), "app/shopify-ui.css"), "utf8");
+    const bridge = css.match(
+      /\.piqae-canvas-column-actions::after\s*\{(?<rules>[^}]+)\}/,
+    )?.groups?.rules;
+
+    expect(bridge).toContain("top: 100%");
+    expect(bridge).toContain("height: 0.35rem");
+    expect(bridge).toContain('content: ""');
+  });
+
   it("inserts columns at exact model boundaries without mutating the source", () => {
     const table = tablePacket.body[0];
     if (table?.type !== "table") throw new Error("table missing");
@@ -1250,6 +1300,88 @@ describe("Shopify document editor layout", () => {
     expect(nextTable.items.value).toEqual([
       { title: "Tea", quantity: 2 },
       { title: "Filters", quantity: 1 },
+    ]);
+  });
+
+  it("does not publish an unchanged static-cell blur into editor history", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={staticTablePacket} onChange={onChange} />,
+    );
+    const cell = page.querySelector<HTMLElement>(
+      '[data-table-row-index="0"] [role="textbox"][aria-label="Item row 1"]',
+    )!;
+
+    await act(async () => {
+      cell.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("preserves numeric and boolean primitives when static cells receive valid edits", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={typedStaticTablePacket} onChange={onChange} />,
+    );
+    const quantity = page.querySelector<HTMLElement>(
+      '[data-table-row-index="0"] [role="textbox"][aria-label="Quantity row 1"]',
+    )!;
+
+    await act(async () => {
+      quantity.textContent = "3.5";
+      quantity.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+    let nextDocument = onChange.mock.lastCall?.[0] as PrintPacket;
+    let nextTable = authoredBody(nextDocument)[0];
+    expect(nextTable.type).toBe("table");
+    if (nextTable.type !== "table" || nextTable.items.type !== "literal")
+      return;
+    expect(nextTable.items.value).toEqual([
+      { title: "Coffee", quantity: 3.5, active: true },
+      { title: "Filters", quantity: 1, active: false },
+    ]);
+
+    const active = page.querySelector<HTMLElement>(
+      '[data-table-row-index="0"] [role="textbox"][aria-label="Active row 1"]',
+    )!;
+    await act(async () => {
+      active.textContent = "FALSE";
+      active.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+    nextDocument = onChange.mock.lastCall?.[0] as PrintPacket;
+    nextTable = authoredBody(nextDocument)[0];
+    expect(nextTable.type).toBe("table");
+    if (nextTable.type !== "table" || nextTable.items.type !== "literal")
+      return;
+    expect(nextTable.items.value).toEqual([
+      { title: "Coffee", quantity: 2, active: false },
+      { title: "Filters", quantity: 1, active: false },
+    ]);
+  });
+
+  it("stores an invalid primitive edit as the explicit text the merchant entered", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={typedStaticTablePacket} onChange={onChange} />,
+    );
+    const quantity = page.querySelector<HTMLElement>(
+      '[data-table-row-index="0"] [role="textbox"][aria-label="Quantity row 1"]',
+    )!;
+
+    await act(async () => {
+      quantity.textContent = "many";
+      quantity.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+
+    const nextDocument = onChange.mock.lastCall?.[0] as PrintPacket;
+    const nextTable = authoredBody(nextDocument)[0];
+    expect(nextTable.type).toBe("table");
+    if (nextTable.type !== "table" || nextTable.items.type !== "literal")
+      return;
+    expect(nextTable.items.value).toEqual([
+      { title: "Coffee", quantity: "many", active: true },
+      { title: "Filters", quantity: 1, active: false },
     ]);
   });
 

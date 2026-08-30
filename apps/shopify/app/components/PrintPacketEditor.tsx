@@ -1678,15 +1678,13 @@ function CanvasBlock({
                         onClick={(event) => event.stopPropagation()}
                         onBlur={(event) => {
                           if (!editable || !editablePath) return;
-                          onChange(
-                            updateStaticTableCell(
-                              block,
-                              rowIndex,
-                              editablePath,
-                              event.currentTarget.textContent ?? "",
-                            ),
-                            path,
+                          const next = updateStaticTableCell(
+                            block,
+                            rowIndex,
+                            editablePath,
+                            event.currentTarget.textContent ?? "",
                           );
+                          if (next !== block) onChange(next, path);
                         }}
                       >
                         {staticTableCellLabel(column.cell, row)}
@@ -3626,8 +3624,12 @@ function updateStaticTableCell(
 ): TableBlock {
   const rows = staticTableRows(block);
   if (!rows || rows[rowIndex] === undefined || !path.length) return block;
+  const previous = literalValueAtPath(rows[rowIndex], path);
+  if (value === printableLiteralValue(previous)) return block;
+  const nextValue = staticCellValueFromEdit(previous, value);
+  if (Object.is(previous, nextValue)) return block;
   const nextRows = rows.map((row, index) =>
-    index === rowIndex ? setLiteralValueAtPath(row, path, value) : row,
+    index === rowIndex ? setLiteralValueAtPath(row, path, nextValue) : row,
   );
   return {
     ...block,
@@ -3638,7 +3640,7 @@ function updateStaticTableCell(
 function setLiteralValueAtPath(
   current: unknown,
   path: string[],
-  value: string,
+  value: string | number | boolean,
 ): Record<string, unknown> {
   const [head, ...rest] = path;
   const source = isLiteralRecord(current) ? current : {};
@@ -3649,6 +3651,22 @@ function setLiteralValueAtPath(
       ? setLiteralValueAtPath(source[head], rest, value)
       : value,
   };
+}
+
+function staticCellValueFromEdit(
+  previous: unknown,
+  source: string,
+): string | number | boolean {
+  const trimmed = source.trim();
+  if (typeof previous === "number" && trimmed) {
+    const parsed = Number(trimmed);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  if (typeof previous === "boolean") {
+    if (trimmed.toLowerCase() === "true") return true;
+    if (trimmed.toLowerCase() === "false") return false;
+  }
+  return source;
 }
 
 function isLiteralRecord(value: unknown): value is Record<string, unknown> {

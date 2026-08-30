@@ -459,6 +459,14 @@
 .piqae-canvas-table-row .piqae-canvas-column-actions {
   padding: 0.2rem;
 }
+.piqae-canvas-column-actions::after {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  left: 0;
+  height: 0.35rem;
+  content: "";
+}
 .piqae-canvas-table-column:hover .piqae-canvas-column-actions,
 .piqae-canvas-table-column:focus-within .piqae-canvas-column-actions {
   opacity: 1;
