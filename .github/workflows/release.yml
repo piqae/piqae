@@ -180,7 +180,7 @@ jobs:
           run_install: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version-file: .node-version
+          node-version: 22
           cache: pnpm
       - name: Install CUPS development library
         run: sudo apt-get update && sudo apt-get install --yes libcups2-dev

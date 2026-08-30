@@ -95,6 +95,24 @@ class CiReleaseContractTest(unittest.TestCase):
         self.assertIn("for source in Config Resources Sources Tests", script)
         self.assertIn("project-only|linked-simulator", script)
 
+    def test_apple_marketing_version_tracks_the_workspace_release(self) -> None:
+        workspace = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+        workspace_version = re.search(
+            r'(?ms)^\[workspace\.package\].*?^version = "([^"]+)"', workspace
+        ).group(1)
+        project = (ROOT / "apps/node-apple/project.yml").read_text(encoding="utf-8")
+        project_version = re.search(
+            r"(?m)^\s+MARKETING_VERSION: ([^\s]+)$", project
+        ).group(1)
+        generated = (
+            ROOT / "apps/node-apple/PiqaeNodeApple.xcodeproj/project.pbxproj"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(project_version, workspace_version)
+        self.assertEqual(
+            generated.count(f"MARKETING_VERSION = {workspace_version};"), 2
+        )
+
     def test_native_sdk_archives_generate_licence_evidence_before_packaging(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         windows = workflow.split("\n  windows_sdk:", 1)[1].split("\n  linux:", 1)[0]
@@ -126,6 +144,8 @@ class CiReleaseContractTest(unittest.TestCase):
         self.assertIn("default: macos", workflow)
         self.assertIn('release_platform.py "$platform"', workflow)
         self.assertIn("platform=all", workflow)
+        self.assertIn("node-version: 22", workflow)
+        self.assertNotIn("node-version-file: .node-version", workflow)
         self.assertIn("pnpm install --frozen-lockfile", workflow)
         self.assertIn("aggregate-gated Windows promoter", workflow)
         self.assertIn(
