@@ -37,10 +37,12 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     !upstream.ok ||
     !upstream.body ||
     upstream.headers.get("content-type")?.split(";", 1)[0] !== "application/pdf"
-  )
+  ) {
+    if (upstream.body) await upstream.body.cancel().catch(() => undefined);
     return unavailable(
       upstream.status === 404 || upstream.status === 410 ? 404 : 409,
     );
+  }
   return cors(
     new Response(upstream.body, {
       headers: {

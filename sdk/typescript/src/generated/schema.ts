@@ -8984,8 +8984,8 @@ export interface operations {
     createPrintPacketPreviewRender: {
         parameters: {
             query?: never;
-            header?: {
-                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+            header: {
+                "Idempotency-Key": string;
             };
             path?: never;
             cookie?: never;

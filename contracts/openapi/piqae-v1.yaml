@@ -3243,7 +3243,10 @@ paths:
       tags: [PrintPacket]
       operationId: createPrintPacketPreviewRender
       parameters:
-        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 255 }
       requestBody:
         required: true
         content:

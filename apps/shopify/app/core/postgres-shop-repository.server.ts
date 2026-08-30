@@ -141,6 +141,7 @@ export class PostgresShopRepository implements ShopRepository {
     const shop = normalizeShopDomain(rawShop);
     await this.withShopLock(shop, async () => {
       const client = await this.pool.connect();
+      let released = false;
       try {
         await client.query("BEGIN");
         await client.query(
@@ -152,10 +153,15 @@ export class PostgresShopRepository implements ShopRepository {
         ]);
         await client.query("COMMIT");
       } catch (error) {
-        await client.query("ROLLBACK");
+        try {
+          await client.query("ROLLBACK");
+        } catch {
+          client.release(true);
+          released = true;
+        }
         throw error;
       } finally {
-        client.release();
+        if (!released) client.release();
       }
     });
   }
