@@ -188,6 +188,7 @@ export function PrintPacketEditor({
   const canonicalBody = canonicalizeShopifyEditorBody(value.body);
   const continuousPageBreaks =
     value.media.kind !== "paged" && documentHasPageBreak(value);
+  const editorRoot = useRef<HTMLDivElement>(null);
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const latest = useRef(value);
@@ -204,6 +205,48 @@ export function PrintPacketEditor({
     insertionScope,
   );
   latest.current = { ...value, body: canonicalBody };
+  useEffect(() => {
+    if (!selection) return;
+    const clearSelectionOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      const target = event.target;
+      const root = editorRoot.current;
+      if (!(target instanceof Node) || !root?.contains(target)) {
+        setSelection(null);
+        return;
+      }
+      if (editorInputTarget(target)) return;
+      event.preventDefault();
+      setSelection(null);
+    };
+    const clearSelectionAwayFromEditorActions = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const root = editorRoot.current;
+      if (
+        root?.contains(target) &&
+        target.closest(
+          ".piqae-editor-toolbar, .piqae-canvas-selected, .piqae-canvas-insertion-slot",
+        )
+      )
+        return;
+      setSelection(null);
+    };
+    document.addEventListener("keydown", clearSelectionOnEscape);
+    document.addEventListener(
+      "pointerdown",
+      clearSelectionAwayFromEditorActions,
+      true,
+    );
+    return () => {
+      document.removeEventListener("keydown", clearSelectionOnEscape);
+      document.removeEventListener(
+        "pointerdown",
+        clearSelectionAwayFromEditorActions,
+        true,
+      );
+    };
+  }, [selection]);
   useEffect(() => {
     if (!host.current) return;
     const state = EditorState.create({
@@ -441,7 +484,7 @@ export function PrintPacketEditor({
     onChange(nextDocument);
   };
   return (
-    <div className="piqae-word-editor">
+    <div className="piqae-word-editor" ref={editorRoot}>
       <div className="piqae-editor-toolbar">
         <div className="piqae-editor-toolbar-primary">
           {workspaceControls ? (
@@ -1857,6 +1900,29 @@ function CanvasInsertionSlot({
 }) {
   const [open, setOpen] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const slot = useRef<HTMLSpanElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const closeOnPointerAway = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && !slot.current?.contains(target))
+        setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      requestAnimationFrame(() => trigger.current?.focus());
+    };
+    document.addEventListener("pointerdown", closeOnPointerAway, true);
+    document.addEventListener("keydown", closeOnEscape, true);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnPointerAway, true);
+      document.removeEventListener("keydown", closeOnEscape, true);
+    };
+  }, [open]);
   const insert = (block: Block) => {
     onInsert(block, path);
     setOpen(false);
@@ -1864,6 +1930,7 @@ function CanvasInsertionSlot({
   };
   return (
     <span
+      ref={slot}
       className={`piqae-canvas-insertion-slot${dragOver ? " is-drag-over" : ""}`}
       data-insertion-index={path.at(-1)?.index}
       onBlur={(event) => {
@@ -1894,6 +1961,7 @@ function CanvasInsertionSlot({
     >
       <span className="piqae-canvas-insertion-line" aria-hidden="true" />
       <button
+        ref={trigger}
         className="piqae-canvas-insertion-button"
         type="button"
         aria-label="Add content here"
@@ -1914,6 +1982,7 @@ function CanvasInsertionSlot({
           onKeyDown={(event) => {
             if (event.key === "Escape") {
               event.preventDefault();
+              event.stopPropagation();
               setOpen(false);
             }
           }}
@@ -2072,9 +2141,33 @@ function InsertDataButton({
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const menu = useRef<HTMLSpanElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
   const matches = searchDocumentFields(fields, query, 40);
+  useEffect(() => {
+    if (!open) return;
+    const closeOnPointerAway = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && !menu.current?.contains(target))
+        setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      requestAnimationFrame(() => trigger.current?.focus());
+    };
+    document.addEventListener("pointerdown", closeOnPointerAway, true);
+    document.addEventListener("keydown", closeOnEscape, true);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnPointerAway, true);
+      document.removeEventListener("keydown", closeOnEscape, true);
+    };
+  }, [open]);
   return (
     <span
+      ref={menu}
       className="piqae-tool-menu"
       onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget as Node | null))
@@ -2082,6 +2175,7 @@ function InsertDataButton({
       }}
     >
       <button
+        ref={trigger}
         className="piqae-tool-button"
         type="button"
         aria-label="Insert Shopify data"
@@ -2104,7 +2198,12 @@ function InsertDataButton({
             value={query}
             onChange={(event) => setQuery(event.currentTarget.value)}
             onKeyDown={(event) => {
-              if (event.key === "Escape") setOpen(false);
+              if (event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                setOpen(false);
+                requestAnimationFrame(() => trigger.current?.focus());
+              }
               if (event.key === "Enter" && matches[0]) {
                 event.preventDefault();
                 onInsert(matches[0].path);
@@ -2319,6 +2418,7 @@ function ExpressionEditor({
           }
           if (event.key === "Escape") {
             event.preventDefault();
+            event.stopPropagation();
             setQuery(null);
           } else if (event.key === "ArrowDown") {
             event.preventDefault();
@@ -3076,6 +3176,14 @@ function isEditingTarget(target: EventTarget | null) {
       ),
     )
   );
+}
+
+function editorInputTarget(target: EventTarget | null) {
+  return target instanceof HTMLElement
+    ? target.closest<HTMLElement>(
+        '[contenteditable="true"], input, textarea, select',
+      )
+    : null;
 }
 
 function moveItem<T>(items: T[], index: number, direction: -1 | 1) {
