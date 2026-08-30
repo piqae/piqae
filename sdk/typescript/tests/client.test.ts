@@ -83,6 +83,45 @@ describe("PiqaeClient", () => {
     ).toBe("Bearer piq_test_redacted");
   });
 
+  it("uses purpose-fenced routes for unpublished preview renders", async () => {
+    const preview = {
+      id: "dprv_1",
+      purpose: "preview" as const,
+      state: "completed" as const,
+      expires_at: "2026-01-01T00:15:00Z",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:01Z",
+    };
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(preview, { status: 202 }))
+      .mockResolvedValueOnce(Response.json(preview))
+      .mockResolvedValueOnce(new Response("%PDF-preview"));
+    const client = new PiqaeClient({ fetch: fetcher });
+    const created = await client.printPackets.renders.createPreviewDraft(
+      {
+        specification: {
+          format: "printpacket/v1",
+          media: { kind: "paged", size: "a4" },
+          body: [],
+        },
+        input: {},
+        expires_in_seconds: 900,
+      },
+      "preview-render-0001",
+    );
+    await client.printPackets.renders.retrievePreviewDraft(created.id);
+    await client.printPackets.renders.downloadPreviewDraft(created.id);
+    expect(fetcher.mock.calls.map(([url]) => String(url))).toEqual([
+      "https://api.piqae.com/v1/printpacket/preview-renders",
+      "https://api.piqae.com/v1/printpacket/preview-renders/dprv_1",
+      "https://api.piqae.com/v1/printpacket/preview-renders/dprv_1/artifact",
+    ]);
+    expect(
+      new Headers(fetcher.mock.calls[0]?.[1]?.headers).get("idempotency-key"),
+    ).toBe("preview-render-0001");
+  });
+
   it("uploads PrintPacket resources with auth and preserves structured API errors", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       Response.json(

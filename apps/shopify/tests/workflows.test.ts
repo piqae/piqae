@@ -227,6 +227,12 @@ describe("hybrid template authority", () => {
         (value) => parseTemplateEnvelope(value.source).system?.immutable,
       ),
     ).toBe(true);
+    expect(
+      templates
+        .filter(isActiveTemplate)
+        .map((value) => parseTemplateEnvelope(value.source).system?.key)
+        .sort(),
+    ).toEqual(starterTemplates.map(({ id }) => id).sort());
   });
 
   it("seeds concurrently without creating replacement revisions", async () => {
@@ -371,6 +377,14 @@ describe("hybrid template authority", () => {
       designTargetId: null,
       designSpecificationRevision: null,
     });
+    expect(index.documents).toContainEqual(
+      expect.objectContaining({
+        id: "00000000-0000-4000-8000-000000000004",
+        name: "Product Label",
+        kind: "label",
+        pageSize: "100x50mm",
+      }),
+    );
   });
 
   it("indexes the immutable publication while newer draft edits stay private", async () => {

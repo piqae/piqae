@@ -28,6 +28,26 @@ let peerPool: pg.Pool;
 let lockPool: pg.Pool;
 let peerLockPool: pg.Pool;
 
+async function prepareLinkedShop(
+  repository: PostgresShopRepository,
+  fixtureShop: string,
+  suffix: string,
+) {
+  await pool.query(
+    `INSERT INTO shopify_installations(shop,state)
+     VALUES($1,'installed')
+     ON CONFLICT(shop) DO UPDATE SET state='installed',uninstalled_at=NULL`,
+    [fixtureShop],
+  );
+  await repository.put({
+    shop: fixtureShop,
+    piqaeAccountId: `account_${suffix}`,
+    encryptedCredential: `encrypted_${suffix}`,
+    templateRevisionId: `revision_${suffix}`,
+    createdAt: "2026-08-30T00:00:00.000Z",
+  });
+}
+
 postgresDescribe("PostgreSQL starter publication transactions", () => {
   beforeAll(async () => {
     if (!databaseUrl) return;
@@ -300,5 +320,201 @@ postgresDescribe("PostgreSQL starter publication transactions", () => {
     await activation;
     await uninstall;
     expect(await activationShops.get(shop)).toBeNull();
+  });
+
+  it("requires an installed linked shop and redacts stored customer ownership", async () => {
+    const fixtureShop = "postgres-render-redaction.myshopify.com";
+    const repository = new PostgresShopRepository(pool, lockPool);
+    await expect(
+      repository.recordRender(
+        fixtureShop,
+        "render_without_link",
+        "ownership-key-without-link",
+      ),
+    ).rejects.toThrow("SHOPIFY_RENDER_OWNERSHIP_UNAVAILABLE");
+
+    await prepareLinkedShop(repository, fixtureShop, "redaction");
+    await repository.recordRender(
+      fixtureShop,
+      "render_redacted",
+      "ownership-key-redacted",
+      {
+        orderGid: "gid://shopify/Order/51",
+        customerGid: "gid://shopify/Customer/61",
+      },
+    );
+    await repository.recordRender(
+      fixtureShop,
+      "render_retained",
+      "ownership-key-retained",
+      {
+        orderGid: "gid://shopify/Order/52",
+        customerGid: "gid://shopify/Customer/62",
+      },
+    );
+    await expect(
+      repository.recordRender(
+        fixtureShop,
+        "render_redacted",
+        "ownership-key-redacted",
+        {
+          orderGid: "gid://shopify/Order/51",
+          customerGid: "gid://shopify/Customer/61",
+        },
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      repository.recordRender(
+        fixtureShop,
+        "render_conflicting",
+        "ownership-key-redacted",
+        {
+          orderGid: "gid://shopify/Order/99",
+          customerGid: "gid://shopify/Customer/99",
+        },
+      ),
+    ).rejects.toThrow("SHOPIFY_RENDER_OWNERSHIP_CONFLICT");
+
+    await repository.redactCustomer(fixtureShop, "61");
+    expect(await repository.ownsRender(fixtureShop, "render_redacted")).toBe(
+      false,
+    );
+    expect(await repository.ownsRender(fixtureShop, "render_retained")).toBe(
+      true,
+    );
+    await repository.redactCustomer(fixtureShop, "gid://shopify/Customer/62");
+    expect(await repository.ownsRender(fixtureShop, "render_retained")).toBe(
+      false,
+    );
+
+    await pool.query(
+      "UPDATE shopify_installations SET state='uninstalled' WHERE shop=$1",
+      [fixtureShop],
+    );
+    await expect(
+      repository.recordRender(
+        fixtureShop,
+        "render_uninstalled",
+        "ownership-key-uninstalled",
+      ),
+    ).rejects.toThrow("SHOPIFY_RENDER_OWNERSHIP_UNAVAILABLE");
+  });
+
+  it("serializes an in-flight ownership registration with uninstall and does not restore it on reinstall", async () => {
+    const fixtureShop = "postgres-render-uninstall.myshopify.com";
+    const gateRepository = new PostgresShopRepository(peerPool, peerLockPool);
+    const uninstallRepository = new PostgresShopRepository(pool, lockPool);
+    await prepareLinkedShop(gateRepository, fixtureShop, "uninstall_first");
+    await gateRepository.recordRender(
+      fixtureShop,
+      "render_before_uninstall",
+      "ownership-key-before-uninstall",
+    );
+
+    let notifyEntered!: () => void;
+    let releaseGate!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      notifyEntered = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    const gate = gateRepository.withShopLock(fixtureShop, async () => {
+      notifyEntered();
+      await released;
+    });
+    await entered;
+    const uninstall = uninstallRepository.deleteShop(fixtureShop);
+    const lateRecord = gateRepository
+      .recordRender(
+        fixtureShop,
+        "render_racing_uninstall",
+        "ownership-key-racing-uninstall",
+      )
+      .then(
+        () => "recorded" as const,
+        () => "rejected" as const,
+      );
+    releaseGate();
+    await gate;
+    await uninstall;
+    await lateRecord;
+
+    expect(
+      await uninstallRepository.ownsRender(
+        fixtureShop,
+        "render_before_uninstall",
+      ),
+    ).toBe(false);
+    expect(
+      await uninstallRepository.ownsRender(
+        fixtureShop,
+        "render_racing_uninstall",
+      ),
+    ).toBe(false);
+
+    await pool.query(
+      "UPDATE shopify_installations SET state='uninstalled' WHERE shop=$1",
+      [fixtureShop],
+    );
+    await pool.query(
+      "UPDATE shopify_installations SET state='installed',uninstalled_at=NULL WHERE shop=$1",
+      [fixtureShop],
+    );
+    await gateRepository.put({
+      shop: fixtureShop,
+      piqaeAccountId: "account_uninstall_reinstalled",
+      encryptedCredential: "encrypted_uninstall_reinstalled",
+      templateRevisionId: "revision_uninstall_reinstalled",
+      createdAt: "2026-08-30T00:00:00.000Z",
+    });
+    expect(
+      await gateRepository.ownsRender(fixtureShop, "render_before_uninstall"),
+    ).toBe(false);
+    await gateRepository.recordRender(
+      fixtureShop,
+      "render_after_reinstall",
+      "ownership-key-after-reinstall",
+    );
+    expect(
+      await gateRepository.ownsRender(fixtureShop, "render_after_reinstall"),
+    ).toBe(true);
+  });
+
+  it("rolls ownership deletion back when link deletion fails", async () => {
+    const fixtureShop = "postgres-render-rollback.myshopify.com";
+    const repository = new PostgresShopRepository(pool, lockPool);
+    await prepareLinkedShop(repository, fixtureShop, "rollback");
+    await repository.recordRender(
+      fixtureShop,
+      "render_rollback",
+      "ownership-key-rollback",
+    );
+    await pool.query(`
+      CREATE FUNCTION reject_render_lifecycle_link_delete() RETURNS trigger
+      LANGUAGE plpgsql AS $$
+      BEGIN
+        IF OLD.shop = '${fixtureShop}' THEN
+          RAISE EXCEPTION 'fixture link deletion failure';
+        END IF;
+        RETURN OLD;
+      END $$;
+      CREATE TRIGGER reject_render_lifecycle_link_delete
+      BEFORE DELETE ON shopify_shop_links
+      FOR EACH ROW EXECUTE FUNCTION reject_render_lifecycle_link_delete();
+    `);
+    try {
+      await expect(repository.deleteShop(fixtureShop)).rejects.toThrow(
+        "fixture link deletion failure",
+      );
+      expect(await repository.get(fixtureShop)).not.toBeNull();
+      expect(await repository.ownsRender(fixtureShop, "render_rollback")).toBe(
+        true,
+      );
+    } finally {
+      await pool.query(
+        "DROP TRIGGER IF EXISTS reject_render_lifecycle_link_delete ON shopify_shop_links; DROP FUNCTION IF EXISTS reject_render_lifecycle_link_delete()",
+      );
+    }
   });
 });

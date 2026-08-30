@@ -154,6 +154,18 @@ pub fn router() -> Router<AppState> {
             get(get_revision),
         )
         .route("/v1/printpacket/renders", post(register_render))
+        .route(
+            "/v1/printpacket/preview-renders",
+            post(register_preview_render),
+        )
+        .route(
+            "/v1/printpacket/preview-renders/{render_id}",
+            get(get_preview_render),
+        )
+        .route(
+            "/v1/printpacket/preview-renders/{render_id}/artifact",
+            get(download_preview_render_artifact),
+        )
         .route("/v1/printpacket/renders/{render_id}", get(get_render))
         .route(
             "/v1/printpacket/renders/{render_id}/readiness",
@@ -511,11 +523,19 @@ struct RenderResponse {
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-impl From<StoredDocumentRender> for RenderResponse {
-    fn from(value: StoredDocumentRender) -> Self {
-        Self {
+impl TryFrom<StoredDocumentRender> for RenderResponse {
+    type Error = AppError;
+
+    fn try_from(value: StoredDocumentRender) -> Result<Self, Self::Error> {
+        if value.purpose != "printable" {
+            return Err(AppError::not_found());
+        }
+        let template_revision_id = value
+            .template_revision_id
+            .ok_or_else(|| AppError::service_unavailable("invalid_stored_document"))?;
+        Ok(Self {
             id: value.id,
-            template_revision_id: value.template_revision_id,
+            template_revision_id,
             state: value.state,
             artifact_sha256: value.artifact_sha256,
             artifact_byte_length: value.artifact_byte_length,
@@ -524,7 +544,58 @@ impl From<StoredDocumentRender> for RenderResponse {
             failure_code: value.failure_code,
             created_at: value.created_at,
             updated_at: value.updated_at,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegisterPreviewRenderRequest {
+    specification: Value,
+    input: Value,
+    #[serde(default = "default_preview_render_ttl")]
+    expires_in_seconds: i64,
+}
+
+const fn default_preview_render_ttl() -> i64 {
+    900
+}
+
+#[derive(Debug, Serialize)]
+struct PreviewRenderResponse {
+    id: String,
+    purpose: &'static str,
+    state: String,
+    artifact_sha256: Option<String>,
+    artifact_byte_length: Option<i64>,
+    artifact_media_type: Option<String>,
+    page_count: Option<i32>,
+    failure_code: Option<String>,
+    expires_at: chrono::DateTime<chrono::Utc>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl TryFrom<StoredDocumentRender> for PreviewRenderResponse {
+    type Error = AppError;
+
+    fn try_from(value: StoredDocumentRender) -> Result<Self, Self::Error> {
+        if value.purpose != "preview" {
+            return Err(AppError::not_found());
         }
+        Ok(Self {
+            id: value.id,
+            purpose: "preview",
+            state: value.state,
+            artifact_sha256: value.artifact_sha256,
+            artifact_byte_length: value.artifact_byte_length,
+            artifact_media_type: value.artifact_media_type,
+            page_count: value.page_count,
+            failure_code: value.failure_code,
+            expires_at: value.expires_at,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        })
     }
 }
 
@@ -585,7 +656,10 @@ async fn register_render(
         .get_document_revision(
             tenant.workspace_id,
             tenant.environment_id,
-            &stored.template_revision_id,
+            stored
+                .template_revision_id
+                .as_deref()
+                .ok_or_else(|| AppError::service_unavailable("invalid_stored_document"))?,
         )
         .await?;
     let specification = state
@@ -620,7 +694,7 @@ async fn register_render(
             &resource_digests,
         )
         .await?;
-    Ok((status, Json(RenderResponse::from(stored))).into_response())
+    Ok((status, Json(RenderResponse::try_from(stored)?)).into_response())
 }
 
 async fn get_render(
@@ -629,12 +703,114 @@ async fn get_render(
     Path(id): Path<String>,
 ) -> Result<Json<RenderResponse>, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::JobsRead).await?;
-    Ok(Json(RenderResponse::from(
+    Ok(Json(RenderResponse::try_from(
         state
             .repository
             .get_document_render(tenant.workspace_id, tenant.environment_id, &id)
             .await?,
-    )))
+    )?))
+}
+
+async fn register_preview_render(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<RegisterPreviewRenderRequest>,
+) -> Result<Response, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
+    let idempotency_key = required_idempotency_key(&headers)?;
+    if !(60..=1800).contains(&request.expires_in_seconds) {
+        return Err(AppError::invalid(
+            "invalid_preview_expiry",
+            "Preview expiry must be between 60 and 1800 seconds.",
+        ));
+    }
+    let specification = validate_document_spec(&request.specification)?;
+    if !request.input.is_object() {
+        return Err(AppError::invalid(
+            "invalid_document_input",
+            "PrintPacket render input must be a JSON object.",
+        ));
+    }
+    let input = validate_json(&request.input, false)?;
+    let spec_sha256 = hex::encode(Sha256::digest(&specification));
+    let input_sha256 = hex::encode(Sha256::digest(&input));
+    let parsed_specification: PrintPacketV1 = serde_json::from_slice(&specification)
+        .map_err(|_| AppError::service_unavailable("invalid_normalized_document"))?;
+    let resource_digests = parsed_specification
+        .resources
+        .values()
+        .map(|resource| match resource {
+            printpacket_renderer::Resource::Image { digest, .. } => {
+                normalized_resource_digest(digest)
+                    .ok_or_else(|| AppError::service_unavailable("invalid_normalized_document"))
+            }
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    let request_sha256 = hex::encode(Sha256::digest(
+        [
+            b"preview\0".as_slice(),
+            specification.as_slice(),
+            b"\0",
+            input.as_slice(),
+            b"\0",
+            request.expires_in_seconds.to_string().as_bytes(),
+        ]
+        .concat(),
+    ));
+    let id = format!("dprv_{}", uuid::Uuid::now_v7());
+    let workspace = tenant.workspace_id.to_string();
+    let environment = tenant.environment_id.to_string();
+    let encrypted_specification = state
+        .document_secrets
+        .encrypt(
+            &preview_render_spec_aad(&workspace, &environment, &id),
+            &specification,
+        )
+        .map_err(|_| AppError::service_unavailable("document_encryption_failed"))?;
+    let encrypted_input = state
+        .document_secrets
+        .encrypt(
+            &preview_render_input_aad(&workspace, &environment, &id),
+            &input,
+        )
+        .map_err(|_| AppError::service_unavailable("document_encryption_failed"))?;
+    let result = state
+        .repository
+        .register_preview_document_render(
+            tenant.workspace_id,
+            tenant.environment_id,
+            &id,
+            &encrypted_specification,
+            &spec_sha256,
+            &encrypted_input,
+            &input_sha256,
+            &idempotency_key,
+            &request_sha256,
+            request.expires_in_seconds,
+            &resource_digests,
+        )
+        .await?;
+    let (status, stored) = match result {
+        CreateDocumentResult::Created(value) => (StatusCode::ACCEPTED, value),
+        CreateDocumentResult::Existing(value) => (StatusCode::OK, value),
+    };
+    Ok((status, Json(PreviewRenderResponse::try_from(stored)?)).into_response())
+}
+
+async fn get_preview_render(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<PreviewRenderResponse>, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::JobsRead).await?;
+    let render = state
+        .repository
+        .get_document_render(tenant.workspace_id, tenant.environment_id, &id)
+        .await?;
+    if render.expires_at <= chrono::Utc::now() || render.state == "expired" {
+        return Err(AppError::not_found());
+    }
+    Ok(Json(PreviewRenderResponse::try_from(render)?))
 }
 
 // This is intentionally kept as one capability matrix so every readiness
@@ -662,6 +838,9 @@ async fn evaluate_readiness(
         .repository
         .get_document_render(workspace_id, environment_id, render_id)
         .await?;
+    if stored_render.purpose != "printable" {
+        return Err(AppError::not_found());
+    }
     let input_bytes = u64::try_from(
         serde_json::to_vec(&payload.input)
             .map_err(|_| AppError::service_unavailable("invalid_stored_document"))?
@@ -949,6 +1128,36 @@ async fn download_render_artifact(
         .repository
         .get_document_render(tenant.workspace_id, tenant.environment_id, &id)
         .await?;
+    if render.purpose != "printable" {
+        return Err(AppError::not_found());
+    }
+    download_render_artifact_inner(&state, &tenant, render).await
+}
+
+async fn download_preview_render_artifact(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let tenant = authenticate_native(&state, &headers, Scope::JobsRead).await?;
+    let render = state
+        .repository
+        .get_document_render(tenant.workspace_id, tenant.environment_id, &id)
+        .await?;
+    if render.purpose != "preview" {
+        return Err(AppError::not_found());
+    }
+    if render.expires_at <= chrono::Utc::now() || render.state == "expired" {
+        return Err(AppError::not_found());
+    }
+    download_render_artifact_inner(&state, &tenant, render).await
+}
+
+async fn download_render_artifact_inner(
+    state: &AppState,
+    tenant: &TenantContext,
+    render: StoredDocumentRender,
+) -> Result<Response, AppError> {
     if render.state != "completed" {
         return Err(AppError::conflict(
             "document_render_not_completed",
@@ -1041,6 +1250,9 @@ async fn print_render(
         .repository
         .get_document_render(tenant.workspace_id, tenant.environment_id, &id)
         .await?;
+    if render.purpose != "printable" {
+        return Err(AppError::not_found());
+    }
     if render.state != "completed" {
         return Err(AppError::conflict(
             "document_render_not_completed",
@@ -1258,9 +1470,16 @@ async fn render_document_media(
     environment_id: piqae_domain::EnvironmentId,
     render: &StoredDocumentRender,
 ) -> Result<printpacket_renderer::Media, AppError> {
+    if render.purpose != "printable" {
+        return Err(AppError::not_found());
+    }
+    let revision_id = render
+        .template_revision_id
+        .as_deref()
+        .ok_or_else(|| AppError::service_unavailable("invalid_stored_document"))?;
     let revision = state
         .repository
-        .get_document_revision(workspace_id, environment_id, &render.template_revision_id)
+        .get_document_revision(workspace_id, environment_id, revision_id)
         .await?;
     let bytes = state
         .document_secrets
@@ -1354,6 +1573,13 @@ async fn create_preview(
 ) -> Result<Response, AppError> {
     let tenant = authenticate_native(&state, &headers, Scope::JobsWrite).await?;
     let key = required_idempotency_key(&headers)?;
+    let render = state
+        .repository
+        .get_document_render(tenant.workspace_id, tenant.environment_id, &render_id)
+        .await?;
+    if render.purpose != "printable" {
+        return Err(AppError::not_found());
+    }
     if !(60..=1800).contains(&request.expires_in_seconds) {
         return Err(AppError::invalid(
             "invalid_document_preview",
@@ -1652,6 +1878,20 @@ pub(crate) fn document_aad(workspace: &str, environment: &str, resource: &str) -
 pub(crate) fn render_input_aad(workspace: &str, environment: &str, resource: &str) -> Vec<u8> {
     document_aad_for("render-input", workspace, environment, resource)
 }
+pub(crate) fn preview_render_spec_aad(
+    workspace: &str,
+    environment: &str,
+    resource: &str,
+) -> Vec<u8> {
+    document_aad_for("preview-render-spec", workspace, environment, resource)
+}
+pub(crate) fn preview_render_input_aad(
+    workspace: &str,
+    environment: &str,
+    resource: &str,
+) -> Vec<u8> {
+    document_aad_for("preview-render-input", workspace, environment, resource)
+}
 pub(crate) fn artifact_key_aad(workspace: &str, environment: &str, resource: &str) -> Vec<u8> {
     document_aad_for("render-artifact-key", workspace, environment, resource)
 }
@@ -1666,9 +1906,16 @@ pub(crate) async fn node_render_payload(
         .repository
         .get_document_render(workspace_id, environment_id, render_id)
         .await?;
+    if render.purpose != "printable" {
+        return Err(AppError::not_found());
+    }
+    let revision_id = render
+        .template_revision_id
+        .as_deref()
+        .ok_or_else(|| AppError::service_unavailable("invalid_stored_document"))?;
     let revision = state
         .repository
-        .get_document_revision(workspace_id, environment_id, &render.template_revision_id)
+        .get_document_revision(workspace_id, environment_id, revision_id)
         .await?;
     let spec_bytes = state
         .document_secrets
@@ -1689,7 +1936,10 @@ pub(crate) async fn node_render_payload(
                 &environment_id.to_string(),
                 &render.id,
             ),
-            &render.input_ciphertext,
+            render
+                .input_ciphertext
+                .as_deref()
+                .ok_or_else(|| AppError::service_unavailable("invalid_stored_document"))?,
         )
         .map_err(|_| AppError::service_unavailable("document_decryption_failed"))?;
     let specification: PrintPacketV1 = serde_json::from_slice(&spec_bytes)

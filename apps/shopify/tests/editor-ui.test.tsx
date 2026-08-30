@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { createRoutesStub } from "react-router";
+import { createRoutesStub, type ActionFunctionArgs } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   insertBlockAfterPath,
@@ -12,21 +12,27 @@ import {
   insertStaticTableRowAt,
   insertTableColumnAt,
   moveBlockAtPath,
+  PdfPreviewWorkspace,
   PrintPacketEditor,
-  PrintPacketPreview,
   createPrintPacketEditorHistory,
+  isEditorPreviewArtifactUrl,
   removeBlockAtPath,
   replaceBlockAtPath,
   siblingsAtPath,
   orderBatchPresentation,
   tableColumnResizeGeometry,
 } from "../app/components/PrintPacketEditor";
-import type { PrintPacket } from "../app/core/template-model";
+import {
+  parseTemplateEnvelope,
+  type PrintPacket,
+} from "../app/core/template-model";
 import { starterTemplates } from "../app/core/starter-templates";
 import Templates from "../app/routes/app.templates";
-import {
+import TemplateEditor, {
+  compileDocumentForPreview,
   documentNameError,
   editorTitleBarActions,
+  previewStateForResponse,
   templateFlowNote,
 } from "../app/routes/app.templates.$templateId";
 
@@ -312,18 +318,31 @@ function StatefulEditorWorkspace({
       </button>
     </div>
   );
-  return workspace === "design" ? (
-    <PrintPacketEditor
-      value={document}
-      history={history}
-      workspaceControls={controls}
-      onChange={(next) => {
-        onChange?.(next);
-        setDocument(next);
-      }}
-    />
-  ) : (
-    <PrintPacketPreview value={document} workspaceControls={controls} />
+  return (
+    <>
+      {workspace === "design" ? (
+        <PrintPacketEditor
+          value={document}
+          history={history}
+          workspaceControls={controls}
+          onChange={(next) => {
+            onChange?.(next);
+            setDocument(next);
+          }}
+        />
+      ) : (
+        <PdfPreviewWorkspace
+          state={{
+            status: "ready",
+            artifactUrl: "/api/editor-preview-renders/pprv_fixture/artifact",
+          }}
+          workspaceControls={controls}
+        />
+      )}
+      <output hidden data-testid="document-json">
+        {JSON.stringify(document)}
+      </output>
+    </>
   );
 }
 
@@ -335,6 +354,53 @@ afterEach(async () => {
 });
 
 describe("Shopify document editor layout", () => {
+  it("compiles current Liquid before Preview and refuses an invalid mode switch", () => {
+    const envelope = parseTemplateEnvelope(starterTemplates[0]!.source);
+    const valid = compileDocumentForPreview(
+      "liquid",
+      envelope.editor.liquid,
+      envelope.document,
+    );
+    expect(valid.ok).toBe(true);
+    if (valid.ok) {
+      expect(valid.document.format).toBe("printpacket/v1");
+      const normalized = compileDocumentForPreview(
+        "liquid",
+        valid.normalizedLiquid,
+        valid.document,
+      );
+      expect(normalized.ok).toBe(true);
+      if (normalized.ok) expect(normalized.document).toEqual(valid.document);
+    }
+
+    const invalid = compileDocumentForPreview(
+      "liquid",
+      "{% render 'remote-snippet' %}",
+      envelope.document,
+    );
+    expect(invalid.ok).toBe(false);
+    if (!invalid.ok) expect(invalid.error).toContain("not supported");
+  });
+
+  it("ignores stale or cancelled Preview responses", () => {
+    const response = {
+      ok: true,
+      requestId: "request-old-0001",
+      preview: {
+        artifactUrl: "/api/editor-preview-renders/pprv_old/artifact",
+      },
+      noOrder: false,
+    };
+    expect(
+      previewStateForResponse("request-current-0002", response),
+    ).toBeNull();
+    expect(previewStateForResponse("", response)).toBeNull();
+    expect(previewStateForResponse(response.requestId, response)).toEqual({
+      status: "ready",
+      artifactUrl: response.preview.artifactUrl,
+    });
+  });
+
   it("keeps starter order batching explicit without changing open source semantics", () => {
     const invoice = starterTemplates.find(
       ({ id }) => id === "invoice",
@@ -517,13 +583,13 @@ describe("Shopify document editor layout", () => {
     ).toBe(true);
   });
 
-  it("keeps Preview chrome-free and aligned with the editor workspace", async () => {
-    const invoice = starterTemplates.find(
-      ({ id }) => id === "invoice",
-    )!.specification;
+  it("shows only tabs and the purpose-fenced PDF in Preview", async () => {
     const page = await render(
-      <PrintPacketPreview
-        value={invoice}
+      <PdfPreviewWorkspace
+        state={{
+          status: "ready",
+          artifactUrl: "/api/editor-preview-renders/pprv_123/artifact",
+        }}
         workspaceControls={
           <div role="group" aria-label="Editor workspace">
             Design Code Preview
@@ -532,37 +598,123 @@ describe("Shopify document editor layout", () => {
       />,
     );
     const stage = page.querySelector(".piqae-preview-stage");
-    const canvas = stage?.querySelector(".piqae-presentation-canvas");
-    const batch = canvas?.querySelector<HTMLElement>(
-      ".piqae-canvas-order-batch",
+    const frame = stage?.querySelector<HTMLIFrameElement>(
+      ".piqae-preview-frame",
     );
 
     expect(
-      stage?.querySelector(".piqae-workspace-toolbar [role=group]"),
+      page.querySelector(".piqae-workspace-toolbar [role=group]"),
     ).not.toBeNull();
-    expect(canvas).not.toBeNull();
-    expect(canvas?.querySelector(".piqae-canvas-selectable")).toBeNull();
-    expect(canvas?.querySelector(".piqae-canvas-badge")).toBeNull();
-    expect(canvas?.querySelector(".piqae-canvas-page-break")).toBeNull();
-    expect(canvas?.querySelector(".piqae-canvas-empty")).toBeNull();
-    expect(batch?.style.gap).toBe("");
+    expect(frame?.src).toContain(
+      "/api/editor-preview-renders/pprv_123/artifact",
+    );
+    expect(stage?.querySelector(".piqae-presentation-canvas")).toBeNull();
+    expect(stage?.querySelector(".piqae-word-editor")).toBeNull();
+    expect(stage?.querySelector(".piqae-canvas-table")).toBeNull();
   });
 
-  it("previews collection headers and one representative item without empty-state chrome", async () => {
-    const page = await render(<PrintPacketPreview value={collectionPacket} />);
-    const canvas = page.querySelector<HTMLElement>(
-      ".piqae-presentation-canvas",
-    )!;
-    const list = canvas.querySelector<HTMLElement>(".piqae-canvas-data-list")!;
-    const table = canvas.querySelector<HTMLElement>(".piqae-canvas-table")!;
+  it("renders bounded Preview loading, empty, error and URL-rejection states", async () => {
+    let page = await render(
+      <PdfPreviewWorkspace state={{ status: "loading" }} />,
+    );
+    expect(page.textContent).toContain("Creating PDF preview");
+    await act(async () => root?.unmount());
+    root = null;
+    host?.remove();
+    host = null;
 
-    expect(list.textContent).toContain("List header");
-    expect(list.textContent).toContain("Item");
-    expect(list.textContent).not.toContain("No list items");
-    expect(table.textContent).not.toContain("No table items");
-    expect(canvas.querySelector(".piqae-canvas-badge")).toBeNull();
-    expect(canvas.querySelector('[data-collection-branch="empty"]')).toBeNull();
-    expect(canvas.querySelector(".piqae-canvas-insertion-slot")).toBeNull();
+    page = await render(<PdfPreviewWorkspace state={{ status: "empty" }} />);
+    expect(page.textContent).toContain("No orders to preview");
+    await act(async () => root?.unmount());
+    root = null;
+    host?.remove();
+    host = null;
+
+    page = await render(
+      <PdfPreviewWorkspace
+        state={{ status: "error", message: "Renderer unavailable" }}
+      />,
+    );
+    expect(
+      page.querySelector('[aria-label="Rendered PDF preview"]'),
+    ).not.toBeNull();
+    expect(page.textContent).toContain("Renderer unavailable");
+    expect(isEditorPreviewArtifactUrl("https://attacker.test/file.pdf")).toBe(
+      false,
+    );
+    expect(
+      isEditorPreviewArtifactUrl(
+        "/api/editor-preview-renders/pprv_123/artifact",
+      ),
+    ).toBe(true);
+  });
+
+  it("aborts the authenticated Preview action when leaving the workspace", async () => {
+    let notifyStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      notifyStarted = resolve;
+    });
+    let previewRequest: Request | undefined;
+    const starter = starterTemplates[0]!;
+    const template = {
+      id: "draft-preview-fixture",
+      name: starter.name,
+      kind: starter.kind,
+      pageSize: starter.pageSize,
+      state: "draft" as const,
+      source: starter.source,
+      revision: 1,
+      draftRevision: 1,
+      designTargetId: null,
+      designSpecificationRevision: null,
+      published: null,
+      updatedAt: "2026-08-30T00:00:00Z",
+    };
+    const Stub = createRoutesStub([
+      {
+        path: "/app/templates/:templateId",
+        Component: TemplateEditor,
+        HydrateFallback: () => null,
+        loader: () => ({
+          template,
+          initialTemplate: template,
+          printTargets: [],
+          printTargetError: "",
+          customFields: [],
+        }),
+        action: async ({ request }: ActionFunctionArgs) => {
+          previewRequest = request;
+          notifyStarted();
+          await new Promise<void>((resolve) => {
+            if (request.signal.aborted) resolve();
+            else
+              request.signal.addEventListener("abort", () => resolve(), {
+                once: true,
+              });
+          });
+          return Response.json({
+            ok: false,
+            requestId: "cancelled",
+            preview: null,
+            noOrder: false,
+          });
+        },
+      },
+    ]);
+    const page = await render(
+      <Stub initialEntries={["/app/templates/draft-preview-fixture"]} />,
+    );
+    const workspaceButton = (label: string) =>
+      Array.from(page.querySelectorAll<HTMLButtonElement>("button")).find(
+        (button) => button.textContent?.includes(label),
+      )!;
+
+    await act(async () => workspaceButton("Preview").click());
+    await started;
+    expect(previewRequest?.signal.aborted).toBe(false);
+    await act(async () => workspaceButton("Design").click());
+    expect(previewRequest?.signal.aborted).toBe(true);
+    expect(page.querySelector(".piqae-preview-frame")).toBeNull();
   });
 
   it("keeps starter and editable actions in the Shopify title bar contract", () => {
@@ -717,16 +869,34 @@ describe("Shopify document editor layout", () => {
     expect(redo.disabled).toBe(true);
   });
 
-  it("keeps document undo history across Preview and Design", async () => {
+  it("keeps the exact document, table columns, and undo history across Preview", async () => {
     const onChange = vi.fn();
-    const page = await render(<StatefulEditorWorkspace onChange={onChange} />);
+    const page = await render(
+      <StatefulEditorWorkspace initial={tablePacket} onChange={onChange} />,
+    );
 
+    const separator = page.querySelector<HTMLElement>(
+      '[role="separator"][aria-label="Resize Item column"]',
+    )!;
+    expect(separator).not.toBeNull();
     await act(async () => {
-      page
-        .querySelector<HTMLButtonElement>('button[aria-label="Heading"]')
-        ?.click();
+      separator.focus();
+      separator.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
+      );
     });
-    expect(authoredBody(onChange.mock.lastCall?.[0])).toHaveLength(3);
+    const exactBeforePreview = structuredClone(
+      onChange.mock.lastCall?.[0] as PrintPacket,
+    );
+    const callsBeforePreview = onChange.mock.calls.length;
+    const exactColumns = (
+      authoredBody(exactBeforePreview)[0] as Extract<
+        PrintPacket["body"][number],
+        { type: "table" }
+      >
+    ).columns;
+    expect(exactColumns).toHaveLength(2);
+    expect(exactColumns.map(({ width }) => width)).not.toEqual([1, 1]);
 
     await act(async () => {
       Array.from(page.querySelectorAll<HTMLButtonElement>("button"))
@@ -734,19 +904,37 @@ describe("Shopify document editor layout", () => {
         ?.click();
     });
     expect(page.querySelector(".piqae-preview-stage")).not.toBeNull();
+    expect(page.querySelector(".piqae-presentation-canvas")).toBeNull();
 
     await act(async () => {
       Array.from(page.querySelectorAll<HTMLButtonElement>("button"))
         .find((button) => button.textContent?.includes("Design"))
         ?.click();
     });
+    const exactAfterPreview = JSON.parse(
+      page.querySelector<HTMLOutputElement>('[data-testid="document-json"]')!
+        .textContent ?? "null",
+    );
+    expect(exactAfterPreview).toEqual(exactBeforePreview);
+    expect(onChange).toHaveBeenCalledTimes(callsBeforePreview);
     const undo = page.querySelector<HTMLButtonElement>(
       'button[aria-label="Undo"]',
     )!;
     expect(undo.disabled).toBe(false);
 
     await act(async () => undo.click());
-    expect(authoredBody(onChange.mock.lastCall?.[0])).toHaveLength(2);
+    const undone = authoredBody(onChange.mock.lastCall?.[0])[0];
+    expect(undone.type).toBe("table");
+    if (undone.type !== "table") return;
+    expect(undone.columns.map(({ width }) => width)).toEqual([1, 1]);
+    expect(undone.columns.map(({ cell }) => cell)).toEqual(
+      (
+        tablePacket.body[0] as Extract<
+          PrintPacket["body"][number],
+          { type: "table" }
+        >
+      ).columns.map(({ cell }) => cell),
+    );
   });
 
   it("supports platform undo and redo shortcuts for document mutations", async () => {
@@ -1389,6 +1577,37 @@ describe("Shopify document editor layout", () => {
     });
 
     expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("does not flatten an unchanged structured table header when Preview takes focus", async () => {
+    const structuredHeaderPacket = structuredClone(tablePacket);
+    const table = structuredHeaderPacket.body[0];
+    if (table?.type !== "table") throw new Error("table missing");
+    table.columns[0]!.header = [
+      {
+        type: "value",
+        value: { type: "path", path: ["shop", "name"] },
+      },
+    ];
+    const before = structuredClone(structuredHeaderPacket);
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor
+        value={structuredHeaderPacket}
+        workspaceControls={<button type="button">Preview</button>}
+        onChange={onChange}
+      />,
+    );
+    const header = page.querySelector<HTMLElement>(
+      ".piqae-canvas-table-head strong[contenteditable=true]",
+    )!;
+
+    await act(async () => {
+      header.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(structuredHeaderPacket).toEqual(before);
   });
 
   it("preserves numeric and boolean primitives when static cells receive valid edits", async () => {

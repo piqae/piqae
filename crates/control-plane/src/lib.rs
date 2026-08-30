@@ -2417,12 +2417,33 @@ mod tests {
                     .encode(sha2::Sha256::digest(&artifact_body))
             )
         );
-        let object_key = format!(
-            "{}/{}/documents/{}.pdf",
-            application.tenant.workspace_id,
-            application.tenant.environment_id,
-            render["id"].as_str().expect("render id")
-        );
+        let stored_render = application
+            .repository
+            .get_document_render(
+                application.tenant.workspace_id,
+                application.tenant.environment_id,
+                render["id"].as_str().expect("render id"),
+            )
+            .await
+            .expect("stored render");
+        let object_key = String::from_utf8(
+            application
+                .state
+                .document_secrets
+                .decrypt(
+                    &documents::artifact_key_aad(
+                        &application.tenant.workspace_id.to_string(),
+                        &application.tenant.environment_id.to_string(),
+                        &stored_render.id,
+                    ),
+                    stored_render
+                        .artifact_object_key_ciphertext
+                        .as_deref()
+                        .expect("encrypted artifact key"),
+                )
+                .expect("decrypt artifact key"),
+        )
+        .expect("artifact key is UTF-8");
         let preview = json_response(
             &application.router,
             idempotent_api_request(
@@ -2726,6 +2747,141 @@ mod tests {
             .await
             .expect("missing artifact response");
         assert_eq!(missing.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn unpublished_preview_render_is_tenant_scoped_and_never_printable() {
+        let application = application().await;
+        let request = serde_json::json!({
+            "specification": {
+                "format": "printpacket/v1",
+                "media": {"kind": "paged", "size": "a4"},
+                "body": [{
+                    "type": "paragraph",
+                    "content": [{"type": "value", "value": {"type": "path", "path": ["number"]}}]
+                }]
+            },
+            "input": {"number": "PREVIEW"},
+            "expires_in_seconds": 900
+        });
+        let preview = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                "/v1/printpacket/preview-renders",
+                "piq_test_integration",
+                "preview-render-test-001",
+                Some(&request.to_string()),
+            ),
+        )
+        .await;
+        assert_eq!(preview["purpose"], "preview");
+        assert_eq!(preview["state"], "registered");
+        assert!(preview.get("specification").is_none());
+        assert!(preview.get("input").is_none());
+        let render_id = preview["id"].as_str().expect("preview render id");
+
+        let replay = application
+            .router
+            .clone()
+            .oneshot(idempotent_api_request(
+                "POST",
+                "/v1/printpacket/preview-renders",
+                "piq_test_integration",
+                "preview-render-test-001",
+                Some(&request.to_string()),
+            ))
+            .await
+            .expect("preview replay");
+        assert_eq!(replay.status(), StatusCode::OK);
+
+        let worker = crate::document_render_worker::DocumentRenderWorker::new(
+            application.state.clone(),
+            "preview-test-worker",
+        );
+        assert_eq!(worker.run_once(1).await.expect("preview render batch"), 1);
+        let completed = json_response(
+            &application.router,
+            api_request(
+                "GET",
+                &format!("/v1/printpacket/preview-renders/{render_id}"),
+                "piq_test_integration",
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(completed["state"], "completed");
+
+        let artifact = application
+            .router
+            .clone()
+            .oneshot(api_request(
+                "GET",
+                &format!("/v1/printpacket/preview-renders/{render_id}/artifact"),
+                "piq_test_integration",
+                None,
+            ))
+            .await
+            .expect("preview artifact");
+        assert_eq!(artifact.status(), StatusCode::OK);
+        assert_eq!(
+            artifact
+                .headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("private, no-store")
+        );
+
+        for (method, path, body) in [
+            ("GET", format!("/v1/printpacket/renders/{render_id}"), None),
+            (
+                "GET",
+                format!("/v1/printpacket/renders/{render_id}/artifact"),
+                None,
+            ),
+            (
+                "POST",
+                format!("/v1/printpacket/renders/{render_id}/print"),
+                Some(serde_json::json!({"printer_id":"not-used","title":"Preview"}).to_string()),
+            ),
+            (
+                "POST",
+                format!("/v1/printpacket/renders/{render_id}/previews"),
+                Some(serde_json::json!({"expires_in_seconds":600}).to_string()),
+            ),
+        ] {
+            let response = application
+                .router
+                .clone()
+                .oneshot(if method == "POST" {
+                    idempotent_api_request(
+                        method,
+                        &path,
+                        "piq_test_integration",
+                        "preview-purpose-fence-001",
+                        body.as_deref(),
+                    )
+                } else {
+                    api_request(method, &path, "piq_test_integration", body.as_deref())
+                })
+                .await
+                .expect("purpose-fenced response");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+        }
+
+        for path in [
+            format!("/v1/printpacket/preview-renders/{render_id}"),
+            format!("/v1/printpacket/preview-renders/{render_id}/artifact"),
+        ] {
+            let response = application
+                .router
+                .clone()
+                .oneshot(api_request("GET", &path, "piq_test_other", None))
+                .await
+                .expect("cross-tenant preview probe");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
     }
 
     #[tokio::test]

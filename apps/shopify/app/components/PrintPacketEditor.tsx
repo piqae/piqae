@@ -986,33 +986,62 @@ export function orderBatchPresentation(
     : "flowing_pages";
 }
 
-export function PrintPacketPreview({
-  value,
-  stock = null,
+export type PdfPreviewState =
+  | { status: "loading" }
+  | { status: "ready"; artifactUrl: string }
+  | { status: "empty" }
+  | { status: "error"; message: string };
+
+export function isEditorPreviewArtifactUrl(value: string): boolean {
+  return /^\/api\/editor-preview-renders\/[A-Za-z0-9_-]{1,128}\/artifact$/.test(
+    value,
+  );
+}
+
+export function PdfPreviewWorkspace({
+  state,
   workspaceControls,
 }: {
-  value: PrintPacket;
-  stock?: DesignStock;
+  state: PdfPreviewState;
   workspaceControls?: ReactNode;
 }) {
+  const ready =
+    state.status === "ready" && isEditorPreviewArtifactUrl(state.artifactUrl)
+      ? state
+      : null;
   return (
-    <div className="piqae-preview-stage" aria-label="Document layout preview">
+    <div className="piqae-pdf-preview" aria-label="Rendered PDF preview">
       {workspaceControls ? (
         <div className="piqae-workspace-toolbar">{workspaceControls}</div>
       ) : null}
-      <MediaRuler value={value} stock={stock} showSafeArea={false} />
-      <div
-        className={`piqae-page-sheet piqae-rendered-canvas piqae-presentation-canvas piqae-media-${value.media.kind}`}
-        style={canvasStyle(value)}
-      >
-        <DocumentCanvas
-          blocks={canonicalizeShopifyEditorBody(value.body)}
-          editable={false}
-          mediaKind={value.media.kind}
-          preview
-          onSelect={() => undefined}
-          onChange={() => undefined}
-        />
+      <div className="piqae-preview-stage" aria-live="polite">
+        {state.status === "loading" ? (
+          <div className="piqae-preview-status" role="status">
+            <strong>Creating PDF preview…</strong>
+            <span>Rendering the latest order with current Shopify data.</span>
+          </div>
+        ) : state.status === "empty" ? (
+          <div className="piqae-preview-status">
+            <strong>No orders to preview</strong>
+            <span>Create an order in this store, then return to Preview.</span>
+          </div>
+        ) : state.status === "error" ? (
+          <div className="piqae-preview-status" role="alert">
+            <strong>PDF preview unavailable</strong>
+            <span>{state.message}</span>
+          </div>
+        ) : ready ? (
+          <iframe
+            className="piqae-preview-frame"
+            src={ready.artifactUrl}
+            title="Rendered order PDF preview"
+          />
+        ) : (
+          <div className="piqae-preview-status" role="alert">
+            <strong>PDF preview unavailable</strong>
+            <span>The preview returned an invalid document URL.</span>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1426,8 +1455,12 @@ function CanvasBlock({
               <strong
                 contentEditable={editable}
                 suppressContentEditableWarning
-                onBlur={(event) =>
-                  editable &&
+                onBlur={(event) => {
+                  if (!editable) return;
+                  const nextText = event.currentTarget.textContent ?? "";
+                  // Merely tabbing away must not flatten a structured header
+                  // (for example a value expression) into rendered text.
+                  if (nextText === inlineLabel(column.header)) return;
                   onChange(
                     {
                       ...block,
@@ -1438,7 +1471,7 @@ function CanvasBlock({
                               header: [
                                 {
                                   type: "text" as const,
-                                  value: event.currentTarget.textContent ?? "",
+                                  value: nextText,
                                 },
                               ],
                             }
@@ -1446,8 +1479,8 @@ function CanvasBlock({
                       ),
                     },
                     path,
-                  )
-                }
+                  );
+                }}
               >
                 {inlineLabel(column.header)}
               </strong>

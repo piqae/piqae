@@ -53,14 +53,20 @@ export class MemoryShopRepository implements ShopRepository {
   private readonly webhooks = new Set<string>();
   private readonly renders = new Map<
     string,
-    { shop: string; orderGid?: string; customerGid?: string }
+    {
+      shop: string;
+      idempotencyKey: string;
+      orderGid?: string;
+      customerGid?: string;
+    }
   >();
-  async get(shop: string) {
-    const link = this.links.get(shop);
+  async get(rawShop: string) {
+    const link = this.links.get(normalizeShopDomain(rawShop));
     return link ? structuredClone(link) : null;
   }
   async put(link: ShopLink) {
-    this.links.set(link.shop, this.withNextRevision(link));
+    const shop = normalizeShopDomain(link.shop);
+    this.links.set(shop, this.withNextRevision({ ...link, shop }));
   }
   async withShopLock<T>(shop: string, action: () => Promise<T>): Promise<T> {
     const key = normalizeShopDomain(shop);
@@ -80,9 +86,10 @@ export class MemoryShopRepository implements ShopRepository {
     }
   }
   async putIfCurrentMatches(link: ShopLink, expected: ShopLink | null) {
-    const current = this.links.get(link.shop) ?? null;
+    const shop = normalizeShopDomain(link.shop);
+    const current = this.links.get(shop) ?? null;
     if (JSON.stringify(current) !== JSON.stringify(expected)) return false;
-    this.links.set(link.shop, this.withNextRevision(link));
+    this.links.set(shop, this.withNextRevision({ ...link, shop }));
     return true;
   }
   private withNextRevision(link: ShopLink): ShopLink {
@@ -93,7 +100,10 @@ export class MemoryShopRepository implements ShopRepository {
   }
   async deleteShop(shop: string) {
     await this.withShopLock(shop, async () => {
-      this.links.delete(normalizeShopDomain(shop));
+      const normalizedShop = normalizeShopDomain(shop);
+      this.links.delete(normalizedShop);
+      for (const [renderId, render] of this.renders)
+        if (render.shop === normalizedShop) this.renders.delete(renderId);
     });
   }
   async redactCustomer(shop: string, customerId: string) {
@@ -118,10 +128,34 @@ export class MemoryShopRepository implements ShopRepository {
   async recordRender(
     shop: string,
     renderId: string,
-    _idempotencyKey: string,
+    idempotencyKey: string,
     order?: { orderGid: string; customerGid?: string },
   ) {
-    this.renders.set(renderId, { shop: normalizeShopDomain(shop), ...order });
+    const normalizedShop = normalizeShopDomain(shop);
+    await this.withShopLock(normalizedShop, async () => {
+      if (!this.links.has(normalizedShop))
+        throw new Error("SHOPIFY_RENDER_OWNERSHIP_UNAVAILABLE");
+      const existing = [...this.renders.entries()].find(
+        ([, render]) =>
+          render.shop === normalizedShop &&
+          render.idempotencyKey === idempotencyKey,
+      );
+      if (existing) {
+        const [existingRenderId, render] = existing;
+        if (
+          existingRenderId === renderId &&
+          render.orderGid === order?.orderGid &&
+          render.customerGid === order?.customerGid
+        )
+          return;
+        throw new Error("SHOPIFY_RENDER_OWNERSHIP_CONFLICT");
+      }
+      this.renders.set(renderId, {
+        shop: normalizedShop,
+        idempotencyKey,
+        ...order,
+      });
+    });
   }
   async ownsRender(shop: string, renderId: string) {
     return this.renders.get(renderId)?.shop === normalizeShopDomain(shop);

@@ -225,6 +225,20 @@ impl DocumentSecretBox {
                         &environment,
                         &record.aad_resource_id,
                     ),
+                    DocumentCiphertextField::RenderPreviewInput => {
+                        crate::documents::preview_render_input_aad(
+                            &workspace,
+                            &environment,
+                            &record.aad_resource_id,
+                        )
+                    }
+                    DocumentCiphertextField::RenderPreviewSpecification => {
+                        crate::documents::preview_render_spec_aad(
+                            &workspace,
+                            &environment,
+                            &record.aad_resource_id,
+                        )
+                    }
                     DocumentCiphertextField::RenderArtifactReference => {
                         crate::documents::artifact_key_aad(
                             &workspace,

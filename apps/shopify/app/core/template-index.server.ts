@@ -12,6 +12,7 @@ const ACTIVE_SYSTEM_TEMPLATE_KEYS = new Set([
   "packing-slip",
   "receipt",
   "credit-note",
+  "product-label",
 ]);
 const SYSTEM_TEMPLATE_POSITIONS = new Map([
   ["invoice", 1],

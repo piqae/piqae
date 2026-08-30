@@ -12,13 +12,34 @@
   grid-template-columns: minmax(18rem, 2fr) minmax(16rem, 1fr);
 }
 .piqae-preview-stage {
+  min-height: 40rem;
   padding: 1.25rem 0.75rem;
   overflow: auto;
   border-radius: 10px;
   background: #f4f4f5;
 }
-.piqae-preview-stage .piqae-page-sheet {
-  margin-bottom: 0;
+.piqae-pdf-preview .piqae-workspace-toolbar {
+  margin-bottom: 1rem;
+}
+.piqae-preview-status {
+  display: grid;
+  place-content: center;
+  gap: 0.35rem;
+  min-height: 36rem;
+  color: #616161;
+  text-align: center;
+}
+.piqae-preview-status strong {
+  color: #202223;
+  font-size: 1rem;
+}
+.piqae-preview-frame {
+  display: block;
+  width: 100%;
+  min-height: 48rem;
+  border: 0;
+  border-radius: 6px;
+  background: white;
 }
 .piqae-import-panel {
   border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
