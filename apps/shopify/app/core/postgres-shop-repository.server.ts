@@ -140,9 +140,23 @@ export class PostgresShopRepository implements ShopRepository {
   async deleteShop(rawShop: string) {
     const shop = normalizeShopDomain(rawShop);
     await this.withShopLock(shop, async () => {
-      await this.pool.query("DELETE FROM shopify_shop_links WHERE shop=$1", [
-        shop,
-      ]);
+      const client = await this.pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(
+          "DELETE FROM shopify_render_ownership WHERE shop=$1",
+          [shop],
+        );
+        await client.query("DELETE FROM shopify_shop_links WHERE shop=$1", [
+          shop,
+        ]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
     });
   }
   async redactCustomer(rawShop: string, customerId: string) {
@@ -174,21 +188,45 @@ export class PostgresShopRepository implements ShopRepository {
     return result.rowCount === 1;
   }
   async recordRender(
-    shop: string,
+    rawShop: string,
     renderId: string,
     idempotencyKey: string,
     order?: { orderGid: string; customerGid?: string },
   ) {
-    await this.pool.query(
-      "INSERT INTO shopify_render_ownership(shop,render_id,idempotency_key,order_gid,customer_gid) VALUES($1,$2,$3,$4,$5) ON CONFLICT(shop,idempotency_key) DO NOTHING",
-      [
-        normalizeShopDomain(shop),
-        renderId,
-        idempotencyKey,
-        order?.orderGid ?? null,
-        order?.customerGid ?? null,
-      ],
-    );
+    const shop = normalizeShopDomain(rawShop);
+    await this.withShopLock(shop, async () => {
+      const result = await this.pool.query(
+        `INSERT INTO shopify_render_ownership
+          (shop,render_id,idempotency_key,order_gid,customer_gid)
+         SELECT installation.shop,$2,$3,$4,$5
+           FROM shopify_installations installation
+           JOIN shopify_shop_links link ON link.shop=installation.shop
+          WHERE installation.shop=$1 AND installation.state='installed'
+         ON CONFLICT(shop,idempotency_key) DO UPDATE SET
+           idempotency_key=EXCLUDED.idempotency_key
+         WHERE shopify_render_ownership.render_id=EXCLUDED.render_id
+           AND shopify_render_ownership.order_gid IS NOT DISTINCT FROM EXCLUDED.order_gid
+           AND shopify_render_ownership.customer_gid IS NOT DISTINCT FROM EXCLUDED.customer_gid
+         RETURNING render_id`,
+        [
+          shop,
+          renderId,
+          idempotencyKey,
+          order?.orderGid ?? null,
+          order?.customerGid ?? null,
+        ],
+      );
+      if (result.rowCount === 1) return;
+      const existingOwnership = await this.pool.query(
+        "SELECT 1 FROM shopify_render_ownership WHERE shop=$1 AND idempotency_key=$2",
+        [shop, idempotencyKey],
+      );
+      throw new Error(
+        existingOwnership.rowCount === 1
+          ? "SHOPIFY_RENDER_OWNERSHIP_CONFLICT"
+          : "SHOPIFY_RENDER_OWNERSHIP_UNAVAILABLE",
+      );
+    });
   }
   async ownsRender(shop: string, renderId: string) {
     const result = await this.pool.query(
