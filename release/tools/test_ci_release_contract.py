@@ -282,6 +282,28 @@ class CiReleaseContractTest(unittest.TestCase):
             "--jq '(.isDraft == true) or (.isPrerelease == true)'", windows
         )
 
+    def test_registry_provenance_publishers_have_attestation_write(self) -> None:
+        publishers = []
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            workflow = path.read_text(encoding="utf-8")
+            for match in re.finditer(
+                r"(?ms)^  ([a-z_]+):.*?(?=^  [a-z_]+:|\Z)", workflow
+            ):
+                job_name = match.group(1)
+                job = match.group(0)
+                if "push-to-registry: true" not in job:
+                    continue
+                publishers.append(f"{path.name}:{job_name}")
+                configuration = job.split("\n    steps:", 1)[0]
+                self.assertIn(
+                    "attestations: write",
+                    configuration,
+                    f"{path.name}:{job_name} persists registry provenance",
+                )
+                self.assertNotIn("attestations: read", configuration)
+        self.assertIn("release.yml:promote_containers", publishers)
+        self.assertGreaterEqual(len(publishers), 1)
+
     def test_release_artifacts_fan_out_after_one_shared_gate(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         for job in ("macos", "windows", "apple_sdk", "windows_sdk", "linux", "server"):

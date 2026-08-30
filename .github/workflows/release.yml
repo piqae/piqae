@@ -526,7 +526,7 @@ jobs:
         name: [server, web, migrate]
     permissions:
       actions: read
-      attestations: read
+      attestations: write
       id-token: write
       packages: write
     steps:
