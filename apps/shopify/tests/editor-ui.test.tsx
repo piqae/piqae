@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, type ReactNode } from "react";
+import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { createRoutesStub } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -166,6 +166,25 @@ function authoredBody(value: PrintPacket) {
     wrapper.items.path.join(".") === "orders"
     ? wrapper.children
     : value.body;
+}
+
+function StatefulPrintPacketEditor({
+  initial = packet,
+  onChange,
+}: {
+  initial?: PrintPacket;
+  onChange?(document: PrintPacket): void;
+}) {
+  const [document, setDocument] = useState(initial);
+  return (
+    <PrintPacketEditor
+      value={document}
+      onChange={(next) => {
+        onChange?.(next);
+        setDocument(next);
+      }}
+    />
+  );
 }
 
 afterEach(async () => {
@@ -428,9 +447,7 @@ describe("Shopify document editor layout", () => {
       "Design Code Preview",
     );
     expect(
-      toolbar?.querySelector(
-        '[role="toolbar"][aria-label="Insert into document"]',
-      ),
+      toolbar?.querySelector('[role="toolbar"][aria-label="Edit document"]'),
     ).not.toBeNull();
     expect(toolbar?.querySelector(".piqae-selection-rail")).toBeNull();
     expect(toolbar?.children).toHaveLength(1);
@@ -484,6 +501,182 @@ describe("Shopify document editor layout", () => {
     });
     expect(card?.children).toHaveLength(2);
     expect(card?.querySelector(".piqae-selection-rail")).not.toBeNull();
+  });
+
+  it("undoes and redoes document mutations from accessible toolbar actions", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <StatefulPrintPacketEditor onChange={onChange} />,
+    );
+    const undo = page.querySelector<HTMLButtonElement>(
+      'button[aria-label="Undo"]',
+    )!;
+    const redo = page.querySelector<HTMLButtonElement>(
+      'button[aria-label="Redo"]',
+    )!;
+
+    expect(undo.disabled).toBe(true);
+    expect(redo.disabled).toBe(true);
+    expect(undo.dataset.tooltip).toBe("Undo");
+    expect(redo.dataset.tooltip).toBe("Redo");
+    expect(undo.getAttribute("aria-keyshortcuts")).toBe("Control+Z Meta+Z");
+    expect(redo.getAttribute("aria-keyshortcuts")).toContain("Control+Y");
+
+    await act(async () => {
+      page
+        .querySelector<HTMLButtonElement>('button[aria-label="Text"]')
+        ?.click();
+    });
+    expect(
+      authoredBody(onChange.mock.lastCall?.[0]).map(({ type }) => type),
+    ).toEqual(["paragraph", "image", "paragraph"]);
+    expect(undo.disabled).toBe(false);
+    expect(redo.disabled).toBe(true);
+
+    await act(async () => undo.click());
+    expect(
+      authoredBody(onChange.mock.lastCall?.[0]).map(({ type }) => type),
+    ).toEqual(["paragraph", "image"]);
+    expect(undo.disabled).toBe(true);
+    expect(redo.disabled).toBe(false);
+
+    await act(async () => redo.click());
+    expect(
+      authoredBody(onChange.mock.lastCall?.[0]).map(({ type }) => type),
+    ).toEqual(["paragraph", "image", "paragraph"]);
+    expect(undo.disabled).toBe(false);
+    expect(redo.disabled).toBe(true);
+  });
+
+  it("supports platform undo and redo shortcuts for document mutations", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <StatefulPrintPacketEditor onChange={onChange} />,
+    );
+    await act(async () => {
+      page
+        .querySelector<HTMLButtonElement>('button[aria-label="Heading"]')
+        ?.click();
+    });
+    const editor = page.querySelector<HTMLElement>(".piqae-word-editor")!;
+    const shortcut = async (
+      key: string,
+      modifiers: Pick<KeyboardEventInit, "ctrlKey" | "metaKey" | "shiftKey">,
+    ) => {
+      const event = new KeyboardEvent("keydown", {
+        key,
+        bubbles: true,
+        cancelable: true,
+        ...modifiers,
+      });
+      await act(async () => editor.dispatchEvent(event));
+      return event;
+    };
+
+    expect((await shortcut("z", { metaKey: true })).defaultPrevented).toBe(
+      true,
+    );
+    expect(authoredBody(onChange.mock.lastCall?.[0])).toHaveLength(2);
+    expect(
+      (await shortcut("z", { metaKey: true, shiftKey: true })).defaultPrevented,
+    ).toBe(true);
+    expect(authoredBody(onChange.mock.lastCall?.[0])).toHaveLength(3);
+    expect((await shortcut("z", { ctrlKey: true })).defaultPrevented).toBe(
+      true,
+    );
+    expect(authoredBody(onChange.mock.lastCall?.[0])).toHaveLength(2);
+    expect((await shortcut("y", { ctrlKey: true })).defaultPrevented).toBe(
+      true,
+    );
+    expect(authoredBody(onChange.mock.lastCall?.[0])).toHaveLength(3);
+  });
+
+  it("leaves native text undo alone and clears selection on document undo", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <StatefulPrintPacketEditor onChange={onChange} />,
+    );
+    await act(async () => {
+      page
+        .querySelector<HTMLButtonElement>('button[aria-label="Divider"]')
+        ?.click();
+    });
+    const text = page.querySelector<HTMLElement>(".piqae-canvas-text")!;
+    const textEditor = text.querySelector<HTMLElement>('[role="textbox"]')!;
+
+    await act(async () => {
+      text.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    });
+    const nativeUndo = new KeyboardEvent("keydown", {
+      key: "z",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    const callsBeforeNativeUndo = onChange.mock.calls.length;
+    await act(async () => textEditor.dispatchEvent(nativeUndo));
+    expect(nativeUndo.defaultPrevented).toBe(false);
+    expect(onChange).toHaveBeenCalledTimes(callsBeforeNativeUndo);
+    expect(
+      page.querySelector<HTMLButtonElement>('button[aria-label="Undo"]')
+        ?.disabled,
+    ).toBe(false);
+
+    await act(async () => {
+      textEditor.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    await act(
+      () =>
+        new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    );
+    await act(async () => text.click());
+    expect(page.querySelector(".piqae-selection-rail")).not.toBeNull();
+
+    const documentUndo = new KeyboardEvent("keydown", {
+      key: "z",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => text.dispatchEvent(documentUndo));
+    expect(documentUndo.defaultPrevented).toBe(true);
+    expect(page.querySelector(".piqae-selection-rail")).toBeNull();
+    expect(authoredBody(onChange.mock.lastCall?.[0])).toHaveLength(2);
+  });
+
+  it("invalidates redo after a divergent document edit", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <StatefulPrintPacketEditor onChange={onChange} />,
+    );
+    const tool = (label: string) =>
+      page.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
+
+    await act(async () => tool("Text").click());
+    await act(async () => tool("Undo").click());
+    expect(tool("Redo").disabled).toBe(false);
+    await act(async () => tool("Divider").click());
+    expect(tool("Redo").disabled).toBe(true);
+
+    const callsBeforeRedo = onChange.mock.calls.length;
+    const redo = new KeyboardEvent("keydown", {
+      key: "y",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () =>
+      page
+        .querySelector<HTMLElement>(".piqae-word-editor")
+        ?.dispatchEvent(redo),
+    );
+    expect(redo.defaultPrevented).toBe(false);
+    expect(onChange).toHaveBeenCalledTimes(callsBeforeRedo);
+    expect(
+      authoredBody(onChange.mock.lastCall?.[0]).map(({ type }) => type),
+    ).toEqual(["paragraph", "image", "divider"]);
   });
 
   it("selects top-level text once and edits only on double-click or keyboard intent", async () => {
@@ -705,7 +898,13 @@ describe("Shopify document editor layout", () => {
 
     onChange.mockClear();
     await act(async () =>
-      root?.render(<PrintPacketEditor value={packet} onChange={onChange} />),
+      root?.render(
+        <PrintPacketEditor
+          key="contextual-delete"
+          value={packet}
+          onChange={onChange}
+        />,
+      ),
     );
     const rerenderedText =
       page.querySelector<HTMLElement>(".piqae-canvas-text")!;

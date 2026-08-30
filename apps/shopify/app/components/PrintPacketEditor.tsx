@@ -169,6 +169,56 @@ const AUTHORING_FIELDS: readonly ShopifyDocumentField[] =
   SHOPIFY_DOCUMENT_FIELDS;
 export const SHOPIFY_VARIABLES = AUTHORING_FIELDS.map((field) => field.path);
 
+const EDITOR_HISTORY_LIMIT = 100;
+type EditorHistoryEntry = { document: PrintPacket; key: string };
+type EditorDocumentHistory = {
+  past: EditorHistoryEntry[];
+  present: EditorHistoryEntry;
+  future: EditorHistoryEntry[];
+};
+
+function editorHistoryEntry(document: PrintPacket): EditorHistoryEntry {
+  const snapshot = structuredClone(document);
+  return { document: snapshot, key: JSON.stringify(snapshot) };
+}
+
+function createEditorHistory(document: PrintPacket): EditorDocumentHistory {
+  return { past: [], present: editorHistoryEntry(document), future: [] };
+}
+
+function recordEditorHistory(
+  historyState: EditorDocumentHistory,
+  document: PrintPacket,
+) {
+  const next = editorHistoryEntry(document);
+  if (next.key === historyState.present.key) return false;
+  historyState.past.push(historyState.present);
+  if (historyState.past.length > EDITOR_HISTORY_LIMIT)
+    historyState.past.splice(
+      0,
+      historyState.past.length - EDITOR_HISTORY_LIMIT,
+    );
+  historyState.present = next;
+  historyState.future = [];
+  return true;
+}
+
+function stepEditorHistory(
+  historyState: EditorDocumentHistory,
+  direction: "undo" | "redo",
+) {
+  const source = direction === "undo" ? historyState.past : historyState.future;
+  const next = source.pop();
+  if (!next) return null;
+  const destination =
+    direction === "undo" ? historyState.future : historyState.past;
+  destination.push(historyState.present);
+  if (destination.length > EDITOR_HISTORY_LIMIT)
+    destination.splice(0, destination.length - EDITOR_HISTORY_LIMIT);
+  historyState.present = next;
+  return structuredClone(next.document);
+}
+
 export function PrintPacketEditor({
   value,
   disabled,
@@ -186,12 +236,26 @@ export function PrintPacketEditor({
 }) {
   const allAuthoringFields = [...AUTHORING_FIELDS, ...customFields];
   const canonicalBody = canonicalizeShopifyEditorBody(value.body);
+  const currentDocument = { ...value, body: canonicalBody };
+  const currentDocumentKey = JSON.stringify(currentDocument);
   const continuousPageBreaks =
     value.media.kind !== "paged" && documentHasPageBreak(value);
   const editorRoot = useRef<HTMLDivElement>(null);
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
-  const latest = useRef(value);
+  const latest = useRef(currentDocument);
+  const observedValueKey = useRef(currentDocumentKey);
+  const documentHistory = useRef<EditorDocumentHistory | null>(null);
+  if (!documentHistory.current)
+    documentHistory.current = createEditorHistory(currentDocument);
+  if (observedValueKey.current !== currentDocumentKey) {
+    observedValueKey.current = currentDocumentKey;
+    latest.current = currentDocument;
+  }
+  const [historyAvailability, setHistoryAvailability] = useState({
+    canUndo: false,
+    canRedo: false,
+  });
   const [selection, setSelection] = useState<{
     position: number;
     block: Block;
@@ -204,7 +268,72 @@ export function PrintPacketEditor({
     allAuthoringFields,
     insertionScope,
   );
-  latest.current = { ...value, body: canonicalBody };
+  const syncHistoryAvailability = () => {
+    const historyState = documentHistory.current!;
+    setHistoryAvailability({
+      canUndo: historyState.past.length > 0,
+      canRedo: historyState.future.length > 0,
+    });
+  };
+  const publishEditorDocument = (document: PrintPacket) => {
+    latest.current = document;
+    if (!recordEditorHistory(documentHistory.current!, document)) return;
+    syncHistoryAvailability();
+    onChange(document);
+  };
+  const applyHistoryStep = (direction: "undo" | "redo") => {
+    const document = stepEditorHistory(documentHistory.current!, direction);
+    if (!document) return;
+    latest.current = document;
+    view.current?.updateState(
+      EditorState.create({
+        schema,
+        doc: blocksToDoc(document.body),
+        plugins: [
+          history(),
+          keymap({ "Mod-z": undo, "Shift-Mod-z": redo }),
+          keymap(baseKeymap),
+        ],
+      }),
+    );
+    setSelection(null);
+    syncHistoryAvailability();
+    onChange(document);
+  };
+  const undoDocument = () => applyHistoryStep("undo");
+  const redoDocument = () => applyHistoryStep("redo");
+  const handleHistoryShortcut = (event: React.KeyboardEvent) => {
+    if (
+      disabled ||
+      event.defaultPrevented ||
+      event.altKey ||
+      nativeHistoryTarget(event.target)
+    )
+      return;
+    const key = event.key.toLowerCase();
+    const modified = event.metaKey || event.ctrlKey;
+    const wantsUndo = modified && key === "z" && !event.shiftKey;
+    const wantsRedo =
+      (modified && key === "z" && event.shiftKey) ||
+      (event.ctrlKey && !event.metaKey && !event.shiftKey && key === "y");
+    if (
+      (!wantsUndo && !wantsRedo) ||
+      (wantsUndo && !historyAvailability.canUndo) ||
+      (wantsRedo && !historyAvailability.canRedo)
+    )
+      return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (wantsUndo) undoDocument();
+    else redoDocument();
+  };
+  useEffect(() => {
+    const historyState = documentHistory.current!;
+    if (historyState.present.key === currentDocumentKey) return;
+    documentHistory.current = createEditorHistory(currentDocument);
+    setHistoryAvailability({ canUndo: false, canRedo: false });
+    setSelection(null);
+  }, [currentDocumentKey]);
   useEffect(() => {
     if (!selection) return;
     const clearSelectionOnEscape = (event: KeyboardEvent) => {
@@ -286,7 +415,7 @@ export function PrintPacketEditor({
         );
         const body = canonicalizeShopifyEditorBody(docToBlocks(next.doc));
         latest.current = { ...latest.current, body };
-        onChange(latest.current);
+        publishEditorDocument(latest.current);
       },
     });
     return () => {
@@ -323,7 +452,7 @@ export function PrintPacketEditor({
     instance.updateState(
       EditorState.create({ schema, doc: blocksToDoc(body) }),
     );
-    onChange(nextDocument);
+    publishEditorDocument(nextDocument);
     instance.focus();
   };
   const insertAtPath = (block: Block, path: BlockPath) => {
@@ -336,7 +465,7 @@ export function PrintPacketEditor({
       EditorState.create({ schema, doc: blocksToDoc(body) }),
     );
     setSelection({ position: -1, path, block });
-    onChange(nextDocument);
+    publishEditorDocument(nextDocument);
   };
   const insertVariable = (path: string) =>
     insert(
@@ -378,7 +507,7 @@ export function PrintPacketEditor({
         }),
       );
       setSelection({ position: -1, path: selection.path, block });
-      onChange(nextDocument);
+      publishEditorDocument(nextDocument);
       return;
     }
     instance.dispatch(
@@ -412,7 +541,7 @@ export function PrintPacketEditor({
       instance.updateState(
         EditorState.create({ schema, doc: blocksToDoc(body) }),
       );
-      onChange(nextDocument);
+      publishEditorDocument(nextDocument);
       setSelection(null);
       return;
     }
@@ -455,7 +584,7 @@ export function PrintPacketEditor({
         ? null
         : { position: -1, path: nextPath, block: selection.block },
     );
-    onChange(nextDocument);
+    publishEditorDocument(nextDocument);
   };
   const duplicateSelected = () => {
     if (!selection?.path) return;
@@ -481,10 +610,14 @@ export function PrintPacketEditor({
     view.current?.updateState(
       EditorState.create({ schema, doc: blocksToDoc(body) }),
     );
-    onChange(nextDocument);
+    publishEditorDocument(nextDocument);
   };
   return (
-    <div className="piqae-word-editor" ref={editorRoot}>
+    <div
+      className="piqae-word-editor"
+      ref={editorRoot}
+      onKeyDown={handleHistoryShortcut}
+    >
       <div className="piqae-editor-toolbar">
         <div className="piqae-editor-toolbar-primary">
           {workspaceControls ? (
@@ -496,8 +629,29 @@ export function PrintPacketEditor({
           <div
             className="piqae-tool-rail"
             role="toolbar"
-            aria-label="Insert into document"
+            aria-label="Edit document"
           >
+            <div
+              className="piqae-tool-group"
+              role="group"
+              aria-label="Document history"
+            >
+              <ToolButton
+                icon="undo"
+                label="Undo"
+                ariaKeyShortcuts="Control+Z Meta+Z"
+                disabled={disabled || !historyAvailability.canUndo}
+                onClick={undoDocument}
+              />
+              <ToolButton
+                icon="redo"
+                label="Redo"
+                ariaKeyShortcuts="Control+Y Control+Shift+Z Meta+Shift+Z"
+                disabled={disabled || !historyAvailability.canRedo}
+                onClick={redoDocument}
+              />
+            </div>
+            <span className="piqae-tool-divider" />
             <div className="piqae-tool-group">
               <ToolButton
                 icon="text"
@@ -756,7 +910,7 @@ export function PrintPacketEditor({
                 view.current?.updateState(
                   EditorState.create({ schema, doc: blocksToDoc(body) }),
                 );
-                onChange({ ...latest.current, body });
+                publishEditorDocument({ ...latest.current, body });
               }}
             />
           </div>
@@ -2059,6 +2213,8 @@ const ICON_PATHS = {
   row: "M2.5 8h11M5 5.5 2.5 8 5 10.5M11 5.5 13.5 8 11 10.5",
   up: "M8 12.8V3.6M4.6 7 8 3.6 11.4 7",
   down: "M8 3.2v9.2M4.6 9 8 12.4 11.4 9",
+  undo: "M6 4.2 2.8 7.4 6 10.6M3 7.4h5.3a4.2 4.2 0 0 1 4.2 4.2",
+  redo: "M10 4.2 13.2 7.4 10 10.6M13 7.4H7.7a4.2 4.2 0 0 0-4.2 4.2",
   duplicate: "M5.6 5.6h7.8v7.8H5.6zM10.6 5.6V2.6H2.8v7.8h2.8",
   trash: "M2.8 4.4h10.4M6.3 4.4V2.9h3.4v1.5M4.4 4.4l.6 8.7h6l.6-8.7",
   settings: "M2.6 5.2h10.8M2.6 10.8h10.8M6 3.6v3.2M10.4 9.2v3.2",
@@ -2095,6 +2251,7 @@ export function Icon({ name }: { name: IconName }) {
 function ToolButton({
   icon,
   label,
+  ariaKeyShortcuts,
   tone,
   disabled,
   dragType,
@@ -2102,6 +2259,7 @@ function ToolButton({
 }: {
   icon: IconName;
   label: string;
+  ariaKeyShortcuts?: string;
   tone?: "critical";
   disabled?: boolean;
   dragType?: DragInsertType;
@@ -2112,6 +2270,7 @@ function ToolButton({
       className={`piqae-tool-button${tone === "critical" ? " piqae-tool-critical" : ""}`}
       type="button"
       aria-label={label}
+      aria-keyshortcuts={ariaKeyShortcuts}
       data-tooltip={label}
       disabled={disabled}
       draggable={Boolean(dragType) && !disabled}
@@ -3184,6 +3343,13 @@ function editorInputTarget(target: EventTarget | null) {
         '[contenteditable="true"], input, textarea, select',
       )
     : null;
+}
+
+function nativeHistoryTarget(target: EventTarget | null) {
+  const editingControl = editorInputTarget(target);
+  return Boolean(
+    editingControl && !editingControl.closest(".piqae-prosemirror-source"),
+  );
 }
 
 function moveItem<T>(items: T[], index: number, direction: -1 | 1) {
