@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import type { PiqaeClient } from "@piqae/sdk";
+import type {
+  CreatePrintPacketPreviewRender,
+  PiqaeClient,
+  PrintPacketPreviewRender,
+} from "@piqae/sdk";
 
 import type { ShopRepository } from "./model";
 import {
@@ -54,78 +58,26 @@ export async function fetchLatestOrderSummary(
 
 type DraftPreviewRenderClient = Pick<PiqaeClient, "printPackets">;
 
-type DraftPreviewRenderInput = {
-  specification: PrintPacket;
-  input: ReturnType<typeof shopifyDocumentInput>;
-  expires_in_seconds: number;
-};
-
-// Structurally mirrors the additive generated PrintPacketPreviewRender type.
-// Keeping this at the adapter seam lets the Shopify commit compile before the
-// SDK generator commit is integrated without weakening runtime purpose checks.
-type DraftPreviewRender = {
-  id: string;
-  purpose: "preview";
-  state:
-    | "registered"
-    | "rendering"
-    | "completed"
-    | "failed_terminal"
-    | "expiring"
-    | "expired";
-  failure_code?: string | null;
-  expires_at: string;
-  created_at: string;
-  updated_at: string;
-};
-
-type DraftPreviewRenders =
-  DraftPreviewRenderClient["printPackets"]["renders"] & {
-    createPreviewDraft?: (
-      input: DraftPreviewRenderInput,
-      idempotencyKey: string,
-    ) => Promise<DraftPreviewRender>;
-    retrievePreviewDraft?: (id: string) => Promise<DraftPreviewRender>;
-    downloadPreviewDraft?: (id: string) => Promise<Response>;
-  };
-
-function draftPreviewRenders(client: DraftPreviewRenderClient) {
-  return client.printPackets.renders as DraftPreviewRenders;
-}
-
-/**
- * Keep the draft-preview SDK seam in one place while the additive SDK method
- * lands. Production fails closed if the connected control plane is older.
- */
 export function createPreviewDraftRender(
   client: DraftPreviewRenderClient,
-  input: DraftPreviewRenderInput,
+  input: CreatePrintPacketPreviewRender,
   idempotencyKey: string,
-): Promise<DraftPreviewRender> {
-  const renders = draftPreviewRenders(client);
-  if (typeof renders.createPreviewDraft !== "function")
-    throw new Error("Piqae draft PDF previews are not available yet");
-  return renders.createPreviewDraft(input, idempotencyKey);
+): Promise<PrintPacketPreviewRender> {
+  return client.printPackets.renders.createPreviewDraft(input, idempotencyKey);
 }
 
 export function retrievePreviewDraftRender(
   client: DraftPreviewRenderClient,
   id: string,
-): Promise<DraftPreviewRender> {
-  const retrieve = draftPreviewRenders(client).retrievePreviewDraft;
-  if (typeof retrieve !== "function")
-    throw new Error("Piqae draft PDF previews are not available yet");
-  return retrieve(id);
+): Promise<PrintPacketPreviewRender> {
+  return client.printPackets.renders.retrievePreviewDraft(id);
 }
 
 export function downloadPreviewDraftArtifact(
   client: DraftPreviewRenderClient,
   id: string,
 ): Promise<Response> {
-  const download = draftPreviewRenders(client).downloadPreviewDraft;
-  if (typeof download !== "function")
-    throw new Error("Piqae draft PDF previews are not available yet");
-  return download(id);
+  return client.printPackets.renders.downloadPreviewDraft(id);
 }
 
 export async function createEditorDraftPreview(input: {
