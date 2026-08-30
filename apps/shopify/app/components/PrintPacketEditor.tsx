@@ -177,6 +177,13 @@ type EditorDocumentHistory = {
   future: EditorHistoryEntry[];
 };
 
+/**
+ * A document-scoped history owner. Keep this object above workspace routing so
+ * temporarily unmounting Design (for example, while showing Preview) does not
+ * discard the merchant's undo stack.
+ */
+export type PrintPacketEditorHistory = EditorDocumentHistory;
+
 function editorHistoryEntry(document: PrintPacket): EditorHistoryEntry {
   const snapshot = structuredClone(document);
   return { document: snapshot, key: JSON.stringify(snapshot) };
@@ -184,6 +191,12 @@ function editorHistoryEntry(document: PrintPacket): EditorHistoryEntry {
 
 function createEditorHistory(document: PrintPacket): EditorDocumentHistory {
   return { past: [], present: editorHistoryEntry(document), future: [] };
+}
+
+export function createPrintPacketEditorHistory(
+  document: PrintPacket,
+): PrintPacketEditorHistory {
+  return createEditorHistory(document);
 }
 
 function recordEditorHistory(
@@ -225,6 +238,7 @@ export function PrintPacketEditor({
   customFields = [],
   stock = null,
   workspaceControls,
+  history: sharedHistory,
   onChange,
 }: {
   value: PrintPacket;
@@ -232,6 +246,7 @@ export function PrintPacketEditor({
   customFields?: readonly ShopifyDocumentField[];
   stock?: DesignStock;
   workspaceControls?: ReactNode;
+  history?: PrintPacketEditorHistory;
   onChange(document: PrintPacket): void;
 }) {
   const allAuthoringFields = [...AUTHORING_FIELDS, ...customFields];
@@ -245,17 +260,18 @@ export function PrintPacketEditor({
   const view = useRef<EditorView | null>(null);
   const latest = useRef(currentDocument);
   const observedValueKey = useRef(currentDocumentKey);
-  const documentHistory = useRef<EditorDocumentHistory | null>(null);
-  if (!documentHistory.current)
-    documentHistory.current = createEditorHistory(currentDocument);
+  const localHistory = useRef<EditorDocumentHistory | null>(null);
+  if (!localHistory.current)
+    localHistory.current = createEditorHistory(currentDocument);
+  const documentHistory = sharedHistory ?? localHistory.current;
   if (observedValueKey.current !== currentDocumentKey) {
     observedValueKey.current = currentDocumentKey;
     latest.current = currentDocument;
   }
-  const [historyAvailability, setHistoryAvailability] = useState({
-    canUndo: false,
-    canRedo: false,
-  });
+  const [historyAvailability, setHistoryAvailability] = useState(() => ({
+    canUndo: documentHistory.past.length > 0,
+    canRedo: documentHistory.future.length > 0,
+  }));
   const [selection, setSelection] = useState<{
     position: number;
     block: Block;
@@ -269,20 +285,19 @@ export function PrintPacketEditor({
     insertionScope,
   );
   const syncHistoryAvailability = () => {
-    const historyState = documentHistory.current!;
     setHistoryAvailability({
-      canUndo: historyState.past.length > 0,
-      canRedo: historyState.future.length > 0,
+      canUndo: documentHistory.past.length > 0,
+      canRedo: documentHistory.future.length > 0,
     });
   };
   const publishEditorDocument = (document: PrintPacket) => {
     latest.current = document;
-    if (!recordEditorHistory(documentHistory.current!, document)) return;
+    if (!recordEditorHistory(documentHistory, document)) return;
     syncHistoryAvailability();
     onChange(document);
   };
   const applyHistoryStep = (direction: "undo" | "redo") => {
-    const document = stepEditorHistory(documentHistory.current!, direction);
+    const document = stepEditorHistory(documentHistory, direction);
     if (!document) return;
     latest.current = document;
     view.current?.updateState(
@@ -328,12 +343,14 @@ export function PrintPacketEditor({
     else redoDocument();
   };
   useEffect(() => {
-    const historyState = documentHistory.current!;
-    if (historyState.present.key === currentDocumentKey) return;
-    documentHistory.current = createEditorHistory(currentDocument);
+    if (documentHistory.present.key === currentDocumentKey) return;
+    const reset = createEditorHistory(currentDocument);
+    documentHistory.past = reset.past;
+    documentHistory.present = reset.present;
+    documentHistory.future = reset.future;
     setHistoryAvailability({ canUndo: false, canRedo: false });
     setSelection(null);
-  }, [currentDocumentKey]);
+  }, [currentDocumentKey, documentHistory]);
   useEffect(() => {
     if (!selection) return;
     const clearSelectionOnEscape = (event: KeyboardEvent) => {

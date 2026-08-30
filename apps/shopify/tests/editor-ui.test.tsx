@@ -10,6 +10,7 @@ import {
   moveBlockAtPath,
   PrintPacketEditor,
   PrintPacketPreview,
+  createPrintPacketEditorHistory,
   removeBlockAtPath,
   replaceBlockAtPath,
   siblingsAtPath,
@@ -184,6 +185,41 @@ function StatefulPrintPacketEditor({
         setDocument(next);
       }}
     />
+  );
+}
+
+function StatefulEditorWorkspace({
+  initial = packet,
+  onChange,
+}: {
+  initial?: PrintPacket;
+  onChange?(document: PrintPacket): void;
+}) {
+  const [document, setDocument] = useState(initial);
+  const [workspace, setWorkspace] = useState<"design" | "preview">("design");
+  const [history] = useState(() => createPrintPacketEditorHistory(initial));
+  const controls = (
+    <div role="group" aria-label="Editor workspace">
+      <button type="button" onClick={() => setWorkspace("design")}>
+        Design
+      </button>
+      <button type="button" onClick={() => setWorkspace("preview")}>
+        Preview
+      </button>
+    </div>
+  );
+  return workspace === "design" ? (
+    <PrintPacketEditor
+      value={document}
+      history={history}
+      workspaceControls={controls}
+      onChange={(next) => {
+        onChange?.(next);
+        setDocument(next);
+      }}
+    />
+  ) : (
+    <PrintPacketPreview value={document} workspaceControls={controls} />
   );
 }
 
@@ -546,6 +582,38 @@ describe("Shopify document editor layout", () => {
     ).toEqual(["paragraph", "image", "paragraph"]);
     expect(undo.disabled).toBe(false);
     expect(redo.disabled).toBe(true);
+  });
+
+  it("keeps document undo history across Preview and Design", async () => {
+    const onChange = vi.fn();
+    const page = await render(<StatefulEditorWorkspace onChange={onChange} />);
+
+    await act(async () => {
+      page
+        .querySelector<HTMLButtonElement>('button[aria-label="Heading"]')
+        ?.click();
+    });
+    expect(authoredBody(onChange.mock.lastCall?.[0])).toHaveLength(3);
+
+    await act(async () => {
+      Array.from(page.querySelectorAll<HTMLButtonElement>("button"))
+        .find((button) => button.textContent?.includes("Preview"))
+        ?.click();
+    });
+    expect(page.querySelector(".piqae-preview-stage")).not.toBeNull();
+
+    await act(async () => {
+      Array.from(page.querySelectorAll<HTMLButtonElement>("button"))
+        .find((button) => button.textContent?.includes("Design"))
+        ?.click();
+    });
+    const undo = page.querySelector<HTMLButtonElement>(
+      'button[aria-label="Undo"]',
+    )!;
+    expect(undo.disabled).toBe(false);
+
+    await act(async () => undo.click());
+    expect(authoredBody(onChange.mock.lastCall?.[0])).toHaveLength(2);
   });
 
   it("supports platform undo and redo shortcuts for document mutations", async () => {
