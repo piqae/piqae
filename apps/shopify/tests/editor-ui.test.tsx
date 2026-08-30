@@ -892,6 +892,169 @@ describe("Shopify document editor layout", () => {
     ]);
   });
 
+  it("dismisses a quick-add action before clearing the selected element", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={packet} onChange={onChange} />,
+    );
+    const text = page.querySelector<HTMLElement>(".piqae-canvas-text")!;
+    const add = page.querySelector<HTMLButtonElement>(
+      '.piqae-canvas-insertion-button[aria-label="Add content here"]',
+    )!;
+
+    await act(async () => text.click());
+    await act(async () => {
+      add.focus();
+      add.click();
+    });
+    expect(
+      page.querySelector('[role="menu"][aria-label="Add content"]'),
+    ).not.toBeNull();
+    expect(page.querySelector(".piqae-selection-rail")).not.toBeNull();
+
+    await act(async () => {
+      add.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    expect(
+      page.querySelector('[role="menu"][aria-label="Add content"]'),
+    ).toBeNull();
+    expect(page.querySelector(".piqae-selection-rail")).not.toBeNull();
+    await act(
+      () =>
+        new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    );
+    expect(document.activeElement).toBe(add);
+
+    await act(async () => {
+      add.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    expect(page.querySelector(".piqae-selection-rail")).toBeNull();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("dismisses Shopify data before clearing selection and restores its trigger", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={packet} onChange={onChange} />,
+    );
+    const text = page.querySelector<HTMLElement>(".piqae-canvas-text")!;
+    const data = page.querySelector<HTMLButtonElement>(
+      'button[aria-label="Insert Shopify data"]',
+    )!;
+
+    await act(async () => text.click());
+    await act(async () => data.click());
+    const search = page.querySelector<HTMLInputElement>(
+      'input[aria-label="Search Shopify data"]',
+    )!;
+    expect(document.activeElement).toBe(search);
+
+    await act(async () => {
+      search.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    await act(
+      () =>
+        new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    );
+    expect(
+      page.querySelector('[role="dialog"][aria-label="Shopify data"]'),
+    ).toBeNull();
+    expect(page.querySelector(".piqae-selection-rail")).not.toBeNull();
+    expect(document.activeElement).toBe(data);
+
+    await act(async () => {
+      data.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    expect(page.querySelector(".piqae-selection-rail")).toBeNull();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("closes quick-add and clears selection when clicking blank editor space", async () => {
+    const page = await render(
+      <PrintPacketEditor value={packet} onChange={() => undefined} />,
+    );
+    const text = page.querySelector<HTMLElement>(".piqae-canvas-text")!;
+    const add = page.querySelector<HTMLButtonElement>(
+      '.piqae-canvas-insertion-button[aria-label="Add content here"]',
+    )!;
+    const sheet = page.querySelector<HTMLElement>(".piqae-page-sheet")!;
+
+    await act(async () => text.click());
+    await act(async () => add.click());
+    expect(
+      page.querySelector('[role="menu"][aria-label="Add content"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      sheet.dispatchEvent(
+        new MouseEvent("pointerdown", { bubbles: true, cancelable: true }),
+      );
+    });
+    expect(
+      page.querySelector('[role="menu"][aria-label="Add content"]'),
+    ).toBeNull();
+    expect(page.querySelector(".piqae-selection-rail")).toBeNull();
+  });
+
+  it("clears selection without consuming Escape owned by an outside control", async () => {
+    const page = await render(
+      <PrintPacketEditor value={packet} onChange={() => undefined} />,
+    );
+    const text = page.querySelector<HTMLElement>(".piqae-canvas-text")!;
+    const outside = document.createElement("input");
+    document.body.append(outside);
+
+    await act(async () => text.click());
+    outside.focus();
+    const escape = new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => outside.dispatchEvent(escape));
+
+    expect(escape.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(outside);
+    expect(page.querySelector(".piqae-selection-rail")).toBeNull();
+    outside.remove();
+  });
+
+  it("clears a stale selection before directly editing a different table", async () => {
+    const mixedPacket: PrintPacket = {
+      ...packet,
+      body: [packet.body[0]!, tablePacket.body[0]!],
+    };
+    const page = await render(
+      <PrintPacketEditor value={mixedPacket} onChange={() => undefined} />,
+    );
+    const text = page.querySelector<HTMLElement>(".piqae-canvas-text")!;
+    const tableHeader = page.querySelector<HTMLElement>(
+      ".piqae-canvas-table-head strong",
+    )!;
+
+    await act(async () => text.click());
+    expect(page.querySelector(".piqae-selection-rail")).not.toBeNull();
+    await act(async () => {
+      tableHeader.dispatchEvent(
+        new MouseEvent("pointerdown", { bubbles: true, cancelable: true }),
+      );
+      tableHeader.focus();
+      tableHeader.click();
+    });
+
+    expect(page.querySelector(".piqae-selection-rail")).toBeNull();
+    expect(document.activeElement).toBe(tableHeader);
+    expect(tableHeader.getAttribute("contenteditable")).toBe("true");
+  });
+
   it("makes toolbar blocks draggable into an exact insertion slot", async () => {
     const onChange = vi.fn();
     const page = await render(
