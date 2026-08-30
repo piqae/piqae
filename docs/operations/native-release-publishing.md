@@ -197,7 +197,24 @@ Windows when enabled, and containers promote independently through their own
 verified path; one platform failure does not cancel or invalidate a successful
 sibling promotion. The explicit `all` lane separately requires every effective
 selected candidate and requested publisher before recording aggregate
-certification and attaching candidate-only assets. The release bucket and
+certification and attaching candidate-only assets. Serialized platform
+finalizers tolerate either a draft or an existing prerelease and merge their
+machine-readable publication state, so macOS-first and Windows-first completion
+produce the same notes without a last-writer-wins race. Aggregate failure
+records **Failed** before the certification job fails. A selected-lane policy
+failure does not begin aggregate attachment; an attachment failure certifies
+none of the candidate-only assets even if GitHub accepted a partial upload.
+
+Direct dispatch of `windows-release.yml` can build a private candidate or use
+the explicit protected unsigned-preview tag flow only. It cannot request stable
+publication. Stable Windows promotion requires a reusable call from canonical
+`release.yml`, whose preparation and core jobs enforce product versioning,
+support tier, repository identity, protected tag, `main` ancestry, database,
+protocol, licence, SDK, and source-policy gates.
+The Windows entry-point job rejects any other stable caller before the
+`native-signing` environment or its credentials are reached.
+
+The release bucket and
 signed appcasts remain the updater authority; GitHub Releases is the
 human-facing mirror and must never become a second independently built channel.
 

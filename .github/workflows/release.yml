@@ -245,6 +245,7 @@ jobs:
     with:
       version: ${{ needs.prepare.outputs.version }}
       publish: ${{ needs.prepare.outputs.publish == 'true' }}
+      orchestrated_release: true
     secrets: inherit
 
   apple_sdk:
@@ -596,10 +597,14 @@ jobs:
       && needs.promote_macos.result == 'success'
     runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
+    concurrency:
+      group: piqae-github-prerelease-${{ needs.prepare.outputs.tag }}
+      cancel-in-progress: false
     permissions:
       actions: read
       contents: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Publish the independently verified macOS draft prerelease
         env:
           CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'piqae/piqae' }}
@@ -607,19 +612,24 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_SCOPE: ${{ needs.prepare.outputs.platform }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          WINDOWS_ENABLED: ${{ needs.prepare.outputs.windows_enabled }}
         shell: bash
         run: |
           if [[ "$GITHUB_REPOSITORY" != "$CANONICAL_REPOSITORY" ]]; then
             echo "GitHub release publishing is enabled only in $CANONICAL_REPOSITORY." >&2
             exit 1
           fi
-          gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' | grep -Fx true
-          if [[ "$RELEASE_SCOPE" == all ]]; then
-            notes='macOS Preview release published from its independently verified lane. Aggregate all-platform certification is still pending; this prerelease does not claim that Windows, Linux, containers, or embedded SDK candidates succeeded.'
-          else
-            notes='macOS Preview release. This release intentionally contains only the signed, notarised universal macOS package, updater, checksums, SBOM, and provenance.'
-          fi
-          gh release edit "$RELEASE_TAG" --draft=false --prerelease --notes "$notes"
+          gh release view "$RELEASE_TAG" --json isDraft,isPrerelease \
+            --jq '(.isDraft == true) or (.isPrerelease == true)' | grep -Fx true
+          gh release view "$RELEASE_TAG" --json body --jq .body > release-notes.current.md
+          python3 release/tools/release_prerelease_notes.py \
+            --existing release-notes.current.md \
+            --output release-notes.next.md \
+            --scope "$RELEASE_SCOPE" \
+            --windows-enabled "$WINDOWS_ENABLED" \
+            --platform macos
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease \
+            --notes-file release-notes.next.md
 
   finalize_windows:
     name: Publish independently verified Windows prerelease
@@ -627,19 +637,28 @@ jobs:
     if: >-
       always() && needs.prepare.outputs.publish == 'true'
       && needs.prepare.result == 'success'
-      && needs.prepare.outputs.platform == 'windows'
+      && (
+        needs.prepare.outputs.platform == 'windows'
+        || needs.prepare.outputs.platform == 'all'
+      )
       && needs.windows.result == 'success'
     runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
+    concurrency:
+      group: piqae-github-prerelease-${{ needs.prepare.outputs.tag }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Publish the Windows-only draft prerelease
         env:
           CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'piqae/piqae' }}
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
+          RELEASE_SCOPE: ${{ needs.prepare.outputs.platform }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          WINDOWS_ENABLED: ${{ needs.prepare.outputs.windows_enabled }}
         shell: bash
         run: |
           set -euo pipefail
@@ -647,9 +666,17 @@ jobs:
             echo "GitHub release publishing is enabled only in $CANONICAL_REPOSITORY." >&2
             exit 1
           fi
-          gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' | grep -Fx true
+          gh release view "$RELEASE_TAG" --json isDraft,isPrerelease \
+            --jq '(.isDraft == true) or (.isPrerelease == true)' | grep -Fx true
+          gh release view "$RELEASE_TAG" --json body --jq .body > release-notes.current.md
+          python3 release/tools/release_prerelease_notes.py \
+            --existing release-notes.current.md \
+            --output release-notes.next.md \
+            --scope "$RELEASE_SCOPE" \
+            --windows-enabled "$WINDOWS_ENABLED" \
+            --platform windows
           gh release edit "$RELEASE_TAG" --draft=false --prerelease \
-            --notes 'Windows Preview release. This release intentionally contains only the Authenticode- and WinSparkle-verified Windows package, updater metadata, checksums, SBOM, and provenance.'
+            --notes-file release-notes.next.md
 
   certify_all:
     name: Certify all selected release lanes
@@ -665,17 +692,23 @@ jobs:
       - promote_containers
       - promote_macos
       - finalize_macos
+      - finalize_windows
     if: >-
       always() && needs.prepare.result == 'success'
       && needs.prepare.outputs.aggregate_enabled == 'true'
     runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
+    concurrency:
+      group: piqae-github-prerelease-${{ needs.prepare.outputs.tag }}
+      cancel-in-progress: false
     permissions:
       actions: read
       contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Require every effective all-platform lane
+        id: certification
+        continue-on-error: true
         shell: bash
         env:
           CORE_RESULT: ${{ needs.core.result }}
@@ -690,6 +723,7 @@ jobs:
           CONTAINER_PROMOTION_RESULT: ${{ needs.promote_containers.result }}
           MACOS_PROMOTION_RESULT: ${{ needs.promote_macos.result }}
           MACOS_FINALIZE_RESULT: ${{ needs.finalize_macos.result }}
+          WINDOWS_FINALIZE_RESULT: ${{ needs.finalize_windows.result }}
         run: |
           set -euo pipefail
           python3 release/tools/release_completion.py \
@@ -704,27 +738,41 @@ jobs:
             --containers "$CONTAINER_RESULT" \
             --macos-promotion "$MACOS_PROMOTION_RESULT" \
             --macos-prerelease "$MACOS_FINALIZE_RESULT" \
+            --windows-prerelease "$WINDOWS_FINALIZE_RESULT" \
             --container-promotion "$CONTAINER_PROMOTION_RESULT"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: needs.prepare.outputs.publish == 'true'
+        id: linux_assets
+        continue-on-error: true
+        if: >-
+          needs.prepare.outputs.publish == 'true'
+          && steps.certification.outcome == 'success'
         with:
           pattern: piqae-linux-*
           path: linux-artifacts
           merge-multiple: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: needs.prepare.outputs.publish == 'true'
+        id: sdk_assets
+        continue-on-error: true
+        if: >-
+          needs.prepare.outputs.publish == 'true'
+          && steps.certification.outcome == 'success'
         with:
           pattern: piqae-node-*-sdk
           path: sdk-artifacts
           merge-multiple: true
-      - name: Attach certified candidate assets and record aggregate status
-        if: needs.prepare.outputs.publish == 'true'
+      - name: Attach certified candidate assets
+        id: aggregate_assets
+        continue-on-error: true
+        if: >-
+          needs.prepare.outputs.publish == 'true'
+          && steps.certification.outcome == 'success'
+          && steps.linux_assets.outcome == 'success'
+          && steps.sdk_assets.outcome == 'success'
         env:
           CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'piqae/piqae' }}
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
-          WINDOWS_ENABLED: ${{ needs.prepare.outputs.windows_enabled }}
         shell: bash
         run: |
           set -euo pipefail
@@ -735,10 +783,69 @@ jobs:
           gh release view "$RELEASE_TAG" --json isDraft,isPrerelease \
             --jq '(.isDraft == false and .isPrerelease == true)' | grep -Fx true
           gh release upload "$RELEASE_TAG" linux-artifacts/* sdk-artifacts/* --clobber
-          if [[ "$WINDOWS_ENABLED" == true ]]; then
-            windows_status='Windows signed candidate and stable publisher passed.'
-          else
-            windows_status='Windows desktop was not selected because it remains Disabled in the support matrix.'
+      - name: Record aggregate certification outcome in public release notes
+        if: >-
+          always() && needs.prepare.outputs.publish == 'true'
+          && (
+            needs.finalize_macos.result == 'success'
+            || needs.finalize_windows.result == 'success'
+          )
+        env:
+          AGGREGATE_ASSETS_OUTCOME: ${{ steps.aggregate_assets.outcome }}
+          CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'piqae/piqae' }}
+          CERTIFICATION_OUTCOME: ${{ steps.certification.outcome }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          LINUX_ASSETS_OUTCOME: ${{ steps.linux_assets.outcome }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          SDK_ASSETS_OUTCOME: ${{ steps.sdk_assets.outcome }}
+          WINDOWS_ENABLED: ${{ needs.prepare.outputs.windows_enabled }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" != "$CANONICAL_REPOSITORY" ]]; then
+            echo "GitHub release publishing is enabled only in $CANONICAL_REPOSITORY." >&2
+            exit 1
           fi
-          gh release edit "$RELEASE_TAG" --notes \
-            "Aggregate all-platform certification passed for every effective selected lane. macOS and containers were promoted independently; Linux and embedded SDK candidates are attached as Preview evidence. $windows_status No physical-print or Supported-platform claim is implied."
+          aggregate=passed
+          for outcome in \
+            "$CERTIFICATION_OUTCOME" \
+            "$LINUX_ASSETS_OUTCOME" \
+            "$SDK_ASSETS_OUTCOME" \
+            "$AGGREGATE_ASSETS_OUTCOME"
+          do
+            if [[ "$outcome" != success ]]; then aggregate=failed; fi
+          done
+          gh release view "$RELEASE_TAG" --json isDraft,isPrerelease \
+            --jq '(.isDraft == false and .isPrerelease == true)' | grep -Fx true
+          gh release view "$RELEASE_TAG" --json body --jq .body > release-notes.current.md
+          python3 release/tools/release_prerelease_notes.py \
+            --existing release-notes.current.md \
+            --output release-notes.next.md \
+            --scope all \
+            --windows-enabled "$WINDOWS_ENABLED" \
+            --aggregate "$aggregate"
+          gh release edit "$RELEASE_TAG" --notes-file release-notes.next.md
+      - name: Fail when aggregate certification or asset publication failed
+        if: always()
+        env:
+          AGGREGATE_ASSETS_OUTCOME: ${{ steps.aggregate_assets.outcome }}
+          CERTIFICATION_OUTCOME: ${{ steps.certification.outcome }}
+          LINUX_ASSETS_OUTCOME: ${{ steps.linux_assets.outcome }}
+          PUBLISH: ${{ needs.prepare.outputs.publish }}
+          SDK_ASSETS_OUTCOME: ${{ steps.sdk_assets.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$CERTIFICATION_OUTCOME" != success ]]; then
+            echo 'Aggregate release policy failed; no aggregate assets were certified.' >&2
+            exit 1
+          fi
+          if [[ "$PUBLISH" == true ]] && (
+            [[ "$LINUX_ASSETS_OUTCOME" != success ]]
+            || [[ "$SDK_ASSETS_OUTCOME" != success ]]
+            || [[ "$AGGREGATE_ASSETS_OUTCOME" != success ]]
+          ); then
+            echo 'Aggregate candidate asset publication failed.' >&2
+            exit 1
+          fi

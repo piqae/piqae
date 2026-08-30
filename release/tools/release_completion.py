@@ -21,6 +21,7 @@ class AggregateResults:
     containers: str
     macos_promotion: str
     macos_prerelease: str
+    windows_prerelease: str
     container_promotion: str
 
 
@@ -37,6 +38,9 @@ def certification_errors(
         "containers": "success",
         "macos-promotion": "success" if publish else "skipped",
         "macos-prerelease": "success" if publish else "skipped",
+        "windows-prerelease": (
+            "success" if publish and windows_enabled else "skipped"
+        ),
         "container-promotion": "success" if publish else "skipped",
     }
     actual = {
@@ -49,6 +53,7 @@ def certification_errors(
         "containers": results.containers,
         "macos-promotion": results.macos_promotion,
         "macos-prerelease": results.macos_prerelease,
+        "windows-prerelease": results.windows_prerelease,
         "container-promotion": results.container_promotion,
     }
     return [
@@ -78,6 +83,7 @@ def main() -> None:
         "containers",
         "macos-promotion",
         "macos-prerelease",
+        "windows-prerelease",
         "container-promotion",
     ):
         parser.add_argument(f"--{argument}", choices=RESULTS, required=True)
@@ -92,6 +98,7 @@ def main() -> None:
         containers=args.containers,
         macos_promotion=args.macos_promotion,
         macos_prerelease=args.macos_prerelease,
+        windows_prerelease=args.windows_prerelease,
         container_promotion=args.container_promotion,
     )
     errors = certification_errors(

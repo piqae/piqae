@@ -22,6 +22,7 @@ def results(**overrides: str) -> AggregateResults:
         "containers": "success",
         "macos_promotion": "success",
         "macos_prerelease": "success",
+        "windows_prerelease": "skipped",
         "container_promotion": "success",
     }
     values.update(overrides)
@@ -43,11 +44,16 @@ class ReleaseCompletionTest(unittest.TestCase):
         )
         self.assertEqual(
             errors,
-            ["windows must be success for aggregate certification; got skipped"],
+            [
+                "windows must be success for aggregate certification; got skipped",
+                "windows-prerelease must be success for aggregate certification; got skipped",
+            ],
         )
         self.assertEqual(
             certification_errors(
-                results(windows="success"), windows_enabled=True, publish=True
+                results(windows="success", windows_prerelease="success"),
+                windows_enabled=True,
+                publish=True,
             ),
             [],
         )
@@ -61,10 +67,42 @@ class ReleaseCompletionTest(unittest.TestCase):
             ["windows-sdk must be success for aggregate certification; got failure"],
         )
 
+    def test_each_native_sibling_can_publish_when_the_other_fails(self) -> None:
+        macos_failed = certification_errors(
+            results(
+                macos="failure",
+                macos_prerelease="skipped",
+                windows="success",
+                windows_prerelease="success",
+            ),
+            windows_enabled=True,
+            publish=True,
+        )
+        self.assertEqual(
+            macos_failed,
+            [
+                "macos must be success for aggregate certification; got failure",
+                "macos-prerelease must be success for aggregate certification; got skipped",
+            ],
+        )
+        windows_failed = certification_errors(
+            results(windows="failure", windows_prerelease="skipped"),
+            windows_enabled=True,
+            publish=True,
+        )
+        self.assertEqual(
+            windows_failed,
+            [
+                "windows must be success for aggregate certification; got failure",
+                "windows-prerelease must be success for aggregate certification; got skipped",
+            ],
+        )
+
     def test_private_all_candidate_requires_promotions_to_be_skipped(self) -> None:
         private = results(
             macos_promotion="skipped",
             macos_prerelease="skipped",
+            windows_prerelease="skipped",
             container_promotion="skipped",
         )
         self.assertEqual(

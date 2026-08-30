@@ -60,8 +60,14 @@ promoting its appcast and appearing as a clearly labelled macOS Preview
 prerelease. The `all` job still fails its separate aggregate certification
 result unless every effective selected candidate—and every requested stable
 publisher—succeeds. A visible macOS prerelease is not evidence that `all`
-certification passed; its notes say when aggregate certification remains
-pending or failed.
+certification passed. Serialized, idempotent platform finalizers merge their
+status into the shared prerelease regardless of completion order, so either
+macOS or an enabled Windows lane remains publicly discoverable when its sibling
+fails. The aggregate job changes the notes from Pending to Passed only after
+candidate-only assets attach successfully, or to Failed before it returns a
+failed conclusion. A selected-lane policy failure does not begin aggregate
+attachment; an attachment failure is recorded as Failed and no attached asset
+is described as aggregate-certified.
 
 Container jobs likewise build checksummed, provenance-attested Docker archives
 as private 14-day workflow artifacts without authenticating to GHCR. Their
@@ -77,6 +83,12 @@ yet have stable registry or update-feed publishers. `publish=true` fails in
 `prepare` for those scopes. Windows stable publication likewise fails while the
 desktop tier remains Disabled. These fail-closed checks keep a successful build
 from being misrepresented as a public or Supported release.
+
+Direct dispatch of **Windows release** is restricted to a private candidate or
+the explicitly tagged unsigned-preview path. It has no stable `publish` input.
+Stable Windows publication is callable only by the canonical **Piqae release**
+workflow, which has already enforced the product-release contract, shared core
+gate, support tier, canonical repository, protected tag, and `main` ancestry.
 
 Before tagging:
 

@@ -7,11 +7,6 @@ on:
         description: SemVer release version without a leading v
         required: true
         default: "0.1.1"
-      publish:
-        description: Publish a signed stable release
-        required: true
-        type: boolean
-        default: false
       publish_unsigned_preview:
         description: Publish an explicitly unsigned GitHub prerelease from a v*-windows-preview.* tag
         required: true
@@ -27,6 +22,10 @@ on:
         description: Promote after the native-release environment gate
         required: true
         type: boolean
+      orchestrated_release:
+        description: Assert that canonical release.yml supplied the shared release gates
+        required: true
+        type: boolean
       publish_unsigned_preview:
         description: Publish an explicitly unsigned GitHub prerelease
         required: false
@@ -40,8 +39,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release_entry:
+    name: Validate Windows release entry point
+    runs-on: ${{ vars.PIQAE_CI_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    steps:
+      - name: Reject stable publication outside canonical release.yml
+        env:
+          ORCHESTRATED_RELEASE: ${{ inputs.orchestrated_release }}
+          REQUESTED_PUBLISH: ${{ inputs.publish }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${REQUESTED_PUBLISH:-false}" == true ]] && (
+            [[ "${ORCHESTRATED_RELEASE:-false}" != true ]]
+            || [[ "$GITHUB_WORKFLOW" != 'Piqae release' ]]
+            || [[ "$GITHUB_REPOSITORY" != 'piqae/piqae' ]]
+          ); then
+            echo 'Stable Windows publication is callable only from canonical release.yml after its shared gates.' >&2
+            exit 1
+          fi
+
   package:
     name: Package x86_64 Windows
+    needs: release_entry
     runs-on: ${{ vars.PIQAE_RELEASE_WINDOWS_RUNNER || 'windows-latest' }}
     timeout-minutes: 90
     environment: native-signing
@@ -185,8 +208,18 @@ jobs:
           $signed = $present -eq $requirements.Count
           $publish = "${{ inputs.publish }}" -eq "true"
           $publishUnsignedPreview = "${{ inputs.publish_unsigned_preview }}" -eq "true"
+          $orchestratedRelease = "${{ inputs.orchestrated_release }}" -eq "true"
           if ($publish -and $publishUnsignedPreview) {
             throw "Signed stable publication and unsigned preview publication are mutually exclusive."
+          }
+          if (
+            $publish -and (
+              -not $orchestratedRelease -or
+              "${{ github.workflow }}" -ne "Piqae release" -or
+              "${{ github.repository }}" -ne "piqae/piqae"
+            )
+          ) {
+            throw "Stable Windows publication is callable only from canonical release.yml after its shared gates."
           }
           if (
             $publish -and (

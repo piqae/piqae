@@ -197,12 +197,41 @@ class CiReleaseContractTest(unittest.TestCase):
             "uses: ./.github/workflows/macos-promotion.yml",
             macos_promotion.group(0),
         )
-        finalizer = re.search(
+        macos_finalizer = re.search(
             r"(?ms)^  finalize_macos:.*?(?=^  [a-z_]+:|\Z)", workflow
         )
-        self.assertIn("needs: [prepare, promote_macos]", finalizer.group(0))
-        self.assertIn("needs.promote_macos.result == 'success'", finalizer.group(0))
-        self.assertIn("Aggregate all-platform certification is still pending", finalizer.group(0))
+        self.assertIn("needs: [prepare, promote_macos]", macos_finalizer.group(0))
+        self.assertIn(
+            "needs.promote_macos.result == 'success'", macos_finalizer.group(0)
+        )
+        self.assertIn(
+            "group: piqae-github-prerelease-${{ needs.prepare.outputs.tag }}",
+            macos_finalizer.group(0),
+        )
+        self.assertIn(
+            "release/tools/release_prerelease_notes.py", macos_finalizer.group(0)
+        )
+
+        windows_finalizer = re.search(
+            r"(?ms)^  finalize_windows:.*?(?=^  [a-z_]+:|\Z)", workflow
+        )
+        self.assertIsNotNone(windows_finalizer)
+        self.assertIn("needs: [prepare, windows]", windows_finalizer.group(0))
+        self.assertIn(
+            "needs.prepare.outputs.platform == 'all'", windows_finalizer.group(0)
+        )
+        self.assertIn(
+            "group: piqae-github-prerelease-${{ needs.prepare.outputs.tag }}",
+            windows_finalizer.group(0),
+        )
+        self.assertIn(
+            "release/tools/release_prerelease_notes.py", windows_finalizer.group(0)
+        )
+        for finalizer in (macos_finalizer, windows_finalizer):
+            self.assertIn(
+                "--jq '(.isDraft == true) or (.isPrerelease == true)'",
+                finalizer.group(0),
+            )
 
         macos_workflow = (ROOT / ".github/workflows/macos-release.yml").read_text(
             encoding="utf-8"
@@ -247,6 +276,7 @@ class CiReleaseContractTest(unittest.TestCase):
             "promote_containers",
             "promote_macos",
             "finalize_macos",
+            "finalize_windows",
         ):
             self.assertIn(f"      - {selected}\n", aggregate.group(0))
         self.assertIn("aggregate_enabled == 'true'", aggregate.group(0))
@@ -261,10 +291,60 @@ class CiReleaseContractTest(unittest.TestCase):
             "containers",
             "macos-promotion",
             "macos-prerelease",
+            "windows-prerelease",
             "container-promotion",
         ):
             self.assertIn(f'--{lane} "$', aggregate.group(0))
-        self.assertIn("No physical-print or Supported-platform claim is implied", aggregate.group(0))
+        self.assertIn("id: certification", aggregate.group(0))
+        self.assertIn("continue-on-error: true", aggregate.group(0))
+        self.assertGreaterEqual(
+            aggregate.group(0).count("steps.certification.outcome == 'success'"),
+            3,
+        )
+        self.assertIn("--aggregate \"$aggregate\"", aggregate.group(0))
+        self.assertIn(
+            "Aggregate release policy failed; no aggregate assets were certified",
+            aggregate.group(0),
+        )
+
+    def test_direct_windows_dispatch_cannot_publish_stable(self) -> None:
+        windows = (ROOT / ".github/workflows/windows-release.yml").read_text(
+            encoding="utf-8"
+        )
+        dispatch = windows.split("\n  workflow_dispatch:", 1)[1].split(
+            "\n  workflow_call:", 1
+        )[0]
+        workflow_call = windows.split("\n  workflow_call:", 1)[1].split(
+            "\npermissions:", 1
+        )[0]
+        self.assertNotIn("\n      publish:\n", dispatch)
+        self.assertIn("publish_unsigned_preview:", dispatch)
+        self.assertIn("orchestrated_release:", workflow_call)
+        self.assertIn("required: true", workflow_call)
+        self.assertIn(
+            '"${{ github.workflow }}" -ne "Piqae release"', windows
+        )
+        self.assertIn('"${{ github.repository }}" -ne "piqae/piqae"', windows)
+        self.assertIn(
+            "Stable Windows publication is callable only from canonical release.yml",
+            windows,
+        )
+        release_entry = re.search(
+            r"(?ms)^  release_entry:.*?(?=^  [a-z_]+:|\Z)", windows
+        )
+        self.assertIsNotNone(release_entry)
+        self.assertNotIn("environment: native-signing", release_entry.group(0))
+        self.assertIn("GITHUB_WORKFLOW", release_entry.group(0))
+        package = re.search(r"(?ms)^  package:.*?(?=^  [a-z_]+:|\Z)", windows)
+        self.assertIn("needs: release_entry", package.group(0))
+        self.assertIn("environment: native-signing", package.group(0))
+
+        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        windows_call = re.search(
+            r"(?ms)^  windows:.*?(?=^  [a-z_]+:|\Z)", release
+        )
+        self.assertIn("orchestrated_release: true", windows_call.group(0))
+        self.assertEqual(release.count("orchestrated_release: true"), 1)
 
     def test_sibling_platform_promoters_accept_only_draft_or_prerelease(self) -> None:
         macos = (ROOT / "packaging/release/promote-macos-release.sh").read_text(

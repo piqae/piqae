@@ -200,6 +200,16 @@ The `Piqae release` workflow is the sole `v*` tag trigger:
    requested publisher succeeds; update the prerelease notes and attach
    candidate-only evidence only after that aggregate passes.
 
+The macOS and enabled Windows GitHub prerelease finalizers use the same
+per-tag serialization group and idempotent state marker. Each accepts either
+the original draft or an already published prerelease, so either platform can
+finish first and one platform's failure cannot strand the successful sibling in
+a draft. The aggregate job always records Passed or Failed in that public state
+before returning; candidate-only aggregate assets are attached only on success.
+Direct `windows-release.yml` dispatch is candidate/unsigned-preview only and
+cannot bypass the canonical release workflow's shared core, product contract,
+support-tier, source-identity, and ancestry gates.
+
 The platform `v*` release keeps one immutable source identity: server, web,
 migration image, native applications, embedded-node SDK candidates, manifest,
 and appcasts are all built from the same commit and version by `release.yml`.
