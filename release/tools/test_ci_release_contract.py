@@ -138,56 +138,71 @@ class CiReleaseContractTest(unittest.TestCase):
         )
         self.assertIn("/p:PiqaeThirdPartyLicenses=", windows_pack)
 
-    def test_release_workflow_has_bounded_macos_and_explicit_full_scopes(self) -> None:
+    def test_release_workflow_has_independent_scopes_and_strict_aggregate(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-        self.assertIn("platform:\n        description: Artifact scope", workflow)
+        self.assertIn("platform:\n        description: Candidate scope", workflow)
         self.assertIn("default: macos", workflow)
+        for scope in (
+            "macos",
+            "windows",
+            "linux",
+            "containers",
+            "apple-sdk",
+            "windows-sdk",
+            "all",
+        ):
+            self.assertIn(f"          - {scope}\n", workflow)
         self.assertIn('release_platform.py "$platform"', workflow)
         self.assertIn("platform=all", workflow)
         self.assertIn("node-version: 22", workflow)
         self.assertNotIn("node-version-file: .node-version", workflow)
         self.assertIn("pnpm install --frozen-lockfile", workflow)
-        self.assertIn("aggregate-gated Windows promoter", workflow)
-        self.assertIn(
-            'if [[ "$platform" == all && "$windows_tier" != disabled ]]', workflow
-        )
+        self.assertIn("produces a private candidate only", workflow)
+        self.assertIn("Windows stable publication is Disabled", workflow)
         self.assertEqual(
             workflow.count("cargo xtask release check --platform core"), 1
         )
         self.assertIn("needs: [prepare, core]", workflow)
-        for job in ("windows", "apple_sdk", "windows_sdk", "linux", "server"):
+        selectors = {
+            "macos": "macos_enabled",
+            "windows": "windows_selected",
+            "apple_sdk": "apple_sdk_enabled",
+            "windows_sdk": "windows_sdk_enabled",
+            "linux": "linux_enabled",
+            "server": "containers_enabled",
+        }
+        for job, selector in selectors.items():
             match = re.search(rf"(?ms)^  {job}:.*?(?=^  [a-z_]+:|\Z)", workflow)
             self.assertIsNotNone(match)
             section = match.group(0)
-            self.assertIn("needs.prepare.outputs.platform == 'all'", section)
-        self.assertIn("Publish the macOS-only draft prerelease", workflow)
-        self.assertIn("intentionally contains only", workflow)
-        self.assertIn(
-            "needs.prepare.outputs.platform == 'all'\n"
-            "          && (\n"
-            "            (needs.prepare.outputs.windows_enabled == 'true' && needs.windows.result == 'success')",
-            workflow,
-        )
-        for selected in ("apple_sdk", "windows_sdk", "linux", "server"):
-            self.assertIn(f"needs.{selected}.result == 'success'", workflow)
-        self.assertNotIn(
-            "needs.apple_sdk.result == 'success' || needs.apple_sdk.result == 'skipped'",
-            workflow,
-        )
+            self.assertIn(f"needs.prepare.outputs.{selector} == 'true'", section)
+
         macos_call = re.search(r"(?ms)^  macos:.*?(?=^  [a-z_]+:|\Z)", workflow)
         self.assertIn("publish: false", macos_call.group(0))
-        promotion = re.search(
+        macos_promotion = re.search(
             r"(?ms)^  promote_macos:.*?(?=^  [a-z_]+:|\Z)", workflow
         )
-        self.assertIsNotNone(promotion)
+        self.assertIsNotNone(macos_promotion)
+        self.assertIn("needs: [prepare, macos]", macos_promotion.group(0))
+        for sibling in (
+            "windows",
+            "apple_sdk",
+            "windows_sdk",
+            "linux",
+            "server",
+            "promote_containers",
+        ):
+            self.assertNotIn(f"needs.{sibling}.result", macos_promotion.group(0))
         self.assertIn(
-            "needs: [prepare, macos, windows, apple_sdk, windows_sdk, linux, server, promote_containers]",
-            promotion.group(0),
+            "uses: ./.github/workflows/macos-promotion.yml",
+            macos_promotion.group(0),
         )
-        self.assertIn("uses: ./.github/workflows/macos-promotion.yml", promotion.group(0))
-        finalizer = re.search(r"(?ms)^  finalize:.*?(?=^  [a-z_]+:|\Z)", workflow)
+        finalizer = re.search(
+            r"(?ms)^  finalize_macos:.*?(?=^  [a-z_]+:|\Z)", workflow
+        )
         self.assertIn("needs: [prepare, promote_macos]", finalizer.group(0))
         self.assertIn("needs.promote_macos.result == 'success'", finalizer.group(0))
+        self.assertIn("Aggregate all-platform certification is still pending", finalizer.group(0))
 
         macos_workflow = (ROOT / ".github/workflows/macos-release.yml").read_text(
             encoding="utf-8"
@@ -195,7 +210,10 @@ class CiReleaseContractTest(unittest.TestCase):
         self.assertIn("value: ${{ jobs.candidate.outputs.artifact_name }}", macos_workflow)
 
         windows_call = re.search(r"(?ms)^  windows:.*?(?=^  [a-z_]+:|\Z)", workflow)
-        self.assertIn("publish: false", windows_call.group(0))
+        self.assertIn(
+            "publish: ${{ needs.prepare.outputs.publish == 'true' }}",
+            windows_call.group(0),
+        )
 
         server = re.search(r"(?ms)^  server:.*?(?=^  [a-z_]+:|\Z)", workflow)
         self.assertIn("push: false", server.group(0))
@@ -207,12 +225,61 @@ class CiReleaseContractTest(unittest.TestCase):
             r"(?ms)^  promote_containers:.*?(?=^  [a-z_]+:|\Z)", workflow
         )
         self.assertIsNotNone(container_promotion)
+        self.assertIn("needs: [prepare, server]", container_promotion.group(0))
         self.assertIn("needs.server.result == 'success'", container_promotion.group(0))
+        self.assertIn("environment: native-release", container_promotion.group(0))
         self.assertIn("fail-fast: false", container_promotion.group(0))
         self.assertIn("sha256sum --check", container_promotion.group(0))
         self.assertIn("docker push", container_promotion.group(0))
+
+        aggregate = re.search(
+            r"(?ms)^  certify_all:.*?(?=^  [a-z_]+:|\Z)", workflow
+        )
+        self.assertIsNotNone(aggregate)
+        for selected in (
+            "core",
+            "macos",
+            "windows",
+            "apple_sdk",
+            "windows_sdk",
+            "linux",
+            "server",
+            "promote_containers",
+            "promote_macos",
+            "finalize_macos",
+        ):
+            self.assertIn(f"      - {selected}\n", aggregate.group(0))
+        self.assertIn("aggregate_enabled == 'true'", aggregate.group(0))
+        self.assertIn("python3 release/tools/release_completion.py", aggregate.group(0))
+        for lane in (
+            "core",
+            "macos",
+            "windows",
+            "apple-sdk",
+            "windows-sdk",
+            "linux",
+            "containers",
+            "macos-promotion",
+            "macos-prerelease",
+            "container-promotion",
+        ):
+            self.assertIn(f'--{lane} "$', aggregate.group(0))
+        self.assertIn("No physical-print or Supported-platform claim is implied", aggregate.group(0))
+
+    def test_sibling_platform_promoters_accept_only_draft_or_prerelease(self) -> None:
+        macos = (ROOT / "packaging/release/promote-macos-release.sh").read_text(
+            encoding="utf-8"
+        )
+        windows = (ROOT / ".github/workflows/windows-release.yml").read_text(
+            encoding="utf-8"
+        )
+        state_gate = (
+            "--json isDraft,isPrerelease \\\n"
+            "    --jq '(.isDraft == true) or (.isPrerelease == true)'"
+        )
+        self.assertIn(state_gate, macos)
         self.assertIn(
-            "needs.promote_containers.result == 'success'", promotion.group(0)
+            "--jq '(.isDraft == true) or (.isPrerelease == true)'", windows
         )
 
     def test_release_artifacts_fan_out_after_one_shared_gate(self) -> None:

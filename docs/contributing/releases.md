@@ -42,35 +42,41 @@ on the target hosted runner so its platform signature, update signature, SBOM,
 checksum, and GitHub provenance all cover the exact published bytes.
 
 The manual **Piqae release** workflow defaults to `publish=false` and the
-`macos` artifact scope, producing a private, short-lived candidate. The
-explicit `all` scope retains Windows, Linux, container, Apple SDK, and Windows
-SDK builds for full certification. A protected `v*` tag always selects `all`
-and fails closed unless every selected artifact succeeds; stable publication
-still accepts only a tag whose commit is already on `main`. Use the manual
-macOS scope before tagging when a faster signed candidate is required.
-The macOS candidate is built and audited in parallel with the selected sibling
-artifacts, but its protected promotion, appcast, stable manifest, and GitHub
-release remain blocked until the aggregate gate proves every selected job
-succeeded. Matrix jobs use `fail-fast: false`, and independent sibling jobs are
-not cancelled when another candidate fails, so their evidence remains useful
-without permitting a partial publication.
+`macos` artifact scope, producing a private, short-lived candidate. Operators
+may select `macos`, `windows`, `linux`, `containers`, `apple-sdk`, or
+`windows-sdk` to exercise only that candidate lane. The explicit `all` scope
+retains every effective platform for cross-platform certification. Pushing a
+protected `v*` tag selects `all`; a manual dispatch against that tag keeps the
+requested scope. Stable publication still accepts only a tag whose commit is
+already on `main`.
+
+Shared protocol, database, SDK, licence, and source-policy gates run once.
+Selected candidates then build in parallel with matrix `fail-fast: false`.
+Each lane with a stable publisher crosses its own protected promotion gate as
+soon as that lane's signature, notarisation where applicable, checksum, SBOM,
+provenance, and evidence audit pass. A failed Windows, Linux, SDK, or container
+candidate therefore cannot prevent a successful selected macOS candidate from
+promoting its appcast and appearing as a clearly labelled macOS Preview
+prerelease. The `all` job still fails its separate aggregate certification
+result unless every effective selected candidate—and every requested stable
+publisher—succeeds. A visible macOS prerelease is not evidence that `all`
+certification passed; its notes say when aggregate certification remains
+pending or failed.
 
 Container jobs likewise build checksummed, provenance-attested Docker archives
-as private 14-day workflow artifacts without authenticating to GHCR. Only after
-the aggregate gate succeeds does a separate `fail-fast: false` promotion matrix
-verify and load those exact archives, push the version and commit tags, and
-attest the resulting registry digests. macOS promotion follows successful
-container promotion. The parent invokes Windows as candidate-only; if its
-support tier is enabled, stable publication fails in `prepare` until Windows has
-an equivalent aggregate-gated promoter, preventing the dormant workflow from
-advancing its installer or appcast early.
+as private 14-day workflow artifacts without authenticating to GHCR. Their
+independent protected promotion matrix verifies and loads those exact archives,
+pushes the version and commit tags, and attests the resulting registry digests.
+It neither gates nor is gated by macOS promotion. Windows uses its own reusable
+signed publisher when its support tier permits publication; an explicitly
+selected Windows candidate may still be built privately while that tier is
+Disabled.
 
-Windows-only and Linux-only selectors are intentionally not exposed yet.
-Windows desktop remains Disabled in the support matrix, while the Linux bundle
-does not have an independent signed update-feed publisher. Adding either choice
-before those platform-specific publication contracts exist would create a
-selector that could build artifacts but could not truthfully complete a stable
-release. Use `all` for their current certification evidence.
+Linux and both embedded SDK selectors are candidate-only because they do not
+yet have stable registry or update-feed publishers. `publish=true` fails in
+`prepare` for those scopes. Windows stable publication likewise fails while the
+desktop tier remains Disabled. These fail-closed checks keep a successful build
+from being misrepresented as a public or Supported release.
 
 Before tagging:
 
@@ -90,13 +96,15 @@ Then:
 2. Create and push `v<version>` at that merged commit.
 3. Review the candidate evidence and approve the protected `native-release`
    environment.
-4. Let the single **Piqae release** workflow publish exactly the selected
-   artifact scope. `macos` publishes the signed universal macOS package,
+4. Let the single **Piqae release** workflow build and, where supported, publish
+   exactly the selected artifact scope. `macos` publishes the signed universal macOS package,
    updater, appcast, checksum, SBOM, provenance, stable manifest entry, and a
    macOS-only GitHub prerelease. It does not claim or attach Windows, Linux,
-   container, or embedded SDK artifacts. `all` additionally builds and attaches
-   the Windows packages, Linux bundles, container images, and provenance-bearing
-   Apple/Windows embedded SDK candidates. Embedded SDK candidates remain
+   container, or embedded SDK artifacts. `all` builds the effective Windows,
+   Linux, container, and provenance-bearing Apple/Windows embedded SDK
+   candidates in parallel. macOS and containers promote independently; only
+   after every effective lane succeeds does aggregate certification attach the
+   Linux and SDK evidence and update the prerelease notes. Embedded SDK candidates remain
    unsigned Preview assets until their package-signing gates are configured;
    the workflow does not publish them to a package registry. Never start the
    platform workflows separately for the same version.

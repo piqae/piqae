@@ -20,10 +20,15 @@ on:
         required: true
         default: false
       platform:
-        description: Artifact scope; macOS is the fast native lane, all is full certification
+        description: Candidate scope; individual lanes publish independently, all adds aggregate certification
         type: choice
         options:
           - macos
+          - windows
+          - linux
+          - containers
+          - apple-sdk
+          - windows-sdk
           - all
         required: true
         default: macos
@@ -50,6 +55,13 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       windows_enabled: ${{ steps.release.outputs.windows_enabled }}
       platform: ${{ steps.release.outputs.platform }}
+      macos_enabled: ${{ steps.release.outputs.macos_enabled }}
+      windows_selected: ${{ steps.release.outputs.windows_selected }}
+      linux_enabled: ${{ steps.release.outputs.linux_enabled }}
+      containers_enabled: ${{ steps.release.outputs.containers_enabled }}
+      apple_sdk_enabled: ${{ steps.release.outputs.apple_sdk_enabled }}
+      windows_sdk_enabled: ${{ steps.release.outputs.windows_sdk_enabled }}
+      aggregate_enabled: ${{ steps.release.outputs.aggregate_enabled }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -116,10 +128,18 @@ jobs:
               echo "Publication requires a protected v* tag ref." >&2
               exit 1
             fi
-            if [[ "$platform" == all && "$windows_tier" != disabled ]]; then
-              echo "Stable publication requires an aggregate-gated Windows promoter; Windows is currently expected to remain Disabled." >&2
-              exit 1
-            fi
+            case "$platform" in
+              linux|apple-sdk|windows-sdk)
+                echo "The $platform scope produces a private candidate only; it has no stable publisher." >&2
+                exit 1
+                ;;
+              windows)
+                if [[ "$windows_tier" == disabled ]]; then
+                  echo "Windows stable publication is Disabled by the support matrix." >&2
+                  exit 1
+                fi
+                ;;
+            esac
             git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
             if ! git rev-parse --verify --quiet origin/main >/dev/null \
               || ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main
@@ -192,6 +212,7 @@ jobs:
   macos:
     name: macOS signed candidate and promotion
     needs: [prepare, core]
+    if: needs.prepare.outputs.macos_enabled == 'true'
     permissions:
       actions: read
       attestations: write
@@ -209,7 +230,12 @@ jobs:
   windows:
     name: Windows signed candidate and promotion
     needs: [prepare, core]
-    if: needs.prepare.outputs.platform == 'all' && needs.prepare.outputs.windows_enabled == 'true'
+    if: >-
+      needs.prepare.outputs.windows_selected == 'true'
+      && (
+        needs.prepare.outputs.platform == 'windows'
+        || needs.prepare.outputs.windows_enabled == 'true'
+      )
     permissions:
       actions: read
       attestations: write
@@ -218,15 +244,13 @@ jobs:
     uses: ./.github/workflows/windows-release.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
-      # The parent workflow owns publication fan-in. If Windows becomes
-      # enabled, prepare fails closed until an aggregate-gated promoter exists.
-      publish: false
+      publish: ${{ needs.prepare.outputs.publish == 'true' }}
     secrets: inherit
 
   apple_sdk:
     name: Apple embedded node SDK candidate
     needs: [prepare, core]
-    if: needs.prepare.outputs.platform == 'all'
+    if: needs.prepare.outputs.apple_sdk_enabled == 'true'
     runs-on: ${{ vars.PIQAE_RELEASE_MACOS_RUNNER || 'macos-15' }}
     timeout-minutes: 45
     permissions:
@@ -285,7 +309,7 @@ jobs:
   windows_sdk:
     name: Windows embedded node SDK candidate
     needs: [prepare, core]
-    if: needs.prepare.outputs.platform == 'all'
+    if: needs.prepare.outputs.windows_sdk_enabled == 'true'
     runs-on: ${{ vars.PIQAE_RELEASE_WINDOWS_RUNNER || 'windows-latest' }}
     timeout-minutes: 45
     permissions:
@@ -348,7 +372,7 @@ jobs:
   linux:
     name: Linux (${{ matrix.artifact }})
     needs: [prepare, core]
-    if: needs.prepare.outputs.platform == 'all'
+    if: needs.prepare.outputs.linux_enabled == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -428,7 +452,7 @@ jobs:
   server:
     name: Container (${{ matrix.name }})
     needs: [prepare, core]
-    if: needs.prepare.outputs.platform == 'all'
+    if: needs.prepare.outputs.containers_enabled == 'true'
     runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     strategy:
@@ -483,23 +507,19 @@ jobs:
           retention-days: 14
 
   promote_containers:
-    name: Promote container (${{ matrix.name }}) after aggregate gate
-    needs: [prepare, macos, windows, apple_sdk, windows_sdk, linux, server]
+    name: Promote verified container (${{ matrix.name }}) independently
+    needs: [prepare, server]
     if: >-
       always() && needs.prepare.outputs.publish == 'true'
       && needs.prepare.result == 'success'
-      && needs.prepare.outputs.platform == 'all'
-      && needs.macos.result == 'success'
-      && (
-        (needs.prepare.outputs.windows_enabled == 'true' && needs.windows.result == 'success')
-        || (needs.prepare.outputs.windows_enabled == 'false' && needs.windows.result == 'skipped')
-      )
-      && needs.apple_sdk.result == 'success'
-      && needs.windows_sdk.result == 'success'
-      && needs.linux.result == 'success'
+      && needs.prepare.outputs.containers_enabled == 'true'
       && needs.server.result == 'success'
     runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 15
+    environment: native-release
+    concurrency:
+      group: piqae-container-promotion-${{ matrix.name }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
@@ -544,35 +564,13 @@ jobs:
           push-to-registry: true
 
   promote_macos:
-    name: Promote verified macOS candidate after aggregate gate
-    needs: [prepare, macos, windows, apple_sdk, windows_sdk, linux, server, promote_containers]
+    name: Promote verified macOS candidate independently
+    needs: [prepare, macos]
     if: >-
       always() && needs.prepare.outputs.publish == 'true'
       && needs.prepare.result == 'success'
+      && needs.prepare.outputs.macos_enabled == 'true'
       && needs.macos.result == 'success'
-      && (
-        (
-          needs.prepare.outputs.platform == 'macos'
-          && needs.windows.result == 'skipped'
-          && needs.apple_sdk.result == 'skipped'
-          && needs.windows_sdk.result == 'skipped'
-          && needs.linux.result == 'skipped'
-          && needs.server.result == 'skipped'
-          && needs.promote_containers.result == 'skipped'
-        )
-        || (
-          needs.prepare.outputs.platform == 'all'
-          && (
-            (needs.prepare.outputs.windows_enabled == 'true' && needs.windows.result == 'success')
-            || (needs.prepare.outputs.windows_enabled == 'false' && needs.windows.result == 'skipped')
-          )
-          && needs.apple_sdk.result == 'success'
-          && needs.windows_sdk.result == 'success'
-          && needs.linux.result == 'success'
-          && needs.server.result == 'success'
-          && needs.promote_containers.result == 'success'
-        )
-      )
     permissions:
       actions: read
       attestations: read
@@ -589,8 +587,8 @@ jobs:
       recovery_mode: false
     secrets: inherit
 
-  finalize:
-    name: Publish GitHub prerelease
+  finalize_macos:
+    name: Publish independently verified macOS prerelease
     needs: [prepare, promote_macos]
     if: >-
       always() && needs.prepare.outputs.publish == 'true'
@@ -602,24 +600,12 @@ jobs:
       actions: read
       contents: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: needs.prepare.outputs.platform == 'all'
-        with:
-          pattern: piqae-linux-*
-          path: linux-artifacts
-          merge-multiple: true
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: needs.prepare.outputs.platform == 'all'
-        with:
-          pattern: piqae-node-*-sdk
-          path: sdk-artifacts
-          merge-multiple: true
-      - name: Attach Linux and SDK assets and publish the draft prerelease
-        if: needs.prepare.outputs.platform == 'all'
+      - name: Publish the independently verified macOS draft prerelease
         env:
           CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'piqae/piqae' }}
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
+          RELEASE_SCOPE: ${{ needs.prepare.outputs.platform }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         shell: bash
         run: |
@@ -628,11 +614,27 @@ jobs:
             exit 1
           fi
           gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' | grep -Fx true
-          gh release upload "$RELEASE_TAG" linux-artifacts/* --clobber
-          gh release upload "$RELEASE_TAG" sdk-artifacts/* --clobber
-          gh release edit "$RELEASE_TAG" --draft=false --prerelease
-      - name: Publish the macOS-only draft prerelease
-        if: needs.prepare.outputs.platform == 'macos'
+          if [[ "$RELEASE_SCOPE" == all ]]; then
+            notes='macOS Preview release published from its independently verified lane. Aggregate all-platform certification is still pending; this prerelease does not claim that Windows, Linux, containers, or embedded SDK candidates succeeded.'
+          else
+            notes='macOS Preview release. This release intentionally contains only the signed, notarised universal macOS package, updater, checksums, SBOM, and provenance.'
+          fi
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease --notes "$notes"
+
+  finalize_windows:
+    name: Publish independently verified Windows prerelease
+    needs: [prepare, windows]
+    if: >-
+      always() && needs.prepare.outputs.publish == 'true'
+      && needs.prepare.result == 'success'
+      && needs.prepare.outputs.platform == 'windows'
+      && needs.windows.result == 'success'
+    runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the Windows-only draft prerelease
         env:
           CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'piqae/piqae' }}
           GH_REPO: ${{ github.repository }}
@@ -640,10 +642,103 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         shell: bash
         run: |
+          set -euo pipefail
           if [[ "$GITHUB_REPOSITORY" != "$CANONICAL_REPOSITORY" ]]; then
             echo "GitHub release publishing is enabled only in $CANONICAL_REPOSITORY." >&2
             exit 1
           fi
           gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' | grep -Fx true
           gh release edit "$RELEASE_TAG" --draft=false --prerelease \
-            --notes "macOS Preview release. This release intentionally contains only the signed, notarised universal macOS package, updater, checksums, SBOM, and provenance. Windows, Linux, container, and embedded SDK artifacts require the all-platform certification lane."
+            --notes 'Windows Preview release. This release intentionally contains only the Authenticode- and WinSparkle-verified Windows package, updater metadata, checksums, SBOM, and provenance.'
+
+  certify_all:
+    name: Certify all selected release lanes
+    needs:
+      - prepare
+      - core
+      - macos
+      - windows
+      - apple_sdk
+      - windows_sdk
+      - linux
+      - server
+      - promote_containers
+      - promote_macos
+      - finalize_macos
+    if: >-
+      always() && needs.prepare.result == 'success'
+      && needs.prepare.outputs.aggregate_enabled == 'true'
+    runs-on: ${{ vars.PIQAE_RELEASE_LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Require every effective all-platform lane
+        shell: bash
+        env:
+          CORE_RESULT: ${{ needs.core.result }}
+          MACOS_RESULT: ${{ needs.macos.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
+          WINDOWS_ENABLED: ${{ needs.prepare.outputs.windows_enabled }}
+          APPLE_SDK_RESULT: ${{ needs.apple_sdk.result }}
+          WINDOWS_SDK_RESULT: ${{ needs.windows_sdk.result }}
+          LINUX_RESULT: ${{ needs.linux.result }}
+          CONTAINER_RESULT: ${{ needs.server.result }}
+          PUBLISH: ${{ needs.prepare.outputs.publish }}
+          CONTAINER_PROMOTION_RESULT: ${{ needs.promote_containers.result }}
+          MACOS_PROMOTION_RESULT: ${{ needs.promote_macos.result }}
+          MACOS_FINALIZE_RESULT: ${{ needs.finalize_macos.result }}
+        run: |
+          set -euo pipefail
+          python3 release/tools/release_completion.py \
+            --windows-enabled "$WINDOWS_ENABLED" \
+            --publish "$PUBLISH" \
+            --core "$CORE_RESULT" \
+            --macos "$MACOS_RESULT" \
+            --windows "$WINDOWS_RESULT" \
+            --apple-sdk "$APPLE_SDK_RESULT" \
+            --windows-sdk "$WINDOWS_SDK_RESULT" \
+            --linux "$LINUX_RESULT" \
+            --containers "$CONTAINER_RESULT" \
+            --macos-promotion "$MACOS_PROMOTION_RESULT" \
+            --macos-prerelease "$MACOS_FINALIZE_RESULT" \
+            --container-promotion "$CONTAINER_PROMOTION_RESULT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.prepare.outputs.publish == 'true'
+        with:
+          pattern: piqae-linux-*
+          path: linux-artifacts
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.prepare.outputs.publish == 'true'
+        with:
+          pattern: piqae-node-*-sdk
+          path: sdk-artifacts
+          merge-multiple: true
+      - name: Attach certified candidate assets and record aggregate status
+        if: needs.prepare.outputs.publish == 'true'
+        env:
+          CANONICAL_REPOSITORY: ${{ vars.PIQAE_CANONICAL_REPOSITORY || 'piqae/piqae' }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          WINDOWS_ENABLED: ${{ needs.prepare.outputs.windows_enabled }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" != "$CANONICAL_REPOSITORY" ]]; then
+            echo "GitHub release publishing is enabled only in $CANONICAL_REPOSITORY." >&2
+            exit 1
+          fi
+          gh release view "$RELEASE_TAG" --json isDraft,isPrerelease \
+            --jq '(.isDraft == false and .isPrerelease == true)' | grep -Fx true
+          gh release upload "$RELEASE_TAG" linux-artifacts/* sdk-artifacts/* --clobber
+          if [[ "$WINDOWS_ENABLED" == true ]]; then
+            windows_status='Windows signed candidate and stable publisher passed.'
+          else
+            windows_status='Windows desktop was not selected because it remains Disabled in the support matrix.'
+          fi
+          gh release edit "$RELEASE_TAG" --notes \
+            "Aggregate all-platform certification passed for every effective selected lane. macOS and containers were promoted independently; Linux and embedded SDK candidates are attached as Preview evidence. $windows_status No physical-print or Supported-platform claim is implied."
