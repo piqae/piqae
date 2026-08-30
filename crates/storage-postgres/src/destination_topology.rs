@@ -833,6 +833,20 @@ fn route_observations_semantically_equal(
     canonical == *submitted
 }
 
+fn wake_hint_durations_semantically_equal(stored: &NodeWakeHint, submitted: &NodeWakeHint) -> bool {
+    // PostgreSQL TIMESTAMPTZ stores microseconds. Canonicalise both endpoints
+    // before deriving the duration so a newly inserted nanosecond-precision
+    // hint cannot conflict with its own RETURNING row.
+    stored
+        .expires_at
+        .timestamp_micros()
+        .checked_sub(stored.requested_at.timestamp_micros())
+        == submitted
+            .expires_at
+            .timestamp_micros()
+            .checked_sub(submitted.requested_at.timestamp_micros())
+}
+
 fn map_runtime_observation(
     row: &sqlx::postgres::PgRow,
 ) -> Result<NodeRuntimeObservation, StorageError> {
@@ -1322,7 +1336,7 @@ impl DestinationTopologyRepository for PostgresStore {
         let stored = map_wake_hint(&row)?;
         if stored.reason != hint.reason
             || stored.delivery_channel != hint.delivery_channel
-            || stored.expires_at - stored.requested_at != hint.expires_at - hint.requested_at
+            || !wake_hint_durations_semantically_equal(&stored, hint)
         {
             return Err(StorageError::IdempotencyConflict);
         }
@@ -3077,7 +3091,7 @@ impl DestinationTopologyRepository for MemoryDestinationTopologyRepository {
         {
             return if stored.reason == hint.reason
                 && stored.delivery_channel == hint.delivery_channel
-                && stored.expires_at - stored.requested_at == hint.expires_at - hint.requested_at
+                && wake_hint_durations_semantically_equal(stored, hint)
             {
                 Ok(stored.clone())
             } else {
@@ -4030,6 +4044,37 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn wake_hint_duration_uses_postgres_timestamp_precision() {
+        let timestamp = |value: &str| {
+            DateTime::parse_from_rfc3339(value)
+                .unwrap()
+                .with_timezone(&Utc)
+        };
+        let submitted = NodeWakeHint {
+            id: "wkh_precision".into(),
+            agent_id: "agt_precision".into(),
+            reason: "job_available".into(),
+            delivery_channel: "connected_session".into(),
+            status: "pending".into(),
+            requested_at: timestamp("2026-08-30T01:02:03.123456789Z"),
+            expires_at: timestamp("2026-08-30T01:07:03.123456700Z"),
+            observed_at: None,
+        };
+        let mut stored = submitted.clone();
+        stored.requested_at = timestamp("2026-08-30T01:02:03.123456Z");
+        stored.expires_at = timestamp("2026-08-30T01:07:03.123456Z");
+
+        assert_ne!(
+            stored.expires_at - stored.requested_at,
+            submitted.expires_at - submitted.requested_at
+        );
+        assert!(wake_hint_durations_semantically_equal(&stored, &submitted));
+
+        stored.expires_at += chrono::Duration::microseconds(1);
+        assert!(!wake_hint_durations_semantically_equal(&stored, &submitted));
     }
 
     #[tokio::test]
