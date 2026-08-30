@@ -40,6 +40,51 @@ describe("PrintPacket model", () => {
       );
     }
   });
+  it("ships a valid thermal product label with variant, price, and a safe Code 128 value", () => {
+    const label = starterTemplates.find(
+      ({ id }) => id === "product-label",
+    )!.specification;
+    expect(() => validatePrintPacket(label)).not.toThrow();
+    expect(label.media).toEqual({
+      kind: "label",
+      width_mm: 100,
+      height_mm: 50,
+      margins: { top_mm: 3, right_mm: 3, bottom_mm: 3, left_mm: 3 },
+    });
+
+    const nodes = allNodes(label.body);
+    expect(
+      nodes.find(
+        (node) =>
+          node.type === "conditional" &&
+          node.condition?.type === "exists" &&
+          node.condition.value?.type === "current_path" &&
+          node.condition.value.path?.join(".") === "variant.title",
+      ),
+    ).toBeDefined();
+    expect(
+      nodes.find(
+        (node) =>
+          node.type === "paragraph" &&
+          node.content?.some(
+            (inline: any) =>
+              inline.type === "value" &&
+              inline.value?.type === "format_money" &&
+              inline.value.amount?.type === "current_path" &&
+              inline.value.amount.path?.join(".") === "unitPrice" &&
+              inline.value.currency?.type === "current_path" &&
+              inline.value.currency.path?.join(".") === "currency",
+          ),
+      ),
+    ).toBeDefined();
+    expect(nodes.find((node) => node.type === "barcode")).toMatchObject({
+      value: { type: "current_path", path: ["labelCode128"] },
+      symbology: "code128",
+      width_mm: 70,
+      height_mm: 12,
+      human_readable: true,
+    });
+  });
   it("rejects noncanonical packets and excessive nesting", () => {
     expect(() => parseTemplateEnvelope('{"schema":"unsupported"}')).toThrow(
       "piqae.shopify-printpacket-template/v1",

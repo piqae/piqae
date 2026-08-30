@@ -1044,30 +1044,9 @@
             },
             "children": [
               {
-                "type": "paragraph",
-                "content": [
-                  {
-                    "type": "value",
-                    "value": {
-                      "type": "current_path",
-                      "path": ["title"]
-                    },
-                    "style": {
-                      "bold": true
-                    }
-                  }
-                ]
-              },
-              {
-                "type": "conditional",
-                "condition": {
-                  "type": "exists",
-                  "value": {
-                    "type": "current_path",
-                    "path": ["variant", "title"]
-                  }
-                },
-                "then": [
+                "type": "stack",
+                "gap_mm": 1,
+                "children": [
                   {
                     "type": "paragraph",
                     "content": [
@@ -1075,14 +1054,68 @@
                         "type": "value",
                         "value": {
                           "type": "current_path",
-                          "path": ["variant", "title"]
+                          "path": ["title"]
                         },
-                        "style": {}
+                        "style": {
+                          "bold": true
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "type": "conditional",
+                    "condition": {
+                      "type": "exists",
+                      "value": {
+                        "type": "current_path",
+                        "path": ["variant", "title"]
+                      }
+                    },
+                    "then": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "value",
+                            "value": {
+                              "type": "current_path",
+                              "path": ["variant", "title"]
+                            },
+                            "style": {}
+                          }
+                        ]
+                      }
+                    ],
+                    "else": []
+                  },
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "value",
+                        "value": {
+                          "type": "format_money",
+                          "amount": {
+                            "type": "current_path",
+                            "path": ["unitPrice"]
+                          },
+                          "currency": {
+                            "type": "current_path",
+                            "path": ["currency"]
+                          }
+                        },
+                        "style": {
+                          "bold": true,
+                          "font_size_pt": 14
+                        }
                       }
                     ]
                   }
-                ],
-                "else": []
+                ]
+              },
+              {
+                "type": "spacer",
+                "height_mm": 2
               },
               {
                 "type": "conditional",

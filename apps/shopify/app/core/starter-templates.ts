@@ -306,8 +306,25 @@ const documents = {
           type: "repeat",
           items: current("lineItems"),
           children: [
-            currentValue(["title"], true),
-            optionalCurrentValue(["variant", "title"]),
+            {
+              type: "stack",
+              gap_mm: 1,
+              children: [
+                currentValue(["title"], true),
+                optionalCurrentValue(["variant", "title"]),
+                {
+                  type: "paragraph",
+                  content: [
+                    {
+                      type: "value",
+                      value: currentMoney("unitPrice"),
+                      style: { bold: true, font_size_pt: 14 },
+                    },
+                  ],
+                },
+              ],
+            },
+            { type: "spacer", height_mm: 2 },
             {
               type: "conditional",
               condition: { type: "exists", value: current("labelCode128") },

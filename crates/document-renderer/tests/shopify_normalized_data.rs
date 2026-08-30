@@ -47,6 +47,17 @@ fn starter_specifications() -> BTreeMap<String, Value> {
     .unwrap_or_else(|error| panic!("Shopify starter fixture must be valid JSON: {error}"))
 }
 
+fn contains_value(value: &Value, expected: &Value) -> bool {
+    if value == expected {
+        return true;
+    }
+    match value {
+        Value::Array(values) => values.iter().any(|value| contains_value(value, expected)),
+        Value::Object(values) => values.values().any(|value| contains_value(value, expected)),
+        _ => false,
+    }
+}
+
 fn path(parts: &[&str]) -> Value {
     json!({ "type": "path", "path": parts })
 }
@@ -164,6 +175,58 @@ fn editor_generated_packet_renders_single_bulk_and_sparse_draft_data() {
         assert!(pages > 0, "editor packet must render {fixture_name} data");
         assert!(pdf.starts_with(b"%PDF-1.4"));
     }
+}
+
+#[test]
+fn exact_product_label_starter_renders_variant_price_and_safe_barcode_data() {
+    let specification = starter_specifications()
+        .remove("product-label")
+        .unwrap_or_else(|| panic!("product label starter must exist"));
+    assert_eq!(
+        specification["media"],
+        json!({
+            "kind": "label",
+            "width_mm": 100,
+            "height_mm": 50,
+            "margins": {
+                "top_mm": 3,
+                "right_mm": 3,
+                "bottom_mm": 3,
+                "left_mm": 3
+            }
+        })
+    );
+    assert!(contains_value(
+        &specification,
+        &json!({
+            "type": "format_money",
+            "amount": current(&["unitPrice"]),
+            "currency": current(&["currency"])
+        })
+    ));
+    assert!(contains_value(
+        &specification,
+        &json!({
+            "type": "barcode",
+            "value": current(&["labelCode128"]),
+            "symbology": "code128",
+            "width_mm": 70,
+            "height_mm": 12,
+            "human_readable": true
+        })
+    ));
+
+    let data = fixture_data();
+    let item = &data["orders"][0]["lineItems"][0];
+    assert_eq!(item["title"], json!("House Coffee"));
+    assert_eq!(item["variant"]["title"], json!("500g / Whole Beans"));
+    assert_eq!(item["unitPrice"], json!(10));
+    assert_eq!(item["currency"], json!("NZD"));
+    assert_eq!(item["labelCode128"], json!("942000000001"));
+
+    let (pages, pdf) = render_with_data(specification, &data);
+    assert!(pages > 0, "product label must render variant data");
+    assert!(pdf.starts_with(b"%PDF-1.4"));
 }
 
 #[test]
