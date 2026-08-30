@@ -46,6 +46,10 @@ export default [
     "api/renders/:renderId/download",
     "routes/api.renders.$renderId.download.tsx",
   ),
+  route(
+    "api/editor-preview-renders/:renderId/artifact",
+    "routes/api.editor-preview-renders.$renderId.artifact.tsx",
+  ),
   route("app", "routes/app.tsx", [
     index("routes/app._index.tsx"),
     route("print", "routes/app.print.tsx"),

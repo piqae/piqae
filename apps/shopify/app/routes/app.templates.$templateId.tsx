@@ -1,5 +1,11 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { Form, redirect, useActionData, useLoaderData } from "react-router";
+import {
+  Form,
+  redirect,
+  useActionData,
+  useFetcher,
+  useLoaderData,
+} from "react-router";
 import { useEffect, useRef, useState } from "react";
 import shopify from "../shopify.server";
 import {
@@ -12,10 +18,11 @@ import {
 } from "../core/workflows.server";
 import {
   PrintPacketEditor,
-  PrintPacketPreview,
+  PdfPreviewWorkspace,
   createPrintPacketEditorHistory,
   DocumentSettingsFields,
   Icon,
+  type PdfPreviewState,
 } from "../components/PrintPacketEditor";
 import { starterTemplates } from "../core/starter-templates";
 import {
@@ -41,6 +48,10 @@ import {
   canonicalToLiquid,
   liquidToCanonical,
 } from "../core/liquid-document-adapter";
+import {
+  createEditorDraftPreview,
+  fetchLatestOrderSummary,
+} from "../core/editor-preview.server";
 export type EditorMode = TemplateEditorMode;
 export const liquidCompatibilityNotice = (mode: EditorMode) =>
   mode === "liquid"
@@ -73,6 +84,38 @@ export const editorLiquidForMode = (
   _mode: TemplateEditorMode,
   liquid: string,
 ) => liquid;
+export const printPacketsEqual = (left: PrintPacket, right: PrintPacket) =>
+  JSON.stringify(left) === JSON.stringify(right);
+export const EDITOR_PREVIEW_CLIENT_ERROR =
+  "The PDF preview could not be created. Try again.";
+
+export function compileDocumentForPreview(
+  mode: TemplateEditorMode,
+  liquid: string,
+  document: PrintPacket,
+):
+  | { ok: true; document: PrintPacket; normalizedLiquid: string }
+  | { ok: false; error: string } {
+  if (mode !== "liquid")
+    return { ok: true, document, normalizedLiquid: liquid };
+  const conversion = liquidToCanonical(liquid, document);
+  if (!conversion.ok) {
+    const diagnostic = conversion.diagnostics[0]!;
+    return {
+      ok: false,
+      error: `${diagnostic.message} (${diagnostic.line}:${diagnostic.column})`,
+    };
+  }
+  return {
+    ok: true,
+    document: conversion.document,
+    normalizedLiquid: conversion.normalizedSource,
+  };
+}
+
+function newPreviewRequestId() {
+  return globalThis.crypto.randomUUID();
+}
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { session } = await shopify.authenticate.admin(request);
   const template =
@@ -121,21 +164,76 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       printTargetError = "Print targets are temporarily unavailable";
     }
   }
+  const settings = await workflows().getSettings(session.shop);
   return {
     template,
     initialTemplate,
     printTargets,
     printTargetError,
-    customFields: shopifyCustomDocumentFields(
-      (await workflows().getSettings(session.shop)).metafieldAllowlist,
-    ),
+    customFields: shopifyCustomDocumentFields(settings.metafieldAllowlist),
   };
 }
 export async function action({ request, params }: ActionFunctionArgs) {
   const { session, admin } = await shopify.authenticate.admin(request);
   const form = await request.formData();
+  const intent = String(form.get("intent") ?? "draft");
+  if (intent === "editor_preview") {
+    let requestId = "";
+    try {
+      requestId = bounded(form, "previewRequestId", 128, true);
+      if (!/^[A-Za-z0-9-]{16,128}$/.test(requestId))
+        throw new Error("Preview request ID is invalid");
+      const envelope = parseTemplateEnvelope(
+        validateDocumentSource(bounded(form, "source", 262144, true)),
+      );
+      validatePrintPacket(envelope.document);
+      request.signal.throwIfAborted();
+      const services = createProductionServices();
+      const link = await services.repository.get(session.shop);
+      if (!link) throw new Error("Connect Piqae before opening a PDF preview");
+      const latestOrder = await fetchLatestOrderSummary(admin);
+      if (!latestOrder)
+        return previewJson({
+          ok: true,
+          requestId,
+          preview: null,
+          noOrder: true,
+        });
+      const settings = await workflows().getSettings(session.shop);
+      const preview = await createEditorDraftPreview({
+        admin,
+        shop: session.shop,
+        latestOrder,
+        specification: envelope.document,
+        assets: envelope.assets,
+        requestKey: requestId,
+        metafieldAllowlist: settings.metafieldAllowlist,
+        client: services.clientForLink(link),
+        renders: services.repository,
+        signal: request.signal,
+      });
+      return previewJson({
+        ok: true,
+        requestId,
+        preview: {
+          artifactUrl: `/api/editor-preview-renders/${encodeURIComponent(preview.renderId)}/artifact`,
+        },
+        noOrder: false,
+      });
+    } catch (error) {
+      return previewJson(
+        {
+          ok: false,
+          requestId,
+          preview: null,
+          noOrder: false,
+          error: EDITOR_PREVIEW_CLIENT_ERROR,
+        },
+        { status: 422 },
+      );
+    }
+  }
   try {
-    const intent = String(form.get("intent") ?? "draft");
     const expectedDraftRevisionValue = bounded(
       form,
       "expectedDraftRevision",
@@ -343,11 +441,46 @@ export async function action({ request, params }: ActionFunctionArgs) {
     );
   }
 }
+
+function previewJson(value: unknown, init?: ResponseInit) {
+  const headers = new Headers(init?.headers);
+  headers.set("cache-control", "private, no-store");
+  headers.set("referrer-policy", "no-referrer");
+  headers.set("x-content-type-options", "nosniff");
+  return Response.json(value, { ...init, headers });
+}
 const WORKSPACES = [
   ["visual", "Design", "design"],
   ["liquid", "Code", "code"],
   ["preview", "Preview", "preview"],
 ] as const;
+
+export type EditorPreviewResponse = {
+  ok: boolean;
+  requestId: string;
+  preview: { artifactUrl: string } | null;
+  noOrder: boolean;
+  error?: string;
+};
+
+export function previewStateForResponse(
+  activeRequestId: string,
+  response: EditorPreviewResponse,
+): PdfPreviewState | null {
+  if (!activeRequestId || response.requestId !== activeRequestId) return null;
+  if (!response.ok)
+    return {
+      status: "error",
+      message: response.error ?? "The PDF preview could not be created",
+    };
+  if (response.noOrder) return { status: "empty" };
+  if (response.preview)
+    return { status: "ready", artifactUrl: response.preview.artifactUrl };
+  return {
+    status: "error",
+    message: "The PDF preview response was incomplete",
+  };
+}
 
 export default function TemplateEditor() {
   const {
@@ -386,6 +519,12 @@ export default function TemplateEditor() {
     initial.editor.mode === "liquid" ? "liquid" : "visual",
   );
   const [error, setError] = useState("");
+  const previewFetcher = useFetcher<EditorPreviewResponse>();
+  const activePreviewRequest = useRef("");
+  const [pdfPreview, setPdfPreview] = useState<PdfPreviewState>({
+    status: "loading",
+  });
+  const [previewSource, setPreviewSource] = useState<string | null>(null);
   const starter = Boolean(initial.system?.immutable);
   const compatibleTargets = printTargets.filter(
     (target) =>
@@ -418,19 +557,22 @@ export default function TemplateEditor() {
       setWorkspace("visual");
     }
   }, [result]);
-  const switchMode = (next: TemplateEditorMode) => {
+  const switchMode = (next: TemplateEditorMode): boolean => {
     if (mode === "liquid" && next !== "liquid") {
       const conversion = liquidToCanonical(liquid, document);
       if (!conversion.ok) {
         const d = conversion.diagnostics[0]!;
         setError(`${d.message} (${d.line}:${d.column})`);
-        return;
+        return false;
       }
-      setDocument(conversion.document);
+      if (!printPacketsEqual(document, conversion.document))
+        setDocument(conversion.document);
+      setLiquid(conversion.normalizedSource);
     } else if (mode !== "liquid" && next === "liquid")
       setLiquid(canonicalToLiquid(document).source);
     setError("");
     setMode(next);
+    return true;
   };
   const source = serializeTemplateEnvelope({
     ...initial,
@@ -444,9 +586,63 @@ export default function TemplateEditor() {
     },
   });
   const switchWorkspace = (next: "visual" | "preview" | "liquid") => {
-    if (next !== "preview") switchMode(next);
+    if (next === "preview") {
+      const compilation = compileDocumentForPreview(mode, liquid, document);
+      if (!compilation.ok) {
+        setError(compilation.error);
+        return;
+      }
+      setPreviewSource(
+        serializeTemplateEnvelope({
+          ...initial,
+          document: compilation.document,
+          editor: {
+            mode,
+            liquid: compilation.normalizedLiquid,
+            roundTrip: "lossless",
+            warnings: [],
+            ...(importMetadata ? { import: importMetadata } : {}),
+          },
+        }),
+      );
+      setError("");
+    } else if (!switchMode(next)) return;
+    if (next !== "preview") {
+      activePreviewRequest.current = "";
+      setPreviewSource(null);
+      previewFetcher.reset({ reason: "Preview workspace closed" });
+    }
+    setPdfPreview({ status: "loading" });
     setWorkspace(next);
   };
+  useEffect(() => {
+    if (workspace !== "preview" || !previewSource) {
+      activePreviewRequest.current = "";
+      return;
+    }
+    const requestId = newPreviewRequestId();
+    activePreviewRequest.current = requestId;
+    setPdfPreview({ status: "loading" });
+    const form = new FormData();
+    form.set("intent", "editor_preview");
+    form.set("previewRequestId", requestId);
+    form.set("source", previewSource);
+    previewFetcher.submit(form, { method: "post" });
+    return () => {
+      if (activePreviewRequest.current === requestId)
+        activePreviewRequest.current = "";
+      previewFetcher.reset({ reason: "Preview request superseded" });
+    };
+  }, [workspace, previewSource]);
+  useEffect(() => {
+    const preview = previewFetcher.data;
+    if (!preview || workspace !== "preview") return;
+    const state = previewStateForResponse(
+      activePreviewRequest.current,
+      preview,
+    );
+    if (state) setPdfPreview(state);
+  }, [previewFetcher.data, workspace]);
   const formRef = useRef<HTMLFormElement>(null);
   const intentRef = useRef<HTMLInputElement>(null);
   const submitWithIntent = (intent: "draft" | "publish" | "delete") => {
@@ -773,9 +969,8 @@ export default function TemplateEditor() {
               <div className="piqae-workspace-toolbar">{workspaceControls}</div>
             ) : null}
             {workspace === "preview" ? (
-              <PrintPacketPreview
-                value={document}
-                stock={selectedTarget?.stock}
+              <PdfPreviewWorkspace
+                state={pdfPreview}
                 workspaceControls={workspaceControls}
               />
             ) : workspace === "visual" ? (

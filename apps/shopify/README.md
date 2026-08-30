@@ -56,18 +56,17 @@ the binding and stock immediately before handoff.
 
 ## Editor preview data
 
-The in-editor Preview is a source and layout preview. It renders one
-representative pass through collection-driven content and keeps Shopify data
-bindings visible; it never fetches customer records merely because a merchant
-opens an editor. The authenticated print flow remains the authority for a
-data-resolved PDF.
+Opening an editor never fetches an order or serializes buyer data into its HTML.
+Preview is an explicit authenticated action: it validates the bounded current
+draft, selects and hydrates the latest accessible order on the server, and asks
+Piqae's canonical renderer for a short-lived PDF. The browser receives only an
+opaque same-origin artifact URL; customer, address, line-item, and metafield
+data remain server-side. Leaving Preview removes the PDF from the page and stale
+responses are ignored.
 
-A recent-order preview of an unsaved draft requires a server-render endpoint
-that accepts that bounded draft plus authenticated order input. The current
-preview endpoint intentionally accepts only immutable published revisions, and
-the browser does not carry a second, partial PrintPacket evaluator. Until that
-contract exists, the editor must not imitate a rendered order with a divergent
-client-side implementation or serialize buyer data into the page by default.
+Preview therefore uses the same PrintPacket/PDF semantics as printing. It does
+not mount the visual editor canvas or maintain a second partial evaluator, and
+it never saves, publishes, or otherwise mutates the merchant's current draft.
 
 ## Piqae test runtime
 
