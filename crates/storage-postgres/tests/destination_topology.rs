@@ -1379,6 +1379,15 @@ async fn revoking_node_retires_only_safe_routes_and_preserves_accepted_evidence(
         .expect("node acceptance evidence");
     sqlx::query("UPDATE jobs SET state='agent_accepted' WHERE workspace_id=$1 AND environment_id=$2 AND id='job_revoke_accepted'")
         .bind(scope.workspace_id.to_string()).bind(scope.environment_id.to_string()).execute(store.pool()).await.expect("accepted job state fixture");
+    // Exercise the nanosecond-to-microsecond round trip used by PostgreSQL.
+    // Deriving these endpoints independently must not make the inserted hint
+    // conflict with the row returned by its own INSERT.
+    let wake_requested_at = DateTime::parse_from_rfc3339("2026-08-30T01:02:03.123456789Z")
+        .expect("wake request timestamp")
+        .with_timezone(&Utc);
+    let wake_expires_at = DateTime::parse_from_rfc3339("2026-08-30T01:07:03.123456700Z")
+        .expect("wake expiry timestamp")
+        .with_timezone(&Utc);
     store
         .create_node_wake_hint(
             scope,
@@ -1388,8 +1397,8 @@ async fn revoking_node_retires_only_safe_routes_and_preserves_accepted_evidence(
                 reason: "job_available".into(),
                 delivery_channel: "connected_session".into(),
                 status: "pending".into(),
-                requested_at: Utc::now(),
-                expires_at: Utc::now() + Duration::minutes(5),
+                requested_at: wake_requested_at,
+                expires_at: wake_expires_at,
                 observed_at: None,
             },
             "wake-revoke-node",
