@@ -430,48 +430,186 @@
   position: relative;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.25rem;
+  min-width: 0;
 }
 .piqae-canvas-table-column strong {
   min-width: 1rem;
   flex: 1;
 }
 .piqae-canvas-column-actions {
-  display: none;
+  position: absolute;
+  z-index: 6;
+  bottom: calc(100% + 0.35rem);
+  left: 50%;
+  display: inline-flex;
   gap: 0.1rem;
-  padding: 0;
+  padding: 0.2rem;
+  border: 1px solid #c9cccf;
+  border-radius: 0.4rem;
+  background: white;
+  box-shadow: 0 4px 12px rgb(0 0 0 / 14%);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%);
+  transition:
+    opacity 120ms ease,
+    visibility 120ms ease;
+  visibility: hidden;
+}
+.piqae-canvas-table-row .piqae-canvas-column-actions {
+  padding: 0.2rem;
 }
 .piqae-canvas-table-column:hover .piqae-canvas-column-actions,
 .piqae-canvas-table-column:focus-within .piqae-canvas-column-actions {
-  display: inline-flex;
+  opacity: 1;
+  pointer-events: auto;
+  visibility: visible;
 }
 .piqae-canvas-column-actions button,
-.piqae-canvas-add-column {
+.piqae-canvas-add-column,
+.piqae-canvas-add-row {
+  display: inline-grid;
+  min-width: 1.75rem;
+  min-height: 1.75rem;
+  place-items: center;
   padding: 0.15rem 0.3rem;
   border: 1px solid #c9cccf;
   border-radius: 0.25rem;
   background: white;
+  color: #202223;
   font: inherit;
+  cursor: pointer;
+}
+.piqae-canvas-column-actions button:hover:not(:disabled),
+.piqae-canvas-column-actions button:focus-visible,
+.piqae-canvas-add-column:hover,
+.piqae-canvas-add-column:focus-visible,
+.piqae-canvas-add-row:hover,
+.piqae-canvas-add-row:focus-visible {
+  border-color: #005bd3;
+  color: #005bd3;
+  outline: 2px solid #91c0ff;
+  outline-offset: 1px;
+}
+.piqae-canvas-column-insertion-layer {
+  position: absolute;
+  z-index: 5;
+  inset: 0;
+  pointer-events: none;
+}
+.piqae-canvas-column-insertion-boundary {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  pointer-events: none;
+}
+.piqae-canvas-column-insertion-boundary::before {
+  position: absolute;
+  top: -0.35rem;
+  left: -0.5rem;
+  width: 1rem;
+  height: 0.9rem;
+  content: "";
+  pointer-events: auto;
+}
+.piqae-canvas-column-insertion-guide {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -1px;
+  width: 2px;
+  background: #005bd3;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
 }
 .piqae-canvas-add-column {
   position: absolute;
-  top: 50%;
-  right: -0.875rem;
-  display: inline-grid;
+  bottom: calc(100% + 0.35rem);
+  left: 0;
   width: 1.75rem;
   height: 1.75rem;
-  place-items: center;
   padding: 0;
   opacity: 0;
+  pointer-events: auto;
   cursor: pointer;
-  transform: translateY(-50%);
+  transform: translateX(-50%);
   transition: opacity 120ms ease;
 }
-.piqae-canvas-table:hover .piqae-canvas-add-column,
-.piqae-canvas-table:focus-within .piqae-canvas-add-column,
+.piqae-canvas-column-insertion-boundary:hover
+  .piqae-canvas-column-insertion-guide,
+.piqae-canvas-column-insertion-boundary:focus-within
+  .piqae-canvas-column-insertion-guide,
+.piqae-canvas-column-insertion-boundary:hover .piqae-canvas-add-column,
+.piqae-canvas-column-insertion-boundary:focus-within .piqae-canvas-add-column,
 .piqae-canvas-add-column:focus-visible {
   opacity: 1;
+}
+.piqae-canvas-table-static-body,
+.piqae-canvas-table-static-row {
+  position: relative;
+}
+.piqae-canvas-table-static-body {
+  min-height: 2.5rem;
+}
+.piqae-canvas-table-static-cell {
+  min-width: 0;
+  white-space: pre-wrap;
+}
+.piqae-canvas-table-static-empty {
+  padding: 0.7rem 0.45rem;
+  color: #616161;
+  font-size: 0.75rem;
+}
+.piqae-canvas-row-insertion-boundary {
+  position: absolute;
+  z-index: 5;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 0.9rem;
+  pointer-events: auto;
+  transform: translateY(-50%);
+}
+.piqae-canvas-table-static-row > .piqae-canvas-row-insertion-boundary {
+  top: 100%;
+}
+.piqae-canvas-row-insertion-guide {
+  position: absolute;
+  top: calc(50% - 1px);
+  right: 0;
+  left: 0;
+  height: 2px;
+  background: #005bd3;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+.piqae-canvas-add-row {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  opacity: 0;
+  transform: translate(-50%, -50%);
+  transition: opacity 120ms ease;
+}
+.piqae-canvas-row-insertion-boundary:hover .piqae-canvas-row-insertion-guide,
+.piqae-canvas-row-insertion-boundary:focus-within
+  .piqae-canvas-row-insertion-guide,
+.piqae-canvas-row-insertion-boundary:hover .piqae-canvas-add-row,
+.piqae-canvas-row-insertion-boundary:focus-within .piqae-canvas-add-row,
+.piqae-canvas-add-row:focus-visible {
+  opacity: 1;
+}
+@media (hover: none) {
+  .piqae-canvas-add-column,
+  .piqae-canvas-add-row {
+    opacity: 1;
+  }
 }
 .piqae-canvas-column-resize {
   position: absolute;

@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   insertBlockAfterPath,
   insertBlockAtPath,
+  insertStaticTableRowAt,
+  insertTableColumnAt,
   moveBlockAtPath,
   PrintPacketEditor,
   PrintPacketPreview,
@@ -76,6 +78,26 @@ const tablePacket: PrintPacket = {
           align: "right",
         },
       ],
+    },
+  ],
+};
+
+const staticTablePacket: PrintPacket = {
+  format: "printpacket/v1",
+  media: { kind: "paged", size: "a4" },
+  body: [
+    {
+      ...(tablePacket.body[0] as Extract<
+        PrintPacket["body"][number],
+        { type: "table" }
+      >),
+      items: {
+        type: "literal",
+        value: [
+          { title: "Coffee", quantity: 2 },
+          { title: "Filters", quantity: 1 },
+        ],
+      },
     },
   ],
 };
@@ -167,6 +189,17 @@ function authoredBody(value: PrintPacket) {
     wrapper.items.path.join(".") === "orders"
     ? wrapper.children
     : value.body;
+}
+
+function testInlineLabel(
+  content: Extract<
+    PrintPacket["body"][number],
+    { type: "table" }
+  >["columns"][number]["header"],
+) {
+  return content
+    .map((item) => (item.type === "text" ? item.value : "Value"))
+    .join("");
 }
 
 function StatefulPrintPacketEditor({
@@ -1018,19 +1051,52 @@ describe("Shopify document editor layout", () => {
     );
   });
 
-  it("keeps table cells directly editable and moves add-column into the header", async () => {
+  it("overlays accessible insertion controls at every table column boundary", async () => {
     const onChange = vi.fn();
     const page = await render(
       <PrintPacketEditor value={tablePacket} onChange={onChange} />,
     );
     const table = page.querySelector(".piqae-canvas-table")!;
     const header = table.querySelector(".piqae-canvas-table-head")!;
-    const addColumn = table.querySelector<HTMLButtonElement>(
-      'button[aria-label="Add table column"]',
+    const insertionLayer = header.querySelector<HTMLElement>(
+      '.piqae-canvas-column-insertion-layer[role="group"]',
     )!;
+    const boundaries = [
+      ...insertionLayer.querySelectorAll<HTMLElement>(
+        ".piqae-canvas-column-insertion-boundary",
+      ),
+    ];
+    const addColumns = boundaries.map(
+      (boundary) => boundary.querySelector<HTMLButtonElement>("button")!,
+    );
 
-    expect(header.contains(addColumn)).toBe(true);
-    expect(addColumn.textContent).not.toContain("Add column");
+    expect(insertionLayer.parentElement).toBe(header);
+    expect(boundaries.map((item) => item.dataset.columnInsertionIndex)).toEqual(
+      ["0", "1", "2"],
+    );
+    expect(boundaries.map((item) => item.style.left)).toEqual([
+      "0%",
+      "50%",
+      "100%",
+    ]);
+    expect(
+      addColumns.map((button) => button.getAttribute("aria-label")),
+    ).toEqual([
+      "Add table column before Item",
+      "Add table column between Item and Quantity",
+      "Add table column after Quantity",
+    ]);
+    expect(addColumns.every((button) => button.tabIndex === 0)).toBe(true);
+    expect(
+      addColumns.every(
+        (button) => button.title === button.getAttribute("aria-label"),
+      ),
+    ).toBe(true);
+    expect(
+      table.querySelector(
+        ".piqae-canvas-table-column .piqae-canvas-add-column",
+      ),
+    ).toBeNull();
     expect(
       table
         .querySelector<HTMLElement>("strong[contenteditable]")
@@ -1044,11 +1110,165 @@ describe("Shopify document editor layout", () => {
         ?.getAttribute("contenteditable"),
     ).toBe("true");
 
-    await act(async () => addColumn.click());
+    await act(async () => addColumns[1]!.click());
     const nextDocument = onChange.mock.lastCall?.[0] as PrintPacket;
     const nextTable = authoredBody(nextDocument)[0];
     expect(nextTable.type).toBe("table");
-    if (nextTable.type === "table") expect(nextTable.columns).toHaveLength(3);
+    if (nextTable.type === "table") {
+      expect(nextTable.columns).toHaveLength(3);
+      expect(
+        nextTable.columns.map((column) => testInlineLabel(column.header)),
+      ).toEqual(["Item", "Column", "Quantity"]);
+    }
+  });
+
+  it("inserts columns at exact model boundaries without mutating the source", () => {
+    const table = tablePacket.body[0];
+    if (table?.type !== "table") throw new Error("table missing");
+
+    const atStart = insertTableColumnAt(table, 0);
+    const between = insertTableColumnAt(table, 1);
+    const atEnd = insertTableColumnAt(table, 2);
+
+    expect(table.columns).toHaveLength(2);
+    expect(
+      atStart.columns.map((column) => testInlineLabel(column.header)),
+    ).toEqual(["Column", "Item", "Quantity"]);
+    expect(
+      between.columns.map((column) => testInlineLabel(column.header)),
+    ).toEqual(["Item", "Column", "Quantity"]);
+    expect(
+      atEnd.columns.map((column) => testInlineLabel(column.header)),
+    ).toEqual(["Item", "Quantity", "Column"]);
+  });
+
+  it("adds static rows before, between and after with overlaid accessible boundaries", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={staticTablePacket} onChange={onChange} />,
+    );
+    const table = page.querySelector<HTMLElement>(".piqae-canvas-table")!;
+    const body = table.querySelector<HTMLElement>(
+      '.piqae-canvas-table-static-body[aria-label="Static table rows"]',
+    )!;
+    const boundaries = [
+      ...body.querySelectorAll<HTMLElement>(
+        ".piqae-canvas-row-insertion-boundary",
+      ),
+    ];
+    const buttons = boundaries.map(
+      (boundary) => boundary.querySelector<HTMLButtonElement>("button")!,
+    );
+
+    expect(boundaries.map((item) => item.dataset.rowInsertionIndex)).toEqual([
+      "0",
+      "1",
+      "2",
+    ]);
+    expect(buttons.map((button) => button.getAttribute("aria-label"))).toEqual([
+      "Add table row before first row",
+      "Add table row between rows 1 and 2",
+      "Add table row after last row",
+    ]);
+    expect(buttons.every((button) => button.tabIndex === 0)).toBe(true);
+    expect(
+      body.querySelectorAll(".piqae-canvas-row-insertion-guide"),
+    ).toHaveLength(3);
+
+    await act(async () => buttons[1]!.click());
+    const nextDocument = onChange.mock.lastCall?.[0] as PrintPacket;
+    const nextTable = authoredBody(nextDocument)[0];
+    expect(nextTable.type).toBe("table");
+    if (nextTable.type !== "table" || nextTable.items.type !== "literal")
+      return;
+    expect(nextTable.items.value).toEqual([
+      { title: "Coffee", quantity: 2 },
+      {},
+      { title: "Filters", quantity: 1 },
+    ]);
+  });
+
+  it("inserts static rows at exact model boundaries without mutating source rows", () => {
+    const table = staticTablePacket.body[0];
+    if (
+      table?.type !== "table" ||
+      table.items.type !== "literal" ||
+      !Array.isArray(table.items.value)
+    )
+      throw new Error("static table missing");
+
+    const atStart = insertStaticTableRowAt(table, 0);
+    const between = insertStaticTableRowAt(table, 1);
+    const atEnd = insertStaticTableRowAt(table, 2);
+    const rows = (candidate: typeof table) =>
+      candidate.items.type === "literal" && Array.isArray(candidate.items.value)
+        ? candidate.items.value
+        : [];
+
+    expect(table.items.value).toEqual([
+      { title: "Coffee", quantity: 2 },
+      { title: "Filters", quantity: 1 },
+    ]);
+    expect(rows(atStart)).toEqual([
+      {},
+      { title: "Coffee", quantity: 2 },
+      { title: "Filters", quantity: 1 },
+    ]);
+    expect(rows(between)).toEqual([
+      { title: "Coffee", quantity: 2 },
+      {},
+      { title: "Filters", quantity: 1 },
+    ]);
+    expect(rows(atEnd)).toEqual([
+      { title: "Coffee", quantity: 2 },
+      { title: "Filters", quantity: 1 },
+      {},
+    ]);
+  });
+
+  it("edits simple current-path cells in a static table without changing row order", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={staticTablePacket} onChange={onChange} />,
+    );
+    const cell = page.querySelector<HTMLElement>(
+      '[data-table-row-index="0"] [role="textbox"][aria-label="Item row 1"]',
+    )!;
+
+    expect(cell.getAttribute("contenteditable")).toBe("true");
+    expect(cell.getAttribute("aria-readonly")).toBe("false");
+    await act(async () => {
+      cell.textContent = "Tea";
+      cell.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+
+    const nextDocument = onChange.mock.lastCall?.[0] as PrintPacket;
+    const nextTable = authoredBody(nextDocument)[0];
+    expect(nextTable.type).toBe("table");
+    if (nextTable.type !== "table" || nextTable.items.type !== "literal")
+      return;
+    expect(nextTable.items.value).toEqual([
+      { title: "Tea", quantity: 2 },
+      { title: "Filters", quantity: 1 },
+    ]);
+  });
+
+  it("does not expose or model arbitrary rows for repeating tables", async () => {
+    const table = tablePacket.body[0];
+    if (table?.type !== "table") throw new Error("table missing");
+    expect(insertStaticTableRowAt(table, 0)).toBe(table);
+
+    const page = await render(
+      <PrintPacketEditor value={tablePacket} onChange={vi.fn()} />,
+    );
+    expect(
+      page.querySelector(".piqae-canvas-row-insertion-boundary"),
+    ).toBeNull();
+    expect(
+      page
+        .querySelector(".piqae-canvas-table-binding-row")
+        ?.getAttribute("aria-label"),
+    ).toContain("Repeating table row from");
   });
 
   it("selects and removes table empty-state content without changing the table", async () => {
