@@ -19,6 +19,7 @@ import {
   replaceBlockAtPath,
   siblingsAtPath,
   orderBatchPresentation,
+  tableColumnResizeGeometry,
 } from "../app/components/PrintPacketEditor";
 import type { PrintPacket } from "../app/core/template-model";
 import { starterTemplates } from "../app/core/starter-templates";
@@ -80,6 +81,27 @@ const tablePacket: PrintPacket = {
           align: "right",
         },
       ],
+    },
+  ],
+};
+
+const unequalTablePacket: PrintPacket = {
+  ...tablePacket,
+  body: [
+    {
+      ...(tablePacket.body[0] as Extract<
+        PrintPacket["body"][number],
+        { type: "table" }
+      >),
+      columns: (
+        tablePacket.body[0] as Extract<
+          PrintPacket["body"][number],
+          { type: "table" }
+        >
+      ).columns.map((column, index) => ({
+        ...column,
+        width: index === 0 ? 1 : 3,
+      })),
     },
   ],
 };
@@ -239,6 +261,16 @@ function testInlineLabel(
   return content
     .map((item) => (item.type === "text" ? item.value : "Value"))
     .join("");
+}
+
+function pointerEvent(type: string, clientX: number, pointerId = 7) {
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    clientX,
+  });
+  Object.defineProperty(event, "pointerId", { value: pointerId });
+  return event;
 }
 
 function StatefulPrintPacketEditor({
@@ -1163,13 +1195,53 @@ describe("Shopify document editor layout", () => {
 
   it("bridges the pointer path from a column to its overlaid action popover", () => {
     const css = readFileSync(join(process.cwd(), "app/shopify-ui.css"), "utf8");
+    const actionRules = css.match(
+      /\.piqae-canvas-column-actions\s*\{(?<rules>[^}]+)\}/,
+    )?.groups?.rules;
     const bridge = css.match(
       /\.piqae-canvas-column-actions::after\s*\{(?<rules>[^}]+)\}/,
     )?.groups?.rules;
 
+    expect(actionRules).toContain("position: absolute");
+    expect(actionRules).toContain("left: 100%");
+    expect(actionRules).toContain("transform: translateX(-50%)");
     expect(bridge).toContain("top: 100%");
     expect(bridge).toContain("height: 0.35rem");
     expect(bridge).toContain('content: ""');
+  });
+
+  it("keeps the contextual toolbar row out of the workspace layout flow", () => {
+    const css = readFileSync(join(process.cwd(), "app/shopify-ui.css"), "utf8");
+    const selectionRailRules = css.match(
+      /\.piqae-selection-rail\s*\{(?<rules>[^}]+)\}/,
+    )?.groups?.rules;
+
+    expect(selectionRailRules).toContain("position: absolute");
+    expect(selectionRailRules).toContain("top: 100%");
+    expect(selectionRailRules).toContain("transform: translateX(-50%)");
+  });
+
+  it("centres column overlays on the exact weighted separator coordinate", async () => {
+    const page = await render(
+      <PrintPacketEditor value={unequalTablePacket} onChange={vi.fn()} />,
+    );
+    const table = page.querySelector<HTMLElement>(".piqae-canvas-table")!;
+    const columns = [
+      ...table.querySelectorAll<HTMLElement>(".piqae-canvas-table-column"),
+    ];
+    const separatorBoundary = table.querySelector<HTMLElement>(
+      '[data-column-insertion-index="1"]',
+    )!;
+    const firstActions = columns[0]!.querySelector<HTMLElement>(
+      ".piqae-canvas-column-actions",
+    )!;
+
+    expect(columns.map((column) => column.style.flex)).toEqual([
+      "1 1 0%",
+      "3 1 0%",
+    ]);
+    expect(separatorBoundary.style.left).toBe("25%");
+    expect(firstActions.parentElement).toBe(columns[0]);
   });
 
   it("inserts columns at exact model boundaries without mutating the source", () => {
@@ -1478,6 +1550,155 @@ describe("Shopify document editor layout", () => {
         >
       ).columns.map((column) => column.cell),
     );
+  });
+
+  it("previews pointer resize without layout mutation and commits once", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <PrintPacketEditor value={unequalTablePacket} onChange={onChange} />,
+    );
+    const table = page.querySelector<HTMLElement>(".piqae-canvas-table")!;
+    const columns = [
+      ...table.querySelectorAll<HTMLElement>(".piqae-canvas-table-column"),
+    ];
+    const separator = page.querySelector<HTMLElement>(
+      '[role="separator"][aria-label="Resize Item column"]',
+    )!;
+    let rect = {
+      left: 100,
+      width: 800,
+      right: 900,
+      top: 0,
+      bottom: 120,
+      height: 120,
+      x: 100,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect;
+    vi.spyOn(table, "getBoundingClientRect").mockImplementation(() => rect);
+    const captured = new Set<number>();
+    separator.setPointerCapture = vi.fn((pointerId) => captured.add(pointerId));
+    separator.hasPointerCapture = vi.fn((pointerId) => captured.has(pointerId));
+    separator.releasePointerCapture = vi.fn((pointerId) =>
+      captured.delete(pointerId),
+    );
+    const originalFlex = columns.map((column) => column.style.flex);
+    const originalTableStyle = table.getAttribute("style");
+
+    await act(async () => {
+      separator.dispatchEvent(pointerEvent("pointerdown", 300));
+      separator.dispatchEvent(pointerEvent("pointermove", 380));
+    });
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(columns.map((column) => column.style.flex)).toEqual(originalFlex);
+    expect(table.getAttribute("style")).toBe(originalTableStyle);
+    expect(Number.parseFloat(separator.style.transform.slice(11))).toBeCloseTo(
+      80,
+    );
+
+    await act(async () => {
+      separator.dispatchEvent(pointerEvent("pointerup", 380));
+    });
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(separator.style.transform).toBe("");
+    const nextDocument = onChange.mock.lastCall?.[0] as PrintPacket;
+    const nextTable = authoredBody(nextDocument)[0];
+    expect(nextTable.type).toBe("table");
+    if (nextTable.type !== "table") return;
+    expect(nextTable.columns[0]?.width).toBeCloseTo(1.4);
+    expect(nextTable.columns[1]?.width).toBeCloseTo(2.6);
+  });
+
+  it("retains table selection and the contextual overlay for the full resize gesture", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <StatefulPrintPacketEditor
+        initial={unequalTablePacket}
+        onChange={onChange}
+      />,
+    );
+    const table = page.querySelector<HTMLElement>(".piqae-canvas-table")!;
+    const toolbar = page.querySelector<HTMLElement>(".piqae-editor-toolbar")!;
+    const workspace = page.querySelector<HTMLElement>(
+      ".piqae-editor-workspace",
+    )!;
+    await act(async () => table.click());
+    expect(table.classList.contains("piqae-canvas-selected")).toBe(true);
+    expect(toolbar.querySelector(".piqae-selection-rail")).not.toBeNull();
+
+    const separator = page.querySelector<HTMLElement>(
+      '[role="separator"][aria-label="Resize Item column"]',
+    )!;
+    vi.spyOn(table, "getBoundingClientRect").mockReturnValue({
+      left: 100,
+      width: 800,
+      right: 900,
+      top: 0,
+      bottom: 120,
+      height: 120,
+      x: 100,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect);
+    const captured = new Set<number>();
+    separator.setPointerCapture = vi.fn((pointerId) => captured.add(pointerId));
+    separator.hasPointerCapture = vi.fn((pointerId) => captured.has(pointerId));
+    separator.releasePointerCapture = vi.fn((pointerId) =>
+      captured.delete(pointerId),
+    );
+
+    await act(async () => {
+      separator.dispatchEvent(pointerEvent("pointerdown", 300));
+    });
+    expect(page.querySelector(".piqae-selection-rail")).not.toBeNull();
+    await act(async () => {
+      separator.dispatchEvent(pointerEvent("pointermove", 380));
+    });
+    expect(onChange).not.toHaveBeenCalled();
+    expect(page.querySelector(".piqae-selection-rail")).not.toBeNull();
+    await act(async () => {
+      separator.dispatchEvent(pointerEvent("pointerup", 380));
+    });
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(page.querySelector(".piqae-selection-rail")).not.toBeNull();
+    expect(page.querySelector(".piqae-editor-toolbar")).toBe(toolbar);
+    expect(page.querySelector(".piqae-editor-workspace")).toBe(workspace);
+    expect(
+      page
+        .querySelector(".piqae-canvas-table")
+        ?.classList.contains("piqae-canvas-selected"),
+    ).toBe(true);
+  });
+
+  it("keeps separator drag geometry stable across zoom, scroll and grab offset", () => {
+    const table = unequalTablePacket.body[0];
+    if (table?.type !== "table") throw new Error("table missing");
+
+    const desktop = tableColumnResizeGeometry(table.columns, 0, 380, 100, 800);
+    const scaledAndScrolled = tableColumnResizeGeometry(
+      table.columns,
+      0,
+      190,
+      50,
+      400,
+    );
+    const offsetGrab = tableColumnResizeGeometry(
+      table.columns,
+      0,
+      384,
+      100,
+      800,
+      4,
+    );
+
+    expect(desktop.delta).toBeCloseTo(0.4);
+    expect(desktop.offsetPx).toBeCloseTo(80);
+    expect(scaledAndScrolled.delta).toBeCloseTo(desktop.delta);
+    expect(scaledAndScrolled.offsetPx).toBeCloseTo(40);
+    expect(offsetGrab.delta).toBeCloseTo(desktop.delta);
   });
 
   it("resizes a visual columns layout directly on the canvas", async () => {

@@ -38,6 +38,13 @@ import { documentHasPageBreak } from "../core/template-model";
 import type { ShopifyPrintTarget } from "../core/shopify-print-targets";
 
 type DesignStock = ShopifyPrintTarget["stock"];
+type TableEditorBlock = Extract<Block, { type: "table" }>;
+type TableColumnResizeDrag = {
+  index: number;
+  grabOffsetPx: number;
+  delta: number;
+  columns: TableEditorBlock["columns"];
+};
 
 const PIQAE_BLOCK_DRAG_TYPE = "application/x-piqae-printpacket-block";
 const QUICK_INSERT_TYPES = [
@@ -372,7 +379,7 @@ export function PrintPacketEditor({
       if (
         root?.contains(target) &&
         target.closest(
-          ".piqae-editor-toolbar, .piqae-canvas-selected, .piqae-canvas-insertion-slot",
+          ".piqae-editor-toolbar, .piqae-canvas-selected, .piqae-canvas-insertion-slot, .piqae-canvas-column-resize",
         )
       )
         return;
@@ -1260,12 +1267,7 @@ function CanvasBlock({
 }) {
   const [editingText, setEditingText] = useState(false);
   const textBlockElement = useRef<HTMLElement | null>(null);
-  const resizeDrag = useRef<{
-    index: number;
-    startX: number;
-    tableWidth: number;
-    columns: Extract<Block, { type: "table" }>["columns"];
-  } | null>(null);
+  const resizeDrag = useRef<TableColumnResizeDrag | null>(null);
   const selectBeforeEdit =
     editable &&
     !preview &&
@@ -1545,52 +1547,85 @@ function CanvasBlock({
                       onPointerDown={(event) => {
                         event.preventDefault();
                         event.stopPropagation();
-                        const table = event.currentTarget.closest(
+                        const table = event.currentTarget.closest<HTMLElement>(
                           ".piqae-canvas-table",
                         );
+                        const rect = table?.getBoundingClientRect();
+                        const boundaryRatio =
+                          tableColumnBoundaryPercent(block.columns, index + 1) /
+                          100;
+                        const tableLeft = rect?.left ?? event.clientX;
+                        const tableWidth = Math.max(1, rect?.width ?? 1);
                         resizeDrag.current = {
                           index,
-                          startX: event.clientX,
-                          tableWidth: Math.max(
-                            1,
-                            table?.getBoundingClientRect().width ?? 1,
-                          ),
+                          grabOffsetPx:
+                            event.clientX -
+                            (tableLeft + tableWidth * boundaryRatio),
+                          delta: 0,
                           columns: block.columns,
                         };
+                        event.currentTarget.style.transform = "";
                         event.currentTarget.setPointerCapture(event.pointerId);
                       }}
                       onPointerMove={(event) => {
                         const drag = resizeDrag.current;
                         if (!drag || drag.index !== index) return;
-                        const total = drag.columns.reduce(
-                          (sum, item) => sum + (item.width ?? 1),
-                          0,
+                        const table = event.currentTarget.closest<HTMLElement>(
+                          ".piqae-canvas-table",
                         );
-                        onChange(
-                          {
-                            ...block,
-                            columns: resizeColumns(
-                              drag.columns,
-                              index,
-                              ((event.clientX - drag.startX) /
-                                drag.tableWidth) *
-                                total,
-                            ),
-                          },
-                          path,
+                        const preview = tableColumnResizePreview(
+                          drag,
+                          event.clientX,
+                          table?.getBoundingClientRect(),
                         );
+                        drag.delta = preview.delta;
+                        event.currentTarget.style.transform = `translateX(${preview.offsetPx}px)`;
                       }}
                       onPointerUp={(event) => {
-                        if (resizeDrag.current?.index === index)
-                          resizeDrag.current = null;
+                        const drag = resizeDrag.current;
+                        const table = event.currentTarget.closest<HTMLElement>(
+                          ".piqae-canvas-table",
+                        );
+                        const preview =
+                          drag?.index === index
+                            ? tableColumnResizePreview(
+                                drag,
+                                event.clientX,
+                                table?.getBoundingClientRect(),
+                              )
+                            : null;
+                        event.currentTarget.style.transform = "";
+                        if (drag?.index === index) resizeDrag.current = null;
                         if (
                           event.currentTarget.hasPointerCapture(event.pointerId)
                         )
                           event.currentTarget.releasePointerCapture(
                             event.pointerId,
                           );
+                        if (
+                          preview &&
+                          drag &&
+                          Math.abs(preview.delta) > Number.EPSILON
+                        )
+                          onChange(
+                            {
+                              ...block,
+                              columns: resizeColumns(
+                                drag.columns,
+                                index,
+                                preview.delta,
+                              ),
+                            },
+                            path,
+                          );
                       }}
-                      onPointerCancel={() => {
+                      onPointerCancel={(event) => {
+                        event.currentTarget.style.transform = "";
+                        if (resizeDrag.current?.index === index)
+                          resizeDrag.current = null;
+                      }}
+                      onLostPointerCapture={(event) => {
+                        event.currentTarget.style.transform = "";
                         if (resizeDrag.current?.index === index)
                           resizeDrag.current = null;
                       }}
@@ -3574,6 +3609,46 @@ function tableColumnBoundaryPercent(columns: TableColumn[], index: number) {
     .slice(0, index)
     .reduce((sum, column) => sum + Math.max(column.width ?? 1, 0.01), 0);
   return total > 0 ? (before / total) * 100 : 0;
+}
+
+function tableColumnResizePreview(
+  drag: TableColumnResizeDrag,
+  clientX: number,
+  rect?: Pick<DOMRect, "left" | "width">,
+) {
+  if (!rect || !Number.isFinite(rect.width) || rect.width <= 0)
+    return { delta: drag.delta, offsetPx: 0 };
+  return tableColumnResizeGeometry(
+    drag.columns,
+    drag.index,
+    clientX,
+    rect.left,
+    rect.width,
+    drag.grabOffsetPx,
+  );
+}
+
+export function tableColumnResizeGeometry(
+  columns: TableEditorBlock["columns"],
+  index: number,
+  clientX: number,
+  tableLeft: number,
+  tableWidth: number,
+  grabOffsetPx = 0,
+) {
+  const width = Math.max(1, tableWidth);
+  const total = columns.reduce((sum, column) => sum + (column.width ?? 1), 0);
+  const boundaryRatio = tableColumnBoundaryPercent(columns, index + 1) / 100;
+  const boundaryX = tableLeft + width * boundaryRatio;
+  const requestedDelta = ((clientX - grabOffsetPx - boundaryX) / width) * total;
+  const resized = resizeColumns(columns, index, requestedDelta);
+  const originalLeft = columns[index]?.width ?? 1;
+  const resizedLeft = resized[index]?.width ?? originalLeft;
+  const delta = resizedLeft - originalLeft;
+  return {
+    delta,
+    offsetPx: (delta / total) * width,
+  };
 }
 
 function editableStaticCellPath(content: Inline[]) {
