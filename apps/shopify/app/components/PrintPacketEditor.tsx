@@ -899,7 +899,7 @@ export function PrintPacketEditor({
         <MediaRuler value={value} stock={stock} />
         <div className="piqae-canvas-wrap">
           <div
-            className={`piqae-page-sheet piqae-rendered-canvas piqae-media-${value.media.kind}`}
+            className={`piqae-page-sheet piqae-rendered-canvas piqae-media-${value.media.kind}${compactCanvasAnnotations(value) ? " piqae-compact-annotations" : ""}`}
             style={canvasStyle(value)}
             onKeyDown={(event) => {
               if (
@@ -1073,6 +1073,10 @@ export function canvasGeometry(value: PrintPacket): {
     height = media.height_mm;
   }
   return { widthMm: width, heightMm: height };
+}
+
+export function compactCanvasAnnotations(value: PrintPacket): boolean {
+  return value.media.kind !== "paged" && canvasGeometry(value).widthMm <= 100;
 }
 
 export function canvasStyle(value: PrintPacket): CSSProperties {
@@ -1828,7 +1832,15 @@ function CanvasBlock({
             className="piqae-canvas-collection-branch piqae-canvas-table-empty"
             data-collection-branch="empty"
           >
-            <span className="piqae-canvas-badge">Empty state</span>
+            <span
+              className="piqae-canvas-badge"
+              data-label="Empty state"
+              title="Empty state"
+              role="note"
+              tabIndex={0}
+            >
+              Empty state
+            </span>
             {block.empty?.length ? (
               <DocumentCanvas
                 blocks={block.empty}
@@ -1863,7 +1875,13 @@ function CanvasBlock({
         onClick={select}
       >
         {preview ? null : (
-          <span className="piqae-canvas-badge">
+          <span
+            className="piqae-canvas-badge"
+            data-label={`Data list · ${expressionLabel(block.items)}`}
+            title={`Data list · ${expressionLabel(block.items)}`}
+            role="note"
+            tabIndex={0}
+          >
             Data list · {expressionLabel(block.items)}
           </span>
         )}
@@ -1929,7 +1947,13 @@ function CanvasBlock({
         onClick={select}
       >
         {preview ? null : (
-          <span className="piqae-canvas-badge">
+          <span
+            className="piqae-canvas-badge"
+            data-label={`Shown when ${expressionLabel(block.condition)}`}
+            title={`Shown when ${expressionLabel(block.condition)}`}
+            role="note"
+            tabIndex={0}
+          >
             Shown when {expressionLabel(block.condition)}
           </span>
         )}
@@ -1958,7 +1982,15 @@ function CanvasBlock({
         )}
         {!preview && block.else?.length ? (
           <>
-            <span className="piqae-canvas-badge">Otherwise</span>
+            <span
+              className="piqae-canvas-badge"
+              data-label="Otherwise"
+              title="Otherwise"
+              role="note"
+              tabIndex={0}
+            >
+              Otherwise
+            </span>
             <DocumentCanvas
               blocks={block.else}
               path={path}
@@ -2020,11 +2052,20 @@ function CanvasBlock({
           className="piqae-canvas-structure-note"
           role="note"
           aria-label="Order batching behavior"
+          data-label={batchLabel}
+          title={batchLabel}
+          tabIndex={0}
         >
           {batchLabel}
         </span>
       ) : !preview && block.type === "repeat" ? (
-        <span className="piqae-canvas-badge">
+        <span
+          className="piqae-canvas-badge"
+          data-label={`Repeats for each ${expressionLabel(block.items)}`}
+          title={`Repeats for each ${expressionLabel(block.items)}`}
+          role="note"
+          tabIndex={0}
+        >
           Repeats for each {expressionLabel(block.items)}
         </span>
       ) : null}
@@ -2135,7 +2176,17 @@ function CollectionCanvasBranch({
       className="piqae-canvas-collection-branch"
       data-collection-branch={branch}
     >
-      {preview ? null : <span className="piqae-canvas-badge">{label}</span>}
+      {preview ? null : (
+        <span
+          className="piqae-canvas-badge"
+          data-label={label}
+          title={label}
+          role="note"
+          tabIndex={0}
+        >
+          {label}
+        </span>
+      )}
       {blocks.length ? (
         <DocumentCanvas
           blocks={blocks}

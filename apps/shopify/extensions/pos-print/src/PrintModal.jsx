@@ -74,11 +74,11 @@ export function PrintModal() {
             value={printerId}
             onChange={(event) => setPrinterId(event.currentTarget.value)}
           >
-            <option value="">Select a connected printer</option>
+            <s-option value="">Select a connected printer</s-option>
             {printers.map((printer) => (
-              <option key={printer.id} value={printer.id}>
+              <s-option key={printer.id} value={printer.id}>
                 {printer.name}
-              </option>
+              </s-option>
             ))}
           </s-select>
           {printers.length === 0 && (

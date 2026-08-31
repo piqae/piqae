@@ -53,9 +53,20 @@ export async function action({ request }: ActionFunctionArgs) {
         .client(link)
         .connectSessions.create({
           name: `${session.shop} · Piqae Order Printing`,
-          return_url: `${process.env.SHOPIFY_APP_URL}/connect/complete?shop=${encodeURIComponent(session.shop)}`,
+          return_url: `${process.env.SHOPIFY_APP_URL}/connect/complete`,
           expires_in_seconds: 600,
         });
+      return { ok: true, error: "", connection };
+    }
+    if (form.get("intent") === "connection-status") {
+      const connectionId = String(form.get("connectionId") ?? "").trim();
+      if (!connectionId.startsWith("enr_") || connectionId.length > 64)
+        throw new Error("The connection status request is invalid.");
+      const services = createProductionServices();
+      const link = await services.managedAccounts.ensure(session.shop);
+      const connection = await services.managedAccounts
+        .client(link)
+        .connectSessions.retrieve(connectionId);
       return { ok: true, error: "", connection };
     }
     if (form.get("intent") === "set-default-printer") {
@@ -95,7 +106,14 @@ type SearchPrinter = {
   state: string;
 };
 
-type ConnectionStage = "idle" | "preparing" | "opened" | "blocked" | "failed";
+type ConnectionStage =
+  | "idle"
+  | "preparing"
+  | "opened"
+  | "connected"
+  | "blocked"
+  | "expired"
+  | "failed";
 
 export function preparePiqaeConnectionWindow(
   openWindow: typeof window.open = window.open.bind(window),
@@ -166,6 +184,9 @@ export default function Printers() {
     useLoaderData<typeof loader>();
   const result = useActionData<typeof action>();
   const connector = useFetcher<typeof action>();
+  const connectionStatus = useFetcher<typeof action>();
+  const connectionStatusRef = useRef(connectionStatus);
+  connectionStatusRef.current = connectionStatus;
   const revalidator = useRevalidator();
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [connectionStage, setConnectionStage] =
@@ -239,8 +260,39 @@ export default function Printers() {
     }
   }, [connector.data, connector.state]);
 
+  useEffect(() => {
+    if (connectionStage !== "opened" || !connection?.id) return;
+    const poll = () => {
+      if (connectionStatusRef.current.state !== "idle") return;
+      const form = new FormData();
+      form.set("intent", "connection-status");
+      form.set("connectionId", connection.id);
+      void connectionStatusRef.current.submit(form, { method: "post" });
+    };
+    poll();
+    const timer = window.setInterval(poll, 1500);
+    return () => window.clearInterval(timer);
+  }, [connection?.id, connectionStage]);
+
+  useEffect(() => {
+    if (connectionStatus.data && !connectionStatus.data.ok) {
+      setConnectionStage("failed");
+      return;
+    }
+    const state = connectionStatus.data?.connection?.state;
+    if (state === "connected") {
+      setConnectionStage("connected");
+      revalidator.revalidate();
+    } else if (state === "expired") {
+      setConnectionStage("expired");
+    }
+  }, [connectionStatus.data, revalidator]);
+
   const hasNodes = nodes.length > 0;
   const hasPrinters = printers.length > 0;
+  const availablePrinterCount = printers.filter(
+    (printer) => printerAvailability(printer.state) === "available",
+  ).length;
   const nodeById = useMemo(
     () => new Map(nodes.map((node) => [node.id, node])),
     [nodes],
@@ -273,127 +325,138 @@ export default function Printers() {
       >
         {revalidator.state === "idle" ? "Refresh" : "Refreshing…"}
       </s-button>
-      <s-section
-        heading={hasNodes ? "Connected printers" : "Connect your first printer"}
-      >
-        <s-stack direction="block" gap="base">
+      {!hasNodes ? (
+        <div className="piqae-connection-panel piqae-connection-panel--standalone">
           {!connected ? <s-banner tone="warning">{setupError}</s-banner> : null}
-          {hasNodes ? (
-            <>
-              <s-paragraph>
-                {nodes.length} connected computer{nodes.length === 1 ? "" : "s"}{" "}
-                · {printers.length} printer{printers.length === 1 ? "" : "s"}{" "}
-                reported live for this store.
-              </s-paragraph>
-              {!hasPrinters ? (
-                <s-banner tone="warning">
-                  Your computer is connected, but no printer inventory has
-                  reached this store yet. Confirm the printer is installed in
-                  macOS or Windows, keep Piqae open, then refresh.
-                </s-banner>
-              ) : null}
-            </>
-          ) : (
-            <div className="piqae-connection-intro">
-              <div className="piqae-connection-mark" aria-hidden="true">
-                <svg viewBox="0 0 24 24" role="presentation">
-                  <path d="M7 8V3h10v5M7 18H4a2 2 0 0 1-2-2v-5a3 3 0 0 1 3-3h14a3 3 0 0 1 3 3v5a2 2 0 0 1-2 2h-3M7 14h10v7H7z" />
-                  <path d="M18 11h1" />
-                </svg>
-              </div>
-              <div>
-                <s-heading>Connect the computer beside your printer</s-heading>
-                <s-paragraph>
-                  Piqae will open in a separate window and ask which installed
-                  printers this store may use. No Piqae account or API key is
-                  needed.
-                </s-paragraph>
-              </div>
+          <div className="piqae-connection-panel-heading">
+            <div className="piqae-connection-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24" role="presentation">
+                <path d="M7 8V3h10v5M7 18H4a2 2 0 0 1-2-2v-5a3 3 0 0 1 3-3h14a3 3 0 0 1 3 3v5a2 2 0 0 1-2 2h-3M7 14h10v7H7z" />
+                <path d="M18 11h1" />
+              </svg>
             </div>
-          )}
-          {!hasNodes ? (
-            <div className="piqae-connection-panel">
-              <div
-                className={`piqae-connection-status piqae-connection-status--${connectionStage}`}
-                role="status"
-                aria-live="polite"
+            <div>
+              <s-heading>Connect Piqae</s-heading>
+              <s-paragraph>
+                Open Piqae on this computer, choose the installed printers this
+                store may use, and they’ll appear here automatically.
+              </s-paragraph>
+            </div>
+          </div>
+          <div className="piqae-connection-actions">
+            <connector.Form method="post" onSubmit={beginConnection}>
+              <input type="hidden" name="intent" value="connect-node" />
+              <s-button
+                type="submit"
+                variant="primary"
+                disabled={!connected || connector.state !== "idle"}
               >
-                <span className="piqae-connection-status-dot" />
-                <div>
-                  <strong>
-                    {connectionStage === "preparing"
-                      ? "Preparing a secure connection…"
-                      : connectionStage === "opened"
-                        ? "Piqae opened"
+                {connector.state === "idle"
+                  ? connectionStage === "failed" ||
+                    connectionStage === "expired"
+                    ? "Try connecting again"
+                    : "Connect this computer"
+                  : "Opening Piqae…"}
+              </s-button>
+            </connector.Form>
+            <div
+              className={`piqae-connection-status piqae-connection-status--${connectionStage}`}
+              role="status"
+              aria-live="polite"
+            >
+              <span className="piqae-connection-status-dot" />
+              <div>
+                <strong>
+                  {connectionStage === "preparing"
+                    ? "Preparing secure connection…"
+                    : connectionStage === "opened"
+                      ? "Waiting for printer access…"
+                      : connectionStage === "connected"
+                        ? "Computer connected"
                         : connectionStage === "blocked"
-                          ? "Connection window was blocked"
-                          : connectionStage === "failed"
-                            ? "Connection could not be prepared"
-                            : "Ready to connect"}
-                  </strong>
-                  <span>
-                    {connectionStage === "opened"
-                      ? "Choose the printers to share, then return here."
+                          ? "Connection window blocked"
+                          : connectionStage === "expired"
+                            ? "Invitation expired"
+                            : connectionStage === "failed"
+                              ? "Connection could not be prepared"
+                              : "Ready to connect"}
+                </strong>
+                <span>
+                  {connectionStage === "opened"
+                    ? "Choose printers in Piqae. This page will update when access is confirmed."
+                    : connectionStage === "connected"
+                      ? "Printer access was confirmed by Piqae."
                       : connectionStage === "blocked"
                         ? "Open the secure invitation below to continue."
-                        : connectionStage === "failed"
-                          ? connector.data?.error || "Try the connection again."
-                          : "A private, one-time invitation will open in a new window."}
-                  </span>
-                </div>
-              </div>
-              <connector.Form method="post" onSubmit={beginConnection}>
-                <input type="hidden" name="intent" value="connect-node" />
-                <s-button
-                  type="submit"
-                  variant="primary"
-                  disabled={!connected || connector.state !== "idle"}
-                >
-                  {connector.state === "idle"
-                    ? connectionStage === "failed"
-                      ? "Try connecting again"
-                      : "Connect this computer"
-                    : "Opening Piqae…"}
-                </s-button>
-              </connector.Form>
-              {connectionStage === "blocked" && connection?.connect_url ? (
-                <a
-                  className="piqae-connection-retry"
-                  href={connection.connect_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  onClick={() => setConnectionStage("opened")}
-                >
-                  Open Piqae connection
-                </a>
-              ) : null}
-              <div className="piqae-connection-download">
-                <span>Don’t have Piqae installed?</span>
-                <a href={installerUrl} target="_top">
-                  Download Piqae for {platformName}
-                </a>
-              </div>
-              <div
-                className="piqae-connection-flow"
-                aria-label="Connection steps"
-              >
-                <span>
-                  <b>1</b> Open Piqae
-                </span>
-                <span>
-                  <b>2</b> Choose printers
-                </span>
-                <span>
-                  <b>3</b> Connected
+                        : connectionStage === "expired"
+                          ? "Create a new one-time invitation to try again."
+                          : connectionStage === "failed"
+                            ? connector.data?.error ||
+                              "Try the connection again."
+                            : "No Piqae account or API key is needed."}
                 </span>
               </div>
-              <small className="piqae-connection-security">
-                Secure invitations can be used once and expire after 10 minutes.
-              </small>
             </div>
+          </div>
+          {connectionStage === "blocked" && connection?.connect_url ? (
+            <a
+              className="piqae-connection-retry"
+              href={connection.connect_url}
+              target="_blank"
+              rel="noreferrer"
+              onClick={() => setConnectionStage("opened")}
+            >
+              Open secure invitation
+            </a>
           ) : null}
-        </s-stack>
-      </s-section>
+          <div className="piqae-connection-download">
+            <span>Need Piqae?</span>
+            <a href={installerUrl} target="_top">
+              Download for {platformName}
+            </a>
+            <small>One-time invitations expire after 10 minutes.</small>
+          </div>
+        </div>
+      ) : (
+        <div className="piqae-printer-overview">
+          <div className="piqae-connection-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" role="presentation">
+              <path d="M7 8V3h10v5M7 18H4a2 2 0 0 1-2-2v-5a3 3 0 0 1 3-3h14a3 3 0 0 1 3 3v5a2 2 0 0 1-2 2h-3M7 14h10v7H7z" />
+              <path d="M18 11h1" />
+            </svg>
+          </div>
+          <div className="piqae-printer-overview-copy">
+            <s-heading>Printers connected</s-heading>
+            <s-paragraph>
+              Piqae is sharing live printer availability with this store.
+            </s-paragraph>
+          </div>
+          <div
+            className="piqae-printer-metrics"
+            aria-label="Connection summary"
+          >
+            <span>
+              <strong>{nodes.length}</strong> computer
+              {nodes.length === 1 ? "" : "s"}
+            </span>
+            <span>
+              <strong>{printers.length}</strong> printer
+              {printers.length === 1 ? "" : "s"}
+            </span>
+            <span>
+              <strong>{availablePrinterCount}</strong> available
+            </span>
+          </div>
+        </div>
+      )}
+
+      {hasNodes && !hasPrinters ? (
+        <s-banner tone="warning">
+          Your computer is connected, but no printer inventory has reached this
+          store yet. Confirm the printer is installed, keep Piqae open, then
+          refresh.
+        </s-banner>
+      ) : null}
 
       {hasPrinters ? (
         <s-section
@@ -401,15 +464,17 @@ export default function Printers() {
           accessibilityLabel="Printers available to this store"
         >
           <s-table>
-            <s-stack slot="filters" direction="inline" gap="base">
+            <div slot="filters" className="piqae-printer-filters">
               <s-search-field
                 label="Search printers"
+                labelAccessibilityVisibility="exclusive"
                 placeholder="Search printers or computers"
                 value={query}
                 onInput={(event) => setQuery(event.currentTarget.value)}
               />
-              <s-select
-                label="Status"
+              <select
+                className="piqae-input"
+                aria-label="Filter printers by status"
                 value={status}
                 onChange={(event) => setStatus(event.currentTarget.value)}
               >
@@ -417,13 +482,12 @@ export default function Printers() {
                 <option value="available">Available</option>
                 <option value="offline">Offline</option>
                 <option value="attention">Needs attention</option>
-              </s-select>
-            </s-stack>
+              </select>
+            </div>
             <s-table-header-row>
               <s-table-header listSlot="primary">Printer</s-table-header>
               <s-table-header listSlot="secondary">Computer</s-table-header>
               <s-table-header listSlot="inline">Status</s-table-header>
-              <s-table-header listSlot="labeled">Connection</s-table-header>
               <s-table-header listSlot="labeled">Default</s-table-header>
               <s-table-header listSlot="labeled">Last seen</s-table-header>
             </s-table-header-row>
@@ -433,9 +497,16 @@ export default function Printers() {
                 return (
                   <s-table-row key={printer.id}>
                     <s-table-cell>
-                      <strong>{printer.name}</strong>
-                      <div className="piqae-muted piqae-resource-id">
-                        {printer.id}
+                      <div className="piqae-printer-identity">
+                        <span className="piqae-printer-icon" aria-hidden="true">
+                          ▣
+                        </span>
+                        <div>
+                          <strong>{printer.name}</strong>
+                          <div className="piqae-muted piqae-resource-id">
+                            {printer.id}
+                          </div>
+                        </div>
                       </div>
                     </s-table-cell>
                     <s-table-cell>
@@ -452,10 +523,6 @@ export default function Printers() {
                             ? "Offline"
                             : "Needs attention"}
                       </s-badge>
-                    </s-table-cell>
-                    <s-table-cell>
-                      <span>This Shopify store</span>
-                      <div className="piqae-muted">Managed child workspace</div>
                     </s-table-cell>
                     <s-table-cell>
                       {settings.defaultPrinterId === printer.id ? (
@@ -511,46 +578,66 @@ export default function Printers() {
             <div className="piqae-computer-grid">
               {nodes.map((node) => (
                 <div className="piqae-computer-card" key={node.id}>
-                  <div>
-                    <strong>{node.name}</strong>
+                  <div className="piqae-computer-card-heading">
+                    <span className="piqae-computer-icon" aria-hidden="true">
+                      ▰
+                    </span>
+                    <div>
+                      <strong>{node.name}</strong>
+                      <span>{node.platform}</span>
+                    </div>
                     <s-badge tone={toneFor(node.state)}>{node.state}</s-badge>
                   </div>
-                  <s-paragraph>{node.platform}</s-paragraph>
-                  <small>
-                    This Shopify store · Managed child workspace · Last seen{" "}
-                    {formatSeen(node.last_seen_at)}
-                  </small>
+                  <div className="piqae-computer-meta">
+                    <span>Printer access for this store</span>
+                    <span>Last seen {formatSeen(node.last_seen_at)}</span>
+                  </div>
                 </div>
               ))}
             </div>
-            <connector.Form method="post" onSubmit={beginConnection}>
-              <input type="hidden" name="intent" value="connect-node" />
-              <s-button type="submit" disabled={connector.state !== "idle"}>
-                {connector.state === "idle"
-                  ? "Connect another computer"
-                  : "Preparing connection…"}
-              </s-button>
-            </connector.Form>
-            {connectionStage === "blocked" && connection?.connect_url ? (
-              <s-paragraph>
-                Your browser blocked the connection window.{" "}
-                <a
-                  href={connection.connect_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  onClick={() => setConnectionStage("opened")}
-                >
-                  Open the secure invitation
-                </a>
-                .
-              </s-paragraph>
-            ) : connectionStage === "preparing" ? (
-              <s-paragraph>Preparing the secure connection…</s-paragraph>
-            ) : connectionStage === "opened" ? (
-              <s-paragraph>
-                Piqae opened. Finish choosing printers in that window.
-              </s-paragraph>
-            ) : null}
+            <div className="piqae-connect-another">
+              <span className="piqae-connect-another-mark" aria-hidden="true">
+                +
+              </span>
+              <div>
+                <strong>Add another computer</strong>
+                <span>
+                  Open Piqae there and choose the printers this store may use.
+                </span>
+                {connectionStage === "blocked" && connection?.connect_url ? (
+                  <a
+                    href={connection.connect_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={() => setConnectionStage("opened")}
+                  >
+                    Open the secure invitation
+                  </a>
+                ) : connectionStage === "preparing" ? (
+                  <small>Preparing the secure connection…</small>
+                ) : connectionStage === "opened" ? (
+                  <small>Waiting for printer access in Piqae…</small>
+                ) : connectionStage === "connected" ? (
+                  <small>Computer connected. Refreshing printers…</small>
+                ) : connectionStage === "expired" ? (
+                  <small>
+                    The invitation expired. Select Connect to retry.
+                  </small>
+                ) : connectionStage === "failed" ? (
+                  <small>
+                    {connectionStatus.data?.error ||
+                      connector.data?.error ||
+                      "The connection could not be confirmed."}
+                  </small>
+                ) : null}
+              </div>
+              <connector.Form method="post" onSubmit={beginConnection}>
+                <input type="hidden" name="intent" value="connect-node" />
+                <s-button type="submit" disabled={connector.state !== "idle"}>
+                  {connector.state === "idle" ? "Connect" : "Opening…"}
+                </s-button>
+              </connector.Form>
+            </div>
           </s-stack>
         </s-section>
       ) : null}
@@ -565,27 +652,14 @@ export default function Printers() {
             ) : null}
             {hasPrinters ? (
               <>
-                <s-select
-                  label="Default printer"
+                <input
+                  type="hidden"
                   name="defaultPrinterId"
                   value={settings.defaultPrinterId}
-                >
-                  <option value="">Ask each time</option>
-                  {settings.defaultPrinterId &&
-                  !printers.some(
-                    (printer) => printer.id === settings.defaultPrinterId,
-                  ) ? (
-                    <option value={settings.defaultPrinterId} disabled>
-                      Previously selected printer (unavailable)
-                    </option>
-                  ) : null}
-                  {printers.map((printer) => (
-                    <option key={printer.id} value={printer.id}>
-                      {printer.name}
-                      {printer.state === "online" ? "" : ` (${printer.state})`}
-                    </option>
-                  ))}
-                </s-select>
+                />
+                <s-paragraph>
+                  Choose the default directly in the printer list above.
+                </s-paragraph>
                 <label className="piqae-check">
                   <input
                     type="checkbox"
@@ -624,18 +698,20 @@ export default function Printers() {
                   />{" "}
                   Keep PDF download available
                 </label>
-                <s-select
-                  label="Where documents are prepared"
-                  name="renderExecutionPolicy"
-                  value={settings.renderExecutionPolicy}
-                >
-                  <option value="automatic">Automatic (recommended)</option>
-                  <option value="cloud_only">Piqae Cloud</option>
-                  <option value="prefer_node">
-                    This computer when compatible
-                  </option>
-                  <option value="require_node">Only this computer</option>
-                </s-select>
+                <label className="piqae-field">
+                  Where documents are prepared
+                  <select
+                    name="renderExecutionPolicy"
+                    defaultValue={settings.renderExecutionPolicy}
+                  >
+                    <option value="automatic">Automatic (recommended)</option>
+                    <option value="cloud_only">Piqae Cloud</option>
+                    <option value="prefer_node">
+                      This computer when compatible
+                    </option>
+                    <option value="require_node">Only this computer</option>
+                  </select>
+                </label>
                 <s-paragraph>
                   Automatic uses the fastest compatible option and always falls
                   back to the exact preview PDF when the connected app is older.

@@ -140,25 +140,103 @@
 }
 .piqae-computer-card {
   min-width: 0;
-  padding: 1rem;
-  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  padding: 1.1rem;
+  border: 1px solid #c8dcf8;
   border-radius: 0.75rem;
-  background: Canvas;
+  background: linear-gradient(135deg, #f7faff 0%, Canvas 78%);
 }
-.piqae-computer-card > div {
+.piqae-computer-card-heading {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 0.75rem;
+}
+.piqae-computer-card-heading > div {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 0.1rem;
+}
+.piqae-computer-card-heading > div > span,
+.piqae-computer-meta {
+  color: #616161;
+  font-size: 0.75rem;
+}
+.piqae-connect-another {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 1rem;
+  border: 1px dashed #b5d3ff;
+  border-radius: 0.75rem;
+  background: #f7faff;
+}
+.piqae-connect-another-mark {
+  display: grid;
+  flex: 0 0 2rem;
+  width: 2rem;
+  height: 2rem;
+  place-items: center;
+  border-radius: 50%;
+  background: #eaf3ff;
+  color: #005bd3;
+  font-size: 1.2rem;
+}
+.piqae-connect-another > div {
+  display: grid;
+  flex: 1;
+  gap: 0.12rem;
+  min-width: 0;
+}
+.piqae-connect-another > div > span,
+.piqae-connect-another small {
+  color: #616161;
+  font-size: 0.75rem;
+}
+.piqae-connect-another a {
+  color: #005bd3;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+.piqae-computer-icon,
+.piqae-printer-icon {
+  display: grid;
+  flex: 0 0 2rem;
+  width: 2rem;
+  height: 2rem;
+  place-items: center;
+  border-radius: 0.55rem;
+  background: #eaf3ff;
+  color: #005bd3;
+  font-size: 0.85rem;
+}
+.piqae-computer-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.35rem 1rem;
+  margin-top: 0.9rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #d7e6fa;
 }
 .piqae-computer-card strong,
 .piqae-resource-id {
   overflow-wrap: anywhere;
 }
-.piqae-computer-card small {
-  display: block;
-  color: color-mix(in srgb, currentColor 68%, transparent);
-  line-height: 1.45;
+.piqae-printer-identity {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-width: 15rem;
+}
+.piqae-printer-identity > div {
+  min-width: 0;
+}
+.piqae-printer-filters {
+  display: grid;
+  grid-template-columns: minmax(16rem, 1fr) 12rem;
+  gap: 0.75rem;
+  align-items: center;
+  width: 100%;
 }
 .piqae-printer-empty {
   display: grid;
@@ -166,16 +244,6 @@
   gap: 0.75rem;
   padding: 2rem;
   text-align: left;
-}
-.piqae-connection-intro {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.9rem;
-  max-width: 48rem;
-}
-.piqae-connection-intro s-paragraph {
-  display: block;
-  margin-top: 0.25rem;
 }
 .piqae-connection-mark {
   display: grid;
@@ -197,14 +265,65 @@
 }
 .piqae-connection-panel {
   display: grid;
-  justify-items: start;
-  gap: 1rem;
-  max-width: 48rem;
-  margin-top: 0.25rem;
-  padding: 1.15rem;
+  gap: 1.1rem;
+  padding: 1.35rem;
   border: 1px solid #b5d3ff;
-  border-radius: 0.85rem;
+  border-radius: 0.9rem;
   background: linear-gradient(135deg, #f7faff 0%, #fff 70%);
+}
+.piqae-connection-panel--standalone,
+.piqae-printer-overview {
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0;
+}
+.piqae-connection-panel-heading,
+.piqae-printer-overview {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+}
+.piqae-connection-panel-heading > div:last-child,
+.piqae-printer-overview-copy {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+.piqae-connection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.85rem 1.25rem;
+}
+.piqae-printer-overview {
+  padding: 1.35rem;
+  border: 1px solid #b9dfcb;
+  border-radius: 0.9rem;
+  background: linear-gradient(135deg, #f4fbf7 0%, Canvas 72%);
+}
+.piqae-printer-overview .piqae-connection-mark {
+  background: #e4f4eb;
+  color: #177446;
+}
+.piqae-printer-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-left: auto;
+}
+.piqae-printer-metrics span {
+  display: grid;
+  min-width: 5.5rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid #d6e9df;
+  border-radius: 0.65rem;
+  background: color-mix(in srgb, Canvas 86%, transparent);
+  color: #616161;
+  font-size: 0.72rem;
+}
+.piqae-printer-metrics strong {
+  color: CanvasText;
+  font-size: 1rem;
 }
 .piqae-connection-status {
   display: flex;
@@ -225,10 +344,16 @@
   animation: piqae-connection-pulse 1.2s ease-in-out infinite;
 }
 .piqae-connection-status--opened .piqae-connection-status-dot {
+  background: #458fff;
+  box-shadow: 0 0 0 1px #7eb1f8;
+  animation: piqae-connection-pulse 1.2s ease-in-out infinite;
+}
+.piqae-connection-status--connected .piqae-connection-status-dot {
   background: #29845a;
   box-shadow: 0 0 0 1px #69ad8d;
 }
 .piqae-connection-status--blocked .piqae-connection-status-dot,
+.piqae-connection-status--expired .piqae-connection-status-dot,
 .piqae-connection-status--failed .piqae-connection-status-dot {
   background: #b98900;
   box-shadow: 0 0 0 1px #d6af3f;
@@ -252,36 +377,15 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0.25rem 0.45rem;
+  align-items: baseline;
   width: 100%;
   padding-top: 0.9rem;
   border-top: 1px solid #d7e6fa;
   color: #616161;
 }
-.piqae-connection-flow {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.6rem 1.1rem;
+.piqae-connection-download small {
+  margin-left: auto;
   color: #616161;
-  font-size: 0.78rem;
-}
-.piqae-connection-flow span {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-}
-.piqae-connection-flow b {
-  display: grid;
-  width: 1.2rem;
-  height: 1.2rem;
-  place-items: center;
-  border-radius: 50%;
-  background: #eaf3ff;
-  color: #005bd3;
-  font-size: 0.68rem;
-}
-.piqae-connection-security {
-  color: #616161;
-  line-height: 1.4;
 }
 @keyframes piqae-connection-pulse {
   50% {
@@ -295,8 +399,7 @@
   }
 }
 @media (prefers-color-scheme: dark) {
-  .piqae-connection-mark,
-  .piqae-connection-flow b {
+  .piqae-connection-mark {
     background: #162e4d;
     color: #8dbdff;
   }
@@ -305,9 +408,7 @@
     background: linear-gradient(135deg, #111d2c 0%, Canvas 72%);
   }
   .piqae-connection-status span,
-  .piqae-connection-download,
-  .piqae-connection-flow,
-  .piqae-connection-security {
+  .piqae-connection-download {
     color: #b5b5b5;
   }
   .piqae-connection-download {
@@ -324,11 +425,92 @@
   border-radius: 0.75rem;
 }
 .piqae-connect-complete {
-  max-width: 34rem;
-  margin: 12vh auto;
-  padding: 2rem;
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  box-sizing: border-box;
+  padding: 1.5rem;
+  background: #f3f4f5;
   color: #202223;
   font-family: system-ui, sans-serif;
+}
+.piqae-connect-complete section {
+  width: min(100%, 29rem);
+  padding: 2rem;
+  border: 1px solid #dfe3e8;
+  border-radius: 1rem;
+  background: white;
+  box-shadow: 0 12px 36px rgb(26 26 26 / 10%);
+}
+.piqae-connect-complete-mark {
+  display: grid;
+  width: 3rem;
+  height: 3rem;
+  place-items: center;
+  border-radius: 50%;
+  background: #dff3e8;
+  color: #177446;
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+.piqae-connect-complete-eyebrow {
+  margin: 1.25rem 0 0;
+  color: #005bd3;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.piqae-connect-complete h1 {
+  margin: 0.35rem 0 0;
+  font-size: 1.65rem;
+}
+.piqae-connect-complete section > p:not(.piqae-connect-complete-eyebrow) {
+  color: #616161;
+  line-height: 1.5;
+}
+.piqae-connect-complete button {
+  width: 100%;
+  min-height: 2.75rem;
+  margin-top: 0.75rem;
+  border: 0;
+  border-radius: 0.55rem;
+  background: #202223;
+  color: white;
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+.piqae-connect-complete small {
+  display: block;
+  margin-top: 0.75rem;
+  color: #616161;
+  text-align: center;
+}
+@media (max-width: 640px) {
+  .piqae-printer-filters {
+    grid-template-columns: 1fr;
+  }
+  .piqae-printer-overview {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .piqae-printer-metrics {
+    width: 100%;
+    margin-left: 0;
+  }
+  .piqae-connection-download small {
+    width: 100%;
+    margin-left: 0;
+  }
+  .piqae-connect-another {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .piqae-connect-another form {
+    width: 100%;
+    padding-left: 2.8rem;
+  }
 }
 .piqae-page-sheet {
   position: relative;
@@ -1825,6 +2007,76 @@
   font-weight: 650;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+.piqae-compact-annotations .piqae-canvas-stack,
+.piqae-compact-annotations .piqae-canvas-row,
+.piqae-compact-annotations .piqae-canvas-grid,
+.piqae-compact-annotations .piqae-canvas-conditional,
+.piqae-compact-annotations .piqae-canvas-data-list,
+.piqae-compact-annotations .piqae-canvas-collection-branch,
+.piqae-compact-annotations .piqae-canvas-order-batch {
+  position: relative;
+}
+.piqae-compact-annotations .piqae-canvas-badge,
+.piqae-compact-annotations .piqae-canvas-structure-note {
+  position: absolute;
+  z-index: 8;
+  top: 0;
+  left: 0;
+  display: grid;
+  width: 1rem;
+  height: 1rem;
+  box-sizing: border-box;
+  place-items: center;
+  margin: 0;
+  padding: 0;
+  overflow: visible;
+  border: 1px solid #91c0ff;
+  border-radius: 50%;
+  background: #f4f8ff;
+  color: #174ea6;
+  font-size: 0;
+  line-height: 1;
+  transform: translate(-55%, -55%);
+  pointer-events: auto;
+}
+.piqae-compact-annotations .piqae-canvas-badge::before,
+.piqae-compact-annotations .piqae-canvas-structure-note::before {
+  content: "ƒ";
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: none;
+}
+.piqae-compact-annotations .piqae-canvas-structure-note::before {
+  content: "↻";
+}
+.piqae-compact-annotations .piqae-canvas-badge:hover::after,
+.piqae-compact-annotations .piqae-canvas-badge:focus-visible::after,
+.piqae-compact-annotations .piqae-canvas-structure-note:hover::after,
+.piqae-compact-annotations .piqae-canvas-structure-note:focus-visible::after {
+  content: attr(data-label);
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 0.35rem);
+  left: 0;
+  width: max-content;
+  max-width: min(14rem, 70vw);
+  padding: 0.35rem 0.5rem;
+  border: 1px solid #c9cccf;
+  border-radius: 0.4rem;
+  background: #202223;
+  color: white;
+  box-shadow: 0 4px 12px rgb(26 26 26 / 18%);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: normal;
+  line-height: 1.3;
+  text-transform: none;
+}
+.piqae-compact-annotations .piqae-canvas-conditional,
+.piqae-compact-annotations .piqae-canvas-data-list-editor {
+  padding: 0.28rem;
+  border-left-width: 1px;
 }
 .piqae-canvas-empty {
   display: inline-flex;

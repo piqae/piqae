@@ -3,6 +3,7 @@
   import { consumeNodeConnectFragment, nativeNodeConnectUrl } from '$lib/node-connect-fragment';
 
   let nativeUrl = $state<string | null>(null);
+  let launchAttempted = $state(false);
 
   onMount(() => {
     const invitation = consumeNodeConnectFragment(window.location, (url) =>
@@ -11,11 +12,13 @@
     nativeUrl = invitation
       ? nativeNodeConnectUrl(invitation.enrolmentToken, invitation.controlPlaneUrl)
       : null;
-    if (nativeUrl) window.location.assign(nativeUrl);
+    if (nativeUrl) openPiqae();
   });
 
   function openPiqae() {
-    if (nativeUrl) window.location.assign(nativeUrl);
+    if (!nativeUrl) return;
+    launchAttempted = true;
+    window.location.assign(nativeUrl);
   }
 </script>
 
@@ -28,14 +31,22 @@
   <section>
     <span>Piqae node connection</span>
     {#if nativeUrl}
-      <h1>Opening Piqae…</h1>
+      <h1>{launchAttempted ? 'Continue in Piqae' : 'Opening Piqae…'}</h1>
       <p>
-        Piqae will show the service requesting access and let you choose exactly which local
-        printers it may use.
+        {launchAttempted
+          ? 'Choose which installed printers this store may use. Shopify will confirm the connection automatically.'
+          : 'Piqae will ask which installed printers this store may use.'}
       </p>
-      <button type="button" onclick={openPiqae}>Try opening Piqae again</button>
-      <a href={`/downloads#${nativeUrl.split('#')[1]}`}>Download or update Piqae</a>
-      <small>This invitation expires shortly and can be accepted only once.</small>
+      <button type="button" onclick={openPiqae}>
+        {launchAttempted ? 'Open Piqae again' : 'Open Piqae'}
+      </button>
+      <p class="handoff-note">
+        {launchAttempted
+          ? 'This handoff tab is no longer needed and can be closed.'
+          : 'A one-time invitation will open in the Piqae app.'}
+      </p>
+      <a class="download" href={`/downloads#${nativeUrl.split('#')[1]}`}>Need Piqae? Download or update it</a>
+      <small>The secure invitation expires shortly and can be accepted only once.</small>
     {:else}
       <h1>This connection link is invalid or has already been cleared</h1>
       <p>Return to the service that asked you to connect this printer computer and try again.</p>
@@ -50,8 +61,10 @@
   span { color: var(--accent); font-size: 10px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; }
   h1 { margin: 10px 0 0; color: var(--text-primary); font-size: 24px; letter-spacing: -.035em; }
   p, small { color: var(--text-secondary); line-height: 1.55; }
-  button, a { display: flex; min-height: 40px; align-items: center; justify-content: center; margin-top: 18px; border-radius: 8px; font: inherit; }
+  button, a.download { display: flex; min-height: 40px; align-items: center; justify-content: center; margin-top: 18px; border-radius: 8px; font: inherit; }
   button { width: 100%; color: white; background: var(--accent); border: 0; cursor: pointer; }
-  a { color: var(--text-primary); border: 1px solid var(--border-default); }
+  a.download { color: var(--text-primary); border: 1px solid var(--border-default); }
+  button:focus, a.download:focus { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .handoff-note { margin: 14px 0 0; padding: 12px 14px; border-radius: 8px; background: color-mix(in srgb, var(--accent) 10%, transparent); font-size: 13px; }
   small { display: block; margin-top: 16px; font-size: 11px; }
 </style>

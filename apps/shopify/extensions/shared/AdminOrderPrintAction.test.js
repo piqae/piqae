@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   chooseDefault,
+  chooseDefaultDocument,
   loadWithTimeout,
   messageForLoadError,
   newInteractionId,
@@ -41,6 +42,27 @@ describe("admin print action state", () => {
         { id: "ready", eligible: true, isDefault: true },
       ]),
     ).toMatchObject({ id: "ready" });
+  });
+
+  it("defaults documents to the merchant choice, then packing slip and invoice", () => {
+    const documents = [
+      { id: "invoice", name: "Invoice", kind: "invoice" },
+      { id: "packing", name: "Packing Slip", kind: "packing_slip" },
+    ];
+    expect(chooseDefaultDocument(documents)?.id).toBe("packing");
+    expect(
+      chooseDefaultDocument([
+        { id: "invoice", name: "Facture", kind: "invoice" },
+        { id: "packing", name: "Bon de livraison", kind: "packing_slip" },
+      ])?.id,
+    ).toBe("packing");
+    expect(
+      chooseDefaultDocument([
+        ...documents,
+        { id: "chosen", name: "Warehouse", isDefault: true },
+      ])?.id,
+    ).toBe("chosen");
+    expect(chooseDefaultDocument([documents[0]])?.id).toBe("invoice");
   });
 
   it("selects each document's own compatible target when documents change", () => {
