@@ -31,7 +31,19 @@ final class NodeConnectAgentBridgeTests: XCTestCase {
             XCTAssertGreaterThan(evidence.stderrBytes, 0)
             XCTAssertFalse(evidence.description.contains("private.pdf"))
             XCTAssertFalse(error.localizedDescription.contains("private.pdf"))
+            let diagnostic = nodeConnectDiagnosticSummary(for: error)
+            XCTAssertTrue(diagnostic.contains("native_crash"))
+            XCTAssertFalse(diagnostic.contains("private.pdf"))
         }
+    }
+
+    func testConnectionDiagnosticSummaryDoesNotSurfaceUnexpectedErrorText() {
+        let error = NSError(
+            domain: "secret.piq_enr_0123456789abcdef0123456789abcdef",
+            code: 17,
+            userInfo: [NSLocalizedDescriptionKey: "private document path"]
+        )
+        XCTAssertEqual(nodeConnectDiagnosticSummary(for: error), "unexpected_error")
     }
 
     func testInheritedStderrHandleCannotBlockBridgeForever() throws {
