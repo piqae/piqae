@@ -39,6 +39,7 @@ import type { ShopifyPrintTarget } from "../core/shopify-print-targets";
 
 type DesignStock = ShopifyPrintTarget["stock"];
 type TableEditorBlock = Extract<Block, { type: "table" }>;
+type DocumentRegion = "body" | "header" | "footer";
 type TableColumnResizeDrag = {
   index: number;
   grabOffsetPx: number;
@@ -67,6 +68,30 @@ const DRAG_INSERT_TYPES = [
   "row",
 ] as const;
 type DragInsertType = (typeof DRAG_INSERT_TYPES)[number];
+
+function documentRegionBlocks(
+  document: PrintPacket,
+  region: DocumentRegion,
+): Block[] {
+  return region === "body" ? document.body : (document[region]?.default ?? []);
+}
+
+function withDocumentRegionBlocks(
+  document: PrintPacket,
+  region: DocumentRegion,
+  blocks: Block[],
+): PrintPacket {
+  if (region === "body")
+    return { ...document, body: canonicalizeShopifyEditorBody(blocks) };
+  return {
+    ...document,
+    [region]: {
+      first: document[region]?.first ?? [],
+      default: blocks,
+      last: document[region]?.last ?? [],
+    },
+  };
+}
 
 const schema = new Schema({
   nodes: {
@@ -282,13 +307,19 @@ export function PrintPacketEditor({
   const [compactAnnotations, setCompactAnnotations] = useState(() =>
     compactCanvasAnnotations(value),
   );
+  const [activeRegion, setActiveRegion] = useState<DocumentRegion>("body");
   const [selection, setSelection] = useState<{
     position: number;
     block: Block;
     path?: BlockPath;
+    region: DocumentRegion;
   } | null>(null);
+  const selectedRegionBlocks = documentRegionBlocks(
+    currentDocument,
+    selection?.region ?? activeRegion,
+  );
   const insertionScope = selection?.path
-    ? scopeForBlockPath(canonicalBody, selection.path)
+    ? scopeForBlockPath(selectedRegionBlocks, selection.path)
     : "order";
   const insertionFields = contextualFieldSuggestions(
     allAuthoringFields,
@@ -322,6 +353,7 @@ export function PrintPacketEditor({
       }),
     );
     setSelection(null);
+    setActiveRegion("body");
     syncHistoryAvailability();
     onChange(document);
   };
@@ -360,33 +392,45 @@ export function PrintPacketEditor({
     documentHistory.future = reset.future;
     setHistoryAvailability({ canUndo: false, canRedo: false });
     setSelection(null);
+    setActiveRegion("body");
   }, [currentDocumentKey, documentHistory]);
   useEffect(() => {
-    if (!selection) return;
+    if (!selection && activeRegion === "body") return;
     const clearSelectionOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
       const target = event.target;
       const root = editorRoot.current;
       if (!(target instanceof Node) || !root?.contains(target)) {
         setSelection(null);
+        setActiveRegion("body");
         return;
       }
       if (editorInputTarget(target)) return;
       event.preventDefault();
       setSelection(null);
+      setActiveRegion("body");
     };
     const clearSelectionAwayFromEditorActions = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Element)) return;
       const root = editorRoot.current;
-      if (
-        root?.contains(target) &&
-        target.closest(
-          ".piqae-editor-toolbar, .piqae-canvas-selected, .piqae-canvas-insertion-slot, .piqae-canvas-column-resize",
-        )
-      )
+      if (root?.contains(target) && target.closest(".piqae-editor-toolbar"))
         return;
+      const region = target.closest<HTMLElement>("[data-document-region]")
+        ?.dataset.documentRegion as DocumentRegion | undefined;
+      if (region === activeRegion) {
+        if (
+          root?.contains(target) &&
+          target.closest(
+            ".piqae-canvas-selected, .piqae-canvas-insertion-slot, .piqae-canvas-column-resize",
+          )
+        )
+          return;
+        setSelection(null);
+        return;
+      }
       setSelection(null);
+      setActiveRegion("body");
     };
     document.addEventListener("keydown", clearSelectionOnEscape);
     document.addEventListener(
@@ -402,7 +446,7 @@ export function PrintPacketEditor({
         true,
       );
     };
-  }, [selection]);
+  }, [activeRegion, selection]);
   useEffect(() => {
     if (!host.current) return;
     const state = EditorState.create({
@@ -422,6 +466,7 @@ export function PrintPacketEditor({
         setSelection({
           position,
           block: JSON.parse(node.attrs.json) as Block,
+          region: "body",
         });
         return false;
       },
@@ -437,6 +482,7 @@ export function PrintPacketEditor({
             ? {
                 position: next.selection.from,
                 block: JSON.parse(selected.attrs.json) as Block,
+                region: "body",
               }
             : null,
         );
@@ -450,11 +496,39 @@ export function PrintPacketEditor({
       view.current = null;
     };
   }, [disabled]);
+  const syncBodyEditor = (document: PrintPacket) =>
+    view.current?.updateState(
+      EditorState.create({
+        schema,
+        doc: blocksToDoc(document.body),
+        plugins: [
+          history(),
+          keymap({ "Mod-z": undo, "Shift-Mod-z": redo }),
+          keymap(baseKeymap),
+        ],
+      }),
+    );
   const insert = (node: ProseMirrorNode) => {
     const instance = view.current;
     if (!instance) return;
     const inserted = docToBlocks(schema.nodes.doc!.create(null, [node]))[0];
     if (!inserted) return;
+    const region = selection?.region ?? activeRegion;
+    if (region !== "body") {
+      const blocks = documentRegionBlocks(latest.current, region);
+      const selectedPath = selection?.region === region ? selection.path : null;
+      const nextBlocks = selectedPath
+        ? insertBlockAfterPath(blocks, selectedPath, inserted)
+        : [...blocks, inserted];
+      const nextDocument = withDocumentRegionBlocks(
+        latest.current,
+        region,
+        nextBlocks,
+      );
+      latest.current = nextDocument;
+      publishEditorDocument(nextDocument);
+      return;
+    }
     const selectedPath = selection?.path;
     const authoredBody = selectedPath
       ? isProtectedOrderPageBreakPath(
@@ -482,16 +556,24 @@ export function PrintPacketEditor({
     publishEditorDocument(nextDocument);
     instance.focus();
   };
-  const insertAtPath = (block: Block, path: BlockPath) => {
-    const body = canonicalizeShopifyEditorBody(
-      insertBlockAtPath(latest.current.body, path, block),
+  const insertAtPath = (
+    block: Block,
+    path: BlockPath,
+    region: DocumentRegion = activeRegion,
+  ) => {
+    const blocks = insertBlockAtPath(
+      documentRegionBlocks(latest.current, region),
+      path,
+      block,
     );
-    const nextDocument = { ...latest.current, body };
+    const nextDocument = withDocumentRegionBlocks(
+      latest.current,
+      region,
+      blocks,
+    );
     latest.current = nextDocument;
-    view.current?.updateState(
-      EditorState.create({ schema, doc: blocksToDoc(body) }),
-    );
-    setSelection({ position: -1, path, block });
+    if (region === "body") syncBodyEditor(nextDocument);
+    setSelection({ position: -1, path, block, region });
     publishEditorDocument(nextDocument);
   };
   const insertVariable = (path: string) =>
@@ -508,6 +590,7 @@ export function PrintPacketEditor({
     if (!instance || !selection) return;
     if (selection.path) {
       if (
+        selection.region === "body" &&
         isProtectedOrderPageBreakPath(
           latest.current.body,
           selection.path,
@@ -517,23 +600,24 @@ export function PrintPacketEditor({
         setSelection(null);
         return;
       }
-      const body = canonicalizeShopifyEditorBody(
-        replaceBlockAtPath(latest.current.body, selection.path, block),
+      const blocks = replaceBlockAtPath(
+        documentRegionBlocks(latest.current, selection.region),
+        selection.path,
+        block,
       );
-      const nextDocument = { ...latest.current, body };
+      const nextDocument = withDocumentRegionBlocks(
+        latest.current,
+        selection.region,
+        blocks,
+      );
       latest.current = nextDocument;
-      instance.updateState(
-        EditorState.create({
-          schema,
-          doc: blocksToDoc(body),
-          plugins: [
-            history(),
-            keymap({ "Mod-z": undo, "Shift-Mod-z": redo }),
-            keymap(baseKeymap),
-          ],
-        }),
-      );
-      setSelection({ position: -1, path: selection.path, block });
+      if (selection.region === "body") syncBodyEditor(nextDocument);
+      setSelection({
+        position: -1,
+        path: selection.path,
+        block,
+        region: selection.region,
+      });
       publishEditorDocument(nextDocument);
       return;
     }
@@ -551,6 +635,7 @@ export function PrintPacketEditor({
     if (!instance || !selection) return;
     if (selection.path) {
       if (
+        selection.region === "body" &&
         isProtectedOrderPageBreakPath(
           latest.current.body,
           selection.path,
@@ -560,14 +645,17 @@ export function PrintPacketEditor({
         setSelection(null);
         return;
       }
-      const body = canonicalizeShopifyEditorBody(
-        removeBlockAtPath(latest.current.body, selection.path),
+      const blocks = removeBlockAtPath(
+        documentRegionBlocks(latest.current, selection.region),
+        selection.path,
       );
-      const nextDocument = { ...latest.current, body };
+      const nextDocument = withDocumentRegionBlocks(
+        latest.current,
+        selection.region,
+        blocks,
+      );
       latest.current = nextDocument;
-      instance.updateState(
-        EditorState.create({ schema, doc: blocksToDoc(body) }),
-      );
+      if (selection.region === "body") syncBodyEditor(nextDocument);
       publishEditorDocument(nextDocument);
       setSelection(null);
       return;
@@ -584,38 +672,50 @@ export function PrintPacketEditor({
   };
   const moveSelected = (direction: -1 | 1) => {
     if (!selection?.path) return;
+    const regionBlocks = documentRegionBlocks(latest.current, selection.region);
     if (
       !canMoveBlockAtPath(
-        latest.current.body,
+        regionBlocks,
         selection.path,
         direction,
-        latest.current.media.kind,
+        selection.region === "body" ? latest.current.media.kind : "label",
       )
     )
       return;
-    const body = canonicalizeShopifyEditorBody(
-      moveBlockAtPath(latest.current.body, selection.path, direction),
-    );
+    const blocks = moveBlockAtPath(regionBlocks, selection.path, direction);
     const nextPath = selection.path.map((part, index) =>
       index === selection.path!.length - 1
         ? { ...part, index: part.index + direction }
         : part,
     );
-    const nextDocument = { ...latest.current, body };
-    latest.current = nextDocument;
-    view.current?.updateState(
-      EditorState.create({ schema, doc: blocksToDoc(body) }),
+    const nextDocument = withDocumentRegionBlocks(
+      latest.current,
+      selection.region,
+      blocks,
     );
+    latest.current = nextDocument;
+    if (selection.region === "body") syncBodyEditor(nextDocument);
     setSelection(
-      isProtectedOrderPageBreakPath(body, nextPath, latest.current.media.kind)
+      selection.region === "body" &&
+        isProtectedOrderPageBreakPath(
+          blocks,
+          nextPath,
+          latest.current.media.kind,
+        )
         ? null
-        : { position: -1, path: nextPath, block: selection.block },
+        : {
+            position: -1,
+            path: nextPath,
+            block: selection.block,
+            region: selection.region,
+          },
     );
     publishEditorDocument(nextDocument);
   };
   const duplicateSelected = () => {
     if (!selection?.path) return;
     if (
+      selection.region === "body" &&
       isProtectedOrderPageBreakPath(
         latest.current.body,
         selection.path,
@@ -625,19 +725,98 @@ export function PrintPacketEditor({
       setSelection(null);
       return;
     }
-    const body = canonicalizeShopifyEditorBody(
-      insertBlockAfterPath(
-        latest.current.body,
-        selection.path,
-        structuredClone(selection.block),
-      ),
+    const blocks = insertBlockAfterPath(
+      documentRegionBlocks(latest.current, selection.region),
+      selection.path,
+      structuredClone(selection.block),
     );
-    const nextDocument = { ...latest.current, body };
+    const nextDocument = withDocumentRegionBlocks(
+      latest.current,
+      selection.region,
+      blocks,
+    );
     latest.current = nextDocument;
-    view.current?.updateState(
-      EditorState.create({ schema, doc: blocksToDoc(body) }),
-    );
+    if (selection.region === "body") syncBodyEditor(nextDocument);
     publishEditorDocument(nextDocument);
+  };
+  const focusDocumentRegion = (region: DocumentRegion) => {
+    setSelection(null);
+    setActiveRegion(region);
+  };
+  const changeDocumentRegionBlock = (
+    region: DocumentRegion,
+    block: Block,
+    path: BlockPath,
+  ) => {
+    const blocks = replaceBlockAtPath(
+      documentRegionBlocks(latest.current, region),
+      path,
+      block,
+    );
+    const nextDocument = withDocumentRegionBlocks(
+      latest.current,
+      region,
+      blocks,
+    );
+    latest.current = nextDocument;
+    setSelection({ position: -1, block, path, region });
+    publishEditorDocument(nextDocument);
+  };
+  const renderRepeatingRegion = (region: "header" | "footer") => {
+    const blocks = documentRegionBlocks(currentDocument, region);
+    const active = activeRegion === region;
+    const name = region === "header" ? "header" : "footer";
+    return (
+      <section
+        className={`piqae-document-region piqae-document-${region}${active ? " is-active" : ""}${activeRegion !== "body" && !active ? " is-dimmed" : ""}`}
+        data-document-region={region}
+        aria-label={`Repeating page ${name}${active ? ", editing" : ", double-click, Enter, or F2 to edit"}`}
+        tabIndex={active ? -1 : 0}
+        onDoubleClick={(event) => {
+          if (disabled) return;
+          event.stopPropagation();
+          focusDocumentRegion(region);
+        }}
+        onKeyDown={(event) => {
+          if (
+            disabled ||
+            active ||
+            (event.key !== "Enter" && event.key !== "F2")
+          )
+            return;
+          event.preventDefault();
+          event.stopPropagation();
+          focusDocumentRegion(region);
+        }}
+      >
+        <span className="piqae-document-region-label">
+          {active ? `Editing repeating ${name}` : `Repeating ${name}`}
+        </span>
+        {blocks.length || active ? (
+          <DocumentCanvas
+            blocks={blocks}
+            selectedPath={
+              selection?.region === region ? selection.path : undefined
+            }
+            editable={active && !disabled}
+            preview={!active}
+            mediaKind={value.media.kind}
+            authoringFields={allAuthoringFields}
+            onSelect={(block, path) =>
+              setSelection({ position: -1, block, path, region })
+            }
+            onInsert={(block, path) => insertAtPath(block, path, region)}
+            onChange={(block, path) =>
+              changeDocumentRegionBlock(region, block, path)
+            }
+          />
+        ) : (
+          <span className="piqae-document-region-empty">
+            Double-click to add content
+          </span>
+        )}
+      </section>
+    );
   };
   return (
     <div
@@ -850,10 +1029,10 @@ export function PrintPacketEditor({
                     disabled ||
                     !selection.path ||
                     !canMoveBlockAtPath(
-                      canonicalBody,
+                      selectedRegionBlocks,
                       selection.path,
                       -1,
-                      value.media.kind,
+                      selection.region === "body" ? value.media.kind : "label",
                     )
                   }
                   onClick={() => moveSelected(-1)}
@@ -865,10 +1044,10 @@ export function PrintPacketEditor({
                     disabled ||
                     !selection.path ||
                     !canMoveBlockAtPath(
-                      canonicalBody,
+                      selectedRegionBlocks,
                       selection.path,
                       1,
-                      value.media.kind,
+                      selection.region === "body" ? value.media.kind : "label",
                     )
                   }
                   onClick={() => moveSelected(1)}
@@ -879,11 +1058,12 @@ export function PrintPacketEditor({
                   disabled={
                     disabled ||
                     !selection.path ||
-                    isProtectedOrderPageBreakPath(
-                      canonicalBody,
-                      selection.path,
-                      value.media.kind,
-                    )
+                    (selection.region === "body" &&
+                      isProtectedOrderPageBreakPath(
+                        canonicalBody,
+                        selection.path,
+                        value.media.kind,
+                      ))
                   }
                   onClick={duplicateSelected}
                 />
@@ -895,6 +1075,7 @@ export function PrintPacketEditor({
                     disabled ||
                     Boolean(
                       selection.path &&
+                      selection.region === "body" &&
                       isProtectedOrderPageBreakPath(
                         canonicalBody,
                         selection.path,
@@ -934,29 +1115,46 @@ export function PrintPacketEditor({
             }}
           >
             <SafeAreaGuide value={value} stock={stock} />
-            <DocumentCanvas
-              blocks={canonicalBody}
-              insertionSlots={false}
-              selectedPath={selection?.path}
-              editable={!disabled}
-              mediaKind={value.media.kind}
-              authoringFields={allAuthoringFields}
-              onSelect={(block, path) =>
-                setSelection({ position: -1, block, path })
-              }
-              onInsert={insertAtPath}
-              onChange={(block, path) => {
-                setSelection({ position: -1, block, path });
-                const body = canonicalizeShopifyEditorBody(
-                  replaceBlockAtPath(canonicalBody, path, block),
-                );
-                latest.current = { ...latest.current, body };
-                view.current?.updateState(
-                  EditorState.create({ schema, doc: blocksToDoc(body) }),
-                );
-                publishEditorDocument({ ...latest.current, body });
-              }}
-            />
+            {value.media.kind === "paged"
+              ? renderRepeatingRegion("header")
+              : null}
+            <main
+              className={`piqae-document-body${activeRegion !== "body" ? " is-dimmed" : ""}`}
+              data-document-region="body"
+            >
+              <DocumentCanvas
+                blocks={canonicalBody}
+                insertionSlots={false}
+                selectedPath={
+                  selection?.region === "body" ? selection.path : undefined
+                }
+                editable={!disabled && activeRegion === "body"}
+                preview={activeRegion !== "body"}
+                mediaKind={value.media.kind}
+                authoringFields={allAuthoringFields}
+                onSelect={(block, path) =>
+                  setSelection({ position: -1, block, path, region: "body" })
+                }
+                onInsert={(block, path) => insertAtPath(block, path, "body")}
+                onChange={(block, path) => {
+                  setSelection({
+                    position: -1,
+                    block,
+                    path,
+                    region: "body",
+                  });
+                  const body = canonicalizeShopifyEditorBody(
+                    replaceBlockAtPath(canonicalBody, path, block),
+                  );
+                  latest.current = { ...latest.current, body };
+                  syncBodyEditor(latest.current);
+                  publishEditorDocument({ ...latest.current, body });
+                }}
+              />
+            </main>
+            {value.media.kind === "paged"
+              ? renderRepeatingRegion("footer")
+              : null}
           </div>
           <div
             className="piqae-prosemirror-source"
@@ -1102,12 +1300,7 @@ export function compactCanvasAnnotations(value: PrintPacket): boolean {
 
 export function canvasStyle(value: PrintPacket): CSSProperties {
   const media = value.media;
-  const margins = media.margins ?? {
-    top_mm: 0,
-    right_mm: 0,
-    bottom_mm: 0,
-    left_mm: 0,
-  };
+  const margins = documentMargins(value);
   const { widthMm, heightMm } = canvasGeometry(value);
   const fixed = heightMm !== null;
   const padding = fixed
@@ -1119,6 +1312,89 @@ export function canvasStyle(value: PrintPacket): CSSProperties {
     "--piqae-media-min-height": fixed ? "0" : "120mm",
     aspectRatio: fixed ? `${widthMm} / ${heightMm}` : undefined,
     padding,
+  } as CSSProperties;
+}
+
+export type DocumentMarginEdge = "top" | "right" | "bottom" | "left";
+export type DocumentMargins = {
+  top_mm: number;
+  right_mm: number;
+  bottom_mm: number;
+  left_mm: number;
+};
+
+const DEFAULT_DOCUMENT_MARGINS: DocumentMargins = {
+  top_mm: 10,
+  right_mm: 10,
+  bottom_mm: 10,
+  left_mm: 10,
+};
+
+/** Matches the renderer's 10 mm default when older documents omit margins. */
+export function documentMargins(value: PrintPacket): DocumentMargins {
+  return value.media.margins ?? DEFAULT_DOCUMENT_MARGINS;
+}
+
+export function maximumDocumentMargin(
+  value: PrintPacket,
+  edge: DocumentMarginEdge,
+): number {
+  const margins = documentMargins(value);
+  const { widthMm, heightMm } = canvasGeometry(value);
+  const vertical = edge === "top" || edge === "bottom";
+  const available = vertical ? heightMm : widthMm;
+  if (available === null) return 1_000;
+  const opposite = vertical
+    ? edge === "top"
+      ? margins.bottom_mm
+      : margins.top_mm
+    : edge === "left"
+      ? margins.right_mm
+      : margins.left_mm;
+  return Math.max(0, Math.round((available - opposite - 1) * 10) / 10);
+}
+
+export function withDocumentMargin(
+  value: PrintPacket,
+  edge: DocumentMarginEdge,
+  requestedMm: number,
+): PrintPacket {
+  if (!Number.isFinite(requestedMm)) return value;
+  const key = `${edge}_mm` as keyof DocumentMargins;
+  const next = Math.min(
+    Math.max(requestedMm, 0),
+    maximumDocumentMargin(value, edge),
+  );
+  return {
+    ...value,
+    media: {
+      ...value.media,
+      margins: { ...documentMargins(value), [key]: next },
+    },
+  };
+}
+
+/**
+ * Keep the authoring placeholder faithful to the bounded renderer. Barcode
+ * dimensions remain explicit in PrintPacket, while the canvas clamps a
+ * malformed draft to the renderer's 20 x 8 mm minimum and prevents fixed-label
+ * overflow. The document itself is never mutated by this presentation helper.
+ */
+export function barcodeCanvasStyle(
+  block: Extract<Block, { type: "barcode" }>,
+  mediaKind: PrintPacket["media"]["kind"],
+): CSSProperties {
+  const widthMm = Math.min(
+    180,
+    Math.max(20, Number.isFinite(block.width_mm) ? block.width_mm : 20),
+  );
+  const heightMm = Math.min(
+    80,
+    Math.max(8, Number.isFinite(block.height_mm) ? block.height_mm : 8),
+  );
+  return {
+    width: mediaKind === "label" ? `min(100%, ${widthMm}mm)` : `${widthMm}mm`,
+    "--piqae-barcode-height": `${heightMm}mm`,
   } as CSSProperties;
 }
 
@@ -1456,6 +1732,11 @@ function CanvasBlock({
     return (
       <div
         className={`piqae-canvas-code piqae-canvas-${block.type}${selectableClass}${selected ? " piqae-canvas-selected" : ""}`}
+        style={
+          block.type === "barcode"
+            ? barcodeCanvasStyle(block, mediaKind)
+            : undefined
+        }
         onClick={select}
       >
         <span aria-hidden="true">{block.type === "qr" ? "▦" : "▌█▌▌█▌█"}</span>
@@ -2716,81 +2997,33 @@ export function DocumentSettingsFields({
   disabled?: boolean;
   onChange(document: PrintPacket): void;
 }) {
-  const theme = value.theme ?? {};
-  const updateRegion = (region: "header" | "footer", content: string) =>
-    onChange({
-      ...value,
-      [region]: {
-        first: value[region]?.first ?? [],
-        default: content
-          ? [{ type: "paragraph", content: [{ type: "text", value: content }] }]
-          : [],
-        last: value[region]?.last ?? [],
-      },
-    });
   return (
-    <>
-      <label className="piqae-field">
-        <span>Base text size</span>
-        <input
-          type="number"
-          min={7}
-          max={24}
-          value={theme.font_size_pt ?? 10}
-          disabled={disabled}
-          onChange={(event) =>
-            onChange({
-              ...value,
-              theme: {
-                ...value.theme,
-                font_size_pt: Number(event.currentTarget.value),
-              },
-            })
-          }
-        />
-      </label>
-      <label className="piqae-field">
-        <span>Text colour</span>
-        <input
-          type="color"
-          value={rgbToHex(theme.text_color ?? { red: 32, green: 34, blue: 35 })}
-          disabled={disabled}
-          onChange={(event) =>
-            onChange({
-              ...value,
-              theme: {
-                ...value.theme,
-                text_color: hexToRgb(event.currentTarget.value),
-              },
-            })
-          }
-        />
-      </label>
-      <label className="piqae-field piqae-field-wide">
-        <span>Repeating page header</span>
-        <input
-          type="text"
-          value={regionText(value.header?.default)}
-          placeholder="Shown at the top of every page"
-          disabled={disabled}
-          onChange={(event) =>
-            updateRegion("header", event.currentTarget.value)
-          }
-        />
-      </label>
-      <label className="piqae-field piqae-field-wide">
-        <span>Repeating page footer</span>
-        <input
-          type="text"
-          value={regionText(value.footer?.default)}
-          placeholder="Shown at the bottom of every page"
-          disabled={disabled}
-          onChange={(event) =>
-            updateRegion("footer", event.currentTarget.value)
-          }
-        />
-      </label>
-    </>
+    <fieldset className="piqae-settings-group piqae-field-wide">
+      <legend>Document margins</legend>
+      <p>Sets the printable inset and updates the visual page immediately.</p>
+      <div className="piqae-margin-fields">
+        {(["top", "right", "bottom", "left"] as const).map((edge) => (
+          <label className="piqae-field" key={edge}>
+            <span>{edge[0]!.toUpperCase() + edge.slice(1)} (mm)</span>
+            <input
+              name={`margin${edge[0]!.toUpperCase()}${edge.slice(1)}Mm`}
+              type="number"
+              inputMode="decimal"
+              min={0}
+              max={maximumDocumentMargin(value, edge)}
+              step={0.5}
+              value={documentMargins(value)[`${edge}_mm`]}
+              disabled={disabled}
+              onChange={(event) => {
+                const next = event.currentTarget.valueAsNumber;
+                if (Number.isFinite(next))
+                  onChange(withDocumentMargin(value, edge, next));
+              }}
+            />
+          </label>
+        ))}
+      </div>
+    </fieldset>
   );
 }
 
@@ -4185,16 +4418,6 @@ export function removeBlockAtPath(blocks: Block[], path: BlockPath): Block[] {
       : block;
   });
 }
-function rgbToHex(color: { red: number; green: number; blue: number }) {
-  return `#${[color.red, color.green, color.blue].map((value) => Math.max(0, Math.min(255, value)).toString(16).padStart(2, "0")).join("")}`;
-}
-function hexToRgb(value: string) {
-  return {
-    red: Number.parseInt(value.slice(1, 3), 16),
-    green: Number.parseInt(value.slice(3, 5), 16),
-    blue: Number.parseInt(value.slice(5, 7), 16),
-  };
-}
 function fieldGroups(fields: readonly ShopifyDocumentField[]) {
   const groups = new Map<
     ShopifyDocumentField["group"],
@@ -4208,20 +4431,6 @@ function fieldGroups(fields: readonly ShopifyDocumentField[]) {
   return [...groups.entries()];
 }
 
-function regionText(blocks: Block[] | undefined) {
-  const first = blocks?.[0];
-  return first && (first.type === "paragraph" || first.type === "heading")
-    ? first.content
-        .map((item) =>
-          item.type === "text"
-            ? item.value
-            : item.type === "value"
-              ? `{{ ${expressionLabel(item.value)} }}`
-              : "\n",
-        )
-        .join("")
-    : "";
-}
 function structuredBlockDOM(block: Block, fallback?: string): DOMOutputSpec {
   const attrs = {
     class: `piqae-structured-block piqae-block-${block.type}`,

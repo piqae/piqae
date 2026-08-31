@@ -2,12 +2,15 @@ import { describe, expect, it } from "vitest";
 
 import {
   ACCOUNT_DEFAULT_DOCUMENT_ID,
+  adminPreviewPlaceholderUrl,
   loadAdminPrintOptions,
 } from "../app/core/admin-print-options.server";
 import { CredentialVault } from "../app/core/credentials.server";
 import { MemoryShopRepository } from "../app/core/model";
 import { MemoryWorkflowRepository } from "../app/core/workflows.server";
 import { starterTemplates } from "../app/core/starter-templates";
+
+const APP_URL = "https://shopify.example.com";
 
 function a4Target(
   specificationRevision: string,
@@ -72,6 +75,12 @@ function a4Target(
 }
 
 describe("admin print options", () => {
+  it("normalizes the absolute preview placeholder URL", () => {
+    expect(adminPreviewPlaceholderUrl(`${APP_URL}/`)).toBe(
+      `${APP_URL}/api/public/print-placeholder`,
+    );
+  });
+
   it("returns published documents and a setup state before Piqae is linked", async () => {
     const shops = new MemoryShopRepository();
     const workflowRepository = new MemoryWorkflowRepository();
@@ -100,6 +109,7 @@ describe("admin print options", () => {
       workflows: workflowRepository,
       vault: CredentialVault.fromBase64(Buffer.alloc(32, 4).toString("base64")),
       baseUrl: "https://unused.example.invalid",
+      appUrl: APP_URL,
     });
 
     expect(result.linked).toBe(false);
@@ -113,6 +123,9 @@ describe("admin print options", () => {
     expect(result.targets).toEqual([]);
     expect(result.printers).toEqual([]);
     expect(result.setupDestinationUrl).toBe("/app/printers");
+    expect(result.previewPlaceholderUrl).toBe(
+      "https://shopify.example.com/api/public/print-placeholder",
+    );
     expect(result.renderExecutionPolicy).toBe("automatic");
   });
 
@@ -148,6 +161,7 @@ describe("admin print options", () => {
       workflows: workflows as never,
       vault: CredentialVault.fromBase64(Buffer.alloc(32, 4).toString("base64")),
       baseUrl: "https://unused.example.invalid",
+      appUrl: APP_URL,
     });
     expect(result.documents).toEqual([
       expect.objectContaining({
@@ -211,6 +225,7 @@ describe("admin print options", () => {
       workflows: workflowRepository,
       vault: CredentialVault.fromBase64(Buffer.alloc(32, 4).toString("base64")),
       baseUrl: "https://unused.example.invalid",
+      appUrl: APP_URL,
       managedClientFactory,
     };
 
@@ -391,6 +406,7 @@ describe("admin print options", () => {
       workflows: new MemoryWorkflowRepository(),
       vault: CredentialVault.fromBase64(Buffer.alloc(32, 4).toString("base64")),
       baseUrl: "https://unused.example.invalid",
+      appUrl: APP_URL,
       managedClientFactory: () =>
         ({
           targets: { list: async () => [] },

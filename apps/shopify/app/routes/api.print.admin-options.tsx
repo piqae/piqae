@@ -16,6 +16,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       workflows: workflows(),
       vault: services.vault,
       baseUrl: services.baseUrl,
+      appUrl: services.appUrl,
       managedClientFactory: (link) => services.managedAccounts.client(link),
     });
     return cors(Response.json(result));

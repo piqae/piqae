@@ -114,6 +114,9 @@ export class ManagedPiqaeAccountService {
   ): Promise<boolean> {
     const stored = await this.workflows.listTemplates(shop);
     for (const starter of starterTemplates) {
+      const currentStarterDigest = createHash("sha256")
+        .update(JSON.stringify(starter.specification))
+        .digest("hex");
       const local =
         stored.find(
           (candidate) => candidate.id === systemTemplateId(starter.id),
@@ -128,6 +131,10 @@ export class ManagedPiqaeAccountService {
           !published ||
           published.piqaeAccountId !== link.piqaeAccountId ||
           published.piqaeEnvironmentId !== link.piqaeLiveEnvironmentId ||
+          // A valid old publication is still old. Comparing the pin with the
+          // checked-in starter digest lets immutable defaults receive layout
+          // fixes once, while merchant-owned copies remain untouched.
+          published.canonicalDigest !== currentStarterDigest ||
           published.canonicalDigest !==
             createHash("sha256")
               .update(JSON.stringify(envelope.document))

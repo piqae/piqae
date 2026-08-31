@@ -52,6 +52,7 @@ function buildServices() {
   );
   const runtime = resolvePiqaeRuntime();
   const baseUrl = runtime.baseUrl;
+  const appUrl = required("SHOPIFY_APP_URL");
   const managedAccounts = new ManagedPiqaeAccountService(
     repository,
     workflows(),
@@ -62,7 +63,7 @@ function buildServices() {
     repository,
     vault,
     (token) => new PiqaeClient({ baseUrl, accessToken: () => token }),
-    required("SHOPIFY_APP_URL"),
+    appUrl,
     downloadTokens,
     workflows(),
     (link) => managedAccounts.client(link),
@@ -125,6 +126,7 @@ function buildServices() {
     vault,
     downloadTokens,
     baseUrl,
+    appUrl,
     runtime,
     storage,
     printing,

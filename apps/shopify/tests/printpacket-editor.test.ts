@@ -12,11 +12,15 @@ import {
   removeBlockAtPath,
   replaceBlockAtPath,
   searchDocumentFields,
+  barcodeCanvasStyle,
   canvasGeometry,
   canvasStyle,
   compactCanvasAnnotations,
+  documentMargins,
+  maximumDocumentMargin,
   responsiveCanvasGeometry,
   safeAreaStyle,
+  withDocumentMargin,
 } from "../app/components/PrintPacketEditor";
 import {
   authoringPathExpression,
@@ -48,6 +52,34 @@ describe("PrintPacket editor serialization", () => {
       safeAreaStyle(label, { top: 2, right: 4, bottom: 3, left: 5 }),
     ).toEqual({ top: "4%", right: "4%", bottom: "6%", left: "5%" });
   });
+  it("uses renderer-default margins and reflects bounded margin edits", () => {
+    const document: PrintPacket = {
+      format: "printpacket/v1",
+      media: { kind: "label", width_mm: 100, height_mm: 50 },
+      body: [],
+    };
+
+    expect(documentMargins(document)).toEqual({
+      top_mm: 10,
+      right_mm: 10,
+      bottom_mm: 10,
+      left_mm: 10,
+    });
+    expect(canvasStyle(document).padding).toBe("10% 10% 10% 10%");
+
+    const edited = withDocumentMargin(document, "left", 4.5);
+    expect(edited.media.margins).toEqual({
+      top_mm: 10,
+      right_mm: 10,
+      bottom_mm: 10,
+      left_mm: 4.5,
+    });
+    expect(canvasStyle(edited).padding).toBe("10% 10% 10% 4.5%");
+    expect(maximumDocumentMargin(edited, "top")).toBe(39);
+    expect(withDocumentMargin(edited, "top", 500).media.margins?.top_mm).toBe(
+      39,
+    );
+  });
   it.each([320, 768])(
     "preserves A4 portrait, landscape, and label ratios at a %i px browser width",
     (browserWidth) => {
@@ -75,6 +107,32 @@ describe("PrintPacket editor serialization", () => {
       }
     },
   );
+  it("sizes label barcodes from the specification without allowing unsafe placeholders", () => {
+    const label = starterTemplates.find(
+      ({ id }) => id === "product-label",
+    )!.specification;
+    const barcode = {
+      type: "barcode",
+      value: { type: "literal", value: "942000000001" },
+      symbology: "code128",
+      width_mm: 88,
+      height_mm: 16,
+      human_readable: true,
+    } as const;
+    expect(barcodeCanvasStyle(barcode, label.media.kind)).toEqual({
+      width: "min(100%, 88mm)",
+      "--piqae-barcode-height": "16mm",
+    });
+    expect(
+      barcodeCanvasStyle(
+        { ...barcode, width_mm: 1, height_mm: 1 },
+        label.media.kind,
+      ),
+    ).toEqual({
+      width: "min(100%, 20mm)",
+      "--piqae-barcode-height": "8mm",
+    });
+  });
   it("preserves computed values, line breaks, and non-text layout blocks", () => {
     const blocks: Block[] = [
       {

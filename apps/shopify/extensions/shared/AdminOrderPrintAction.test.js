@@ -7,13 +7,15 @@ import {
   messageForLoadError,
   newInteractionId,
   stableOptionKey,
-  PRINT_PLACEHOLDER_URL,
+  PRINT_PLACEHOLDER_PATH,
   canUseDestinationForPolicy,
   renderPolicySummary,
   targetForDocument,
   canUsePublishedBinding,
   chooseDefaultPrinterOption,
   printerOptionsForDocument,
+  printerCompatibilityMessage,
+  previewPlaceholderUrl,
 } from "./AdminOrderPrintAction.jsx";
 
 describe("admin print action state", () => {
@@ -35,7 +37,15 @@ describe("admin print action state", () => {
   });
 
   it("uses a same-origin first-paint print placeholder", () => {
-    expect(PRINT_PLACEHOLDER_URL).toBe("/api/public/print-placeholder");
+    expect(PRINT_PLACEHOLDER_PATH).toBe("/api/public/print-placeholder");
+    expect(
+      previewPlaceholderUrl(
+        "https://shopify.example.com/api/public/print-placeholder",
+        "loading",
+      ),
+    ).toBe(
+      "https://shopify.example.com/api/public/print-placeholder?state=loading",
+    );
   });
   it("uses the configured ready default", () => {
     expect(
@@ -138,7 +148,7 @@ describe("admin print action state", () => {
       expect(canUsePublishedBinding(document)).toBe(false);
   });
 
-  it("shows connected printers but enables only the published compatible binding", () => {
+  it("shows every connected printer and preserves the merchant default", () => {
     const document = {
       targetBindingStatus: "ready",
       designTargetId: "tgt_a4",
@@ -172,19 +182,25 @@ describe("admin print action state", () => {
     expect(options).toEqual([
       expect.objectContaining({
         id: "prt_label",
-        disabled: true,
-        label: "Label printer — setup required",
+        value: "prt_label",
+        compatible: false,
+        directTargetId: null,
       }),
       expect.objectContaining({
         id: "prt_a4",
-        value: "tgt_a4",
-        disabled: false,
+        value: "prt_a4",
+        compatible: true,
+        directTargetId: "tgt_a4",
       }),
     ]);
-    expect(chooseDefaultPrinterOption(options)?.id).toBe("prt_a4");
+    expect(chooseDefaultPrinterOption(options)?.id).toBe("prt_label");
+    expect(printerCompatibilityMessage(document, options[0])).toContain(
+      "Label printer is connected",
+    );
+    expect(printerCompatibilityMessage(document, options[1])).toBe("");
   });
 
-  it("keeps raw printers visible but unavailable for an unbound document", () => {
+  it("keeps the saved printer selected for browser printing on an unbound document", () => {
     const options = printerOptionsForDocument(
       {
         targetBindingStatus: "unbound",
@@ -192,17 +208,24 @@ describe("admin print action state", () => {
         designSpecificationRevision: null,
       },
       [],
-      [{ id: "prt_a4", name: "Office A4" }],
+      [{ id: "prt_a4", name: "Office A4", isDefault: true }],
     );
     expect(options).toEqual([
-      expect.objectContaining({ disabled: true, value: "printer:prt_a4" }),
+      expect.objectContaining({
+        value: "prt_a4",
+        compatible: false,
+        isDefault: true,
+      }),
     ]);
-    expect(chooseDefaultPrinterOption(options)).toBeUndefined();
+    expect(chooseDefaultPrinterOption(options)?.id).toBe("prt_a4");
   });
 
   it("shows a useful backend error", () => {
     expect(messageForLoadError(new Error("Connect Piqae first"))).toBe(
       "Connect Piqae first",
+    );
+    expect(messageForLoadError(new TypeError("Load failed"))).toContain(
+      "could not reach Piqae",
     );
   });
 

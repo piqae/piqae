@@ -49,8 +49,9 @@ describe("PrintPacket model", () => {
       kind: "label",
       width_mm: 100,
       height_mm: 50,
-      margins: { top_mm: 3, right_mm: 3, bottom_mm: 3, left_mm: 3 },
+      margins: { top_mm: 2, right_mm: 2, bottom_mm: 2, left_mm: 2 },
     });
+    expect(label.theme).toMatchObject({ font_size_pt: 9, line_height: 1.15 });
 
     const nodes = allNodes(label.body);
     expect(
@@ -80,8 +81,8 @@ describe("PrintPacket model", () => {
     expect(nodes.find((node) => node.type === "barcode")).toMatchObject({
       value: { type: "current_path", path: ["labelCode128"] },
       symbology: "code128",
-      width_mm: 70,
-      height_mm: 12,
+      width_mm: 88,
+      height_mm: 16,
       human_readable: true,
     });
     const lineItemRepeat = nodes.find(

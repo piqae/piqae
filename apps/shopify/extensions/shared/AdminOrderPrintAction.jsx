@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { authorizedJson } from "./print-urls.js";
 
 export const ADMIN_OPTIONS_TIMEOUT_MS = 8_000;
-export const PRINT_PLACEHOLDER_URL = "/api/public/print-placeholder";
+export const PRINT_PLACEHOLDER_PATH = "/api/public/print-placeholder";
 
 let interactionSequence = 0;
 
@@ -55,6 +55,11 @@ class PrintActionErrorBoundary extends Component {
 export function messageForLoadError(error) {
   if (error?.name === "AbortError" || error?.name === "TimeoutError")
     return "Piqae took too long to respond. Check the connection and try again.";
+  if (
+    error instanceof TypeError &&
+    ["Load failed", "Failed to fetch"].includes(error.message)
+  )
+    return "The preview could not reach Piqae. Try again, or close and reopen this print action.";
   return error instanceof Error
     ? error.message
     : "Printing options could not be loaded.";
@@ -107,43 +112,42 @@ export function printerOptionsForDocument(document, targets, printers) {
             document.compatibleTargetIds.includes(target.id)),
       )
     : undefined;
-  const advisoryName = document?.advisoryDestination?.printerName;
-  const inventory = (printers ?? []).map((printer) => {
+  return (printers ?? []).map((printer) => {
     const destination = selectedTarget?.destinations?.find(
       (item) =>
         item.printerId === printer.id &&
-        item.printerName === advisoryName &&
         item.mediaCompatibility?.status === "ready",
     );
-    const available = Boolean(destination);
     return {
       id: printer.id,
-      value: available ? selectedTarget.id : `printer:${printer.id}`,
-      label: `${printer.name}${available ? "" : " — setup required"}`,
-      disabled: !available,
+      value: printer.id,
+      label: printer.name,
+      directTargetId: destination ? selectedTarget.id : null,
+      compatible: Boolean(destination),
       isDefault: Boolean(printer.isDefault),
     };
   });
-  if (inventory.some((item) => !item.disabled)) return inventory;
-  if (!selectedTarget) return inventory;
-  const fallbackName = advisoryName ?? selectedTarget.name;
-  return [
-    {
-      id: selectedTarget.id,
-      value: selectedTarget.id,
-      label: fallbackName,
-      disabled: false,
-      isDefault: false,
-    },
-    ...inventory,
-  ];
 }
 
 export function chooseDefaultPrinterOption(items) {
   return (
-    items.find((item) => item.isDefault && !item.disabled) ??
-    items.find((item) => !item.disabled)
+    items.find((item) => item.isDefault) ??
+    items.find((item) => item.compatible) ??
+    items[0]
   );
+}
+
+export function printerCompatibilityMessage(document, printer) {
+  if (!document || !printer || printer.compatible) return "";
+  const documentName = document.name || "This document";
+  return `${printer.label} is connected, but ${documentName} does not have compatible published stock settings for it. Browser printing is still available.`;
+}
+
+export function previewPlaceholderUrl(baseUrl, status) {
+  if (!baseUrl) return undefined;
+  const url = new URL(baseUrl);
+  url.searchParams.set("state", status);
+  return url.toString();
 }
 
 export function canUsePublishedBinding(document) {
@@ -199,11 +203,14 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   );
   const [options, setOptions] = useState(null);
   const [documentId, setDocumentId] = useState("");
-  const [destinationId, setDestinationId] = useState("");
+  const [printerId, setPrinterId] = useState("");
   const [state, setState] = useState("loading");
   const [error, setError] = useState("");
   const [result, setResult] = useState("");
   const [preview, setPreview] = useState(null);
+  const [previewState, setPreviewState] = useState("idle");
+  const [previewError, setPreviewError] = useState("");
+  const [previewAttempt, setPreviewAttempt] = useState(0);
   const requestSequence = useRef(0);
   const previewSequence = useRef(0);
   const interactionId = useRef(newInteractionId(orderIds));
@@ -219,10 +226,6 @@ function AdminOrderPrintActionContent({ bulk = false }) {
       );
       if (sequence !== requestSequence.current) return;
       const defaultDocument = chooseDefaultDocument(value.documents ?? []);
-      const defaultDestination = targetForDocument(
-        defaultDocument,
-        value.targets ?? [],
-      );
       const defaultPrinter = chooseDefaultPrinterOption(
         printerOptionsForDocument(
           defaultDocument,
@@ -232,7 +235,7 @@ function AdminOrderPrintActionContent({ bulk = false }) {
       );
       setOptions(value);
       setDocumentId(defaultDocument?.id ?? "");
-      setDestinationId(defaultPrinter?.value ?? defaultDestination?.id ?? "");
+      setPrinterId(defaultPrinter?.value ?? "");
       setState("ready");
     } catch (cause) {
       if (sequence !== requestSequence.current) return;
@@ -256,8 +259,9 @@ function AdminOrderPrintActionContent({ bulk = false }) {
     options?.targets ?? [],
     options?.printers ?? [],
   );
+  const selectedPrinter = printerOptions.find(({ id }) => id === printerId);
   const selectedTarget = options?.targets?.find(
-    ({ id }) => id === destinationId,
+    ({ id }) => id === selectedPrinter?.directTargetId,
   );
   useEffect(() => {
     if (!selectedDocument || !options?.targets) return;
@@ -268,14 +272,19 @@ function AdminOrderPrintActionContent({ bulk = false }) {
         options.printers ?? [],
       ),
     );
-    setDestinationId(next?.value ?? "");
+    setPrinterId(next?.value ?? "");
   }, [selectedDocument?.id, options]);
   useEffect(() => {
-    if (!options?.linked || !selectedDocument || orderIds.length === 0) return;
+    if (!options?.linked || !selectedDocument || orderIds.length === 0) {
+      setPreview(null);
+      setPreviewState("idle");
+      setPreviewError("");
+      return;
+    }
     const sequence = ++previewSequence.current;
     setPreview(null);
-    setError("");
-    setState("rendering");
+    setPreviewError("");
+    setPreviewState("loading");
     loadWithTimeout(
       (signal) =>
         authorizedJson("/api/print/admin/previews", {
@@ -292,22 +301,28 @@ function AdminOrderPrintActionContent({ bulk = false }) {
       .then((value) => {
         if (sequence !== previewSequence.current) return;
         setPreview(value);
-        setState("ready");
+        setPreviewState("ready");
       })
       .catch((cause) => {
         if (sequence !== previewSequence.current) return;
-        setError(messageForLoadError(cause));
-        setState("ready");
+        setPreviewError(messageForLoadError(cause));
+        setPreviewState("failed");
       });
     return () => {
       previewSequence.current += 1;
     };
-  }, [options, selectedDocument?.id, orderIds.join(",")]);
+  }, [options, selectedDocument?.id, orderIds.join(","), previewAttempt]);
 
-  // Shopify's print host can suppress the extension body while `src` is
-  // absent. Keep a safe same-origin document attached from the first paint,
-  // then atomically replace it with the signed preview artifact.
-  const src = preview?.artifactUrl ?? PRINT_PLACEHOLDER_URL;
+  const src =
+    preview?.artifactUrl ??
+    previewPlaceholderUrl(
+      options?.previewPlaceholderUrl,
+      previewState === "failed"
+        ? "error"
+        : previewState === "loading"
+          ? "loading"
+          : "empty",
+    );
 
   useEffect(() => {
     if (!preview) return;
@@ -330,7 +345,7 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   async function printDirect() {
     if (
       !preview ||
-      !destinationId ||
+      !selectedTarget ||
       !canUsePublishedBinding(selectedDocument) ||
       state === "printing"
     )
@@ -345,11 +360,11 @@ function AdminOrderPrintActionContent({ bulk = false }) {
           method: "POST",
           headers: {
             "content-type": "application/json",
-            "idempotency-key": `shopify-admin-${interactionId.current}-${stableOptionKey(`${destinationId}:${selectedDocument.designSpecificationRevision}`)}`,
+            "idempotency-key": `shopify-admin-${interactionId.current}-${stableOptionKey(`${printerId}:${selectedTarget.id}:${selectedDocument.designSpecificationRevision}`)}`,
           },
           body: JSON.stringify({
             renderId: preview.renderId,
-            targetId: destinationId,
+            targetId: selectedTarget.id,
             specificationRevision: selectedDocument.designSpecificationRevision,
             templateId: selectedDocument.id,
             renderCost: preview.renderCost,
@@ -373,14 +388,15 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   const policy = options?.renderExecutionPolicy ?? "automatic";
   const canPrint = Boolean(
     preview &&
-    destinationId &&
+    selectedPrinter &&
     canUsePublishedBinding(selectedDocument) &&
+    previewState === "ready" &&
     state === "ready" &&
     canUseDestinationForPolicy(selectedDestination, policy),
   );
 
   return (
-    <s-admin-print-action src={src}>
+    <s-admin-print-action {...(src ? { src } : {})}>
       <s-stack direction="block" gap="base">
         {bulk && (
           <s-text type="strong">{orderIds.length} selected orders</s-text>
@@ -393,7 +409,6 @@ function AdminOrderPrintActionContent({ bulk = false }) {
         {state === "loading" && (
           <s-text>Loading documents and destinations…</s-text>
         )}
-        {state === "rendering" && <s-text>Generating preview…</s-text>}
         {state === "failed" && (
           <s-banner tone="critical">
             {error}
@@ -431,20 +446,14 @@ function AdminOrderPrintActionContent({ bulk = false }) {
             {printerOptions.length > 0 ? (
               <s-select
                 label="Printer"
-                value={destinationId}
-                onChange={(event) =>
-                  setDestinationId(event.currentTarget.value)
-                }
+                value={printerId}
+                onChange={(event) => setPrinterId(event.currentTarget.value)}
               >
                 <s-option value="" disabled>
                   Choose a printer
                 </s-option>
                 {printerOptions.map((printer) => (
-                  <s-option
-                    key={printer.id}
-                    value={printer.value}
-                    disabled={printer.disabled}
-                  >
+                  <s-option key={printer.id} value={printer.value}>
                     {printer.label}
                   </s-option>
                 ))}
@@ -452,11 +461,25 @@ function AdminOrderPrintActionContent({ bulk = false }) {
             ) : (
               <s-text>No connected printers are available.</s-text>
             )}
-            {selectedDocument && !canUsePublishedBinding(selectedDocument) && (
-              <s-banner tone="info">
-                Connected printers are shown above. Direct printing needs this
-                document to be published with compatible printer and stock
-                settings. Shopify browser printing remains available.
+            {printerCompatibilityMessage(selectedDocument, selectedPrinter) && (
+              <s-banner tone="warning">
+                {printerCompatibilityMessage(selectedDocument, selectedPrinter)}
+              </s-banner>
+            )}
+            {previewState === "loading" && (
+              <s-stack direction="inline" gap="small" alignItems="center">
+                <s-spinner accessibilityLabel="Generating document preview" />
+                <s-text>Generating a preview with the selected orders…</s-text>
+              </s-stack>
+            )}
+            {previewState === "failed" && previewError && (
+              <s-banner tone="critical">
+                {previewError}
+                <s-button
+                  onClick={() => setPreviewAttempt((value) => value + 1)}
+                >
+                  Try again
+                </s-button>
               </s-banner>
             )}
             {error && <s-banner tone="critical">{error}</s-banner>}
