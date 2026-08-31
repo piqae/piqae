@@ -13,20 +13,26 @@ route-bound.
 ## Decision
 
 Piqae presents each installed operating-system printer route once and allows
-any number of named, immutable print profiles beneath it. Creating or
-editing a profile opens the operating system's real printer-driver interface.
-The web application deliberately does not recreate vendor settings.
+any number of named, immutable print profiles beneath it. Every route also has
+an automatic **Current printer defaults** mode. That mode is a live pointer to
+the installed driver's current configuration, not a captured profile revision.
+Creating or editing a saved profile opens the operating system's real
+printer-driver interface. The web application deliberately does not recreate
+vendor settings.
 
 The product contract is the same on Windows and macOS:
 
 1. discover an installed destination;
-2. create, clone, edit, validate, test, publish, and retire profiles;
-3. capture the complete native settings selected by the operator;
-4. pin every job to a profile revision;
-5. reject or hold work if the profile, driver, device, or loaded stock is not
-   ready;
-6. submit using the captured native configuration without changing global
-   printer defaults.
+2. print with the current driver defaults without requiring profile or stock
+   setup;
+3. optionally create, clone, edit, validate, test, publish, and retire saved
+   profiles;
+4. pin jobs to an immutable profile revision only when a saved profile or
+   target is explicitly selected;
+5. reject or hold an explicitly pinned job if its profile, driver, device, or
+   required loaded stock is not ready; and
+6. submit automatic jobs without native overrides so the installed driver owns
+   paper source, tray selection, and its other current defaults.
 
 The platform implementations are intentionally different:
 
@@ -73,6 +79,20 @@ fallback rather than the primary model.
 The compatibility API continues to call installed routes or flattened targets
 `printers`. The native API uses the more precise terms.
 
+### Automatic and pinned modes
+
+| Mode | Selection | Media/tray behaviour | Failure behaviour |
+| --- | --- | --- | --- |
+| Current printer defaults | Direct `printer_id`, with no saved profile selected | Piqae leaves vendor-specific settings and source/tray unset unless the job carries a safe portable requirement the driver advertises. The current OS/driver defaults decide. | A connected printer can accept the job without a Piqae stock record. Unknown physical stock is reported as unknown, not incompatible. |
+| Saved native profile | Exact profile ID and immutable revision | Replays the captured configuration, including a pinned source/tray when present. | Fails closed on missing, stale, mismatched, or unusable profile data. It never silently becomes an automatic job. |
+| Target | Exact target and specification revision | Resolves only through bindings that satisfy the target's saved profile and stock policy. | Fails closed when no binding satisfies the pinned target contract. |
+
+The existence of saved profiles does not change the default mode. An
+integration that does not explicitly choose one continues to use Current
+printer defaults. This keeps common A4, receipt, and single-roll printing
+zero-configuration while preserving deterministic production workflows when
+operators opt into them.
+
 ## Required V1 experience
 
 ### Tray/menu application
@@ -81,6 +101,7 @@ The native shell is the primary place for hardware setup:
 
 - list installed destinations and live state;
 - open the operating system's Add Printer interface;
+- show Current printer defaults as the always-available automatic choice;
 - expand a destination to show profiles;
 - add a profile using native driver settings;
 - clone a profile and reopen native settings;
@@ -118,6 +139,13 @@ If the selected node is local, the dashboard calls the loopback bridge. If it
 is remote, it creates a short-lived, auditable action request that appears in
 that node's tray application. A web request may never cause a driver dialog to
 appear without local user confirmation.
+
+Capability discovery reports what the installed driver supports and which
+choices are currently configured. It does not by itself prove what substrate
+is physically loaded. Device-reported, scanned, or operator-confirmed media is
+separate evidence with its own observation time and freshness. Multi-tray
+automatic jobs leave the source unset; a saved profile is the opt-in mechanism
+for pinning a particular tray or other vendor setting.
 
 ## Identity and versioning
 

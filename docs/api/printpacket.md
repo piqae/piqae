@@ -57,6 +57,15 @@ resources, immutable profile, and loaded stock. If none does, their approved
 fallback remains the retained PDF; `require_node` fails closed. `cloud_only`
 never depends on node renderer capability.
 
+A direct `printer_id` request is the zero-configuration path. Unless the caller
+explicitly pins a saved profile through a target, the node delegates native
+settings to the installed printer driver's current defaults. It does not
+require a Piqae stock record or a fresh loaded-media observation. Driver
+capabilities may prove that a document size is supported, but missing physical
+stock evidence remains `unknown`; it is not an incompatibility claim. Exact
+target/profile requests keep their stricter immutable profile, stock, and
+loaded-media contract and never silently fall back to current defaults.
+
 The chosen binding is pinned through job registration without becoming part of
 the caller's idempotency payload. Before local acceptance, a waiting target job
 may move to another ready binding—even on another physical destination—only
