@@ -1722,21 +1722,8 @@ fn installed_control_plane(arguments: &Arguments) -> Result<(Url, ExistingInstal
         })
         .context("connection invitation has no control-plane URL")?;
     if !config_path.exists() {
-        let agent_id = std::fs::read_to_string(arguments.data_dir.join("agent-id"))?
-            .trim()
-            .to_owned();
-        anyhow::ensure!(
-            !agent_id.is_empty(),
-            "local installation has no durable identity"
-        );
-        return Ok((
-            base_url,
-            ExistingInstallation {
-                agent_id: agent_id.clone(),
-                installation_id: agent_id,
-            },
-            arguments.data_dir.join("device.key"),
-        ));
+        let (installation, key_path) = ensure_local_installation_identity(&arguments.data_dir)?;
+        return Ok((base_url, installation, key_path));
     }
     let installation = existing_installation(&config_path)?;
     let body: serde_json::Value = serde_json::from_slice(&std::fs::read(&config_path)?)?;
@@ -1748,8 +1735,79 @@ fn installed_control_plane(arguments: &Arguments) -> Result<(Url, ExistingInstal
     Ok((base_url, installation, key_path))
 }
 
+/// Creates the file-backed installation identity when a standalone local node
+/// accepts its first cloud connector. Local-only installs intentionally have
+/// no legacy `agent-config.json`, `agent-id`, or `device.key`; requiring those
+/// files made the consent flow fail after preview without ever reaching the
+/// enrolment endpoint.
+fn ensure_local_installation_identity(data_dir: &Path) -> Result<(ExistingInstallation, PathBuf)> {
+    std::fs::create_dir_all(data_dir).with_context(|| format!("create {}", data_dir.display()))?;
+    let agent_id_path = data_dir.join("agent-id");
+    let agent_id = match std::fs::read_to_string(&agent_id_path) {
+        Ok(value) => value.trim().to_owned(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let generated = AgentId::new().to_string();
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            let mut file = options
+                .open(&agent_id_path)
+                .with_context(|| format!("create {}", agent_id_path.display()))?;
+            file.write_all(generated.as_bytes())
+                .with_context(|| format!("write {}", agent_id_path.display()))?;
+            file.write_all(b"\n")
+                .with_context(|| format!("write {}", agent_id_path.display()))?;
+            file.sync_all()
+                .with_context(|| format!("sync {}", agent_id_path.display()))?;
+            generated
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("read {}", agent_id_path.display()));
+        }
+    };
+    anyhow::ensure!(
+        !agent_id.is_empty() && agent_id.parse::<AgentId>().is_ok(),
+        "local installation has an invalid durable identity"
+    );
+
+    let key_path = data_dir.join("device.key");
+    if !key_path.exists() {
+        let generated = DeviceIdentity::generate(
+            agent_id
+                .parse()
+                .context("parse generated local installation id")?,
+        );
+        write_new_device_key(&key_path, &generated.secret_bytes())?;
+    }
+    let encoded = std::fs::read_to_string(&key_path)
+        .with_context(|| format!("read {}", key_path.display()))?;
+    let key = hex::decode(encoded.trim()).context("decode local installation device key")?;
+    anyhow::ensure!(
+        key.len() == 32,
+        "local installation device key must contain exactly 32 bytes"
+    );
+    Ok((
+        ExistingInstallation {
+            agent_id: agent_id.clone(),
+            installation_id: agent_id,
+        },
+        key_path,
+    ))
+}
+
 fn installed_local_bind(arguments: &Arguments) -> Result<SocketAddr> {
     let config_path = arguments.data_dir.join("agent-config.json");
+    if !config_path.exists() {
+        anyhow::ensure!(
+            arguments.local_bind.ip().is_loopback(),
+            "installed local API bind address is not loopback"
+        );
+        return Ok(arguments.local_bind);
+    }
     let body: serde_json::Value = serde_json::from_slice(&std::fs::read(&config_path)?)?;
     let bind = body
         .get("local_bind")
@@ -1795,14 +1853,9 @@ async fn add_connector(arguments: &Arguments, consent: ConnectorConsentInput) ->
         .await
         .context("read Piqae connector identity")?;
     let fingerprint = hex::encode(Sha256::digest(token.as_bytes()));
-    let local_first_connection = no_enabled_connectors(&arguments.data_dir)?;
-    let relative_key = if local_first_connection {
-        PathBuf::from("device.key")
-    } else {
-        PathBuf::from("connectors")
-            .join("keys")
-            .join(format!("{fingerprint}.key"))
-    };
+    let relative_key = PathBuf::from("connectors")
+        .join("keys")
+        .join(format!("{fingerprint}.key"));
     let key_path = arguments.data_dir.join(&relative_key);
     let identity = if key_path.exists() {
         let encoded = std::fs::read_to_string(&key_path)?;
@@ -2111,20 +2164,7 @@ fn installed_identity_from_data_dir(data_dir: &Path) -> Result<(ExistingInstalla
             .context("installed configuration has no device key path")?;
         return Ok((installation, key_path));
     }
-    let agent_id = std::fs::read_to_string(data_dir.join("agent-id"))?
-        .trim()
-        .to_owned();
-    anyhow::ensure!(
-        !agent_id.is_empty(),
-        "local installation has no durable identity"
-    );
-    Ok((
-        ExistingInstallation {
-            installation_id: agent_id.clone(),
-            agent_id,
-        },
-        data_dir.join("device.key"),
-    ))
+    ensure_local_installation_identity(data_dir)
 }
 
 fn read_device_identity(agent_id: &str, key_path: &Path) -> Result<DeviceIdentity> {
@@ -2170,13 +2210,6 @@ fn connector_installation_proof_message(
             allowed_printer_ids,
         ),
     }
-}
-
-fn no_enabled_connectors(data_dir: &Path) -> Result<bool> {
-    Ok(connector_runtime::ConnectorRegistry::load(data_dir)?
-        .enabled()
-        .next()
-        .is_none())
 }
 
 async fn signal_connector_reload(arguments: &Arguments) -> Result<()> {
@@ -9087,7 +9120,8 @@ mod tests {
     #[test]
     fn local_first_connection_reuses_the_durable_installation_identity() {
         let directory = tempfile::tempdir().expect("tempdir");
-        std::fs::write(directory.path().join("agent-id"), "agt_local_identity\n")
+        let agent_id = AgentId::new().to_string();
+        std::fs::write(directory.path().join("agent-id"), format!("{agent_id}\n"))
             .expect("agent id");
         std::fs::write(directory.path().join("device.key"), "00".repeat(32)).expect("device key");
         let arguments = Arguments::try_parse_from([
@@ -9100,8 +9134,154 @@ mod tests {
         .expect("arguments");
         let (origin, installation, key) = installed_control_plane(&arguments).expect("identity");
         assert_eq!(origin.as_str(), "https://self-hosted.example/api");
-        assert_eq!(installation.installation_id, "agt_local_identity");
+        assert_eq!(installation.installation_id, agent_id);
         assert_eq!(key, directory.path().join("device.key"));
+    }
+
+    #[test]
+    fn local_first_connection_creates_the_missing_durable_installation_identity() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let arguments = Arguments::try_parse_from([
+            "piqae-agent",
+            "--data-dir",
+            directory.path().to_str().expect("path"),
+            "--control-plane-url",
+            "https://self-hosted.example/api",
+        ])
+        .expect("arguments");
+
+        let (origin, installation, key) = installed_control_plane(&arguments).expect("identity");
+        assert_eq!(origin.as_str(), "https://self-hosted.example/api");
+        assert!(installation.agent_id.starts_with("agt_"));
+        assert_eq!(installation.installation_id, installation.agent_id);
+        assert_eq!(key, directory.path().join("device.key"));
+        assert_eq!(
+            std::fs::read_to_string(&key)
+                .expect("device key")
+                .trim()
+                .len(),
+            64
+        );
+
+        let (_, repeated, repeated_key) =
+            installed_control_plane(&arguments).expect("repeated identity");
+        assert_eq!(repeated.agent_id, installation.agent_id);
+        assert_eq!(repeated_key, key);
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the first-connection regression keeps the complete preview, enrolment, reload, and durable-key assertions visible"
+    )]
+    async fn local_first_connection_accepts_invitation_without_legacy_identity_files() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        std::fs::write(directory.path().join("local.token"), "local-test-token\n")
+            .expect("local token");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind authority fixture");
+        let address = listener.local_addr().expect("authority address");
+        let enrolled_agent_id = AgentId::new();
+        let expected_agent_id = enrolled_agent_id.to_string();
+        let server = tokio::spawn(async move {
+            let mut paths = Vec::new();
+            for response in [
+                serde_json::json!({
+                    "workspace_id": "ws_local_first",
+                    "workspace_name": "Local first workspace",
+                    "requesting_service_account_id": "psa_shopify",
+                    "requesting_service_name": "Shopify",
+                    "authorization_type": "platform_customer",
+                    "environment_id": "env_live",
+                    "requested_scopes": ["discover_printers", "print", "monitor_jobs"],
+                    "printer_grant": "all_or_selected",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                    "return_url": null,
+                }),
+                serde_json::json!({
+                    "agent_id": enrolled_agent_id,
+                    "environment": "live",
+                    "server_time": "2099-01-01T00:00:00Z",
+                    "sync_after_ms": 1000,
+                    "connector_id": "ncon_local_first",
+                }),
+                serde_json::json!({}),
+            ] {
+                let (mut stream, _) = listener.accept().await.expect("accept fixture request");
+                let mut request = vec![0_u8; 32 * 1024];
+                let read = stream
+                    .read(&mut request)
+                    .await
+                    .expect("read fixture request");
+                let first_line = String::from_utf8_lossy(&request[..read])
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                paths.push(first_line);
+                let body = serde_json::to_vec(&response).expect("encode fixture response");
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .expect("write fixture response headers");
+                stream
+                    .write_all(&body)
+                    .await
+                    .expect("write fixture response body");
+            }
+            paths
+        });
+        let arguments = Arguments::try_parse_from([
+            "piqae-agent",
+            "--data-dir",
+            directory.path().to_str().expect("path"),
+            "--control-plane-url",
+            &format!("http://{address}"),
+            "--local-bind",
+            &address.to_string(),
+        ])
+        .expect("arguments");
+        let invitation_suffix = AgentId::new().to_string();
+        let invitation = format!("piq_enr_{invitation_suffix}{invitation_suffix}");
+        add_connector(
+            &arguments,
+            ConnectorConsentInput {
+                token: invitation,
+                printer_grant: PrinterGrant::AllLocalPrinters,
+                printer_ids: Vec::new(),
+            },
+        )
+        .await
+        .expect("accept first connector");
+
+        let paths = server.await.expect("authority fixture");
+        assert_eq!(
+            paths,
+            [
+                "POST /v1/node-connect-sessions/preview HTTP/1.1",
+                "POST /v1/agents/enrol HTTP/1.1",
+                "POST /v1/local/connectors/reload HTTP/1.1",
+            ]
+        );
+        assert!(directory.path().join("agent-id").exists());
+        assert!(directory.path().join("device.key").exists());
+        let registry = connector_runtime::ConnectorRegistry::load(directory.path())
+            .expect("load connector registry");
+        let connector = registry.enabled().next().expect("enabled connector");
+        assert_eq!(connector.connector_id, "ncon_local_first");
+        assert_eq!(connector.agent_id, expected_agent_id);
+        assert_ne!(
+            connector.device_key_file.as_deref(),
+            Some(Path::new("device.key")),
+            "the connector key must remain isolated from the installation key"
+        );
     }
 
     #[test]

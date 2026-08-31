@@ -64,6 +64,32 @@ public enum NodeConnectAgentBridgeError: Error, LocalizedError {
     }
 }
 
+/// Returns bounded, token-free evidence suitable for copied diagnostics and
+/// support logs. Native stderr is deliberately represented only by the
+/// classifier and byte counts captured at the process boundary.
+public func nodeConnectDiagnosticSummary(for error: Error) -> String {
+    guard let bridgeError = error as? NodeConnectAgentBridgeError else {
+        if error is DecodingError { return "preview_response_invalid" }
+        return "unexpected_error"
+    }
+    switch bridgeError {
+    case .unavailable:
+        return "agent_unavailable"
+    case .failed:
+        return "invitation_validation_failed"
+    case .oversizedResponse:
+        return "helper_response_oversized"
+    case .expired:
+        return "invitation_expired"
+    case .invitationRejected:
+        return "invitation_rejected"
+    case .identityRejected:
+        return "installation_identity_rejected"
+    case let .nativeProcessFailure(evidence):
+        return "native_helper_failed(\(evidence))"
+    }
+}
+
 public struct NativeProcessEvidence: Equatable, Sendable, CustomStringConvertible {
     public let classification: String
     public let stderrBytes: Int

@@ -21,6 +21,14 @@ persists the isolated connector before restarting the agent, and follows only
 a server-validated return URL after success. Windows and Linux application-link
 registration remain gated on equivalent signed-shell consent flows.
 
+Fresh local-only installations create their durable installation signing
+identity only after the operator approves the first connector. The connector
+receives a separate key; neither key is created during invitation preview.
+**Diagnostics → Copy Diagnostics** records only the attempt count, timestamp,
+last bounded stage, outcome, and a redacted helper classification with byte
+counts. Invitation capabilities, service metadata, printer selections, native
+stderr, and document data are never copied into diagnostics.
+
 An unconnected install remains fully local and offers **Connect Piqae
 Account…**. Integrators do not use that account action: their backend creates a
 short-lived node-connect session through the SDK and opens its `connect_url` in

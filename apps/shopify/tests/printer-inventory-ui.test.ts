@@ -9,6 +9,8 @@ vi.mock("../app/services.server", () => ({
 
 import {
   filterPrinterInventory,
+  openPreparedPiqaeConnection,
+  preparePiqaeConnectionWindow,
   printerAvailability,
 } from "../app/routes/app.printers";
 
@@ -47,5 +49,55 @@ describe("Shopify printer inventory", () => {
     expect(
       filterPrinterInventory(printers, nodes, "labels", "attention"),
     ).toEqual([]);
+  });
+
+  it("reserves one connection window directly from the merchant gesture", () => {
+    const status = { textContent: "", style: { cssText: "" } };
+    const replaceChildren = vi.fn();
+    const popup = {
+      closed: false,
+      opener: {},
+      document: {
+        title: "",
+        createElement: vi.fn(() => status),
+        body: { replaceChildren },
+      },
+    } as unknown as Window;
+    const openWindow = vi.fn(() => popup) as unknown as typeof window.open;
+
+    expect(preparePiqaeConnectionWindow(openWindow)).toBe(popup);
+    expect(openWindow).toHaveBeenCalledWith(
+      "",
+      "piqae-node-connection",
+      "popup,width=560,height=720",
+    );
+    expect(popup.opener).toBeNull();
+    expect(status.textContent).toContain("Preparing");
+    expect(replaceChildren).toHaveBeenCalledWith(status);
+  });
+
+  it("navigates only a reserved window to the trusted Piqae handoff", () => {
+    const replace = vi.fn();
+    const popup = {
+      closed: false,
+      location: { replace },
+    } as unknown as Window;
+
+    expect(
+      openPreparedPiqaeConnection(
+        popup,
+        "https://app.piqae.com/connect#one-time-fragment",
+      ),
+    ).toBe(true);
+    expect(replace).toHaveBeenCalledWith(
+      "https://app.piqae.com/connect#one-time-fragment",
+    );
+    expect(
+      openPreparedPiqaeConnection(
+        popup,
+        "https://attacker.example/connect#one-time-fragment",
+      ),
+    ).toBe(false);
+    expect(replace).toHaveBeenCalledTimes(1);
   });
 });

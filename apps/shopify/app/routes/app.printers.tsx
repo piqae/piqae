@@ -6,7 +6,7 @@ import {
   useLoaderData,
   useRevalidator,
 } from "react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import shopify from "../shopify.server";
 import { parseSettings, workflows } from "../core/workflows.server";
 import { syncTemplateIndex } from "../core/template-index.server";
@@ -95,6 +95,47 @@ type SearchPrinter = {
   state: string;
 };
 
+type ConnectionStage = "idle" | "preparing" | "opened" | "blocked" | "failed";
+
+export function preparePiqaeConnectionWindow(
+  openWindow: typeof window.open = window.open.bind(window),
+) {
+  const connectionWindow = openWindow(
+    "",
+    "piqae-node-connection",
+    "popup,width=560,height=720",
+  );
+  if (!connectionWindow) return null;
+  try {
+    connectionWindow.opener = null;
+    connectionWindow.document.title = "Opening Piqae…";
+    const status = connectionWindow.document.createElement("p");
+    status.textContent = "Preparing your secure Piqae connection…";
+    status.style.cssText =
+      "margin:25vh auto;max-width:24rem;padding:2rem;color:#202223;font:600 18px system-ui;text-align:center";
+    connectionWindow.document.body.replaceChildren(status);
+  } catch {
+    // The reserved window may already be navigating. The handoff can still use it.
+  }
+  return connectionWindow;
+}
+
+export function openPreparedPiqaeConnection(
+  connectionWindow: Window | null,
+  connectUrl: string,
+) {
+  if (!connectionWindow || connectionWindow.closed) return false;
+  try {
+    const url = new URL(connectUrl);
+    if (url.protocol !== "https:" || url.hostname !== "app.piqae.com")
+      return false;
+    connectionWindow.location.replace(url.toString());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function printerAvailability(state: string) {
   if (state === "online" || state === "busy") return "available";
   if (state === "offline") return "offline";
@@ -126,8 +167,11 @@ export default function Printers() {
   const result = useActionData<typeof action>();
   const connector = useFetcher<typeof action>();
   const revalidator = useRevalidator();
-  const [showInstaller, setShowInstaller] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [connectionStage, setConnectionStage] =
+    useState<ConnectionStage>("idle");
+  const connectionWindow = useRef<Window | null>(null);
+  const openedConnectionUrl = useRef("");
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("all");
   const connection = connector.data?.connection;
@@ -158,6 +202,42 @@ export default function Printers() {
   const installer = connection?.downloads?.find(
     (download) => download.platform === detectedPlatform,
   );
+  const platformName =
+    detectedPlatform === "macos"
+      ? "macOS"
+      : detectedPlatform === "windows"
+        ? "Windows"
+        : "Linux";
+  const installerUrl =
+    installer?.url ??
+    `https://app.piqae.com/downloads?platform=${detectedPlatform}`;
+
+  const beginConnection = () => {
+    openedConnectionUrl.current = "";
+    connectionWindow.current?.close();
+    connectionWindow.current = preparePiqaeConnectionWindow();
+    setConnectionStage("preparing");
+  };
+
+  useEffect(() => {
+    const connectUrl = connection?.connect_url;
+    if (!connectUrl || openedConnectionUrl.current === connectUrl) return;
+    openedConnectionUrl.current = connectUrl;
+    const opened = openPreparedPiqaeConnection(
+      connectionWindow.current,
+      connectUrl,
+    );
+    connectionWindow.current = null;
+    setConnectionStage(opened ? "opened" : "blocked");
+  }, [connection]);
+
+  useEffect(() => {
+    if (connector.state === "idle" && connector.data && !connector.data.ok) {
+      connectionWindow.current?.close();
+      connectionWindow.current = null;
+      setConnectionStage("failed");
+    }
+  }, [connector.data, connector.state]);
 
   const hasNodes = nodes.length > 0;
   const hasPrinters = printers.length > 0;
@@ -214,50 +294,103 @@ export default function Printers() {
               ) : null}
             </>
           ) : (
-            <s-paragraph>
-              Install or open Piqae on the computer connected to your printer.
-              This store manages the secure connection automatically—no Piqae
-              account or API key is needed.
-            </s-paragraph>
+            <div className="piqae-connection-intro">
+              <div className="piqae-connection-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" role="presentation">
+                  <path d="M7 8V3h10v5M7 18H4a2 2 0 0 1-2-2v-5a3 3 0 0 1 3-3h14a3 3 0 0 1 3 3v5a2 2 0 0 1-2 2h-3M7 14h10v7H7z" />
+                  <path d="M18 11h1" />
+                </svg>
+              </div>
+              <div>
+                <s-heading>Connect the computer beside your printer</s-heading>
+                <s-paragraph>
+                  Piqae will open in a separate window and ask which installed
+                  printers this store may use. No Piqae account or API key is
+                  needed.
+                </s-paragraph>
+              </div>
+            </div>
           )}
           {!hasNodes ? (
-            <connector.Form method="post">
-              <input type="hidden" name="intent" value="connect-node" />
-              <s-button
-                type="submit"
-                variant="primary"
-                disabled={!connected || connector.state !== "idle"}
+            <div className="piqae-connection-panel">
+              <div
+                className={`piqae-connection-status piqae-connection-status--${connectionStage}`}
+                role="status"
+                aria-live="polite"
               >
-                {connector.state === "idle"
-                  ? "Connect this computer"
-                  : "Preparing connection…"}
-              </s-button>
-            </connector.Form>
-          ) : null}
-          {connection ? (
-            <s-stack direction="block" gap="base">
-              {connection.connect_url ? (
+                <span className="piqae-connection-status-dot" />
+                <div>
+                  <strong>
+                    {connectionStage === "preparing"
+                      ? "Preparing a secure connection…"
+                      : connectionStage === "opened"
+                        ? "Piqae opened"
+                        : connectionStage === "blocked"
+                          ? "Connection window was blocked"
+                          : connectionStage === "failed"
+                            ? "Connection could not be prepared"
+                            : "Ready to connect"}
+                  </strong>
+                  <span>
+                    {connectionStage === "opened"
+                      ? "Choose the printers to share, then return here."
+                      : connectionStage === "blocked"
+                        ? "Open the secure invitation below to continue."
+                        : connectionStage === "failed"
+                          ? connector.data?.error || "Try the connection again."
+                          : "A private, one-time invitation will open in a new window."}
+                  </span>
+                </div>
+              </div>
+              <connector.Form method="post" onSubmit={beginConnection}>
+                <input type="hidden" name="intent" value="connect-node" />
                 <s-button
+                  type="submit"
+                  variant="primary"
+                  disabled={!connected || connector.state !== "idle"}
+                >
+                  {connector.state === "idle"
+                    ? connectionStage === "failed"
+                      ? "Try connecting again"
+                      : "Connect this computer"
+                    : "Opening Piqae…"}
+                </s-button>
+              </connector.Form>
+              {connectionStage === "blocked" && connection?.connect_url ? (
+                <a
+                  className="piqae-connection-retry"
                   href={connection.connect_url}
                   target="_blank"
-                  onClick={() => {
-                    setShowInstaller(false);
-                    window.setTimeout(() => setShowInstaller(true), 1800);
-                  }}
+                  rel="noreferrer"
+                  onClick={() => setConnectionStage("opened")}
                 >
                   Open Piqae connection
-                </s-button>
+                </a>
               ) : null}
-              {showInstaller && installer ? (
-                <s-button href={installer.url} target="_top">
-                  Download Piqae for {installer.platform}
-                </s-button>
-              ) : null}
-              <s-paragraph>
-                The secure connection expires in 10 minutes and can be used
-                once.
-              </s-paragraph>
-            </s-stack>
+              <div className="piqae-connection-download">
+                <span>Don’t have Piqae installed?</span>
+                <a href={installerUrl} target="_top">
+                  Download Piqae for {platformName}
+                </a>
+              </div>
+              <div
+                className="piqae-connection-flow"
+                aria-label="Connection steps"
+              >
+                <span>
+                  <b>1</b> Open Piqae
+                </span>
+                <span>
+                  <b>2</b> Choose printers
+                </span>
+                <span>
+                  <b>3</b> Connected
+                </span>
+              </div>
+              <small className="piqae-connection-security">
+                Secure invitations can be used once and expire after 10 minutes.
+              </small>
+            </div>
           ) : null}
         </s-stack>
       </s-section>
@@ -390,7 +523,7 @@ export default function Printers() {
                 </div>
               ))}
             </div>
-            <connector.Form method="post">
+            <connector.Form method="post" onSubmit={beginConnection}>
               <input type="hidden" name="intent" value="connect-node" />
               <s-button type="submit" disabled={connector.state !== "idle"}>
                 {connector.state === "idle"
@@ -398,6 +531,26 @@ export default function Printers() {
                   : "Preparing connection…"}
               </s-button>
             </connector.Form>
+            {connectionStage === "blocked" && connection?.connect_url ? (
+              <s-paragraph>
+                Your browser blocked the connection window.{" "}
+                <a
+                  href={connection.connect_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={() => setConnectionStage("opened")}
+                >
+                  Open the secure invitation
+                </a>
+                .
+              </s-paragraph>
+            ) : connectionStage === "preparing" ? (
+              <s-paragraph>Preparing the secure connection…</s-paragraph>
+            ) : connectionStage === "opened" ? (
+              <s-paragraph>
+                Piqae opened. Finish choosing printers in that window.
+              </s-paragraph>
+            ) : null}
           </s-stack>
         </s-section>
       ) : null}

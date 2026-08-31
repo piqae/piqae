@@ -113,6 +113,11 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var profilesSupported = false
     private var queueSupported = false
     private var lastError: String?
+    private var connectionAttemptCount = 0
+    private var lastConnectionAttemptAt: Date?
+    private var lastConnectionStage: String?
+    private var lastConnectionResult: String?
+    private var lastConnectionError: String?
     private var isRefreshing = false
     private var refreshTask: Task<Void, Never>?
     private var actionTask: Task<Void, Never>?
@@ -205,7 +210,13 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func handleConnectApplicationLink(_ url: URL) async {
+        beginConnectionDiagnostic()
         if let updateError = await nativeComponentUpdateTask?.value {
+            finishConnectionDiagnostic(
+                stage: "native_component_update",
+                result: "failed",
+                error: "native_component_update_failed"
+            )
             showAlert(title: "Piqae update not completed", message: updateError)
             return
         }
@@ -213,13 +224,22 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         do {
             link = try NodeConnectApplicationLink(url: url)
         } catch {
+            finishConnectionDiagnostic(
+                stage: "validate_link",
+                result: "rejected",
+                error: "invalid_or_unsafe_link"
+            )
             showAlert(title: "Invalid Piqae connection", message: "This connection link is invalid or unsafe.")
             return
         }
-        guard await connectReplayGuard.begin(link) else { return }
+        guard await connectReplayGuard.begin(link) else {
+            finishConnectionDiagnostic(stage: "replay_guard", result: "ignored", error: "duplicate_link")
+            return
+        }
         var consumed = false
         defer { Task { await connectReplayGuard.finish(link, consumed: consumed) } }
         do {
+            updateConnectionDiagnostic(stage: "local_preflight")
             guard let client else { throw NodeConnectAgentBridgeError.unavailable }
             async let currentStatusRequest = client.status()
             async let currentPrintersRequest = client.printers()
@@ -228,6 +248,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 currentPrintersRequest
             )
             guard currentStatus.queuedJobs == 0, currentStatus.activeJobs == 0 else {
+                finishConnectionDiagnostic(stage: "local_preflight", result: "blocked", error: "jobs_active")
                 showAlert(
                     title: "Finish current print jobs first",
                     message: "Piqae will not change connected services while jobs are queued or active."
@@ -235,6 +256,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return
             }
             guard !currentPrinters.isEmpty else {
+                finishConnectionDiagnostic(stage: "local_preflight", result: "blocked", error: "no_printers")
                 showAlert(
                     title: "No printers available",
                     message: "Add a local printer before connecting this service."
@@ -242,15 +264,22 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return
             }
             let bridge = try NodeConnectAgentBridge()
+            updateConnectionDiagnostic(stage: "preview_invitation")
             let preview = try await Task.detached {
                 try bridge.preview(capability: link.enrolmentCapability, controlPlaneURL: link.controlPlaneURL)
             }.value
+            updateConnectionDiagnostic(stage: "awaiting_printer_consent")
             guard let authorization = presentConnectorConsent(
                 preview: preview,
                 printers: currentPrinters
-            ) else { return }
+            ) else {
+                finishConnectionDiagnostic(stage: "awaiting_printer_consent", result: "cancelled")
+                return
+            }
+            updateConnectionDiagnostic(stage: "accept_invitation")
             let statusBeforeAccept = try await client.status()
             guard statusBeforeAccept.queuedJobs == 0, statusBeforeAccept.activeJobs == 0 else {
+                finishConnectionDiagnostic(stage: "accept_invitation", result: "blocked", error: "jobs_started")
                 showAlert(
                     title: "Print activity started",
                     message: "The connection was not changed because a print job started while approval was open. Try again when the queue is idle."
@@ -258,6 +287,7 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return
             }
             guard preview.expiresAt > Date() else {
+                finishConnectionDiagnostic(stage: "accept_invitation", result: "failed", error: "invitation_expired")
                 showAlert(
                     title: "Connection expired",
                     message: "Return to the service and create a new connection, then approve it within the displayed time."
@@ -272,17 +302,24 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 )
             }.value
             consumed = true
+            updateConnectionDiagnostic(stage: "restart_node")
             do {
                 try await Task.detached {
                     try restartInstalledAgent()
                 }.value
             } catch {
+                finishConnectionDiagnostic(
+                    stage: "restart_node",
+                    result: "connected_restart_required",
+                    error: "automatic_restart_failed"
+                )
                 showAlert(
                     title: "Connected — restart Piqae",
                     message: "The connector was saved securely, but Piqae could not restart automatically. Restart Piqae to activate it."
                 )
                 return
             }
+            finishConnectionDiagnostic(stage: "complete", result: "connected")
             showAlert(
                 title: "Connected with Piqae",
                 message: authorization.grant == .allLocalPrinters
@@ -292,11 +329,41 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             )
             if let returnURL = preview.returnURL { NSWorkspace.shared.open(returnURL) }
         } catch {
+            let diagnostic = nodeConnectDiagnosticSummary(for: error)
+            finishConnectionDiagnostic(
+                stage: lastConnectionStage ?? "unknown",
+                result: "failed",
+                error: diagnostic
+            )
+            lastError = "Connection failed (\(diagnostic))."
             showAlert(
                 title: "Connection not completed",
                 message: error.localizedDescription
             )
         }
+    }
+
+    private func beginConnectionDiagnostic() {
+        connectionAttemptCount += 1
+        lastConnectionAttemptAt = Date()
+        lastConnectionStage = "link_received"
+        lastConnectionResult = "in_progress"
+        lastConnectionError = nil
+    }
+
+    private func updateConnectionDiagnostic(stage: String) {
+        lastConnectionStage = stage
+        lastConnectionResult = "in_progress"
+    }
+
+    private func finishConnectionDiagnostic(
+        stage: String,
+        result: String,
+        error: String? = nil
+    ) {
+        lastConnectionStage = stage
+        lastConnectionResult = result
+        lastConnectionError = error
     }
 
     private func presentConnectorConsent(
@@ -1288,6 +1355,21 @@ final class PiqaeMenuDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ]
         if let lastError {
             lines.append("last_error=\(lastError)")
+        }
+        lines.append("connection_attempts=\(connectionAttemptCount)")
+        if let lastConnectionAttemptAt {
+            lines.append(
+                "connection_last_attempt=\(ISO8601DateFormatter().string(from: lastConnectionAttemptAt))"
+            )
+        }
+        if let lastConnectionStage {
+            lines.append("connection_last_stage=\(lastConnectionStage)")
+        }
+        if let lastConnectionResult {
+            lines.append("connection_last_result=\(lastConnectionResult)")
+        }
+        if let lastConnectionError {
+            lines.append("connection_last_error=\(lastConnectionError)")
         }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
