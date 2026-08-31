@@ -43,4 +43,4 @@ WORKDIR /app
 COPY --from=shopify-production-build --chown=node:node /app /app
 USER node
 EXPOSE 3000
-CMD ["node", "node_modules/@react-router/serve/bin.js", "./build/server/index.js"]
+CMD ["node", "server.mjs"]

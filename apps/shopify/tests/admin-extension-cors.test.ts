@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { adminExtensionPreflight } from "../app/core/admin-extension-cors.server";
+import {
+  adminExtensionPreflight,
+  isAdminExtensionPreflightPath,
+} from "../server/admin-extension-cors.mjs";
 
 function request(
   origin: string,
@@ -17,6 +20,19 @@ function request(
 }
 
 describe("Admin extension CORS preflight", () => {
+  it("intercepts only Shopify extension POST action routes", () => {
+    expect(isAdminExtensionPreflightPath("/api/print/admin/previews")).toBe(
+      true,
+    );
+    expect(
+      isAdminExtensionPreflightPath("/api/print/previews/preview_1/approve"),
+    ).toBe(true);
+    expect(isAdminExtensionPreflightPath("/api/print/admin/options")).toBe(
+      false,
+    );
+    expect(isAdminExtensionPreflightPath("/app/templates")).toBe(false);
+  });
+
   it("allows only the headers used by authenticated preview actions", () => {
     const response = adminExtensionPreflight(
       request("https://extensions.shopifycdn.com"),
