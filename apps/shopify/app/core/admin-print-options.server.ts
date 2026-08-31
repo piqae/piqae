@@ -53,6 +53,13 @@ export type AdminPrintOptions = {
       isDefault: boolean;
     }
   >;
+  printers: Array<{
+    id: string;
+    name: string;
+    state: string;
+    targetIds: string[];
+    isDefault: boolean;
+  }>;
   manageDocumentsUrl: string;
   setupDestinationUrl: string;
   destinationError?: string;
@@ -105,6 +112,7 @@ export async function loadAdminPrintOptions(input: {
         advisoryDestination: null,
       })),
       targets: [],
+      printers: [],
       manageDocumentsUrl: "/app/templates",
       setupDestinationUrl: "/app/printers",
       renderExecutionPolicy: settings.renderExecutionPolicy,
@@ -120,6 +128,7 @@ export async function loadAdminPrintOptions(input: {
         });
   if (!client) throw new Error("PIQAE_MANAGED_ACCOUNT_NOT_READY");
   let targets: AdminPrintOptions["targets"] = [];
+  let printers: AdminPrintOptions["printers"] = [];
   let destinationError: string | undefined;
   try {
     const loaded = await loadShopifyPrintTargets(client);
@@ -135,6 +144,24 @@ export async function loadAdminPrintOptions(input: {
   } catch {
     // A printer-list outage must not hide document preview or PDF download.
     destinationError = "Printer status is temporarily unavailable";
+  }
+  try {
+    const inventory = await client.printers.list();
+    printers = inventory.data.map((printer) => ({
+      id: printer.id,
+      name: printer.name,
+      state: printer.state,
+      targetIds: targets
+        .filter((target) =>
+          target.destinations.some(
+            (destination) => destination.printerId === printer.id,
+          ),
+        )
+        .map((target) => target.id),
+      isDefault: printer.id === settings.defaultPrinterId,
+    }));
+  } catch {
+    destinationError ??= "Printer status is temporarily unavailable";
   }
   // A shop with no published document of its own still prints, using the
   // starter revision provisioned when the managed account was created. The
@@ -211,6 +238,7 @@ export async function loadAdminPrintOptions(input: {
           })
         : accountDefault,
     targets,
+    printers,
     manageDocumentsUrl: "/app/templates",
     setupDestinationUrl: "/app/printers",
     destinationError,

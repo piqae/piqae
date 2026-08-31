@@ -12,6 +12,8 @@ import {
   renderPolicySummary,
   targetForDocument,
   canUsePublishedBinding,
+  chooseDefaultPrinterOption,
+  printerOptionsForDocument,
 } from "./AdminOrderPrintAction.jsx";
 
 describe("admin print action state", () => {
@@ -134,6 +136,68 @@ describe("admin print action state", () => {
       },
     ])
       expect(canUsePublishedBinding(document)).toBe(false);
+  });
+
+  it("shows connected printers but enables only the published compatible binding", () => {
+    const document = {
+      targetBindingStatus: "ready",
+      designTargetId: "tgt_a4",
+      designSpecificationRevision: "spec_a4_1",
+      compatibilityKnown: true,
+      compatibleTargetIds: ["tgt_a4"],
+      advisoryDestination: { printerName: "Office A4" },
+    };
+    const targets = [
+      {
+        id: "tgt_a4",
+        eligible: true,
+        destinations: [
+          {
+            printerId: "prt_a4",
+            printerName: "Office A4",
+            mediaCompatibility: { status: "ready" },
+          },
+        ],
+      },
+    ];
+    const printers = [
+      {
+        id: "prt_label",
+        name: "Label printer",
+        isDefault: true,
+      },
+      { id: "prt_a4", name: "Office A4", isDefault: false },
+    ];
+    const options = printerOptionsForDocument(document, targets, printers);
+    expect(options).toEqual([
+      expect.objectContaining({
+        id: "prt_label",
+        disabled: true,
+        label: "Label printer — setup required",
+      }),
+      expect.objectContaining({
+        id: "prt_a4",
+        value: "tgt_a4",
+        disabled: false,
+      }),
+    ]);
+    expect(chooseDefaultPrinterOption(options)?.id).toBe("prt_a4");
+  });
+
+  it("keeps raw printers visible but unavailable for an unbound document", () => {
+    const options = printerOptionsForDocument(
+      {
+        targetBindingStatus: "unbound",
+        designTargetId: null,
+        designSpecificationRevision: null,
+      },
+      [],
+      [{ id: "prt_a4", name: "Office A4" }],
+    );
+    expect(options).toEqual([
+      expect.objectContaining({ disabled: true, value: "printer:prt_a4" }),
+    ]);
+    expect(chooseDefaultPrinterOption(options)).toBeUndefined();
   });
 
   it("shows a useful backend error", () => {

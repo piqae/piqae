@@ -9,10 +9,13 @@ vi.mock("../app/services.server", () => ({
 
 import {
   filterPrinterInventory,
+  printerAvailability,
+  syncSavedPrinterSettings,
+} from "../app/routes/app.printers";
+import {
   openPreparedPiqaeConnection,
   preparePiqaeConnectionWindow,
-  printerAvailability,
-} from "../app/routes/app.printers";
+} from "../app/components/node-connection-ui";
 
 const nodes = new Map([
   [
@@ -99,5 +102,16 @@ describe("Shopify printer inventory", () => {
       ),
     ).toBe(false);
     expect(replace).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a saved default authoritative if Shopify index sync fails", async () => {
+    await expect(syncSavedPrinterSettings(async () => undefined)).resolves.toBe(
+      "",
+    );
+    await expect(
+      syncSavedPrinterSettings(async () => {
+        throw new Error("temporary metafield outage");
+      }),
+    ).resolves.toContain("was saved");
   });
 });

@@ -1,11 +1,14 @@
 import type { ActionFunctionArgs } from "react-router";
 
 import { createProductionServices } from "../services.server";
+import { adminExtensionPreflight } from "../core/admin-extension-cors.server";
 import { parseRenderCost } from "../core/printing.server";
 import shopify from "../shopify.server";
 
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
 export async function action({ request, params }: ActionFunctionArgs) {
+  const preflight = adminExtensionPreflight(request);
+  if (preflight) return preflight;
   const { session, cors } = await shopify.authenticate.admin(request);
   const previewId = params.previewId ?? "";
   const body = (await request.json()) as Record<string, unknown>;
