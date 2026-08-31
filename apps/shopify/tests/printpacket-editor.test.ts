@@ -14,6 +14,7 @@ import {
   searchDocumentFields,
   canvasGeometry,
   canvasStyle,
+  compactCanvasAnnotations,
   responsiveCanvasGeometry,
   safeAreaStyle,
 } from "../app/components/PrintPacketEditor";
@@ -41,6 +42,8 @@ describe("PrintPacket editor serialization", () => {
     )!.specification;
     expect(canvasGeometry(label)).toEqual({ widthMm: 100, heightMm: 50 });
     expect(canvasStyle(label).aspectRatio).toBe("100 / 50");
+    expect(compactCanvasAnnotations(label)).toBe(true);
+    expect(compactCanvasAnnotations(a4)).toBe(false);
     expect(
       safeAreaStyle(label, { top: 2, right: 4, bottom: 3, left: 5 }),
     ).toEqual({ top: "4%", right: "4%", bottom: "6%", left: "5%" });

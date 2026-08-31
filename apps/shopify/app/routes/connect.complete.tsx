@@ -1,20 +1,47 @@
-import type { LoaderFunctionArgs } from "react-router";
-import { redirect } from "react-router";
-import shopify from "../shopify.server";
+import { useEffect, useState } from "react";
 
-const SETTINGS_PATH = "/app/printers";
+/**
+ * Native Piqae opens this top-level URL only after the one-time invitation has
+ * been accepted and persisted. It intentionally contains no merchant data and
+ * does not require an embedded Admin ID token: a native browser launch cannot
+ * provide the short-lived App Bridge credential used inside Shopify Admin.
+ */
+export function loader() {
+  return Response.json({ connected: true });
+}
 
-export async function loader({ request }: LoaderFunctionArgs) {
-  const { session } = await shopify.authenticate.admin(request);
-  const requestedShop = new URL(request.url).searchParams.get("shop");
-  if (requestedShop && requestedShop !== session.shop) {
-    throw new Response("The connection belongs to a different Shopify store.", {
-      status: 403,
-    });
-  }
+export default function ConnectComplete() {
+  const [closeAttempted, setCloseAttempted] = useState(false);
 
-  // Keep the destination fixed and derive the only query value from the
-  // authenticated session. App Bridge needs the shop context after this
-  // top-level, non-Shopify connection flow returns to the embedded app.
-  return redirect(`${SETTINGS_PATH}?shop=${encodeURIComponent(session.shop)}`);
+  useEffect(() => {
+    document.title = "Piqae connected";
+  }, []);
+
+  return (
+    <main className="piqae-connect-complete">
+      <section>
+        <span className="piqae-connect-complete-mark" aria-hidden="true">
+          ✓
+        </span>
+        <p className="piqae-connect-complete-eyebrow">Piqae node connection</p>
+        <h1>Computer connected</h1>
+        <p>
+          Printer access was confirmed. Shopify will update automatically, so
+          you can close this tab now.
+        </p>
+        <button
+          type="button"
+          onClick={() => {
+            setCloseAttempted(true);
+            window.close();
+          }}
+        >
+          Close this tab
+        </button>
+        {closeAttempted ? (
+          <small>If the tab stays open, close it with your browser.</small>
+        ) : null}
+      </section>
+    </main>
+  );
 }

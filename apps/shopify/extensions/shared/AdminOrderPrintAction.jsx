@@ -72,6 +72,18 @@ export function chooseDefault(items) {
   );
 }
 
+export function chooseDefaultDocument(items) {
+  const usable = items.filter((item) => item?.id);
+  const label = (item) => `${item.kind ?? ""} ${item.name ?? ""}`.toLowerCase();
+  return (
+    usable.find((item) => item.isDefault) ??
+    usable.find((item) => item.kind === "packing_slip") ??
+    usable.find((item) => label(item).includes("packing slip")) ??
+    usable.find((item) => label(item).includes("invoice")) ??
+    usable[0]
+  );
+}
+
 export function targetForDocument(document, targets) {
   if (!canUsePublishedBinding(document)) return undefined;
   const allowed = targets.filter(
@@ -158,9 +170,10 @@ function AdminOrderPrintActionContent({ bulk = false }) {
         authorizedJson("/api/print/admin/options", { signal }),
       );
       if (sequence !== requestSequence.current) return;
-      const defaultDocument = chooseDefault(value.documents ?? []);
-      const defaultDestination = chooseDefault(
-        (value.targets ?? []).filter((item) => item.eligible),
+      const defaultDocument = chooseDefaultDocument(value.documents ?? []);
+      const defaultDestination = targetForDocument(
+        defaultDocument,
+        value.targets ?? [],
       );
       setOptions(value);
       setDocumentId(defaultDocument?.id ?? "");
@@ -353,9 +366,9 @@ function AdminOrderPrintActionContent({ bulk = false }) {
                 }}
               >
                 {options.documents.map((document) => (
-                  <option key={document.id} value={document.id}>
+                  <s-option key={document.id} value={document.id}>
                     {document.name}
-                  </option>
+                  </s-option>
                 ))}
               </s-select>
             ) : (
@@ -363,10 +376,6 @@ function AdminOrderPrintActionContent({ bulk = false }) {
                 Publish a document before printing.
               </s-banner>
             )}
-            <s-button href={options.manageDocumentsUrl}>
-              Manage documents
-            </s-button>
-
             <s-text type="strong">Print target</s-text>
             {selectedDocument?.targetBindingStatus === "revision_changed" && (
               <s-banner tone="critical">
@@ -431,10 +440,10 @@ function AdminOrderPrintActionContent({ bulk = false }) {
                 }
               >
                 {eligible.map((destination) => (
-                  <option key={destination.id} value={destination.id}>
+                  <s-option key={destination.id} value={destination.id}>
                     {destination.name} ·{" "}
                     {destination.stock?.name ?? "stock not configured"}
-                  </option>
+                  </s-option>
                 ))}
               </s-select>
             ) : (
