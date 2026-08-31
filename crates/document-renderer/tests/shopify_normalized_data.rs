@@ -212,10 +212,10 @@ fn exact_product_label_starter_renders_variant_price_and_safe_barcode_data() {
             "width_mm": 100,
             "height_mm": 50,
             "margins": {
-                "top_mm": 3,
-                "right_mm": 3,
-                "bottom_mm": 3,
-                "left_mm": 3
+                "top_mm": 2,
+                "right_mm": 2,
+                "bottom_mm": 2,
+                "left_mm": 2
             }
         })
     );
@@ -233,8 +233,8 @@ fn exact_product_label_starter_renders_variant_price_and_safe_barcode_data() {
             "type": "barcode",
             "value": current(&["labelCode128"]),
             "symbology": "code128",
-            "width_mm": 70,
-            "height_mm": 12,
+            "width_mm": 88,
+            "height_mm": 16,
             "human_readable": true
         })
     ));

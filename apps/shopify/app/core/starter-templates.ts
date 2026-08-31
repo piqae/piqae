@@ -118,7 +118,12 @@ const label = (body: Block[]): PrintPacket => ({
     kind: "label",
     width_mm: 100,
     height_mm: 50,
-    margins: { top_mm: 3, right_mm: 3, bottom_mm: 3, left_mm: 3 },
+    margins: { top_mm: 2, right_mm: 2, bottom_mm: 2, left_mm: 2 },
+  },
+  theme: {
+    font_size_pt: 9,
+    line_height: 1.15,
+    text_color: { red: 32, green: 34, blue: 35 },
   },
 });
 const documents = {
@@ -311,7 +316,7 @@ const documents = {
               children: [
                 {
                   type: "stack",
-                  gap_mm: 1,
+                  gap_mm: 0.5,
                   children: [
                     currentValue(["title"], true),
                     optionalCurrentValue(["variant", "title"]),
@@ -321,13 +326,13 @@ const documents = {
                         {
                           type: "value",
                           value: currentMoney("unitPrice"),
-                          style: { bold: true, font_size_pt: 14 },
+                          style: { bold: true, font_size_pt: 13 },
                         },
                       ],
                     },
                   ],
                 },
-                { type: "spacer", height_mm: 2 },
+                { type: "spacer", height_mm: 1 },
                 {
                   type: "conditional",
                   condition: {
@@ -339,8 +344,8 @@ const documents = {
                       type: "barcode",
                       value: current("labelCode128"),
                       symbology: "code128",
-                      width_mm: 70,
-                      height_mm: 12,
+                      width_mm: 88,
+                      height_mm: 16,
                       human_readable: true,
                     },
                   ],

@@ -733,6 +733,61 @@ describe("Shopify document editor layout", () => {
     expect(documentNameError("", "delete")).toBeNull();
   });
 
+  it("uses a focused document-settings modal with physical margins and a real print-setup select", async () => {
+    const starter = starterTemplates[0]!;
+    const template = {
+      id: "settings-fixture",
+      name: starter.name,
+      kind: starter.kind,
+      pageSize: starter.pageSize,
+      state: "draft" as const,
+      source: starter.source,
+      revision: 1,
+      draftRevision: 1,
+      designTargetId: null,
+      designSpecificationRevision: null,
+      published: null,
+      updatedAt: "2026-08-31T00:00:00Z",
+    };
+    const Stub = createRoutesStub([
+      {
+        path: "/app/templates/:templateId",
+        Component: TemplateEditor,
+        HydrateFallback: () => null,
+        loader: () => ({
+          template,
+          initialTemplate: template,
+          printTargets: [],
+          printTargetError: "",
+          customFields: [],
+        }),
+      },
+    ]);
+
+    const page = await render(
+      <Stub initialEntries={["/app/templates/settings-fixture"]} />,
+    );
+    const modal = page.querySelector("s-modal#piqae-document-settings");
+    const setup = modal?.querySelector<HTMLSelectElement>(
+      'select[name="designTargetId"]',
+    );
+    const orientations = modal?.querySelectorAll(
+      '[role="group"][aria-label="Page orientation"] button',
+    );
+
+    expect(modal?.getAttribute("heading")).toBe("Document settings");
+    expect(modal?.textContent).toContain("Document margins");
+    expect(modal?.textContent).toContain("Default print setup");
+    expect(modal?.textContent).not.toContain("Base text size");
+    expect(modal?.textContent).not.toContain("Text colour");
+    expect(modal?.textContent).not.toContain("Find print target");
+    expect(modal?.querySelectorAll('input[name^="margin"]')).toHaveLength(4);
+    expect(modal?.querySelector('input[type="search"]')).toBeNull();
+    expect(setup?.options[0]?.textContent).toContain("Automatic");
+    expect(orientations).toHaveLength(2);
+    expect(orientations?.[0]?.getAttribute("aria-pressed")).toBe("true");
+  });
+
   it("removes portable import from the templates page", async () => {
     const Stub = createRoutesStub([
       {
@@ -796,6 +851,76 @@ describe("Shopify document editor layout", () => {
     expect(
       toolbar?.querySelectorAll(".piqae-bar-input").length,
     ).toBeGreaterThan(1);
+  });
+
+  it("edits repeating page regions in place and returns to the body", async () => {
+    const onChange = vi.fn();
+    const initial: PrintPacket = {
+      ...packet,
+      header: {
+        first: [],
+        default: [
+          {
+            type: "paragraph",
+            content: [{ type: "text", value: "Packing slip header" }],
+          },
+        ],
+        last: [],
+      },
+      footer: { first: [], default: [], last: [] },
+    };
+    const page = await render(
+      <StatefulPrintPacketEditor initial={initial} onChange={onChange} />,
+    );
+    const header = page.querySelector<HTMLElement>(
+      '[data-document-region="header"]',
+    )!;
+    const footer = page.querySelector<HTMLElement>(
+      '[data-document-region="footer"]',
+    )!;
+    const body = page.querySelector<HTMLElement>(
+      '[data-document-region="body"]',
+    )!;
+
+    expect(header.getAttribute("aria-label")).toContain("double-click");
+    expect(body.classList.contains("is-dimmed")).toBe(false);
+
+    await act(async () => {
+      header.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    });
+    expect(header.classList.contains("is-active")).toBe(true);
+    expect(body.classList.contains("is-dimmed")).toBe(true);
+    expect(header.getAttribute("aria-label")).toContain("editing");
+
+    await act(async () => {
+      page
+        .querySelector<HTMLButtonElement>('button[aria-label="Heading"]')
+        ?.click();
+    });
+    const withHeaderHeading = onChange.mock.lastCall?.[0] as PrintPacket;
+    expect(withHeaderHeading.header?.default.at(-1)?.type).toBe("heading");
+    expect(authoredBody(withHeaderHeading)).toEqual(initial.body);
+
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    expect(header.classList.contains("is-active")).toBe(false);
+    expect(body.classList.contains("is-dimmed")).toBe(false);
+
+    await act(async () => {
+      footer.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    });
+    expect(footer.classList.contains("is-active")).toBe(true);
+
+    await act(async () => {
+      body.dispatchEvent(pointerEvent("pointerdown", 0));
+    });
+    expect(footer.classList.contains("is-active")).toBe(false);
+    expect(body.classList.contains("is-dimmed")).toBe(false);
   });
 
   it("keeps both toolbar rows keyboard reachable at a narrow viewport", async () => {

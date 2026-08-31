@@ -21,6 +21,10 @@ import {
  */
 export const ACCOUNT_DEFAULT_DOCUMENT_ID = "account-default";
 
+export function adminPreviewPlaceholderUrl(appUrl: string): string {
+  return new URL("/api/public/print-placeholder", appUrl).toString();
+}
+
 export type AdminPrintOptions = {
   linked: boolean;
   documents: Array<{
@@ -62,6 +66,7 @@ export type AdminPrintOptions = {
   }>;
   manageDocumentsUrl: string;
   setupDestinationUrl: string;
+  previewPlaceholderUrl: string;
   destinationError?: string;
   renderExecutionPolicy: RenderExecutionPolicy;
 };
@@ -72,6 +77,7 @@ export async function loadAdminPrintOptions(input: {
   workflows: WorkflowRepository;
   vault: CredentialVault;
   baseUrl: string;
+  appUrl: string;
   managedClientFactory?: (link: ShopLink) => PiqaeClient;
 }): Promise<AdminPrintOptions> {
   const shop = normalizeShopDomain(input.shop);
@@ -115,6 +121,7 @@ export async function loadAdminPrintOptions(input: {
       printers: [],
       manageDocumentsUrl: "/app/templates",
       setupDestinationUrl: "/app/printers",
+      previewPlaceholderUrl: adminPreviewPlaceholderUrl(input.appUrl),
       renderExecutionPolicy: settings.renderExecutionPolicy,
     };
   }
@@ -241,6 +248,7 @@ export async function loadAdminPrintOptions(input: {
     printers,
     manageDocumentsUrl: "/app/templates",
     setupDestinationUrl: "/app/printers",
+    previewPlaceholderUrl: adminPreviewPlaceholderUrl(input.appUrl),
     destinationError,
     renderExecutionPolicy: settings.renderExecutionPolicy,
   };

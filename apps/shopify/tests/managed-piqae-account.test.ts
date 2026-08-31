@@ -164,6 +164,40 @@ describe("managed Piqae Shopify accounts", () => {
       ),
     ).toBe(true);
 
+    const label = (await workflows.listTemplates(shop)).find(
+      (value) =>
+        parseTemplateEnvelope(value.published!.source).system?.key ===
+        "product-label",
+    )!;
+    const outdatedLabel = parseTemplateEnvelope(label.published!.source);
+    outdatedLabel.document.theme = {
+      ...outdatedLabel.document.theme,
+      font_size_pt: 8,
+    };
+    outdatedLabel.published!.canonicalDigest = createHash("sha256")
+      .update(JSON.stringify(outdatedLabel.document))
+      .digest("hex");
+    await workflows.saveTemplate(shop, {
+      ...label,
+      source: serializeTemplateEnvelope(outdatedLabel),
+      expectedDraftRevision: label.draftRevision,
+    });
+    const beforeStarterUpgrade = fetcher.mock.calls.length;
+    await restartedService.ensure(shop);
+    expect(fetcher).toHaveBeenCalledTimes(
+      beforeStarterUpgrade + starterTemplates.length * 2,
+    );
+    const upgradedLabel = (await workflows.listTemplates(shop)).find(
+      (value) =>
+        parseTemplateEnvelope(value.published!.source).system?.key ===
+        "product-label",
+    )!;
+    expect(
+      parseTemplateEnvelope(upgradedLabel.published!.source).document,
+    ).toEqual(
+      starterTemplates.find(({ id }) => id === "product-label")!.specification,
+    );
+
     const beforeCustomStarters = new Map(
       (await workflows.listTemplates(shop)).map((value) => [
         value.id,
