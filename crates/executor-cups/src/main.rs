@@ -529,22 +529,30 @@ mod platform {
         let Some(path) = lpoptions_path() else {
             return (PrinterCapabilities::default(), BTreeMap::new());
         };
-        let Some(output) = command_output_bounded(path, printer, Duration::from_millis(500)) else {
+        let Some(output) =
+            command_output_bounded(path, &["-p", printer, "-l"], Duration::from_millis(500))
+        else {
             return (PrinterCapabilities::default(), BTreeMap::new());
         };
         if !output.status.success() {
             return (PrinterCapabilities::default(), BTreeMap::new());
         }
-        parse_lpoptions(&String::from_utf8_lossy(&output.stdout))
+        let configured = command_output_bounded(path, &["-p", printer], Duration::from_millis(500))
+            .filter(|configured| configured.status.success())
+            .map(|configured| {
+                parse_configured_options(&String::from_utf8_lossy(&configured.stdout))
+            })
+            .unwrap_or_default();
+        parse_lpoptions_with_configured(&String::from_utf8_lossy(&output.stdout), &configured)
     }
 
     fn command_output_bounded(
         path: &Path,
-        printer: &str,
+        arguments: &[&str],
         timeout: Duration,
     ) -> Option<std::process::Output> {
         let mut child = Command::new(path)
-            .args(["-p", printer, "-l"])
+            .args(arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -597,8 +605,16 @@ mod platform {
             .find(|path| path.is_file())
     }
 
+    #[cfg(test)]
     fn parse_lpoptions(
         output: &str,
+    ) -> (PrinterCapabilities, BTreeMap<String, NativePrinterOption>) {
+        parse_lpoptions_with_configured(output, &BTreeMap::new())
+    }
+
+    fn parse_lpoptions_with_configured(
+        output: &str,
+        configured: &BTreeMap<String, String>,
     ) -> (PrinterCapabilities, BTreeMap<String, NativePrinterOption>) {
         let mut capabilities = PrinterCapabilities::default();
         let mut native_options = BTreeMap::new();
@@ -624,17 +640,45 @@ mod platform {
                 continue;
             }
             apply_portable_capability(&mut capabilities, key, &choices);
+            let selected_choice = configured
+                .iter()
+                .find(|(configured_key, _)| configured_key.eq_ignore_ascii_case(key))
+                .map(|(_, value)| value)
+                .filter(|configured_value| {
+                    choices
+                        .iter()
+                        .any(|choice| choice.value == configured_value.as_str())
+                })
+                .cloned()
+                .or_else(|| default_choice.clone());
             native_options.insert(
                 key.to_owned(),
                 NativePrinterOption {
                     display_name: display_name.to_owned(),
                     default_choice: default_choice.clone(),
-                    selected_choice: default_choice,
+                    selected_choice,
                     choices,
                 },
             );
         }
         (capabilities, native_options)
+    }
+
+    /// Parses only configured job defaults that can later be matched against
+    /// an advertised option. Queue metadata such as device URIs is discarded
+    /// by the caller because it never matches a native option key.
+    fn parse_configured_options(output: &str) -> BTreeMap<String, String> {
+        output
+            .split_ascii_whitespace()
+            .filter_map(|token| token.split_once('='))
+            .filter(|(key, value)| !key.is_empty() && !value.is_empty())
+            .map(|(key, value)| {
+                (
+                    key.to_owned(),
+                    value.trim_matches(['\'', '"']).replace("\\ ", " "),
+                )
+            })
+            .collect()
     }
 
     fn parse_choices(encoded: &str) -> (Vec<NativePrinterChoice>, Option<String>) {
@@ -1765,6 +1809,21 @@ mod platform {
         }
 
         #[test]
+        fn automatic_defaults_do_not_pin_media_or_a_tray() {
+            assert!(cups_job_options(false, &JobOptions::default()).is_empty());
+            assert_eq!(
+                cups_job_options(
+                    false,
+                    &JobOptions {
+                        paper: Some("iso_a4_210x297mm".into()),
+                        ..Default::default()
+                    }
+                ),
+                vec![("media".into(), "iso_a4_210x297mm".into())]
+            );
+        }
+
+        #[test]
         fn raw_jobs_ignore_rendering_options() {
             let options = piqae_domain::JobOptions {
                 copies: Some(99),
@@ -2019,6 +2078,35 @@ mod platform {
             let (escaped, _) = parse_choices("*Letter/US\\ Letter Legal/US\\ Legal");
             assert_eq!(escaped[0].display_name, "US Letter");
             assert_eq!(escaped[1].display_name, "US Legal");
+        }
+
+        #[test]
+        fn configured_queue_defaults_override_advertised_driver_defaults_for_display_only() {
+            let configured = parse_configured_options(
+                "device-uri=ipps://printer.invalid/ipp/print PageSize=A5 InputSlot=auto \
+                 printer-info='Office Printer'",
+            );
+            let (_, native) = parse_lpoptions_with_configured(
+                "PageSize/Media Size: *A4 A5 Letter\n\
+                 InputSlot/Media Source: *tray-1 tray-2 auto\n",
+                &configured,
+            );
+
+            assert_eq!(native["PageSize"].default_choice.as_deref(), Some("A4"));
+            assert_eq!(native["PageSize"].selected_choice.as_deref(), Some("A5"));
+            assert_eq!(native["InputSlot"].selected_choice.as_deref(), Some("auto"));
+            assert!(!native.contains_key("device-uri"));
+            assert!(!native.contains_key("printer-info"));
+        }
+
+        #[test]
+        fn unknown_configured_values_never_invent_native_choices() {
+            let configured = BTreeMap::from([("InputSlot".into(), "missing-tray".into())]);
+            let (_, native) = parse_lpoptions_with_configured(
+                "InputSlot/Media Source: *auto tray-1 tray-2\n",
+                &configured,
+            );
+            assert_eq!(native["InputSlot"].selected_choice.as_deref(), Some("auto"));
         }
     }
 }

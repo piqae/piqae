@@ -4146,7 +4146,11 @@ async fn refresh_local_printers(
             .map_err(storage_control_failure)?;
         engine
             .store_mut()
-            .ensure_current_printer_defaults_profile(&stored.printer_id, observed_unix_ms)
+            .refresh_current_printer_defaults_profile(
+                &stored.printer_id,
+                &native_options_json,
+                observed_unix_ms,
+            )
             .map_err(storage_control_failure)?;
     }
     engine
@@ -4160,6 +4164,17 @@ async fn refresh_local_printers(
         .into_iter()
         .map(|printer| local_printer_from_stored(engine.store(), printer))
         .collect()
+}
+
+fn refresh_current_defaults(
+    store: &mut AgentStore,
+    printer_id: &str,
+    native_options_json: &str,
+    observed_unix_ms: i64,
+) -> Result<(), StorageError> {
+    store
+        .refresh_current_printer_defaults_profile(printer_id, native_options_json, observed_unix_ms)
+        .map(|_| ())
 }
 
 fn local_printer(store: &AgentStore, printer_id: &str) -> Result<LocalPrinter, ControlFailure> {
@@ -7613,7 +7628,7 @@ async fn discover_cloud_printers(
                 &native_options,
                 observed_unix_ms,
             )?;
-            store.ensure_current_printer_defaults_profile(&stored.printer_id, observed_unix_ms)?;
+            refresh_current_defaults(store, &stored.printer_id, &native_options, observed_unix_ms)?;
             let profiles = store
                 .named_profiles(&stored.printer_id)?
                 .into_iter()
@@ -11559,6 +11574,14 @@ mod tests {
         assert_eq!(first.0[0].profiles[0].name, "Current printer defaults");
         assert!(first.0[0].profiles[0].is_default);
         assert!(first.0[0].profiles[0].published);
+        assert_eq!(
+            first.0[0].profiles[0].summary.details["settings_origin"],
+            "configured_driver_defaults"
+        );
+        assert_eq!(
+            first.0[0].profiles[0].summary.details["loaded_media_evidence"],
+            "not_reported"
+        );
         let printer = store
             .present_printers()
             .expect("printers")
