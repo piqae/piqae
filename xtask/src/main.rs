@@ -735,6 +735,11 @@ const CHECKS: &[Check] = &[
                 "release/tools/check_workflow_runners.py",
                 "@workflows",
             ],
+            &[
+                "python3",
+                "release/tools/check_workflow_bash.py",
+                "@workflows",
+            ],
         ],
     },
     Check {

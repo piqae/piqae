@@ -841,11 +841,11 @@ jobs:
             echo 'Aggregate release policy failed; no aggregate assets were certified.' >&2
             exit 1
           fi
-          if [[ "$PUBLISH" == true ]] && (
-            [[ "$LINUX_ASSETS_OUTCOME" != success ]]
-            || [[ "$SDK_ASSETS_OUTCOME" != success ]]
-            || [[ "$AGGREGATE_ASSETS_OUTCOME" != success ]]
-          ); then
+          if [[ "$PUBLISH" == true
+            && ( "$LINUX_ASSETS_OUTCOME" != success
+              || "$SDK_ASSETS_OUTCOME" != success
+              || "$AGGREGATE_ASSETS_OUTCOME" != success )
+          ]]; then
             echo 'Aggregate candidate asset publication failed.' >&2
             exit 1
           fi
