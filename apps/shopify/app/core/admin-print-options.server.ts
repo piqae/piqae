@@ -10,6 +10,7 @@ import { parseTemplateEnvelope } from "./template-model";
 import { loadShopifyPrintTargets } from "./shopify-print-targets.server";
 import {
   selectTargetDestination,
+  targetDocumentCompatibility,
   type ShopifyPrintTarget,
 } from "./shopify-print-targets";
 
@@ -41,6 +42,7 @@ export type AdminPrintOptions = {
       | "unknown"
       | "document_invalid"
       | "revision_changed"
+      | "media_unverified"
       | "media_incompatible";
     compatibilityKnown: boolean;
     compatibleTargetIds: string[];
@@ -207,7 +209,10 @@ export async function loadAdminPrintOptions(input: {
               target && document
                 ? selectTargetDestination(target, document)
                 : null;
-            const mediaCompatible = advisoryDestination !== null;
+            const mediaCompatibility =
+              target && document
+                ? targetDocumentCompatibility(target, document)
+                : null;
             const targetBindingStatus = !document
               ? "document_invalid"
               : !published.designTargetId
@@ -218,9 +223,11 @@ export async function loadAdminPrintOptions(input: {
                     : "target_missing"
                   : !revisionCurrent
                     ? "revision_changed"
-                    : !mediaCompatible
-                      ? "media_incompatible"
-                      : "ready";
+                    : mediaCompatibility === "unverified"
+                      ? "media_unverified"
+                      : mediaCompatibility !== "ready"
+                        ? "media_incompatible"
+                        : "ready";
             return {
               id: template.id,
               name: published.name,

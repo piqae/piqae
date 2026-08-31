@@ -6,6 +6,7 @@ import {
 } from "../app/core/shopify-print-targets.server";
 import {
   selectTargetDestination,
+  targetDocumentCompatibility,
   targetSupportsDocument,
 } from "../app/core/shopify-print-targets";
 
@@ -61,6 +62,9 @@ const base = {
       profile: { name: "100x50 direct thermal" },
       media_compatibility: {
         status: "ready",
+        configuration_status: "configured",
+        capability_status: "supported",
+        loaded_media_status: "ready",
         reasons: [],
         profile_dimensions_mm: { width_mm: 100, height_mm: 50 },
         loaded_media: {
@@ -222,6 +226,9 @@ describe("Shopify print target projection", () => {
           ...structuredClone(base.destinations[0]),
           media_compatibility: {
             status: "not_reported",
+            configuration_status: "configured",
+            capability_status: "supported",
+            loaded_media_status: "unknown",
             reasons: ["stock_not_loaded"],
             profile_dimensions_mm: { width_mm: 100, height_mm: 50 },
             loaded_media: null,
@@ -233,8 +240,29 @@ describe("Shopify print target projection", () => {
     expect(target.hasMediaCandidate).toBe(false);
     expect(target.destinations[0]?.mediaCompatibility).toMatchObject({
       status: "not_reported",
+      configurationStatus: "configured",
+      capabilityStatus: "supported",
+      loadedMediaStatus: "unknown",
       observedAt: null,
     });
+    expect(
+      targetDocumentCompatibility(target, {
+        format: "printpacket/v1",
+        media: { kind: "label", width_mm: 100, height_mm: 50 },
+        body: [],
+      }),
+    ).toBe("unverified");
+  });
+
+  it("reserves incompatible for a proven document or profile mismatch", () => {
+    const target = mapDesignSpecification(base as never);
+    expect(
+      targetDocumentCompatibility(target, {
+        format: "printpacket/v1",
+        media: { kind: "label", width_mm: 62, height_mm: 29 },
+        body: [],
+      }),
+    ).toBe("incompatible");
   });
 
   it("skips a stale primary and advises the compatible exact standby", () => {
@@ -269,6 +297,7 @@ describe("Shopify print target projection", () => {
           media_compatibility: {
             ...structuredClone(base.destinations[0]!.media_compatibility),
             status: "stale",
+            loaded_media_status: "stale",
             reasons: ["loaded_media_stale"],
           },
         },

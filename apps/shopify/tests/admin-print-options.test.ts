@@ -359,7 +359,7 @@ describe("admin print options", () => {
         }) as never,
     });
     expect(notReady.documents[0]).toMatchObject({
-      targetBindingStatus: "media_incompatible",
+      targetBindingStatus: "media_unverified",
       compatibleTargetIds: [],
     });
 

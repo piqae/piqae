@@ -15,6 +15,7 @@ import {
   chooseDefaultPrinterOption,
   printerOptionsForDocument,
   printerCompatibilityMessage,
+  approvalForDocumentPrinter,
   previewPlaceholderUrl,
 } from "./AdminOrderPrintAction.jsx";
 
@@ -184,29 +185,37 @@ describe("admin print action state", () => {
         id: "prt_label",
         value: "prt_label",
         compatible: false,
+        eligible: false,
         directTargetId: null,
       }),
       expect.objectContaining({
         id: "prt_a4",
         value: "prt_a4",
         compatible: true,
+        eligible: true,
         directTargetId: "tgt_a4",
       }),
     ]);
-    expect(chooseDefaultPrinterOption(options)?.id).toBe("prt_label");
+    expect(chooseDefaultPrinterOption(options)?.id).toBe("prt_a4");
     expect(printerCompatibilityMessage(document, options[0])).toContain(
-      "Label printer is connected",
+      "not part of this document's saved print setup",
     );
     expect(printerCompatibilityMessage(document, options[1])).toBe("");
+    expect(approvalForDocumentPrinter(document, options[1])).toEqual({
+      mode: "target",
+      targetId: "tgt_a4",
+      specificationRevision: "spec_a4_1",
+    });
   });
 
-  it("keeps the saved printer selected for browser printing on an unbound document", () => {
+  it("uses the merchant default with current driver settings for an unbound document", () => {
+    const document = {
+      targetBindingStatus: "unbound",
+      designTargetId: null,
+      designSpecificationRevision: null,
+    };
     const options = printerOptionsForDocument(
-      {
-        targetBindingStatus: "unbound",
-        designTargetId: null,
-        designSpecificationRevision: null,
-      },
+      document,
       [],
       [{ id: "prt_a4", name: "Office A4", isDefault: true }],
     );
@@ -214,10 +223,45 @@ describe("admin print action state", () => {
       expect.objectContaining({
         value: "prt_a4",
         compatible: false,
+        eligible: true,
+        routeMode: "printer",
+        directPrinterId: "prt_a4",
         isDefault: true,
       }),
     ]);
     expect(chooseDefaultPrinterOption(options)?.id).toBe("prt_a4");
+    expect(approvalForDocumentPrinter(document, options[0])).toEqual({
+      mode: "printer",
+      printerId: "prt_a4",
+    });
+    expect(printerCompatibilityMessage(document, options[0])).toBe("");
+  });
+
+  it("does not silently fall back from a pinned setup with unknown stock", () => {
+    const document = {
+      name: "Packing Slip",
+      targetBindingStatus: "media_unverified",
+      designTargetId: "tgt_a4",
+      designSpecificationRevision: "spec_a4_1",
+    };
+    const options = printerOptionsForDocument(
+      document,
+      [],
+      [{ id: "prt_a4", name: "Office A4", isDefault: true }],
+    );
+    expect(options[0]).toMatchObject({
+      eligible: false,
+      routeMode: "blocked",
+      directPrinterId: null,
+      directTargetId: null,
+    });
+    expect(approvalForDocumentPrinter(document, options[0])).toBeNull();
+    expect(printerCompatibilityMessage(document, options[0])).toContain(
+      "cannot currently verify the loaded stock",
+    );
+    expect(printerCompatibilityMessage(document, options[0])).not.toContain(
+      "incompatible",
+    );
   });
 
   it("shows a useful backend error", () => {
