@@ -127,7 +127,7 @@ export class ShopifyPrintingService {
     printerId?: string;
     targetId?: string;
     targetSpecificationRevision?: string;
-    templateId?: string;
+    templateId: string;
     requestKey: string;
     renderCost?: PrintPacketRenderCost;
   }) {
@@ -148,22 +148,20 @@ export class ShopifyPrintingService {
     );
     if (preview.render_id !== input.renderId)
       throw new Error("Preview not found");
+    const publication = await this.resolveTemplatePublication(
+      shop,
+      link.templateRevisionId,
+      link.piqaeAccountId,
+      link.piqaeLiveEnvironmentId ?? null,
+      input.templateId,
+    );
+    const rendered = await client.printPackets.renders.retrieve(input.renderId);
+    if (rendered.template_revision_id !== publication.revisionId)
+      throw new Error("Preview does not belong to the selected publication");
     let destination:
       | { target_id: string; specification_revision: string }
       | { printer_id: string };
     if (input.targetId) {
-      const publication = await this.resolveTemplatePublication(
-        shop,
-        link.templateRevisionId,
-        link.piqaeAccountId,
-        link.piqaeLiveEnvironmentId ?? null,
-        input.templateId,
-      );
-      const rendered = await client.printPackets.renders.retrieve(
-        input.renderId,
-      );
-      if (rendered.template_revision_id !== publication.revisionId)
-        throw new Error("Preview does not belong to the selected publication");
       destination = {
         target_id: input.targetId,
         specification_revision: this.publishedTargetRevision(
@@ -172,7 +170,13 @@ export class ShopifyPrintingService {
           input.targetSpecificationRevision,
         ),
       };
-    } else destination = { printer_id: input.printerId! };
+    } else {
+      if (publication.designTargetId || publication.designSpecificationRevision)
+        throw new Error(
+          "This published document is pinned to a print target and cannot fall back to current printer settings",
+        );
+      destination = { printer_id: input.printerId! };
+    }
     const approved = await client.printPackets.previews.approve(
       input.previewId,
       {

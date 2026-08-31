@@ -6,6 +6,17 @@ export type MediaCompatibilityStatus =
   | "stale"
   | "untrusted"
   | "incompatible";
+export type MediaConfigurationStatus =
+  | "configured"
+  | "not_configured"
+  | "incompatible";
+export type MediaCapabilityStatus = "supported" | "unsupported" | "unknown";
+export type LoadedMediaStatus =
+  | "ready"
+  | "unknown"
+  | "stale"
+  | "untrusted"
+  | "incompatible";
 
 export type ShopifyPrintTargetDestination = {
   bindingId: string;
@@ -19,6 +30,9 @@ export type ShopifyPrintTargetDestination = {
   readinessStatus: string;
   readinessReasons: string[];
   mediaCompatibility: {
+    configurationStatus: MediaConfigurationStatus;
+    capabilityStatus: MediaCapabilityStatus;
+    loadedMediaStatus: LoadedMediaStatus;
     status: MediaCompatibilityStatus;
     reasons: string[];
     profileDimensionsMm: { widthMm: number; heightMm: number } | null;
@@ -61,6 +75,62 @@ export function targetSupportsDocument(
   document: PrintPacketV1,
 ): boolean {
   return selectTargetDestination(target, document) !== null;
+}
+
+export type TargetDocumentCompatibility =
+  | "ready"
+  | "unverified"
+  | "incompatible";
+
+/**
+ * Separates a proven media mismatch from missing or stale loaded-media
+ * evidence. Both remain fail-closed for an immutable target binding, but the
+ * merchant guidance must not claim that unknown physical stock is
+ * incompatible.
+ */
+export function targetDocumentCompatibility(
+  target: ShopifyPrintTarget,
+  document: PrintPacketV1,
+): TargetDocumentCompatibility {
+  const configuredDestinations = target.destinations.filter(
+    (destination) =>
+      destination.enabled &&
+      destination.destinationId !== null &&
+      destination.routeId !== null &&
+      destination.mediaCompatibility.configurationStatus === "configured" &&
+      mediaMatchesDocument(
+        target.stock,
+        destination.mediaCompatibility.profileDimensionsMm,
+        document,
+      ),
+  );
+  if (
+    configuredDestinations.some(
+      (destination) =>
+        destination.mediaCompatibility.capabilityStatus === "supported" &&
+        destination.mediaCompatibility.loadedMediaStatus === "ready" &&
+        destination.mediaCompatibility.status === "ready",
+    )
+  )
+    return "ready";
+  if (
+    configuredDestinations.some(
+      (destination) =>
+        destination.mediaCompatibility.capabilityStatus === "unknown" ||
+        ["unknown", "stale", "untrusted"].includes(
+          destination.mediaCompatibility.loadedMediaStatus,
+        ),
+    ) ||
+    target.destinations.some(
+      (destination) =>
+        destination.enabled &&
+        (destination.mediaCompatibility.configurationStatus ===
+          "not_configured" ||
+          destination.mediaCompatibility.capabilityStatus === "unknown"),
+    )
+  )
+    return "unverified";
+  return "incompatible";
 }
 
 /**

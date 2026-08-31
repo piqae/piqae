@@ -1516,6 +1516,58 @@ impl AgentStore {
         Ok(profile)
     }
 
+    /// Refreshes the display-only observation attached to the live
+    /// driver-default profile without turning those defaults into a pinned job
+    /// ticket.
+    ///
+    /// The profile keeps an empty [`JobOptions`] payload so execution continues
+    /// to delegate media source, tray, and other unspecified choices to the
+    /// installed driver. The summary records configured queue defaults only;
+    /// it deliberately does not claim that the corresponding stock is
+    /// physically loaded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed native options, an unknown printer, or a
+    /// failed update.
+    pub fn refresh_current_printer_defaults_profile(
+        &mut self,
+        printer_id: &str,
+        native_options_json: &str,
+        observed_unix_ms: i64,
+    ) -> Result<StoredNamedProfile, StorageError> {
+        let native_options: BTreeMap<String, NativePrinterOption> =
+            serde_json::from_str(native_options_json)?;
+        PrinterCapabilityProfile::draft(PrinterCapabilities::default(), native_options.clone())
+            .validate()
+            .map_err(|error| StorageError::InvalidPrinterProfile(error.to_string()))?;
+        let profile = self.ensure_current_printer_defaults_profile(printer_id, observed_unix_ms)?;
+        let summary_json = serde_json::to_string(&current_driver_defaults_summary(
+            &native_options,
+            observed_unix_ms,
+        ))?;
+        let changed = self.connection.execute(
+            "UPDATE printer_profiles
+             SET summary_json = ?4, updated_unix_ms = ?5
+             WHERE profile_id = ?1 AND printer_id = ?2 AND revision = ?3
+               AND uses_current_printer_defaults = 1 AND deleted = 0",
+            params![
+                profile.profile_id,
+                printer_id,
+                profile.revision,
+                summary_json,
+                observed_unix_ms
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::InvalidPrinterProfile(
+                "current printer defaults profile could not be refreshed".into(),
+            ));
+        }
+        self.named_profile(printer_id, &profile.profile_id)?
+            .ok_or_else(|| StorageError::InvalidPrinterProfile("profile refresh failed".into()))
+    }
+
     /// Appends a named print profile revision using optimistic concurrency.
     ///
     /// # Errors
@@ -4836,6 +4888,68 @@ fn demote_default_profiles(
     Ok(())
 }
 
+fn current_driver_defaults_summary(
+    native_options: &BTreeMap<String, NativePrinterOption>,
+    observed_unix_ms: i64,
+) -> ProfileSummary {
+    let mut summary = ProfileSummary::default();
+    summary.details.insert(
+        "settings_origin".into(),
+        serde_json::Value::String("configured_driver_defaults".into()),
+    );
+    summary.details.insert(
+        "loaded_media_evidence".into(),
+        serde_json::Value::String("not_reported".into()),
+    );
+    summary.details.insert(
+        "observed_unix_ms".into(),
+        serde_json::Value::from(observed_unix_ms),
+    );
+
+    for (key, option) in native_options {
+        let Some(selected) = option
+            .selected_choice
+            .as_ref()
+            .or(option.default_choice.as_ref())
+        else {
+            continue;
+        };
+        let display_value = option
+            .choices
+            .iter()
+            .find(|choice| choice.value == *selected)
+            .map_or_else(|| selected.clone(), |choice| choice.display_name.clone());
+        summary
+            .native
+            .insert(option.display_name.clone(), display_value.clone());
+        match key.to_ascii_lowercase().as_str() {
+            "pagesize" | "pageregion" | "media" => {
+                summary.paper = Some(display_value);
+            }
+            // Output bins do not describe where paper is sourced. Keeping the
+            // distinction prevents an output tray from being presented as
+            // loaded input stock.
+            "inputslot" | "media-source" => {
+                summary.source = Some(display_value);
+            }
+            "mediatype" | "media-type" => {
+                summary.media = Some(display_value);
+            }
+            "colormodel" | "colormode" | "print-color-mode" => {
+                summary.color = Some(display_value);
+            }
+            "duplex" | "sides" => {
+                summary.duplex = Some(display_value);
+            }
+            "resolution" | "printer-resolution" => {
+                summary.resolution = Some(display_value);
+            }
+            _ => {}
+        }
+    }
+    summary
+}
+
 fn validate_named_profile(name: &str, options_json: &str) -> Result<(), StorageError> {
     if name.trim().is_empty() {
         return Err(StorageError::InvalidPrinterProfile(
@@ -6452,6 +6566,88 @@ mod tests {
         assert_ne!(restored.profile_id, first.profile_id);
         assert!(restored.uses_current_printer_defaults);
         assert_eq!(store.named_profiles(&printer.printer_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn live_default_summary_refreshes_without_pinning_driver_choices() {
+        let mut store = AgentStore::in_memory().unwrap();
+        let printer = store
+            .upsert_printer(
+                "native-live-summary",
+                "Office",
+                "online",
+                true,
+                &serde_json::to_string(&PrinterCapabilities::default()).unwrap(),
+                10,
+            )
+            .unwrap();
+        let first = store
+            .refresh_current_printer_defaults_profile(
+                &printer.printer_id,
+                r#"{
+                  "PageSize": {
+                    "display_name": "Media Size",
+                    "default_choice": "A4",
+                    "selected_choice": "A5",
+                    "choices": [
+                      {"value": "A4", "display_name": "A4"},
+                      {"value": "A5", "display_name": "A5"}
+                    ]
+                  },
+                  "InputSlot": {
+                    "display_name": "Media Source",
+                    "default_choice": "tray-1",
+                    "selected_choice": "auto",
+                    "choices": [
+                      {"value": "auto", "display_name": "Automatic"},
+                      {"value": "tray-1", "display_name": "Tray 1"}
+                    ]
+                  }
+                }"#,
+                20,
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<JobOptions>(&first.options_json).unwrap(),
+            JobOptions::default(),
+            "the live profile must remain a driver-managed pointer"
+        );
+        let first_summary: ProfileSummary = serde_json::from_str(&first.summary_json).unwrap();
+        assert_eq!(first_summary.paper.as_deref(), Some("A5"));
+        assert_eq!(first_summary.source.as_deref(), Some("Automatic"));
+        assert_eq!(
+            first_summary.details["settings_origin"],
+            "configured_driver_defaults"
+        );
+        assert_eq!(
+            first_summary.details["loaded_media_evidence"],
+            "not_reported"
+        );
+
+        let refreshed = store
+            .refresh_current_printer_defaults_profile(
+                &printer.printer_id,
+                r#"{
+                  "PageSize": {
+                    "display_name": "Media Size",
+                    "default_choice": "A4",
+                    "selected_choice": "A4",
+                    "choices": [
+                      {"value": "A4", "display_name": "A4"},
+                      {"value": "A5", "display_name": "A5"}
+                    ]
+                  }
+                }"#,
+                30,
+            )
+            .unwrap();
+        assert_eq!(refreshed.profile_id, first.profile_id);
+        assert_eq!(refreshed.revision, first.revision);
+        let refreshed_summary: ProfileSummary =
+            serde_json::from_str(&refreshed.summary_json).unwrap();
+        assert_eq!(refreshed_summary.paper.as_deref(), Some("A4"));
+        assert_eq!(refreshed_summary.source, None);
+        assert_eq!(refreshed_summary.details["observed_unix_ms"], 30);
     }
 
     #[test]

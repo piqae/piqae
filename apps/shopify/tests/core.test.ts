@@ -51,6 +51,7 @@ import {
 } from "../app/core/template-model";
 import { templateDigest } from "../app/core/template-digest.server";
 import { seedStarterTemplates } from "../app/core/template-index.server";
+import { ACCOUNT_DEFAULT_DOCUMENT_ID } from "../app/core/admin-print-options.server";
 
 const shop = "fixture-shop.myshopify.com";
 const order = {
@@ -786,6 +787,16 @@ describe("Shopify boundary", () => {
         shop,
         previewId: preview.previewId,
         renderId: preview.renderId,
+        printerId: "printer_1",
+        templateId: "preview-invoice",
+        requestKey: "approve-pinned-as-printer",
+      }),
+    ).rejects.toThrow("pinned to a print target");
+    await expect(
+      service.approvePreview({
+        shop,
+        previewId: preview.previewId,
+        renderId: preview.renderId,
         targetId: "tgt_orders",
         targetSpecificationRevision: "spec_orders_5",
         templateId: "preview-invoice",
@@ -793,6 +804,79 @@ describe("Shopify boundary", () => {
       }),
     ).rejects.toThrow("changed after this document was published");
     expect(approve).toHaveBeenCalledTimes(1);
+  });
+
+  it("approves an unpinned account document by printer with current defaults", async () => {
+    const repository = new MemoryShopRepository();
+    const workflow = new MemoryWorkflowRepository();
+    const vault = new CredentialVault(Buffer.alloc(32, 6));
+    await repository.put({
+      shop,
+      piqaeAccountId: "acct_current_defaults",
+      encryptedCredential: vault.seal("token", shop),
+      templateRevisionId: "rev_current_defaults",
+      createdAt: new Date().toISOString(),
+    });
+    await repository.recordRender(
+      shop,
+      "render_current_defaults",
+      "preview-current-defaults",
+    );
+    const approve = vi.fn(
+      async (
+        _previewId: string,
+        _input: Record<string, unknown>,
+        _requestKey: string,
+      ) => ({
+        preview: { state: "approved" },
+        job: { id: "job_current_defaults" },
+      }),
+    );
+    const service = new ShopifyPrintingService(
+      repository,
+      vault,
+      () =>
+        ({
+          printPackets: {
+            renders: {
+              retrieve: vi.fn(async () => ({
+                id: "render_current_defaults",
+                state: "completed",
+                template_revision_id: "rev_current_defaults",
+              })),
+            },
+            previews: {
+              retrieve: vi.fn(async () => ({
+                render_id: "render_current_defaults",
+              })),
+              approve,
+            },
+          },
+        }) as never,
+      "https://app.example",
+      undefined,
+      workflow,
+    );
+
+    await expect(
+      service.approvePreview({
+        shop,
+        previewId: "preview_current_defaults",
+        renderId: "render_current_defaults",
+        printerId: "printer_office",
+        templateId: ACCOUNT_DEFAULT_DOCUMENT_ID,
+        requestKey: "approve-current-defaults",
+      }),
+    ).resolves.toEqual({
+      jobId: "job_current_defaults",
+      state: "approved",
+    });
+    expect(approve).toHaveBeenCalledWith(
+      "preview_current_defaults",
+      expect.objectContaining({ printer_id: "printer_office" }),
+      "approve-current-defaults",
+    );
+    expect(approve.mock.calls[0]?.[1]).not.toHaveProperty("target_id");
   });
 
   it("keeps canonical document media authoritative for editor sizing", () => {

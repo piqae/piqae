@@ -2512,7 +2512,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "piqae-agent"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2558,7 +2558,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-agent-client"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2578,7 +2578,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-agent-core"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "async-trait",
  "piqae-agent-storage",
@@ -2596,7 +2596,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-agent-storage"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "piqae-domain",
  "rusqlite",
@@ -2621,7 +2621,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-control-plane"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2680,7 +2680,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-domain"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "chrono",
  "serde",
@@ -2692,7 +2692,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-executor-cups"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -2710,7 +2710,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-executor-protocol"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "bytes",
  "piqae-protocol",
@@ -2724,7 +2724,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-executor-supervisor"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "async-trait",
  "piqae-agent-core",
@@ -2739,7 +2739,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-executor-windows"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -2754,7 +2754,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-fake-executor"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "piqae-agent-core",
  "piqae-domain",
@@ -2767,7 +2767,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-local-api"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "axum",
  "piqae-domain",
@@ -2784,7 +2784,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-local-ipc"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -2803,7 +2803,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-native-logging"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "tempfile",
  "tracing-subscriber",
@@ -2811,7 +2811,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-node-client"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "async-trait",
  "piqae-local-ipc",
@@ -2826,7 +2826,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-node-ffi"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2847,7 +2847,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-node-host-api"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "async-trait",
  "serde",
@@ -2857,7 +2857,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-node-runtime"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2902,7 +2902,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-platform-adapters"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "async-trait",
  "piqae-domain",
@@ -2912,7 +2912,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-protocol"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "chrono",
  "piqae-domain",
@@ -2924,14 +2924,14 @@ dependencies = [
 
 [[package]]
 name = "piqae-shell-linux"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "ksni",
 ]
 
 [[package]]
 name = "piqae-shell-windows"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -2950,7 +2950,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-storage-postgres"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2971,7 +2971,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-support-packs"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -2984,7 +2984,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-update-guardian"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3000,7 +3000,7 @@ dependencies = [
 
 [[package]]
 name = "piqae-update-metadata"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3041,7 +3041,7 @@ dependencies = [
 
 [[package]]
 name = "piqaectl"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3152,7 +3152,7 @@ dependencies = [
 
 [[package]]
 name = "printpacket"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "printpacket-renderer",
  "serde",
@@ -3163,7 +3163,7 @@ dependencies = [
 
 [[package]]
 name = "printpacket-renderer"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "qrcode",
  "serde",
@@ -5465,7 +5465,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xtask"
-version = "0.1.25"
+version = "0.1.26"
 
 [[package]]
 name = "yoke"

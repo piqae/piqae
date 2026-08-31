@@ -2181,8 +2181,13 @@ async fn resolve_job_destination(
                         && route.printer_id == printer_id.to_string()
                         && route.agent_id == agent_id.to_string()
                 });
-            let mut metadata =
-                BTreeMap::from([("piqae.route_agent_id".into(), agent_id.to_string())]);
+            let mut metadata = BTreeMap::from([
+                ("piqae.route_agent_id".into(), agent_id.to_string()),
+                (
+                    "piqae.print_settings_mode".into(),
+                    "current_driver_defaults".into(),
+                ),
+            ]);
             if let Some(route) = topology_route {
                 metadata.insert("piqae.destination_id".into(), route.destination_id);
                 metadata.insert("piqae.route_id".into(), route.id);
@@ -2463,6 +2468,7 @@ async fn resolve_target_destination(
             ("piqae.target_id".into(), target.id.clone()),
             ("piqae.binding_id".into(), binding.id.clone()),
             ("piqae.profile_id".into(), profile.profile_id.clone()),
+            ("piqae.print_settings_mode".into(), "pinned_profile".into()),
             ("piqae.route_agent_id".into(), printer.agent_id.to_string()),
             (
                 "piqae.profile_revision".into(),

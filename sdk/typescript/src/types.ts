@@ -730,7 +730,14 @@ export interface TargetLoadedMediaEvidence {
 }
 
 export interface TargetMediaCompatibility {
+  /** Legacy aggregate status. Prefer the orthogonal status projections below. */
   status: 'ready' | 'not_reported' | 'stale' | 'untrusted' | 'incompatible';
+  /** Completeness and internal consistency of the target/profile/stock binding. */
+  configuration_status?: 'configured' | 'not_configured' | 'incompatible';
+  /** Reported immutable profile support; unknown is not evidence of incompatibility. */
+  capability_status?: 'supported' | 'unsupported' | 'unknown';
+  /** Quality of loaded-media evidence; unknown is not an incompatible stock claim. */
+  loaded_media_status?: 'ready' | 'unknown' | 'stale' | 'untrusted' | 'incompatible';
   reasons: string[];
   profile_dimensions_mm: TargetMediaDimensions | null;
   loaded_media: TargetLoadedMediaEvidence | null;

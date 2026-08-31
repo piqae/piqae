@@ -82,6 +82,15 @@ function destinationProjection(
     readinessStatus: readiness?.status ?? "destination_missing",
     readinessReasons: readiness?.reasons ?? ["destination_readiness_missing"],
     mediaCompatibility: {
+      configurationStatus:
+        projection.configuration_status ??
+        (width !== null && height !== null ? "configured" : "not_configured"),
+      capabilityStatus:
+        projection.capability_status ??
+        (width !== null && height !== null ? "supported" : "unknown"),
+      loadedMediaStatus:
+        projection.loaded_media_status ??
+        legacyLoadedMediaStatus(projection.status),
       status: projection.status,
       reasons: projection.reasons,
       profileDimensionsMm:
@@ -94,6 +103,13 @@ function destinationProjection(
       freshUntil: loaded?.fresh_until ?? null,
     },
   };
+}
+
+function legacyLoadedMediaStatus(
+  status: DesignSpecification["destinations"][number]["media_compatibility"]["status"],
+) {
+  if (status === "not_reported") return "unknown" as const;
+  return status;
 }
 
 function stockProjection(stock: Stock | null): ShopifyPrintTarget["stock"] {

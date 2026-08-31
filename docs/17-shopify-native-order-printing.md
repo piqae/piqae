@@ -84,8 +84,8 @@ printing without a PDF-download detour.
 - Direct print, preview, and PDF download from the same immutable render.
 - One-click repeat of the last destination and template, with a confirmation
   summary for batches.
-- Piqae computer/printer connection, driver-owned print settings, named
-  destinations, readiness, queue, and recovery.
+- Piqae node/printer connection, zero-configuration current driver defaults,
+  optional named immutable profiles, readiness, queue, and recovery.
 - Code-free branding editor plus an advanced sandboxed Liquid/HTML/CSS editor.
 - Locale, currency, tax, discounts, refunds, duties, tips, notes, metafields,
   line-item properties, B2B company data, and partial fulfillment.

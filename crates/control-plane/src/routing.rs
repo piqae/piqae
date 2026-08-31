@@ -793,7 +793,13 @@ pub(crate) struct LoadedMediaEvidence {
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct MediaCompatibility {
+    /// Backwards-compatible aggregate projection. New clients should inspect
+    /// the three orthogonal status fields below so absent evidence is not
+    /// mistaken for an incompatibility.
     pub(crate) status: &'static str,
+    pub(crate) configuration_status: &'static str,
+    pub(crate) capability_status: &'static str,
+    pub(crate) loaded_media_status: &'static str,
     pub(crate) reasons: Vec<String>,
     pub(crate) profile_dimensions_mm: Option<MediaDimensions>,
     pub(crate) loaded_media: Option<LoadedMediaEvidence>,
@@ -1188,6 +1194,9 @@ pub(crate) async fn evaluate_binding_media(
     let profile_dimensions_mm = profile.and_then(profile_dimensions);
     let mut result = MediaCompatibility {
         status: "incompatible",
+        configuration_status: "not_configured",
+        capability_status: "unknown",
+        loaded_media_status: "unknown",
         reasons: Vec::new(),
         profile_dimensions_mm,
         loaded_media: None,
@@ -1197,6 +1206,7 @@ pub(crate) async fn evaluate_binding_media(
         return Ok(result);
     };
     if stock.archived {
+        result.configuration_status = "incompatible";
         result.reasons.push("target_stock_is_archived".into());
         return Ok(result);
     }
@@ -1205,17 +1215,28 @@ pub(crate) async fn evaluate_binding_media(
         return Ok(result);
     };
     if profile.stock_id.as_deref() != Some(stock.id.as_str()) {
+        result.configuration_status = "incompatible";
         result
             .reasons
             .push("profile_stock_does_not_match_target".into());
         return Ok(result);
     }
+    result.configuration_status = "configured";
+    if !profile_stock_geometry_is_known(stock, result.profile_dimensions_mm.as_ref()) {
+        result
+            .reasons
+            .push("profile_or_stock_dimensions_not_reported".into());
+        return Ok(result);
+    }
     if !stock_profile_dimensions_compatible(stock, result.profile_dimensions_mm.as_ref()) {
+        result.configuration_status = "incompatible";
+        result.capability_status = "unsupported";
         result
             .reasons
             .push("profile_dimensions_do_not_match_stock".into());
         return Ok(result);
     }
+    result.capability_status = "supported";
 
     let observations = state
         .repository
@@ -1224,6 +1245,7 @@ pub(crate) async fn evaluate_binding_media(
     let expected_source = match effective_profile_media_source(profile, requested_source) {
         Ok(source) => source,
         Err(reason) => {
+            result.configuration_status = "incompatible";
             result.reasons.push(reason.into());
             return Ok(result);
         }
@@ -1244,40 +1266,54 @@ pub(crate) async fn evaluate_binding_media(
         });
         return Ok(result);
     };
+    apply_loaded_media_evidence(&mut result, selected, stock, now);
+    Ok(result)
+}
+
+fn apply_loaded_media_evidence(
+    result: &mut MediaCompatibility,
+    selected: &StoredLoadedMedia,
+    stock: &StoredStock,
+    now: DateTime<Utc>,
+) {
     result.loaded_media = Some(loaded_media_evidence(selected));
     if selected.observed_at + TimeDelta::seconds(LOADED_MEDIA_FRESHNESS_SECONDS) < now {
         result.status = "stale";
+        result.loaded_media_status = "stale";
         result.reasons.push("loaded_media_observation_stale".into());
-        return Ok(result);
+        return;
     }
     if !matches!(
         selected.confidence.as_str(),
         "reported" | "operator_confirmed"
     ) {
         result.status = "untrusted";
+        result.loaded_media_status = "untrusted";
         result
             .reasons
             .push("loaded_media_confidence_untrusted".into());
-        return Ok(result);
+        return;
     }
     if selected.calibration_state != "current" {
         result.status = "untrusted";
+        result.loaded_media_status = "untrusted";
         result
             .reasons
             .push("loaded_media_calibration_not_current".into());
-        return Ok(result);
+        return;
     }
     if selected.stock_id.as_deref() != Some(stock.id.as_str())
         || selected.stock_revision != Some(stock.revision)
     {
         result.status = "incompatible";
+        result.loaded_media_status = "incompatible";
         result
             .reasons
             .push("loaded_stock_revision_does_not_match_target".into());
-        return Ok(result);
+        return;
     }
     result.status = "ready";
-    Ok(result)
+    result.loaded_media_status = "ready";
 }
 
 fn profile_media_source(profile: &PrinterProfileSnapshot) -> Option<String> {
@@ -1344,6 +1380,18 @@ pub(crate) fn stock_profile_dimensions_compatible(
     } else {
         false
     }
+}
+
+fn profile_stock_geometry_is_known(stock: &StoredStock, profile: Option<&MediaDimensions>) -> bool {
+    let Some(profile) = profile else {
+        return false;
+    };
+    let (Some(_), height) = stock_dimensions(stock) else {
+        return false;
+    };
+    profile.width_mm.is_finite()
+        && profile.height_mm.is_finite()
+        && (stock_kind_matches(stock, &["roll", "continuous", "receipt"]) || height.is_some())
 }
 
 fn loaded_media_evidence(observation: &StoredLoadedMedia) -> LoadedMediaEvidence {

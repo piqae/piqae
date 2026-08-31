@@ -123,7 +123,23 @@ export function printerOptionsForDocument(document, targets, printers) {
       value: printer.id,
       label: printer.name,
       directTargetId: destination ? selectedTarget.id : null,
+      directPrinterId:
+        !document?.designTargetId && document?.targetBindingStatus === "unbound"
+          ? printer.id
+          : null,
+      routeMode: destination
+        ? "target"
+        : !document?.designTargetId &&
+            document?.targetBindingStatus === "unbound"
+          ? "printer"
+          : "blocked",
       compatible: Boolean(destination),
+      eligible: Boolean(
+        destination ||
+        (!document?.designTargetId &&
+          document?.targetBindingStatus === "unbound"),
+      ),
+      state: printer.state,
       isDefault: Boolean(printer.isDefault),
     };
   });
@@ -131,16 +147,45 @@ export function printerOptionsForDocument(document, targets, printers) {
 
 export function chooseDefaultPrinterOption(items) {
   return (
+    items.find((item) => item.isDefault && item.eligible) ??
+    items.find((item) => item.eligible) ??
     items.find((item) => item.isDefault) ??
-    items.find((item) => item.compatible) ??
     items[0]
   );
 }
 
 export function printerCompatibilityMessage(document, printer) {
-  if (!document || !printer || printer.compatible) return "";
-  const documentName = document.name || "This document";
-  return `${printer.label} is connected, but ${documentName} does not have compatible published stock settings for it. Browser printing is still available.`;
+  if (!document || !printer || printer.eligible) return "";
+  if (document.targetBindingStatus === "media_unverified")
+    return "Piqae cannot currently verify the loaded stock for this document's saved print setup. Refresh the Node or confirm the stock before printing.";
+  if (document.targetBindingStatus === "media_incompatible")
+    return "This document's saved print setup does not match its page or label size. Review and publish the document setup before printing.";
+  if (document.targetBindingStatus === "revision_changed")
+    return "This document's saved print setup changed after publication. Review and publish the document again before printing.";
+  if (document.targetBindingStatus === "unknown")
+    return "The saved print setup is temporarily unavailable. Try again when the Node has refreshed.";
+  if (document.targetBindingStatus === "target_missing")
+    return "This document's saved print setup no longer exists. Choose a new setup and publish the document again.";
+  if (document.designTargetId)
+    return `${printer.label} is not part of this document's saved print setup.`;
+  return "This document cannot be sent to the selected printer.";
+}
+
+export function approvalForDocumentPrinter(document, printer) {
+  if (!document || !printer) return null;
+  if (canUsePublishedBinding(document) && printer.directTargetId)
+    return {
+      mode: "target",
+      targetId: printer.directTargetId,
+      specificationRevision: document.designSpecificationRevision,
+    };
+  if (
+    !document.designTargetId &&
+    document.targetBindingStatus === "unbound" &&
+    printer.directPrinterId
+  )
+    return { mode: "printer", printerId: printer.directPrinterId };
+  return null;
 }
 
 export function previewPlaceholderUrl(baseUrl, status) {
@@ -260,9 +305,14 @@ function AdminOrderPrintActionContent({ bulk = false }) {
     options?.printers ?? [],
   );
   const selectedPrinter = printerOptions.find(({ id }) => id === printerId);
-  const selectedTarget = options?.targets?.find(
-    ({ id }) => id === selectedPrinter?.directTargetId,
+  const approval = approvalForDocumentPrinter(
+    selectedDocument,
+    selectedPrinter,
   );
+  const selectedTarget =
+    approval?.mode === "target"
+      ? options?.targets?.find(({ id }) => id === approval.targetId)
+      : undefined;
   useEffect(() => {
     if (!selectedDocument || !options?.targets) return;
     const next = chooseDefaultPrinterOption(
@@ -343,30 +393,37 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   }, [preview?.previewId]);
 
   async function printDirect() {
-    if (
-      !preview ||
-      !selectedTarget ||
-      !canUsePublishedBinding(selectedDocument) ||
-      state === "printing"
-    )
-      return;
+    if (!preview || !approval || state === "printing") return;
     setState("printing");
     setError("");
     setResult("");
     try {
+      const approvalKey =
+        approval.mode === "target"
+          ? `${printerId}:${approval.targetId}:${approval.specificationRevision}`
+          : `${approval.printerId}:current-defaults`;
+      const destination =
+        approval.mode === "target"
+          ? {
+              targetId: approval.targetId,
+              specificationRevision: approval.specificationRevision,
+              templateId: selectedDocument.id,
+            }
+          : {
+              printerId: approval.printerId,
+              templateId: selectedDocument.id,
+            };
       const value = await authorizedJson(
         `/api/print/previews/${encodeURIComponent(preview.previewId)}/approve`,
         {
           method: "POST",
           headers: {
             "content-type": "application/json",
-            "idempotency-key": `shopify-admin-${interactionId.current}-${stableOptionKey(`${printerId}:${selectedTarget.id}:${selectedDocument.designSpecificationRevision}`)}`,
+            "idempotency-key": `shopify-admin-${interactionId.current}-${stableOptionKey(approvalKey)}`,
           },
           body: JSON.stringify({
             renderId: preview.renderId,
-            targetId: selectedTarget.id,
-            specificationRevision: selectedDocument.designSpecificationRevision,
-            templateId: selectedDocument.id,
+            ...destination,
             renderCost: preview.renderCost,
           }),
         },
@@ -389,10 +446,11 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   const canPrint = Boolean(
     preview &&
     selectedPrinter &&
-    canUsePublishedBinding(selectedDocument) &&
+    approval &&
     previewState === "ready" &&
     state === "ready" &&
-    canUseDestinationForPolicy(selectedDestination, policy),
+    (approval.mode === "printer" ||
+      canUseDestinationForPolicy(selectedDestination, policy)),
   );
 
   return (
@@ -486,10 +544,9 @@ function AdminOrderPrintActionContent({ bulk = false }) {
             {result && <s-banner tone="success">{result}</s-banner>}
             {canPrint ? (
               <s-button variant="primary" onClick={printDirect}>
-                {state === "printing" ? "Sending…" : "Print directly"}
+                {state === "printing" ? "Sending…" : "Print"}
               </s-button>
             ) : null}
-            {preview ? <s-link href={src}>Download PDF</s-link> : null}
           </>
         )}
       </s-stack>

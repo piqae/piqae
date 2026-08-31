@@ -6438,6 +6438,19 @@ components:
         status:
           type: string
           enum: [ready, not_reported, stale, untrusted, incompatible]
+          description: Legacy aggregate status. New clients should inspect configuration_status, capability_status, and loaded_media_status so missing evidence is not presented as incompatibility.
+        configuration_status:
+          type: string
+          enum: [configured, not_configured, incompatible]
+          description: Whether the target, immutable profile revision, and stock reference form a complete and internally consistent configuration.
+        capability_status:
+          type: string
+          enum: [supported, unsupported, unknown]
+          description: Whether the immutable profile's reported media geometry supports the configured stock. Unknown means the node has not reported enough capability data; it is not evidence of incompatibility.
+        loaded_media_status:
+          type: string
+          enum: [ready, unknown, stale, untrusted, incompatible]
+          description: Quality of current loaded-media evidence. Unknown means no source-specific evidence is available and must not be described as an incompatible printer or stock.
         reasons:
           type: array
           maxItems: 32

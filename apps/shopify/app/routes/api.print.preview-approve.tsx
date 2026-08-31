@@ -24,7 +24,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
     Boolean(targetId) === Boolean(printerId) ||
     Boolean(targetId) !== Boolean(specificationRevision) ||
     (specificationRevision && !ID.test(specificationRevision)) ||
-    (targetId && !ID.test(templateId)) ||
+    !ID.test(templateId) ||
     !requestKey
   )
     return cors(
@@ -39,7 +39,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
       printerId: printerId || undefined,
       targetId: targetId || undefined,
       targetSpecificationRevision: specificationRevision || undefined,
-      templateId: templateId || undefined,
+      templateId,
       requestKey,
       renderCost,
     });

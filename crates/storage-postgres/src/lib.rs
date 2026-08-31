@@ -8735,7 +8735,7 @@ impl PostgresStore {
         sqlx::query(
             "INSERT INTO node_capability_recovery_checks (
                  workspace_id,environment_id,agent_id,job_id,next_check_at,checked_at,updated_at
-             ) VALUES ($1,$2,$3,$4,$5,NULL,$5)
+             ) VALUES ($1,$2,$3,$4,now(),NULL,now())
              ON CONFLICT (workspace_id,environment_id,agent_id,job_id)
              DO UPDATE SET next_check_at=EXCLUDED.next_check_at,
                            checked_at=NULL,updated_at=EXCLUDED.updated_at",
@@ -8744,7 +8744,6 @@ impl PostgresStore {
         .bind(environment_id.to_string())
         .bind(agent_id.to_string())
         .bind(job_id.to_string())
-        .bind(now)
         .execute(&mut *transaction)
         .await?;
         let webhook_idempotency_key = node_update_required_webhook_idempotency_key(

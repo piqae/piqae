@@ -46,13 +46,17 @@ handoff. Publishing snapshots the exact PrintPacket source, document media,
 target id, and target design-specification revision. A stale editor receives a
 conflict response and must reload instead of overwriting newer work.
 
-The target is the authority for its immutable printer/profile binding and
-business stock. The editor sizes its canvas from `document.media`, then offers
-only compatible targets. Loaded-media evidence is operational truth reported by
-Piqae: absent, stale, untrusted, or mismatched evidence is shown distinctly and
-cannot be fabricated from profile dimensions. Printing sends the saved target
-id and exact design-specification revision so the control plane can revalidate
-the binding and stock immediately before handoff.
+When a document is pinned, the target is the authority for its immutable
+printer/profile binding and business stock. The editor sizes its canvas from
+`document.media`, then offers only compatible targets. Loaded-media evidence is
+operational truth reported by Piqae: absent, stale, untrusted, or mismatched
+evidence is shown distinctly and cannot be fabricated from profile dimensions.
+Printing sends the saved target id and exact design-specification revision so
+the control plane can revalidate the binding and stock immediately before
+handoff. Unpinned documents instead use a directly selected printer and its
+current operating-system/driver defaults; saved profiles are optional and are
+never selected implicitly. A pinned document never silently falls back to this
+automatic path.
 
 ## Editor preview data
 
