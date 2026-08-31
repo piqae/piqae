@@ -52,7 +52,6 @@ export default [
   ),
   route("app", "routes/app.tsx", [
     index("routes/app._index.tsx"),
-    route("print", "routes/app.print.tsx"),
     route("templates", "routes/app.templates.tsx"),
     route("templates/new", "routes/app.template-new.tsx"),
     route("templates/:templateId", "routes/app.templates.$templateId.tsx"),

@@ -279,6 +279,9 @@ export function PrintPacketEditor({
     canUndo: documentHistory.past.length > 0,
     canRedo: documentHistory.future.length > 0,
   }));
+  const [compactAnnotations, setCompactAnnotations] = useState(() =>
+    compactCanvasAnnotations(value),
+  );
   const [selection, setSelection] = useState<{
     position: number;
     block: Block;
@@ -676,6 +679,23 @@ export function PrintPacketEditor({
               />
             </div>
             <span className="piqae-tool-divider" />
+            <div
+              className="piqae-tool-group"
+              role="group"
+              aria-label="Canvas annotations"
+            >
+              <ToolButton
+                icon="annotations"
+                label={
+                  compactAnnotations
+                    ? "Show detailed logic"
+                    : "Use compact logic markers"
+                }
+                pressed={!compactAnnotations}
+                onClick={() => setCompactAnnotations((value) => !value)}
+              />
+            </div>
+            <span className="piqae-tool-divider" />
             <div className="piqae-tool-group">
               <ToolButton
                 icon="text"
@@ -899,7 +919,7 @@ export function PrintPacketEditor({
         <MediaRuler value={value} stock={stock} />
         <div className="piqae-canvas-wrap">
           <div
-            className={`piqae-page-sheet piqae-rendered-canvas piqae-media-${value.media.kind}${compactCanvasAnnotations(value) ? " piqae-compact-annotations" : ""}`}
+            className={`piqae-page-sheet piqae-rendered-canvas piqae-media-${value.media.kind}${compactAnnotations ? " piqae-compact-annotations" : ""}`}
             style={canvasStyle(value)}
             onKeyDown={(event) => {
               if (
@@ -1076,7 +1096,8 @@ export function canvasGeometry(value: PrintPacket): {
 }
 
 export function compactCanvasAnnotations(value: PrintPacket): boolean {
-  return value.media.kind !== "paged" && canvasGeometry(value).widthMm <= 100;
+  void value;
+  return true;
 }
 
 export function canvasStyle(value: PrintPacket): CSSProperties {
@@ -2495,6 +2516,7 @@ const ICON_PATHS = {
   code: "M5.9 4.4 2.6 8l3.3 3.6M10.1 4.4 13.4 8l-3.3 3.6",
   preview:
     "M1.6 8s2.4-4.2 6.4-4.2S14.4 8 14.4 8s-2.4 4.2-6.4 4.2S1.6 8 1.6 8ZM9.8 8a1.8 1.8 0 1 1-3.6 0 1.8 1.8 0 0 1 3.6 0Z",
+  annotations: "M3 3.2h10v9.6H3zM5.2 6.1h5.6M5.2 8h3.7M5.2 9.9h4.8",
   more: "M4 8h.01M8 8h.01M12 8h.01",
   close: "M4.2 4.2 11.8 11.8M11.8 4.2 4.2 11.8",
   plus: "M8 3.6v8.8M3.6 8h8.8",
@@ -2527,6 +2549,7 @@ function ToolButton({
   ariaKeyShortcuts,
   tone,
   disabled,
+  pressed,
   dragType,
   onClick,
 }: {
@@ -2535,6 +2558,7 @@ function ToolButton({
   ariaKeyShortcuts?: string;
   tone?: "critical";
   disabled?: boolean;
+  pressed?: boolean;
   dragType?: DragInsertType;
   onClick(): void;
 }) {
@@ -2544,6 +2568,7 @@ function ToolButton({
       type="button"
       aria-label={label}
       aria-keyshortcuts={ariaKeyShortcuts}
+      aria-pressed={pressed}
       data-tooltip={label}
       disabled={disabled}
       draggable={Boolean(dragType) && !disabled}

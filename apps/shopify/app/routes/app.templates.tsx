@@ -1,6 +1,17 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { Form, redirect, useActionData, useLoaderData } from "react-router";
-import { useMemo, useState } from "react";
+import {
+  Form,
+  redirect,
+  useActionData,
+  useFetcher,
+  useLoaderData,
+  useRevalidator,
+} from "react-router";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  openPreparedPiqaeConnection,
+  preparePiqaeConnectionWindow,
+} from "../components/node-connection-ui";
 import shopify from "../shopify.server";
 import {
   bounded,
@@ -19,6 +30,7 @@ import {
   removeSystemOwnership,
   serializeTemplateEnvelope,
 } from "../core/template-model";
+import { createProductionServices } from "../services.server";
 export const templates = [
   ["Invoice", "Orders · A4", "Published"],
   ["Packing slip", "Fulfillment · A4", "Published"],
@@ -43,17 +55,41 @@ export function customizedSystemDraft(
 }
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await shopify.authenticate.admin(request);
-  await seedStarterTemplates(workflows(), session.shop);
-  return {
-    templates: (await workflows().listTemplates(session.shop)).filter(
-      isActiveTemplate,
+  const services = createProductionServices();
+  const [templates, nodeState] = await Promise.all([
+    seedStarterTemplates(workflows(), session.shop).then(() =>
+      workflows().listTemplates(session.shop),
     ),
+    services.managedAccounts
+      .ensure(session.shop)
+      .then((link) => services.managedAccounts.client(link).nodes.list())
+      .then((nodes) => ({ hasNodes: nodes.length > 0, nodeError: "" }))
+      .catch(() => ({
+        hasNodes: false,
+        nodeError: "Your Piqae workspace is still being prepared.",
+      })),
+  ]);
+  return {
+    templates: templates.filter(isActiveTemplate),
+    ...nodeState,
   };
 }
 export async function action({ request }: ActionFunctionArgs) {
   const { session, admin } = await shopify.authenticate.admin(request);
   const form = await request.formData();
   try {
+    if (form.get("intent") === "connect-node") {
+      const services = createProductionServices();
+      const link = await services.managedAccounts.ensure(session.shop);
+      const connection = await services.managedAccounts
+        .client(link)
+        .connectSessions.create({
+          name: `${session.shop} · Piqae Order Printing`,
+          return_url: `${process.env.SHOPIFY_APP_URL}/connect/complete`,
+          expires_in_seconds: 600,
+        });
+      return { ok: true, error: "", connection };
+    }
     if (form.get("intent") !== "customize")
       throw new Error("Unsupported template action");
     const templateId = bounded(form, "templateId", 200, true);
@@ -79,6 +115,11 @@ export async function action({ request }: ActionFunctionArgs) {
 export default function Templates() {
   const data = useLoaderData<typeof loader>();
   const result = useActionData<{ error: string }>();
+  const connector = useFetcher<typeof action>();
+  const revalidator = useRevalidator();
+  const connectionWindow = useRef<Window | null>(null);
+  const openedConnectionUrl = useRef("");
+  const connectionStarted = useRef(false);
   const [query, setQuery] = useState("");
   const [scope, setScope] = useState<"all" | "starters" | "custom">("all");
   const visibleTemplates = useMemo(() => {
@@ -94,6 +135,26 @@ export default function Templates() {
       ),
     );
   }, [data.templates, query, scope]);
+  useEffect(() => {
+    const connection = connector.data?.connection;
+    if (!connection?.connect_url) return;
+    if (openedConnectionUrl.current === connection.connect_url) return;
+    openedConnectionUrl.current = connection.connect_url;
+    if (
+      !openPreparedPiqaeConnection(
+        connectionWindow.current,
+        connection.connect_url,
+      )
+    )
+      window.open(connection.connect_url, "_blank", "noopener,noreferrer");
+  }, [connector.data]);
+  useEffect(() => {
+    const refreshAfterConnection = () => {
+      if (connectionStarted.current) revalidator.revalidate();
+    };
+    window.addEventListener("focus", refreshAfterConnection);
+    return () => window.removeEventListener("focus", refreshAfterConnection);
+  }, [revalidator]);
   return (
     <s-page heading="Templates">
       <s-button
@@ -103,6 +164,47 @@ export default function Templates() {
       >
         Create template
       </s-button>
+      {!data.hasNodes ? (
+        <div className="piqae-template-node-banner">
+          <span className="piqae-connection-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path d="M7 8V4h10v4M7 17H5a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M7 14h10v7H7z" />
+            </svg>
+          </span>
+          <div>
+            <strong>Connect a Piqae node</strong>
+            <span>
+              Add the device beside your printer to enable direct printing.
+            </span>
+            {connector.data?.error || data.nodeError ? (
+              <small>{connector.data?.error || data.nodeError}</small>
+            ) : null}
+          </div>
+          <connector.Form
+            method="post"
+            onSubmit={() => {
+              connectionStarted.current = true;
+              connectionWindow.current = preparePiqaeConnectionWindow();
+            }}
+          >
+            <input type="hidden" name="intent" value="connect-node" />
+            <s-button
+              type="submit"
+              variant="primary"
+              disabled={connector.state !== "idle"}
+            >
+              {connector.state === "idle" ? "Connect node" : "Opening…"}
+            </s-button>
+          </connector.Form>
+          <a
+            className="piqae-download-link"
+            href="https://piqae.com/downloads"
+            target="_top"
+          >
+            Download Piqae
+          </a>
+        </div>
+      ) : null}
       <s-section padding="none" accessibilityLabel="Templates table">
         {result?.error ? (
           <s-banner tone="critical">{result.error}</s-banner>

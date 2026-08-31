@@ -111,6 +111,7 @@ describe("admin print options", () => {
       }),
     ]);
     expect(result.targets).toEqual([]);
+    expect(result.printers).toEqual([]);
     expect(result.setupDestinationUrl).toBe("/app/printers");
     expect(result.renderExecutionPolicy).toBe("automatic");
   });
@@ -187,6 +188,22 @@ describe("admin print options", () => {
           list: async () => [{ id: "tgt_a4", enabled: true }],
           designSpecification: async () => a4Target(currentRevision),
         },
+        printers: {
+          list: async () => ({
+            data: [
+              {
+                id: "printer_a4",
+                name: "Office printer",
+                state: "online",
+              },
+              {
+                id: "printer_label",
+                name: "Label printer",
+                state: "offline",
+              },
+            ],
+          }),
+        },
       }) as never;
     const input = {
       shop: "fixtures.myshopify.com",
@@ -209,6 +226,16 @@ describe("admin print options", () => {
         mediaStatus: "ready",
       },
     });
+    expect(ready.printers).toEqual([
+      expect.objectContaining({
+        id: "printer_a4",
+        targetIds: ["tgt_a4"],
+      }),
+      expect.objectContaining({
+        id: "printer_label",
+        targetIds: [],
+      }),
+    ]);
 
     const offlineButConfigured = await loadAdminPrintOptions({
       ...input,

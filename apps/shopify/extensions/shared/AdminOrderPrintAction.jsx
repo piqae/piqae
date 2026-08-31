@@ -97,6 +97,55 @@ export function targetForDocument(document, targets) {
   return undefined;
 }
 
+export function printerOptionsForDocument(document, targets, printers) {
+  const selectedTarget = canUsePublishedBinding(document)
+    ? targets.find(
+        (target) =>
+          target.id === document.designTargetId &&
+          target.eligible &&
+          (!document.compatibilityKnown ||
+            document.compatibleTargetIds.includes(target.id)),
+      )
+    : undefined;
+  const advisoryName = document?.advisoryDestination?.printerName;
+  const inventory = (printers ?? []).map((printer) => {
+    const destination = selectedTarget?.destinations?.find(
+      (item) =>
+        item.printerId === printer.id &&
+        item.printerName === advisoryName &&
+        item.mediaCompatibility?.status === "ready",
+    );
+    const available = Boolean(destination);
+    return {
+      id: printer.id,
+      value: available ? selectedTarget.id : `printer:${printer.id}`,
+      label: `${printer.name}${available ? "" : " — setup required"}`,
+      disabled: !available,
+      isDefault: Boolean(printer.isDefault),
+    };
+  });
+  if (inventory.some((item) => !item.disabled)) return inventory;
+  if (!selectedTarget) return inventory;
+  const fallbackName = advisoryName ?? selectedTarget.name;
+  return [
+    {
+      id: selectedTarget.id,
+      value: selectedTarget.id,
+      label: fallbackName,
+      disabled: false,
+      isDefault: false,
+    },
+    ...inventory,
+  ];
+}
+
+export function chooseDefaultPrinterOption(items) {
+  return (
+    items.find((item) => item.isDefault && !item.disabled) ??
+    items.find((item) => !item.disabled)
+  );
+}
+
 export function canUsePublishedBinding(document) {
   return Boolean(
     document?.targetBindingStatus === "ready" &&
@@ -151,7 +200,6 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   const [options, setOptions] = useState(null);
   const [documentId, setDocumentId] = useState("");
   const [destinationId, setDestinationId] = useState("");
-  const [targetSearch, setTargetSearch] = useState("");
   const [state, setState] = useState("loading");
   const [error, setError] = useState("");
   const [result, setResult] = useState("");
@@ -175,9 +223,16 @@ function AdminOrderPrintActionContent({ bulk = false }) {
         defaultDocument,
         value.targets ?? [],
       );
+      const defaultPrinter = chooseDefaultPrinterOption(
+        printerOptionsForDocument(
+          defaultDocument,
+          value.targets ?? [],
+          value.printers ?? [],
+        ),
+      );
       setOptions(value);
       setDocumentId(defaultDocument?.id ?? "");
-      setDestinationId(defaultDestination?.id ?? "");
+      setDestinationId(defaultPrinter?.value ?? defaultDestination?.id ?? "");
       setState("ready");
     } catch (cause) {
       if (sequence !== requestSequence.current) return;
@@ -196,24 +251,24 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   const selectedDocument = documentId
     ? options?.documents?.find(({ id }) => id === documentId)
     : undefined;
-  const allEligibleTargets =
-    options?.targets?.filter((item) => item.eligible) ?? [];
-  const compatibleTargets = allEligibleTargets.filter(
-    (target) =>
-      (!selectedDocument?.compatibilityKnown ||
-        selectedDocument.compatibleTargetIds.includes(target.id)) &&
-      `${target.name} ${target.stock?.name ?? ""} ${target.destinations?.map(({ printerName }) => printerName).join(" ") ?? ""}`
-        .toLowerCase()
-        .includes(targetSearch.toLowerCase()),
+  const printerOptions = printerOptionsForDocument(
+    selectedDocument,
+    options?.targets ?? [],
+    options?.printers ?? [],
   );
   const selectedTarget = options?.targets?.find(
     ({ id }) => id === destinationId,
   );
   useEffect(() => {
     if (!selectedDocument || !options?.targets) return;
-    setDestinationId(
-      targetForDocument(selectedDocument, options.targets)?.id ?? "",
+    const next = chooseDefaultPrinterOption(
+      printerOptionsForDocument(
+        selectedDocument,
+        options.targets,
+        options.printers ?? [],
+      ),
     );
+    setDestinationId(next?.value ?? "");
   }, [selectedDocument?.id, options]);
   useEffect(() => {
     if (!options?.linked || !selectedDocument || orderIds.length === 0) return;
@@ -314,7 +369,6 @@ function AdminOrderPrintActionContent({ bulk = false }) {
     }
   }
 
-  const eligible = compatibleTargets;
   const selectedDestination = selectedTarget;
   const policy = options?.renderExecutionPolicy ?? "automatic";
   const canPrint = Boolean(
@@ -354,8 +408,6 @@ function AdminOrderPrintActionContent({ bulk = false }) {
         )}
         {options?.linked && (
           <>
-            <s-text type="strong">Documents</s-text>
-            <s-text>Select one published document for this print.</s-text>
             {options.documents.length > 0 ? (
               <s-select
                 label="Document"
@@ -376,130 +428,45 @@ function AdminOrderPrintActionContent({ bulk = false }) {
                 Publish a document before printing.
               </s-banner>
             )}
-            <s-text type="strong">Print target</s-text>
-            {selectedDocument?.targetBindingStatus === "revision_changed" && (
-              <s-banner tone="critical">
-                This target changed after the document was published. Review its
-                printer, profile, and stock in the editor, then publish the
-                document again.
-                <s-button href={options.manageDocumentsUrl}>
-                  Review document
-                </s-button>
-              </s-banner>
-            )}
-            {selectedDocument?.targetBindingStatus === "target_missing" && (
-              <s-banner tone="critical">
-                This document's published target is no longer available. Choose
-                a replacement in the editor and publish again.
-              </s-banner>
-            )}
-            {selectedDocument?.targetBindingStatus === "unknown" && (
-              <s-banner tone="info">
-                Printer status is temporarily unavailable, so direct printing
-                stays paused. The PDF preview remains available; try again when
-                the connection recovers.
-              </s-banner>
-            )}
-            {selectedDocument?.targetBindingStatus === "document_invalid" && (
-              <s-banner tone="critical">
-                This published document is damaged and cannot be matched to a
-                print target. Open it in Documents and publish a valid revision.
-              </s-banner>
-            )}
-            {selectedDocument?.targetBindingStatus === "media_incompatible" && (
-              <s-banner tone="critical">
-                This document no longer matches its published target stock or
-                profile. Review the media settings and publish again.
-              </s-banner>
-            )}
-            {selectedDocument?.targetBindingStatus === "unbound" && (
-              <s-banner tone="warning">
-                Choose a print target in the document editor and publish before
-                direct printing. PDF preview and browser printing remain
-                available.
-              </s-banner>
-            )}
-            <s-banner tone={policy === "require_node" ? "warning" : "info"}>
-              {renderPolicySummary(policy)}
-            </s-banner>
-            {options.destinationError && (
-              <s-banner tone="warning">{options.destinationError}</s-banner>
-            )}
-            <s-text-field
-              label="Search targets"
-              value={targetSearch}
-              onInput={(event) => setTargetSearch(event.currentTarget.value)}
-              placeholder="Printer, target, or stock"
-            />
-            {eligible.length > 0 ? (
+            {printerOptions.length > 0 ? (
               <s-select
-                label="Target"
+                label="Printer"
                 value={destinationId}
                 onChange={(event) =>
                   setDestinationId(event.currentTarget.value)
                 }
               >
-                {eligible.map((destination) => (
-                  <s-option key={destination.id} value={destination.id}>
-                    {destination.name} ·{" "}
-                    {destination.stock?.name ?? "stock not configured"}
+                <s-option value="" disabled>
+                  Choose a printer
+                </s-option>
+                {printerOptions.map((printer) => (
+                  <s-option
+                    key={printer.id}
+                    value={printer.value}
+                    disabled={printer.disabled}
+                  >
+                    {printer.label}
                   </s-option>
                 ))}
               </s-select>
             ) : (
+              <s-text>No connected printers are available.</s-text>
+            )}
+            {selectedDocument && !canUsePublishedBinding(selectedDocument) && (
               <s-banner tone="info">
-                No compatible target has a ready printer, pinned profile, and
-                reported matching stock. PDF preview and browser printing remain
-                available.
-                <s-button href={options.setupDestinationUrl}>
-                  Set up a printer
-                </s-button>
+                Connected printers are shown above. Direct printing needs this
+                document to be published with compatible printer and stock
+                settings. Shopify browser printing remains available.
               </s-banner>
-            )}
-            {selectedDestination && (
-              <>
-                <s-text>
-                  Advisory destination:{" "}
-                  {selectedDocument?.advisoryDestination?.printerName ??
-                    "selected by Piqae at handoff"}{" "}
-                  · Profile:{" "}
-                  {selectedDocument?.advisoryDestination?.profileName ??
-                    "selected by Piqae"}{" "}
-                  · Stock: {selectedDestination.stock?.name ?? "not configured"}
-                </s-text>
-                <s-text>
-                  Loaded media:{" "}
-                  {selectedDocument?.advisoryDestination?.mediaStatus?.replaceAll(
-                    "_",
-                    " ",
-                  ) ?? "not reported"}
-                </s-text>
-                <s-text>
-                  Last reported destination state:{" "}
-                  {selectedDocument?.advisoryDestination?.readinessStatus?.replaceAll(
-                    "_",
-                    " ",
-                  ) ?? "unknown"}
-                </s-text>
-              </>
-            )}
-            {selectedDestination && policy !== "cloud_only" && (
-              <s-text>
-                Piqae validates the exact target binding, route, renderer, and
-                resources when you submit. A compatible standby is used when the
-                primary cannot satisfy this document.
-              </s-text>
             )}
             {error && <s-banner tone="critical">{error}</s-banner>}
             {result && <s-banner tone="success">{result}</s-banner>}
-            <s-button
-              variant="primary"
-              disabled={!canPrint}
-              onClick={printDirect}
-            >
-              {state === "printing" ? "Sending…" : "Print with Piqae"}
-            </s-button>
-            {preview && <s-button href={src}>Download PDF</s-button>}
+            {canPrint ? (
+              <s-button variant="primary" onClick={printDirect}>
+                {state === "printing" ? "Sending…" : "Print directly"}
+              </s-button>
+            ) : null}
+            {preview ? <s-link href={src}>Download PDF</s-link> : null}
           </>
         )}
       </s-stack>

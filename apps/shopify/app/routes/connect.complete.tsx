@@ -24,7 +24,7 @@ export default function ConnectComplete() {
           ✓
         </span>
         <p className="piqae-connect-complete-eyebrow">Piqae node connection</p>
-        <h1>Computer connected</h1>
+        <h1>Node connected</h1>
         <p>
           Printer access was confirmed. Shopify will update automatically, so
           you can close this tab now.

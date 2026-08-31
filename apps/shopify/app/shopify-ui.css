@@ -75,6 +75,35 @@
   align-items: center;
   width: 100%;
 }
+.piqae-template-node-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1rem;
+  box-sizing: border-box;
+  width: 100%;
+  margin-bottom: 1rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid #b5d3ff;
+  border-radius: 0.8rem;
+  background: linear-gradient(135deg, #f7faff 0%, Canvas 75%);
+}
+.piqae-template-node-banner > div {
+  display: grid;
+  flex: 1;
+  min-width: min(100%, 18rem);
+  gap: 0.15rem;
+}
+.piqae-template-node-banner > div span,
+.piqae-template-node-banner small {
+  color: #616161;
+  font-size: 0.78rem;
+}
+.piqae-download-link {
+  color: #005bd3;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
 .piqae-template-title-cell {
   display: flex;
   align-items: center;
@@ -237,6 +266,109 @@
   gap: 0.75rem;
   align-items: center;
   width: 100%;
+}
+.piqae-printer-list {
+  margin-top: 1rem;
+}
+.piqae-plan-overview,
+.piqae-plan-note {
+  box-sizing: border-box;
+  width: 100%;
+  border-radius: 0.9rem;
+}
+.piqae-plan-overview {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 1.35rem;
+  border: 1px solid #b5d3ff;
+  background: linear-gradient(135deg, #f5f9ff 0%, Canvas 76%);
+}
+.piqae-plan-mark {
+  display: grid;
+  flex: 0 0 2.75rem;
+  width: 2.75rem;
+  height: 2.75rem;
+  place-items: center;
+  border-radius: 0.75rem;
+  background: #eaf3ff;
+  color: #005bd3;
+  font-size: 1.35rem;
+  font-weight: 700;
+}
+.piqae-plan-overview-copy {
+  display: grid;
+  flex: 1;
+  gap: 0.2rem;
+  min-width: 0;
+}
+.piqae-eyebrow {
+  color: #005bd3;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.piqae-plan-progress {
+  width: min(100%, 32rem);
+  height: 0.45rem;
+  margin-top: 0.5rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dfe7f2;
+}
+.piqae-plan-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #005bd3;
+}
+.piqae-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  gap: 0.9rem;
+}
+.piqae-plan-card {
+  display: grid;
+  align-content: start;
+  gap: 0.8rem;
+  padding: 1.15rem;
+  border: 1px solid #dedede;
+  border-radius: 0.8rem;
+  background: Canvas;
+}
+.piqae-plan-card--current {
+  border-color: #91c0ff;
+  box-shadow: inset 0 3px #005bd3;
+}
+.piqae-plan-card-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.piqae-plan-allowance {
+  font-size: 1rem;
+}
+.piqae-plan-card ul {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  padding-left: 1.15rem;
+  color: #4a4a4a;
+  font-size: 0.8rem;
+}
+.piqae-plan-note {
+  display: grid;
+  gap: 0.2rem;
+  margin-top: 1rem;
+  padding: 1rem 1.15rem;
+  border: 1px solid #d7e6fa;
+  background: #f7faff;
+}
+.piqae-plan-note span {
+  color: #616161;
+  font-size: 0.8rem;
 }
 .piqae-printer-empty {
   display: grid;
@@ -1761,6 +1893,10 @@
   background: #eaf1ff;
   color: #005bd3;
 }
+.piqae-tool-button[aria-pressed="true"] {
+  background: #eaf1ff;
+  color: #005bd3;
+}
 .piqae-tool-critical:hover:not(:disabled) {
   background: #fdecea;
   color: #8e1f0b;
@@ -2110,6 +2246,22 @@
   font-size: 0.8rem;
 }
 @media (max-width: 60rem) {
+  .piqae-template-node-banner,
+  .piqae-plan-overview {
+    align-items: flex-start;
+  }
+  .piqae-template-node-banner > div,
+  .piqae-plan-overview-copy {
+    flex-basis: calc(100% - 4rem);
+  }
+  .piqae-printer-filters,
+  .piqae-template-filters {
+    grid-template-columns: 1fr;
+  }
+  .piqae-printer-metrics {
+    flex-basis: 100%;
+    margin-left: 3.65rem;
+  }
   .piqae-actionbar {
     flex-wrap: wrap;
   }

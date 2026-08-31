@@ -7,10 +7,25 @@ import {
   useRevalidator,
 } from "react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  openPreparedPiqaeConnection,
+  preparePiqaeConnectionWindow,
+} from "../components/node-connection-ui";
 import shopify from "../shopify.server";
 import { parseSettings, workflows } from "../core/workflows.server";
 import { syncTemplateIndex } from "../core/template-index.server";
 import { createProductionServices } from "../services.server";
+
+export async function syncSavedPrinterSettings(
+  sync: () => Promise<unknown>,
+): Promise<string> {
+  try {
+    await sync();
+    return "";
+  } catch {
+    return "The printer setting was saved, but the Shopify print shortcut could not be refreshed yet.";
+  }
+}
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await shopify.authenticate.admin(request);
@@ -73,18 +88,35 @@ export async function action({ request }: ActionFunctionArgs) {
       const printerId = String(form.get("printerId") ?? "").trim();
       if (!printerId)
         throw new Error("Choose a printer before making it the default.");
+      const services = createProductionServices();
+      const link = await services.managedAccounts.ensure(session.shop);
+      const printers = await services.managedAccounts
+        .client(link)
+        .printers.list();
+      if (!printers.data.some((printer) => printer.id === printerId))
+        throw new Error("That printer is no longer available to this store.");
       const current = await workflows().getSettings(session.shop);
       await workflows().saveSettings(session.shop, {
         ...current,
         defaultPrinterId: printerId,
       });
-      await syncTemplateIndex(admin, workflows(), session.shop);
-      return { ok: true, error: "", connection: null };
+      const warning = await syncSavedPrinterSettings(() =>
+        syncTemplateIndex(admin, workflows(), session.shop),
+      );
+      return {
+        ok: true,
+        error: "",
+        warning,
+        connection: null,
+        defaultPrinterId: printerId,
+      };
     }
     const settings = parseSettings(form);
     await workflows().saveSettings(session.shop, settings);
-    await syncTemplateIndex(admin, workflows(), session.shop);
-    return { ok: true, error: "", connection: null };
+    const warning = await syncSavedPrinterSettings(() =>
+      syncTemplateIndex(admin, workflows(), session.shop),
+    );
+    return { ok: true, error: "", warning, connection: null };
   } catch (error) {
     return Response.json(
       {
@@ -114,45 +146,6 @@ type ConnectionStage =
   | "blocked"
   | "expired"
   | "failed";
-
-export function preparePiqaeConnectionWindow(
-  openWindow: typeof window.open = window.open.bind(window),
-) {
-  const connectionWindow = openWindow(
-    "",
-    "piqae-node-connection",
-    "popup,width=560,height=720",
-  );
-  if (!connectionWindow) return null;
-  try {
-    connectionWindow.opener = null;
-    connectionWindow.document.title = "Opening Piqae…";
-    const status = connectionWindow.document.createElement("p");
-    status.textContent = "Preparing your secure Piqae connection…";
-    status.style.cssText =
-      "margin:25vh auto;max-width:24rem;padding:2rem;color:#202223;font:600 18px system-ui;text-align:center";
-    connectionWindow.document.body.replaceChildren(status);
-  } catch {
-    // The reserved window may already be navigating. The handoff can still use it.
-  }
-  return connectionWindow;
-}
-
-export function openPreparedPiqaeConnection(
-  connectionWindow: Window | null,
-  connectUrl: string,
-) {
-  if (!connectionWindow || connectionWindow.closed) return false;
-  try {
-    const url = new URL(connectUrl);
-    if (url.protocol !== "https:" || url.hostname !== "app.piqae.com")
-      return false;
-    connectionWindow.location.replace(url.toString());
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 export function printerAvailability(state: string) {
   if (state === "online" || state === "busy") return "available";
@@ -185,6 +178,7 @@ export default function Printers() {
   const result = useActionData<typeof action>();
   const connector = useFetcher<typeof action>();
   const connectionStatus = useFetcher<typeof action>();
+  const defaultPrinter = useFetcher<typeof action>();
   const connectionStatusRef = useRef(connectionStatus);
   connectionStatusRef.current = connectionStatus;
   const revalidator = useRevalidator();
@@ -195,6 +189,9 @@ export default function Printers() {
   const openedConnectionUrl = useRef("");
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("all");
+  const [defaultPrinterId, setDefaultPrinterId] = useState(
+    settings.defaultPrinterId,
+  );
   const connection = connector.data?.connection;
   const [detectedPlatform, setDetectedPlatform] = useState<
     "macos" | "windows" | "linux"
@@ -287,6 +284,15 @@ export default function Printers() {
       setConnectionStage("expired");
     }
   }, [connectionStatus.data, revalidator]);
+  useEffect(() => {
+    setDefaultPrinterId(settings.defaultPrinterId);
+  }, [settings.defaultPrinterId]);
+  useEffect(() => {
+    if (!defaultPrinter.data?.ok || !defaultPrinter.data.defaultPrinterId)
+      return;
+    setDefaultPrinterId(defaultPrinter.data.defaultPrinterId);
+    revalidator.revalidate();
+  }, [defaultPrinter.data, revalidator]);
 
   const hasNodes = nodes.length > 0;
   const hasPrinters = printers.length > 0;
@@ -336,9 +342,9 @@ export default function Printers() {
               </svg>
             </div>
             <div>
-              <s-heading>Connect Piqae</s-heading>
+              <s-heading>Connect a Piqae node</s-heading>
               <s-paragraph>
-                Open Piqae on this computer, choose the installed printers this
+                Open Piqae on this node, choose the installed printers this
                 store may use, and they’ll appear here automatically.
               </s-paragraph>
             </div>
@@ -355,7 +361,7 @@ export default function Printers() {
                   ? connectionStage === "failed" ||
                     connectionStage === "expired"
                     ? "Try connecting again"
-                    : "Connect this computer"
+                    : "Connect this node"
                   : "Opening Piqae…"}
               </s-button>
             </connector.Form>
@@ -372,7 +378,7 @@ export default function Printers() {
                     : connectionStage === "opened"
                       ? "Waiting for printer access…"
                       : connectionStage === "connected"
-                        ? "Computer connected"
+                        ? "Node connected"
                         : connectionStage === "blocked"
                           ? "Connection window blocked"
                           : connectionStage === "expired"
@@ -436,7 +442,7 @@ export default function Printers() {
             aria-label="Connection summary"
           >
             <span>
-              <strong>{nodes.length}</strong> computer
+              <strong>{nodes.length}</strong> node
               {nodes.length === 1 ? "" : "s"}
             </span>
             <span>
@@ -452,128 +458,148 @@ export default function Printers() {
 
       {hasNodes && !hasPrinters ? (
         <s-banner tone="warning">
-          Your computer is connected, but no printer inventory has reached this
+          Your node is connected, but no printer inventory has reached this
           store yet. Confirm the printer is installed, keep Piqae open, then
           refresh.
         </s-banner>
       ) : null}
 
       {hasPrinters ? (
-        <s-section
-          padding="none"
-          accessibilityLabel="Printers available to this store"
-        >
-          <s-table>
-            <div slot="filters" className="piqae-printer-filters">
-              <s-search-field
-                label="Search printers"
-                labelAccessibilityVisibility="exclusive"
-                placeholder="Search printers or computers"
-                value={query}
-                onInput={(event) => setQuery(event.currentTarget.value)}
-              />
-              <select
-                className="piqae-input"
-                aria-label="Filter printers by status"
-                value={status}
-                onChange={(event) => setStatus(event.currentTarget.value)}
+        <div className="piqae-printer-list">
+          <s-section
+            padding="none"
+            accessibilityLabel="Printers available to this store"
+          >
+            {defaultPrinter.data?.ok ? (
+              <s-banner
+                tone={defaultPrinter.data.warning ? "warning" : "success"}
               >
-                <option value="all">All statuses</option>
-                <option value="available">Available</option>
-                <option value="offline">Offline</option>
-                <option value="attention">Needs attention</option>
-              </select>
-            </div>
-            <s-table-header-row>
-              <s-table-header listSlot="primary">Printer</s-table-header>
-              <s-table-header listSlot="secondary">Computer</s-table-header>
-              <s-table-header listSlot="inline">Status</s-table-header>
-              <s-table-header listSlot="labeled">Default</s-table-header>
-              <s-table-header listSlot="labeled">Last seen</s-table-header>
-            </s-table-header-row>
-            <s-table-body>
-              {visiblePrinters.map((printer) => {
-                const node = nodeById.get(printer.agent_id);
-                return (
-                  <s-table-row key={printer.id}>
-                    <s-table-cell>
-                      <div className="piqae-printer-identity">
-                        <span className="piqae-printer-icon" aria-hidden="true">
-                          ▣
-                        </span>
-                        <div>
-                          <strong>{printer.name}</strong>
-                          <div className="piqae-muted piqae-resource-id">
-                            {printer.id}
+                {defaultPrinter.data.warning || "Default printer updated."}
+              </s-banner>
+            ) : defaultPrinter.data?.error ? (
+              <s-banner tone="critical">{defaultPrinter.data.error}</s-banner>
+            ) : null}
+            <s-table>
+              <div slot="filters" className="piqae-printer-filters">
+                <s-search-field
+                  label="Search printers"
+                  labelAccessibilityVisibility="exclusive"
+                  placeholder="Search printers or nodes"
+                  value={query}
+                  onInput={(event) => setQuery(event.currentTarget.value)}
+                />
+                <select
+                  className="piqae-input"
+                  aria-label="Filter printers by status"
+                  value={status}
+                  onChange={(event) => setStatus(event.currentTarget.value)}
+                >
+                  <option value="all">All statuses</option>
+                  <option value="available">Available</option>
+                  <option value="offline">Offline</option>
+                  <option value="attention">Needs attention</option>
+                </select>
+              </div>
+              <s-table-header-row>
+                <s-table-header listSlot="primary">Printer</s-table-header>
+                <s-table-header listSlot="secondary">Node</s-table-header>
+                <s-table-header listSlot="inline">Status</s-table-header>
+                <s-table-header listSlot="labeled">Default</s-table-header>
+                <s-table-header listSlot="labeled">Last seen</s-table-header>
+              </s-table-header-row>
+              <s-table-body>
+                {visiblePrinters.map((printer) => {
+                  const node = nodeById.get(printer.agent_id);
+                  return (
+                    <s-table-row key={printer.id}>
+                      <s-table-cell>
+                        <div className="piqae-printer-identity">
+                          <span
+                            className="piqae-printer-icon"
+                            aria-hidden="true"
+                          >
+                            ▣
+                          </span>
+                          <div>
+                            <strong>{printer.name}</strong>
+                            <div className="piqae-muted piqae-resource-id">
+                              {printer.id}
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    </s-table-cell>
-                    <s-table-cell>
-                      {node?.name ?? "Unknown computer"}
-                      <div className="piqae-muted">
-                        {node?.platform ?? "Platform unavailable"}
-                      </div>
-                    </s-table-cell>
-                    <s-table-cell>
-                      <s-badge tone={toneFor(printer.state)}>
-                        {printerAvailability(printer.state) === "available"
-                          ? "Available"
-                          : printerAvailability(printer.state) === "offline"
-                            ? "Offline"
-                            : "Needs attention"}
-                      </s-badge>
-                    </s-table-cell>
-                    <s-table-cell>
-                      {settings.defaultPrinterId === printer.id ? (
-                        <s-badge tone="info">Default</s-badge>
-                      ) : (
-                        <Form method="post">
-                          <input
-                            type="hidden"
-                            name="intent"
-                            value="set-default-printer"
-                          />
-                          <input
-                            type="hidden"
-                            name="printerId"
-                            value={printer.id}
-                          />
-                          <s-button type="submit" variant="tertiary">
-                            Make default
-                          </s-button>
-                        </Form>
-                      )}
-                    </s-table-cell>
-                    <s-table-cell>
-                      {formatSeen(printer.updated_at)}
-                    </s-table-cell>
-                  </s-table-row>
-                );
-              })}
-            </s-table-body>
-          </s-table>
-          {visiblePrinters.length === 0 ? (
-            <div className="piqae-printer-empty">
-              <s-heading>No printers match these filters</s-heading>
-              <s-paragraph>
-                Clear the search or choose a different status.
-              </s-paragraph>
-              <s-button
-                onClick={() => {
-                  setQuery("");
-                  setStatus("all");
-                }}
-              >
-                Clear filters
-              </s-button>
-            </div>
-          ) : null}
-        </s-section>
+                      </s-table-cell>
+                      <s-table-cell>
+                        {node?.name ?? "Unknown node"}
+                        <div className="piqae-muted">
+                          {node?.platform ?? "Platform unavailable"}
+                        </div>
+                      </s-table-cell>
+                      <s-table-cell>
+                        <s-badge tone={toneFor(printer.state)}>
+                          {printerAvailability(printer.state) === "available"
+                            ? "Available"
+                            : printerAvailability(printer.state) === "offline"
+                              ? "Offline"
+                              : "Needs attention"}
+                        </s-badge>
+                      </s-table-cell>
+                      <s-table-cell>
+                        {defaultPrinterId === printer.id ? (
+                          <s-badge tone="info">Default</s-badge>
+                        ) : (
+                          <defaultPrinter.Form method="post">
+                            <input
+                              type="hidden"
+                              name="intent"
+                              value="set-default-printer"
+                            />
+                            <input
+                              type="hidden"
+                              name="printerId"
+                              value={printer.id}
+                            />
+                            <s-button
+                              type="submit"
+                              variant="secondary"
+                              disabled={defaultPrinter.state !== "idle"}
+                            >
+                              {defaultPrinter.state === "idle"
+                                ? "Make default"
+                                : "Saving…"}
+                            </s-button>
+                          </defaultPrinter.Form>
+                        )}
+                      </s-table-cell>
+                      <s-table-cell>
+                        {formatSeen(printer.updated_at)}
+                      </s-table-cell>
+                    </s-table-row>
+                  );
+                })}
+              </s-table-body>
+            </s-table>
+            {visiblePrinters.length === 0 ? (
+              <div className="piqae-printer-empty">
+                <s-heading>No printers match these filters</s-heading>
+                <s-paragraph>
+                  Clear the search or choose a different status.
+                </s-paragraph>
+                <s-button
+                  onClick={() => {
+                    setQuery("");
+                    setStatus("all");
+                  }}
+                >
+                  Clear filters
+                </s-button>
+              </div>
+            ) : null}
+          </s-section>
+        </div>
       ) : null}
 
       {hasNodes ? (
-        <s-section heading="Connected computers">
+        <s-section heading="Connected nodes">
           <s-stack direction="block" gap="base">
             <div className="piqae-computer-grid">
               {nodes.map((node) => (
@@ -600,7 +626,7 @@ export default function Printers() {
                 +
               </span>
               <div>
-                <strong>Add another computer</strong>
+                <strong>Add another node</strong>
                 <span>
                   Open Piqae there and choose the printers this store may use.
                 </span>
@@ -618,7 +644,7 @@ export default function Printers() {
                 ) : connectionStage === "opened" ? (
                   <small>Waiting for printer access in Piqae…</small>
                 ) : connectionStage === "connected" ? (
-                  <small>Computer connected. Refreshing printers…</small>
+                  <small>Node connected. Refreshing printers…</small>
                 ) : connectionStage === "expired" ? (
                   <small>
                     The invitation expired. Select Connect to retry.
@@ -646,7 +672,9 @@ export default function Printers() {
         <Form method="post">
           <s-stack direction="block" gap="base">
             {result?.ok ? (
-              <s-banner tone="success">Settings saved.</s-banner>
+              <s-banner tone={result.warning ? "warning" : "success"}>
+                {result.warning || "Settings saved."}
+              </s-banner>
             ) : result?.error ? (
               <s-banner tone="critical">{result.error}</s-banner>
             ) : null}
@@ -655,7 +683,7 @@ export default function Printers() {
                 <input
                   type="hidden"
                   name="defaultPrinterId"
-                  value={settings.defaultPrinterId}
+                  value={defaultPrinterId}
                 />
                 <s-paragraph>
                   Choose the default directly in the printer list above.
@@ -707,9 +735,9 @@ export default function Printers() {
                     <option value="automatic">Automatic (recommended)</option>
                     <option value="cloud_only">Piqae Cloud</option>
                     <option value="prefer_node">
-                      This computer when compatible
+                      This node when compatible
                     </option>
-                    <option value="require_node">Only this computer</option>
+                    <option value="require_node">Only this node</option>
                   </select>
                 </label>
                 <s-paragraph>
