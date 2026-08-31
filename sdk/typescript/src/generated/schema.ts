@@ -4413,8 +4413,26 @@ export interface components {
             stock: components["schemas"]["ResourceRevision"] | null;
         };
         TargetMediaCompatibility: {
-            /** @enum {string} */
+            /**
+             * @description Legacy aggregate status. New clients should inspect configuration_status, capability_status, and loaded_media_status so missing evidence is not presented as incompatibility.
+             * @enum {string}
+             */
             status: "ready" | "not_reported" | "stale" | "untrusted" | "incompatible";
+            /**
+             * @description Whether the target, immutable profile revision, and stock reference form a complete and internally consistent configuration.
+             * @enum {string}
+             */
+            configuration_status?: "configured" | "not_configured" | "incompatible";
+            /**
+             * @description Whether the immutable profile's reported media geometry supports the configured stock. Unknown means the node has not reported enough capability data; it is not evidence of incompatibility.
+             * @enum {string}
+             */
+            capability_status?: "supported" | "unsupported" | "unknown";
+            /**
+             * @description Quality of current loaded-media evidence. Unknown means no source-specific evidence is available and must not be described as an incompatible printer or stock.
+             * @enum {string}
+             */
+            loaded_media_status?: "ready" | "unknown" | "stale" | "untrusted" | "incompatible";
             reasons: string[];
             profile_dimensions_mm: components["schemas"]["TargetMediaDimensions"] | null;
             loaded_media: components["schemas"]["TargetLoadedMediaEvidence"] | null;

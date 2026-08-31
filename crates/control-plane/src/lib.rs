@@ -1268,6 +1268,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_jobs_use_current_driver_defaults_without_profile_or_stock_pins() {
+        let application = application().await;
+        let created = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                "/v1/jobs",
+                "piq_test_integration",
+                "direct-current-driver-defaults",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "title": "Zero-configuration direct print",
+                        "content_type": "pdf",
+                        "content": {"type": "base64", "data": "JVBERi0="}
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            created["metadata"]["piqae.print_settings_mode"],
+            "current_driver_defaults"
+        );
+        assert!(created["metadata"].get("piqae.target_id").is_none());
+        assert!(created["metadata"].get("piqae.profile_id").is_none());
+        assert!(created["metadata"].get("piqae.stock_id").is_none());
+    }
+
+    #[tokio::test]
     #[allow(
         clippy::too_many_lines,
         reason = "the end-to-end assertion keeps wake, stale admission, fencing, and the public projection in one scenario"
@@ -3620,6 +3652,33 @@ mod tests {
         )
         .expect("binding JSON");
         let binding_id = binding["id"].as_str().expect("binding id");
+        let design_without_loaded_media = json_response(
+            &application.router,
+            api_request(
+                "GET",
+                &format!("/v1/targets/{target_id}/design-specification"),
+                "piq_test_integration",
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            design_without_loaded_media["destinations"][0]["media_compatibility"]["status"],
+            "not_reported"
+        );
+        assert_eq!(
+            design_without_loaded_media["destinations"][0]["media_compatibility"]["configuration_status"],
+            "configured"
+        );
+        assert_eq!(
+            design_without_loaded_media["destinations"][0]["media_compatibility"]["capability_status"],
+            "supported"
+        );
+        assert_eq!(
+            design_without_loaded_media["destinations"][0]["media_compatibility"]["loaded_media_status"],
+            "unknown",
+            "absent physical stock evidence is unknown, not incompatible"
+        );
 
         let media_standby_agent = AgentId::new();
         let media_standby_printer = PrinterId::new();
@@ -3840,6 +3899,18 @@ mod tests {
         .await;
         assert_eq!(
             design["destinations"][0]["media_compatibility"]["status"],
+            "ready"
+        );
+        assert_eq!(
+            design["destinations"][0]["media_compatibility"]["configuration_status"],
+            "configured"
+        );
+        assert_eq!(
+            design["destinations"][0]["media_compatibility"]["capability_status"],
+            "supported"
+        );
+        assert_eq!(
+            design["destinations"][0]["media_compatibility"]["loaded_media_status"],
             "ready"
         );
         assert_eq!(
@@ -4254,6 +4325,10 @@ mod tests {
                 .expect("stock revision")
                 .to_string()
         );
+        assert_eq!(
+            target_print["metadata"]["piqae.print_settings_mode"],
+            "pinned_profile"
+        );
         assert_eq!(target_print["printer_id"], printer_id.as_ulid().to_string());
         let mut target_node_job_ids = Vec::new();
         for (policy, key) in [
@@ -4407,6 +4482,18 @@ mod tests {
             .expect("primary design destination");
         assert_eq!(
             primary_destination["media_compatibility"]["status"],
+            "incompatible"
+        );
+        assert_eq!(
+            primary_destination["media_compatibility"]["configuration_status"],
+            "configured"
+        );
+        assert_eq!(
+            primary_destination["media_compatibility"]["capability_status"],
+            "supported"
+        );
+        assert_eq!(
+            primary_destination["media_compatibility"]["loaded_media_status"],
             "incompatible"
         );
         assert_eq!(
@@ -5328,6 +5415,18 @@ mod tests {
         assert_eq!(
             stockless_design["destinations"][0]["media_compatibility"]["status"],
             "incompatible"
+        );
+        assert_eq!(
+            stockless_design["destinations"][0]["media_compatibility"]["configuration_status"],
+            "not_configured"
+        );
+        assert_eq!(
+            stockless_design["destinations"][0]["media_compatibility"]["capability_status"],
+            "unknown"
+        );
+        assert_eq!(
+            stockless_design["destinations"][0]["media_compatibility"]["loaded_media_status"],
+            "unknown"
         );
         let stockless_pdf = application
             .router
