@@ -37,6 +37,7 @@ export class ShopifyAdminApiError extends Error {
 export interface NormalizedOrder {
   id: string;
   name: string;
+  referenceCode128?: string | null;
   createdAt: string;
   currency: string;
   customer: { id: string; displayName: string; email: string } | null;
@@ -45,6 +46,7 @@ export interface NormalizedOrder {
   note: string;
   shippingMethod: string;
   statusUrl: string;
+  tags: string[];
   metafields: Record<string, Record<string, NormalizedMetafield>>;
   lineItems: Array<{
     id: string;
@@ -105,6 +107,7 @@ export type NormalizedProduct = {
   title: string;
   vendor: string;
   productType: string;
+  tags: string[];
   category: NormalizedTaxonomyCategory | null;
   metafields: Record<string, Record<string, NormalizedMetafield>>;
 };
@@ -126,6 +129,7 @@ const CODE128_FIXED_MODULES = 55;
 const CODE128_MODULES_PER_BYTE = 11;
 const CODE128_MIN_MODULE_WIDTH_POINTS = 0.45;
 const PRODUCT_LABEL_BARCODE_WIDTH_MM = 70;
+const ORDER_BARCODE_WIDTH_MM = 56;
 const POINTS_PER_MM = 72 / 25.4;
 
 const ORDER_QUERY = `#graphql
@@ -135,7 +139,7 @@ const ORDER_QUERY = `#graphql
      customer { id displayName email }
      shippingAddress { name company address1 address2 city province zip country phone }
      billingAddress { name company address1 address2 city province zip country phone }
-     note statusPageUrl shippingLine { title }
+     note statusPageUrl tags shippingLine { title }
      metafieldsByIdentifiers: metafields(first: 20, keys: $orderFields) {
        nodes {
          namespace key type jsonValue
@@ -153,7 +157,7 @@ const ORDER_QUERY = `#graphql
          originalUnitPriceSet { shopMoney { amount } }
          discountedTotalSet { shopMoney { amount } }
          product {
-           id title vendor productType
+           id title vendor productType tags
            category { id name fullName level ancestorIds }
            metafieldsByIdentifiers: metafields(first: 20, keys: $productFields) {
              nodes {
@@ -229,7 +233,7 @@ export function normalizeDraftOrderGid(value: string): string {
 const DRAFT_ORDER_QUERY = `#graphql
  query PiqaePrintableDraftOrder($id: ID!, $after: String, $orderFields: [String!]!, $productFields: [String!]!, $variantFields: [String!]!) {
    draftOrder(id: $id) {
-     id name createdAt currencyCode email note
+     id name createdAt currencyCode email note tags
      metafieldsByIdentifiers: metafields(first: 20, keys: $orderFields) {
        nodes {
          namespace key type jsonValue
@@ -248,7 +252,7 @@ const DRAFT_ORDER_QUERY = `#graphql
          originalUnitPriceSet { shopMoney { amount } }
          discountedTotalSet { shopMoney { amount } }
          product {
-           id title vendor productType
+           id title vendor productType tags
            category { id name fullName level ancestorIds }
            metafieldsByIdentifiers: metafields(first: 20, keys: $productFields) {
              nodes {
@@ -328,6 +332,7 @@ export async function fetchDraftOrders(
     return {
       id: stringValue(draft.id),
       name: stringValue(draft.name),
+      referenceCode128: normalizedOrderCode128Candidate(draft.name),
       createdAt: normalizedDateTime(draft.createdAt),
       currency: normalizedCurrency(draft.currencyCode),
       customer: draft.email
@@ -342,6 +347,7 @@ export async function fetchDraftOrders(
       note: stringValue(draft.note),
       shippingMethod: "",
       statusUrl: "",
+      tags: normalizedTags(draft.tags),
       metafields: normalizeMetafields(
         draft.metafieldsByIdentifiers,
         selection,
@@ -430,6 +436,7 @@ export async function fetchOrders(
     return {
       id: stringValue(order.id),
       name: stringValue(order.name),
+      referenceCode128: normalizedOrderCode128Candidate(order.name),
       createdAt: normalizedDateTime(order.createdAt),
       currency: normalizedCurrency(order.currencyCode),
       customer: order.customer
@@ -444,6 +451,7 @@ export async function fetchOrders(
       note: stringValue(order.note),
       shippingMethod: stringValue(order.shippingLine?.title),
       statusUrl: stringValue(order.statusPageUrl),
+      tags: normalizedTags(order.tags),
       metafields: normalizeMetafields(
         order.metafieldsByIdentifiers,
         selection,
@@ -751,6 +759,7 @@ function normalizeProduct(
     title: stringValue(value.title),
     vendor: stringValue(value.vendor),
     productType: stringValue(value.productType),
+    tags: normalizedTags(value.tags),
     category: category
       ? {
           id: stringValue(category.id),
@@ -770,6 +779,20 @@ function normalizeProduct(
       owner,
     ),
   };
+}
+
+function normalizedTags(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [
+    ...new Set(
+      value
+        .map(stringValue)
+        .map((tag) => tag.trim())
+        .filter(Boolean),
+    ),
+  ]
+    .sort()
+    .slice(0, 250);
 }
 
 function normalizeVariant(
@@ -799,7 +822,21 @@ export function normalizedLabelCode128Candidate(
   barcode: unknown,
   sku: unknown,
 ): string | null {
-  for (const source of [barcode, sku]) {
+  return normalizedCode128Candidate(
+    [barcode, sku],
+    PRODUCT_LABEL_BARCODE_WIDTH_MM,
+  );
+}
+
+export function normalizedOrderCode128Candidate(value: unknown): string | null {
+  return normalizedCode128Candidate([value], ORDER_BARCODE_WIDTH_MM);
+}
+
+function normalizedCode128Candidate(
+  sources: unknown[],
+  widthMm: number,
+): string | null {
+  for (const source of sources) {
     if (typeof source !== "string") continue;
     const candidate = source.trim();
     if (
@@ -810,8 +847,7 @@ export function normalizedLabelCode128Candidate(
       continue;
     const modules =
       CODE128_FIXED_MODULES + candidate.length * CODE128_MODULES_PER_BYTE;
-    const moduleWidth =
-      (PRODUCT_LABEL_BARCODE_WIDTH_MM * POINTS_PER_MM) / modules;
+    const moduleWidth = (widthMm * POINTS_PER_MM) / modules;
     if (moduleWidth >= CODE128_MIN_MODULE_WIDTH_POINTS) return candidate;
   }
   return null;

@@ -1,0 +1,11 @@
+api_version = "2026-07"
+
+[[extensions]]
+name = "Print or download selected documents"
+handle = "piqae-bulk-browser-print"
+uid = "a6cc78a2c01b94b54024809fa8e4984bae1be040ad04"
+type = "ui_extension"
+
+[[extensions.targeting]]
+module = "./src/PrintAction.jsx"
+target = "admin.order-index.selection-print-action.render"

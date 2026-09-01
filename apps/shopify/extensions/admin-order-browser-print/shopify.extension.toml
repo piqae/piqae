@@ -1,0 +1,11 @@
+api_version = "2026-07"
+
+[[extensions]]
+name = "Print or download document"
+handle = "piqae-order-browser-print"
+uid = "0a38a0451a841457c593ec3ce9f53f5b8f50372dc1cc"
+type = "ui_extension"
+
+[[extensions.targeting]]
+module = "./src/PrintAction.jsx"
+target = "admin.order-details.print-action.render"

@@ -83,6 +83,7 @@ postgresDescribe("PostgreSQL starter publication transactions", () => {
       "0004_managed_piqae_accounts.sql",
       "0005_template_targets_and_media.sql",
       "0006_template_draft_published_pointers.sql",
+      "0007_print_order_settings.sql",
     ])
       await pool.query(
         await readFile(
@@ -105,6 +106,31 @@ postgresDescribe("PostgreSQL starter publication transactions", () => {
     const cleanup = new pg.Pool({ connectionString: databaseUrl, max: 1 });
     await cleanup.query(`DROP SCHEMA ${identifier} CASCADE`);
     await cleanup.end();
+  });
+
+  it("updates independent settings without overwriting a concurrent preference", async () => {
+    const first = new PostgresWorkflowRepository(pool);
+    const second = new PostgresWorkflowRepository(peerPool);
+    await Promise.all([
+      first.updateSettings(shop, { defaultTemplateId: "template_quick" }),
+      second.updateSettings(shop, {
+        printOrder: {
+          hierarchy: ["taxonomy", "customer"],
+          taxonomyDepth: "specific",
+          mixedOrderMode: "contains",
+        },
+      }),
+    ]);
+    await first.updateSettings(shop, { defaultPrinterId: "printer_default" });
+    expect(await first.getSettings(shop)).toMatchObject({
+      defaultTemplateId: "template_quick",
+      defaultPrinterId: "printer_default",
+      printOrder: {
+        hierarchy: ["taxonomy", "customer"],
+        taxonomyDepth: "specific",
+        mixedOrderMode: "contains",
+      },
+    });
   });
 
   it("keeps the deterministic owner and rolls a stale publication batch back", async () => {

@@ -142,7 +142,7 @@ describe("PrintPacket model", () => {
     expect(
       allNodes(packing.body).find((node) => node.type === "barcode"),
     ).toMatchObject({
-      value: { type: "current_path", path: ["name"] },
+      value: { type: "current_path", path: ["referenceCode128"] },
       symbology: "code128",
       human_readable: false,
     });

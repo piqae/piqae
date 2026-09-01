@@ -2432,6 +2432,69 @@
   color: #616161;
   font-size: 0.8rem;
 }
+.piqae-grouping-list {
+  display: grid;
+  gap: 0.5rem;
+}
+.piqae-grouping-rule {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid #d7d7d7;
+  border-radius: 0.75rem;
+  background: #fafafa;
+  color: #616161;
+}
+.piqae-grouping-rule.is-active {
+  border-color: #91b8f8;
+  background: #f5f9ff;
+  color: #202223;
+  cursor: grab;
+}
+.piqae-grouping-rule.is-active:active {
+  cursor: grabbing;
+}
+.piqae-grouping-handle {
+  color: #8c9196;
+  font-weight: 700;
+  letter-spacing: -0.2rem;
+}
+.piqae-grouping-copy {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+  min-width: 0;
+}
+.piqae-grouping-copy span,
+.piqae-grouping-copy small {
+  display: block;
+}
+.piqae-grouping-copy small {
+  margin-top: 0.15rem;
+  color: #6d7175;
+}
+.piqae-grouping-buttons {
+  display: inline-flex;
+  gap: 0.25rem;
+}
+.piqae-grouping-buttons button {
+  width: 2rem;
+  height: 2rem;
+  border: 1px solid #c9cccf;
+  border-radius: 0.45rem;
+  background: #fff;
+}
+.piqae-grouping-buttons button:disabled {
+  opacity: 0.35;
+}
+.piqae-grouping-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
 @media (max-width: 60rem) {
   .piqae-template-node-banner,
   .piqae-plan-overview {
@@ -2509,5 +2572,8 @@
   }
   .piqae-canvas-wrap {
     padding-bottom: 0.75rem;
+  }
+  .piqae-grouping-options {
+    grid-template-columns: 1fr;
   }
 }

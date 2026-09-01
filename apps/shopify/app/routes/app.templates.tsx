@@ -56,7 +56,7 @@ export function customizedSystemDraft(
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await shopify.authenticate.admin(request);
   const services = createProductionServices();
-  const [templates, nodeState] = await Promise.all([
+  const [templates, nodeState, settings] = await Promise.all([
     seedStarterTemplates(workflows(), session.shop).then(() =>
       workflows().listTemplates(session.shop),
     ),
@@ -68,9 +68,11 @@ export async function loader({ request }: LoaderFunctionArgs) {
         hasNodes: false,
         nodeError: "Your Piqae workspace is still being prepared.",
       })),
+    workflows().getSettings(session.shop),
   ]);
   return {
     templates: templates.filter(isActiveTemplate),
+    defaultTemplateId: settings.defaultTemplateId,
     ...nodeState,
   };
 }
@@ -89,6 +91,30 @@ export async function action({ request }: ActionFunctionArgs) {
           expires_in_seconds: 600,
         });
       return { ok: true, error: "", connection };
+    }
+    if (form.get("intent") === "set-quick-print") {
+      const templateId = bounded(form, "templateId", 200, true);
+      const template = await workflows().getTemplate(session.shop, templateId);
+      if (!template?.published || template.state !== "published")
+        throw new Error(
+          "Publish this document before using it for quick print.",
+        );
+      await workflows().updateSettings(session.shop, {
+        defaultTemplateId: templateId,
+      });
+      let warning = "";
+      try {
+        await syncTemplateIndex(admin, workflows(), session.shop);
+      } catch {
+        warning =
+          "Quick print was saved, but the Shopify shortcut may take a moment to refresh.";
+      }
+      return {
+        ok: true,
+        error: "",
+        warning,
+        defaultTemplateId: templateId,
+      };
     }
     if (form.get("intent") !== "customize")
       throw new Error("Unsupported template action");
@@ -116,6 +142,7 @@ export default function Templates() {
   const data = useLoaderData<typeof loader>();
   const result = useActionData<{ error: string }>();
   const connector = useFetcher<typeof action>();
+  const quickPrint = useFetcher<typeof action>();
   const revalidator = useRevalidator();
   const connectionWindow = useRef<Window | null>(null);
   const openedConnectionUrl = useRef("");
@@ -209,6 +236,12 @@ export default function Templates() {
         {result?.error ? (
           <s-banner tone="critical">{result.error}</s-banner>
         ) : null}
+        {quickPrint.data?.error ? (
+          <s-banner tone="critical">{quickPrint.data.error}</s-banner>
+        ) : null}
+        {quickPrint.data?.warning ? (
+          <s-banner tone="warning">{quickPrint.data.warning}</s-banner>
+        ) : null}
         {visibleTemplates.length ? (
           <s-table>
             <div slot="filters" className="piqae-template-filters">
@@ -276,13 +309,18 @@ export default function Templates() {
                       {template.kind.replaceAll("_", " ")} · {template.pageSize}
                     </s-table-cell>
                     <s-table-cell>
-                      <s-badge
-                        tone={
-                          template.state === "published" ? "success" : "info"
-                        }
-                      >
-                        {template.state}
-                      </s-badge>
+                      <s-stack direction="inline" gap="small">
+                        <s-badge
+                          tone={
+                            template.state === "published" ? "success" : "info"
+                          }
+                        >
+                          {template.state}
+                        </s-badge>
+                        {data.defaultTemplateId === template.id ? (
+                          <s-badge tone="info">Quick print</s-badge>
+                        ) : null}
+                      </s-stack>
                     </s-table-cell>
                     <s-table-cell>
                       <s-stack direction="inline" gap="small">
@@ -320,6 +358,28 @@ export default function Templates() {
                         >
                           Export
                         </s-link>
+                        {template.state === "published" &&
+                        data.defaultTemplateId !== template.id ? (
+                          <quickPrint.Form method="post">
+                            <input
+                              type="hidden"
+                              name="intent"
+                              value="set-quick-print"
+                            />
+                            <input
+                              type="hidden"
+                              name="templateId"
+                              value={template.id}
+                            />
+                            <s-button
+                              type="submit"
+                              variant="tertiary"
+                              disabled={quickPrint.state !== "idle"}
+                            >
+                              Use for quick print
+                            </s-button>
+                          </quickPrint.Form>
+                        ) : null}
                       </s-stack>
                     </s-table-cell>
                   </s-table-row>

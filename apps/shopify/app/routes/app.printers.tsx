@@ -95,9 +95,7 @@ export async function action({ request }: ActionFunctionArgs) {
         .printers.list();
       if (!printers.data.some((printer) => printer.id === printerId))
         throw new Error("That printer is no longer available to this store.");
-      const current = await workflows().getSettings(session.shop);
-      await workflows().saveSettings(session.shop, {
-        ...current,
+      await workflows().updateSettings(session.shop, {
         defaultPrinterId: printerId,
       });
       const warning = await syncSavedPrinterSettings(() =>
@@ -111,8 +109,15 @@ export async function action({ request }: ActionFunctionArgs) {
         defaultPrinterId: printerId,
       };
     }
-    const settings = parseSettings(form);
-    await workflows().saveSettings(session.shop, settings);
+    const current = await workflows().getSettings(session.shop);
+    const settings = parseSettings(form, current);
+    await workflows().updateSettings(session.shop, {
+      preferDirect: settings.preferDirect,
+      offerPdf: settings.offerPdf,
+      metafieldAllowlist: settings.metafieldAllowlist,
+      retentionDays: settings.retentionDays,
+      renderExecutionPolicy: settings.renderExecutionPolicy,
+    });
     const warning = await syncSavedPrinterSettings(() =>
       syncTemplateIndex(admin, workflows(), session.shop),
     );

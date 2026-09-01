@@ -21,6 +21,7 @@ import { templateDigest } from "./template-digest.server";
 import { findSystemTemplate, systemTemplateId } from "./template-index.server";
 import { ACCOUNT_DEFAULT_DOCUMENT_ID } from "./admin-print-options.server";
 import type { DownloadTokenVault } from "./download-token.server";
+import { orderPrintSequence } from "./print-order";
 
 export type PrintResult =
   | { mode: "direct"; renderId: string; jobId: string }
@@ -71,7 +72,7 @@ export class ShopifyPrintingService {
       input.templateId,
     );
     const settings = await this.workflow.getSettings(shop);
-    const [orders, shopIdentity] = await Promise.all([
+    const [fetchedOrders, shopIdentity] = await Promise.all([
       fetchOrders(
         input.admin,
         input.orderIds,
@@ -79,6 +80,7 @@ export class ShopifyPrintingService {
       ),
       fetchShopPrintIdentity(input.admin, shop),
     ]);
+    const orders = orderPrintSequence(fetchedOrders, settings.printOrder);
     const renderInput = shopifyDocumentInput(shop, orders, shopIdentity);
     const digest = createHash("sha256")
       .update(
@@ -362,12 +364,13 @@ export class ShopifyPrintingService {
       : null;
     const settings = await this.workflow.getSettings(shop);
     const bindings = parseShopifyDataBindings(settings.metafieldAllowlist);
-    const [orders, shopIdentity] = await Promise.all([
+    const [fetchedOrders, shopIdentity] = await Promise.all([
       input.resourceType === "draft_orders"
         ? fetchDraftOrders(input.admin, input.orderIds, bindings)
         : fetchOrders(input.admin, input.orderIds, bindings),
       fetchShopPrintIdentity(input.admin, shop),
     ]);
+    const orders = orderPrintSequence(fetchedOrders, settings.printOrder);
     const renderInput = shopifyDocumentInput(shop, orders, shopIdentity);
     const digest = createHash("sha256")
       .update(

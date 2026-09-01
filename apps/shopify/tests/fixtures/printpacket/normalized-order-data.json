@@ -12,6 +12,7 @@
     {
       "id": "gid://shopify/Order/42",
       "name": "#1042",
+      "referenceCode128": "#1042",
       "createdAt": "2026-08-09T00:00:00Z",
       "currency": "NZD",
       "customer": {

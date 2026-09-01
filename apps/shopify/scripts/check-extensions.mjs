@@ -7,6 +7,10 @@ const root = resolve(import.meta.dirname, "..");
 const extensionConfigs = [
   "extensions/admin-order-print/shopify.extension.toml",
   "extensions/admin-bulk-print/shopify.extension.toml",
+  "extensions/admin-order-browser-print/shopify.extension.toml",
+  "extensions/admin-bulk-browser-print/shopify.extension.toml",
+  "extensions/admin-order-quick-print/shopify.extension.toml",
+  "extensions/admin-bulk-quick-print/shopify.extension.toml",
   "extensions/pos-print/shopify.extension.toml",
   "extensions/customer-order-document/shopify.extension.toml",
   "extensions/admin-draft-print/shopify.extension.toml",
@@ -15,6 +19,8 @@ const extensionConfigs = [
 const allowedTargets = new Set([
   "admin.order-details.action.render",
   "admin.order-index.selection-action.render",
+  "admin.order-details.print-action.render",
+  "admin.order-index.selection-print-action.render",
   "pos.order-details.action.menu-item.render",
   "pos.order-details.action.render",
   "pos.purchase.post.action.menu-item.render",
