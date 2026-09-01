@@ -16,6 +16,22 @@ export interface AdminGraphql {
   ): Promise<Response>;
 }
 
+/**
+ * Preserve Shopify's HTTP status and structured error body across the order
+ * normalization boundary. Preview routes use this metadata to distinguish a
+ * revoked offline credential from an ordinary permission failure and can then
+ * perform one bounded token-exchange retry.
+ */
+export class ShopifyAdminApiError extends Error {
+  readonly response: { code: number; body: unknown };
+
+  constructor(status: number, body: unknown) {
+    super(`Shopify Admin API failed (${status})`);
+    this.name = "ShopifyAdminApiError";
+    this.response = { code: status, body };
+  }
+}
+
 export interface NormalizedOrder {
   id: string;
   name: string;
@@ -681,8 +697,7 @@ async function graphqlWithRetry(
         (error: any) => error.extensions?.code === "THROTTLED",
       );
     if (!throttled) {
-      if (!response.ok)
-        throw new Error(`Shopify Admin API failed (${response.status})`);
+      if (!response.ok) throw new ShopifyAdminApiError(response.status, body);
       return body;
     }
     if (attempt === 4)

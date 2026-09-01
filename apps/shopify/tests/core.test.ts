@@ -198,9 +198,13 @@ describe("Shopify boundary", () => {
         ),
       ),
     };
-    await expect(fetchOrders(rejectedAdmin, ["42"])).rejects.toThrow(
-      "Shopify Admin API failed (403)",
-    );
+    await expect(fetchOrders(rejectedAdmin, ["42"])).rejects.toMatchObject({
+      message: "Shopify Admin API failed (403)",
+      response: {
+        code: 403,
+        body: { errors: "The stored Admin API credential is invalid" },
+      },
+    });
   });
   it("normalizes only Code128 candidates that fit the fixed product label", () => {
     expect(normalizedLabelCode128Candidate("VALID-BARCODE", "VALID-SKU")).toBe(
