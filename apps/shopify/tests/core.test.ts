@@ -84,43 +84,45 @@ const order = {
             level: 3,
             ancestorIds: ["gid://shopify/TaxonomyCategory/aa"],
           },
-          metafieldsByIdentifiers: [
-            {
-              namespace: "custom",
-              key: "origin",
-              type: "metaobject_reference",
-              jsonValue: "gid://shopify/Metaobject/9",
-              reference: {
-                id: "gid://shopify/Metaobject/9",
-                type: "coffee_origin",
-                handle: "ethiopia",
-                displayName: "Ethiopia",
-                fields: [
-                  {
-                    key: "country",
-                    type: "single_line_text_field",
-                    jsonValue: "Ethiopia",
-                  },
-                  {
-                    key: "internal_cost",
-                    type: "number_decimal",
-                    jsonValue: 4.2,
-                  },
-                ],
+          metafieldsByIdentifiers: {
+            nodes: [
+              {
+                namespace: "custom",
+                key: "origin",
+                type: "metaobject_reference",
+                jsonValue: "gid://shopify/Metaobject/9",
+                reference: {
+                  id: "gid://shopify/Metaobject/9",
+                  type: "coffee_origin",
+                  handle: "ethiopia",
+                  displayName: "Ethiopia",
+                  fields: [
+                    {
+                      key: "country",
+                      type: "single_line_text_field",
+                      jsonValue: "Ethiopia",
+                    },
+                    {
+                      key: "internal_cost",
+                      type: "number_decimal",
+                      jsonValue: 4.2,
+                    },
+                  ],
+                },
               },
-            },
-          ],
+            ],
+          },
         },
         variant: {
           id: "gid://shopify/ProductVariant/11",
           title: "500g / Whole Beans",
           barcode: "942000000001",
-          metafieldsByIdentifiers: [],
+          metafieldsByIdentifiers: { nodes: [] },
         },
       },
     ],
   },
-  metafieldsByIdentifiers: [],
+  metafieldsByIdentifiers: { nodes: [] },
   subtotalPriceSet: { shopMoney: { amount: "20.00" } },
   totalTaxSet: { shopMoney: { amount: "3.00" } },
   totalPriceSet: { shopMoney: { amount: "23.00" } },
@@ -352,9 +354,12 @@ describe("Shopify boundary", () => {
       value?.lineItems[0]?.product?.metafields.custom?.origin?.reference?.fields
         .internal_cost,
     ).toBeUndefined();
-    expect(admin.graphql.mock.calls[0]?.[1]).toMatchObject({
+    const [query, options] = admin.graphql.mock.calls[0] ?? [];
+    expect(query).toContain("metafieldsByIdentifiers: metafields");
+    expect(query).not.toContain("HasMetafieldsIdentifier");
+    expect(options).toMatchObject({
       variables: {
-        productFields: [{ namespace: "custom", key: "origin" }],
+        productFields: ["custom.origin"],
       },
     });
   });

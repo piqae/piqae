@@ -122,15 +122,15 @@ const PRODUCT_LABEL_BARCODE_WIDTH_MM = 70;
 const POINTS_PER_MM = 72 / 25.4;
 
 const ORDER_QUERY = `#graphql
- query PiqaePrintableOrder($id: ID!, $after: String, $orderFields: [HasMetafieldsIdentifier!]!, $productFields: [HasMetafieldsIdentifier!]!, $variantFields: [HasMetafieldsIdentifier!]!) {
+ query PiqaePrintableOrder($id: ID!, $after: String, $orderFields: [String!]!, $productFields: [String!]!, $variantFields: [String!]!) {
    order(id: $id) {
      id name createdAt currencyCode
      customer { id displayName email }
      shippingAddress { name company address1 address2 city province zip country phone }
      billingAddress { name company address1 address2 city province zip country phone }
      note statusPageUrl shippingLine { title }
-     metafieldsByIdentifiers(identifiers: $orderFields) { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } }
-     lineItems(first: 100, after: $after) { nodes { id title sku quantity originalUnitPriceSet { shopMoney { amount } } discountedTotalSet { shopMoney { amount } } product { id title vendor productType category { id name fullName level ancestorIds } metafieldsByIdentifiers(identifiers: $productFields) { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } } } variant { id title barcode metafieldsByIdentifiers(identifiers: $variantFields) { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } } } } pageInfo { hasNextPage endCursor } }
+     metafieldsByIdentifiers: metafields(first: 20, keys: $orderFields) { nodes { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } } }
+     lineItems(first: 100, after: $after) { nodes { id title sku quantity originalUnitPriceSet { shopMoney { amount } } discountedTotalSet { shopMoney { amount } } product { id title vendor productType category { id name fullName level ancestorIds } metafieldsByIdentifiers: metafields(first: 20, keys: $productFields) { nodes { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } } } } variant { id title barcode metafieldsByIdentifiers: metafields(first: 20, keys: $variantFields) { nodes { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } } } } } } pageInfo { hasNextPage endCursor } }
      subtotalPriceSet { shopMoney { amount } }
      totalTaxSet { shopMoney { amount } }
      totalPriceSet { shopMoney { amount } }
@@ -161,12 +161,12 @@ export function normalizeDraftOrderGid(value: string): string {
 }
 
 const DRAFT_ORDER_QUERY = `#graphql
- query PiqaePrintableDraftOrder($id: ID!, $after: String, $orderFields: [HasMetafieldsIdentifier!]!, $productFields: [HasMetafieldsIdentifier!]!, $variantFields: [HasMetafieldsIdentifier!]!) {
+ query PiqaePrintableDraftOrder($id: ID!, $after: String, $orderFields: [String!]!, $productFields: [String!]!, $variantFields: [String!]!) {
    draftOrder(id: $id) {
      id name createdAt currencyCode email note
-     metafieldsByIdentifiers(identifiers: $orderFields) { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } }
+     metafieldsByIdentifiers: metafields(first: 20, keys: $orderFields) { nodes { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } } }
      shippingAddress { name company address1 address2 city province zip country phone }
-     lineItems(first: 100, after: $after) { nodes { id title sku quantity originalUnitPriceSet { shopMoney { amount } } discountedTotalSet { shopMoney { amount } } product { id title vendor productType category { id name fullName level ancestorIds } metafieldsByIdentifiers(identifiers: $productFields) { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } } } variant { id title barcode metafieldsByIdentifiers(identifiers: $variantFields) { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } } } } pageInfo { hasNextPage endCursor } }
+     lineItems(first: 100, after: $after) { nodes { id title sku quantity originalUnitPriceSet { shopMoney { amount } } discountedTotalSet { shopMoney { amount } } product { id title vendor productType category { id name fullName level ancestorIds } metafieldsByIdentifiers: metafields(first: 20, keys: $productFields) { nodes { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } } } } variant { id title barcode metafieldsByIdentifiers: metafields(first: 20, keys: $variantFields) { nodes { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } } } } } } pageInfo { hasNextPage endCursor } }
      subtotalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } }
    }
  }`;
@@ -184,9 +184,9 @@ export async function fetchDraftOrders(
     const first = await graphqlWithRetry(admin, DRAFT_ORDER_QUERY, {
       id,
       after: null,
-      orderFields: selection.order,
-      productFields: selection.product,
-      variantFields: selection.variant,
+      orderFields: metafieldKeys(selection.order),
+      productFields: metafieldKeys(selection.product),
+      variantFields: metafieldKeys(selection.variant),
     });
     if (first.errors?.length)
       throw new Error("Shopify Admin API rejected the draft order query");
@@ -200,9 +200,9 @@ export async function fetchDraftOrders(
       const next = await graphqlWithRetry(admin, DRAFT_ORDER_QUERY, {
         id,
         after: pageInfo.endCursor,
-        orderFields: selection.order,
-        productFields: selection.product,
-        variantFields: selection.variant,
+        orderFields: metafieldKeys(selection.order),
+        productFields: metafieldKeys(selection.product),
+        variantFields: metafieldKeys(selection.variant),
       });
       const connection = next.data?.draftOrder?.lineItems;
       if (!connection)
@@ -275,9 +275,9 @@ export async function fetchOrders(
     const first = await graphqlWithRetry(admin, ORDER_QUERY, {
       id,
       after: null,
-      orderFields: selection.order,
-      productFields: selection.product,
-      variantFields: selection.variant,
+      orderFields: metafieldKeys(selection.order),
+      productFields: metafieldKeys(selection.product),
+      variantFields: metafieldKeys(selection.variant),
     });
     const body = first;
     if (body.errors?.length)
@@ -303,9 +303,9 @@ export async function fetchOrders(
       const next = await graphqlWithRetry(admin, ORDER_QUERY, {
         id,
         after: pageInfo.endCursor,
-        orderFields: selection.order,
-        productFields: selection.product,
-        variantFields: selection.variant,
+        orderFields: metafieldKeys(selection.order),
+        productFields: metafieldKeys(selection.product),
+        variantFields: metafieldKeys(selection.variant),
       });
       const connection = next.data?.order?.lineItems;
       if (!connection) throw new Error(`order changed while paginating: ${id}`);
@@ -487,9 +487,15 @@ function normalizeMetafields(
   selection: NormalizedBindingSelection,
   owner: "order" | "product" | "variant",
 ): Record<string, Record<string, NormalizedMetafield>> {
-  if (!Array.isArray(values)) return {};
+  const nodes = Array.isArray(values)
+    ? values
+    : values &&
+        typeof values === "object" &&
+        Array.isArray((values as { nodes?: unknown }).nodes)
+      ? (values as { nodes: unknown[] }).nodes
+      : [];
   const result: Record<string, Record<string, NormalizedMetafield>> = {};
-  for (const field of values) {
+  for (const field of nodes) {
     if (!field || typeof field !== "object") continue;
     const source = field as Record<string, unknown>;
     const namespace = stringValue(source.namespace);
@@ -513,6 +519,12 @@ function normalizeMetafields(
     (result[namespace] ??= {})[key] = normalized;
   }
   return result;
+}
+
+function metafieldKeys(
+  values: Array<{ namespace: string; key: string }>,
+): string[] {
+  return values.map(({ namespace, key }) => `${namespace}.${key}`);
 }
 
 function normalizeMetaobject(
