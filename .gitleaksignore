@@ -46,8 +46,9 @@ e7703e78135dcbfc2022f72dd4d6e9e67b21b972:docs/12-open-source-saas-and-build-plan
 99791d2891421d34b1a21eb72530dcdff320ce71:contracts/fixtures/encrypted-job-v3.json:generic-api-key:44
 
 # Public PrintPacket cache digests and Swift encoder syntax, not credentials.
-# Keep both immutable fixture revisions because the history scan evaluates every
-# commit in the pull-request range rather than only the current tree.
+# Keep every immutable fixture revision because the history scan evaluates every
+# commit in the pull-request range rather than only the current tree. GitHub's
+# squash merge creates a distinct immutable revision for the same public data.
 5bfdd3fa2e27572b26e2937b8d237579db491ba3:sdk/apple/Sources/PiqaeNodeKit/PrintPacket.swift:generic-api-key:81
 0f991e28f129bb259645a6b536693cc00ba999ee:standards/printpacket/conformance/expected.json:generic-api-key:7
 0f991e28f129bb259645a6b536693cc00ba999ee:standards/printpacket/conformance/expected.json:generic-api-key:14
@@ -58,3 +59,6 @@ f611f9428819f3270e0cb17471c29fbf34f85fab:standards/printpacket/conformance/expec
 b59af5664d8552d36145c4d6416504a0ecd267eb:standards/printpacket/conformance/expected.json:generic-api-key:7
 b59af5664d8552d36145c4d6416504a0ecd267eb:standards/printpacket/conformance/expected.json:generic-api-key:14
 b59af5664d8552d36145c4d6416504a0ecd267eb:standards/printpacket/conformance/expected.json:generic-api-key:21
+354464d24e11bd34dab08ffcbff4a25880da5d5e:standards/printpacket/conformance/expected.json:generic-api-key:7
+354464d24e11bd34dab08ffcbff4a25880da5d5e:standards/printpacket/conformance/expected.json:generic-api-key:14
+354464d24e11bd34dab08ffcbff4a25880da5d5e:standards/printpacket/conformance/expected.json:generic-api-key:21
