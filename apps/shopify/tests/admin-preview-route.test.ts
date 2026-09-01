@@ -5,6 +5,7 @@ import {
   isShopifySessionCredentialFailure,
   withShopifySessionRecovery,
 } from "../app/routes/api.print.admin-previews";
+import { fetchOrders } from "../app/core/orders.server";
 
 describe("admin preview failure classification", () => {
   it("turns stale publications into a useful republish instruction", () => {
@@ -49,6 +50,21 @@ describe("admin preview failure classification", () => {
         },
       }),
     ).toBe(false);
+  });
+
+  it("recognizes a credential failure returned by the order loader", async () => {
+    const admin = {
+      graphql: async () =>
+        Response.json(
+          { errors: "The access token for this shop is invalid" },
+          { status: 403 },
+        ),
+    };
+
+    const failure = await fetchOrders(admin, ["42"]).catch(
+      (error: unknown) => error,
+    );
+    expect(isShopifySessionCredentialFailure(failure)).toBe(true);
   });
 
   it("recovers a revoked session once without retrying unrelated failures", async () => {
