@@ -189,6 +189,19 @@ describe("Shopify boundary", () => {
     expect(value?.total).toBe(23);
     expect(typeof value?.total).toBe("number");
   });
+  it("handles Shopify's string-form HTTP error without masking it as a TypeError", async () => {
+    const rejectedAdmin = {
+      graphql: vi.fn<AdminGraphql["graphql"]>(async () =>
+        Response.json(
+          { errors: "The stored Admin API credential is invalid" },
+          { status: 403 },
+        ),
+      ),
+    };
+    await expect(fetchOrders(rejectedAdmin, ["42"])).rejects.toThrow(
+      "Shopify Admin API failed (403)",
+    );
+  });
   it("normalizes only Code128 candidates that fit the fixed product label", () => {
     expect(normalizedLabelCode128Candidate("VALID-BARCODE", "VALID-SKU")).toBe(
       "VALID-BARCODE",

@@ -56,15 +56,11 @@ export async function adminExtensionPreflightMiddleware(
     next();
     return;
   }
-  if (request.method === "POST") {
-    if (request.headers.origin === ADMIN_EXTENSION_ORIGIN) {
-      response.setHeader("access-control-allow-origin", ADMIN_EXTENSION_ORIGIN);
-      response.setHeader("vary", "Origin");
-    }
-    next();
-    return;
-  }
   if (request.method !== "OPTIONS") {
+    // React Router actions authenticate the request and own CORS on their
+    // response through Shopify's `cors()` helper. Adding another origin here
+    // produces two Access-Control-Allow-Origin values, which browsers reject
+    // before the extension can read the real response.
     next();
     return;
   }
