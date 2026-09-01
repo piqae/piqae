@@ -11,10 +11,10 @@ surfaces and must identify the same reviewed commit.
 
 ## Environment model
 
-| Target | Shopify app | Railway environment/service | Store and data |
-| --- | --- | --- | --- |
-| Development/pilot | the public app registration in CLI dev-preview mode | local Shopify CLI tunnel | Shopify Dev Store, synthetic data, fake printer |
-| Production | the same public app registration, released app version | `production` / `piqae-shopify` | approved merchant stores, production PostgreSQL, live Piqae account |
+| Target            | Shopify app                                            | Railway environment/service    | Store and data                                                      |
+| ----------------- | ------------------------------------------------------ | ------------------------------ | ------------------------------------------------------------------- |
+| Development/pilot | the public app registration in CLI dev-preview mode    | local Shopify CLI tunnel       | Shopify Dev Store, synthetic data, fake printer                     |
+| Production        | the same public app registration, released app version | `production` / `piqae-shopify` | approved merchant stores, production PostgreSQL, live Piqae account |
 
 Do not copy a production API secret, session database, encryption key, Piqae
 credential, App Automation Token, or customer document into a local or pull
@@ -32,25 +32,29 @@ first approved live-store pilot.
 
 1. In Shopify Dev Dashboard, create or select the single permanent app and
    choose Public distribution. This choice cannot be changed later.
-2. Create a Dev Store in the Dev Dashboard and install the draft app there.
+2. In the app's **Settings → App icon**, manually upload
+   [`apps/shopify/public/piqae-shopify-app-icon-1200.png`](../../apps/shopify/public/piqae-shopify-app-icon-1200.png).
+   Shopify app configuration and extension releases do not upload this
+   dashboard asset.
+3. Create a Dev Store in the Dev Dashboard and install the draft app there.
    Do not use a client-transfer store; draft public apps are not installable on
    that store type.
-3. Set the application, callback, webhook, app-proxy, and customer extension
+4. Set the application, callback, webhook, app-proxy, and customer extension
    origins to the matching HTTPS Railway origin.
-4. Select only the protected customer fields required to render the supported
+5. Select only the protected customer fields required to render the supported
    documents. Piqae's `read_all_orders` access is approved and declared beside
    `read_orders`; retain the approval evidence with the Shopify release record.
    Existing stores are prompted for the added required scope when they next open
    the app after that configuration version is released.
-5. In the app's **Settings → App Automation Token**, create an app-scoped
+6. In the app's **Settings → App Automation Token**, create an app-scoped
    token. Store it once in the GitHub production environment as
    `SHOPIFY_APP_AUTOMATION_TOKEN`. Tokens expire after at most six months;
    create the replacement, update GitHub, validate a no-release version, then revoke
    the old token.
-6. Link the app once with Shopify CLI to verify that the checked-in extension
+7. Link the app once with Shopify CLI to verify that the checked-in extension
    handles/UIDs map as updates. Stop if a deploy proposes removing and
    re-creating an extension.
-7. Before review, install only through the app's **Installs** section or
+8. Before review, install only through the app's **Installs** section or
    `shopify app dev` onto the Dev Store. After approval, set the listing to
    Limited visibility and share its App Store URL with the first pilot merchant.
 
@@ -63,13 +67,13 @@ configuration. GitHub environments contain non-secret `SHOPIFY_CLIENT_ID` and
 
 Create only the `shopify-production` environment.
 
-| Setting | Value |
-| --- | --- |
-| `SHOPIFY_CLIENT_ID` variable | permanent public app client ID |
-| `SHOPIFY_APP_URL` variable | `https://shopify.piqae.com` |
-| `SHOPIFY_APP_AUTOMATION_TOKEN` secret | permanent public app token |
-| Required reviewers | release owner |
-| Deployment branches | `main` and `shopify-v*` tags only |
+| Setting                               | Value                             |
+| ------------------------------------- | --------------------------------- |
+| `SHOPIFY_CLIENT_ID` variable          | permanent public app client ID    |
+| `SHOPIFY_APP_URL` variable            | `https://shopify.piqae.com`       |
+| `SHOPIFY_APP_AUTOMATION_TOKEN` secret | permanent public app token        |
+| Required reviewers                    | release owner                     |
+| Deployment branches                   | `main` and `shopify-v*` tags only |
 
 `main` remains protected by `CI result` and `Supply-chain result`. Do not add
 the path-scoped `Shopify` job as an independently required check because it is

@@ -4861,10 +4861,27 @@ export interface components {
             value: components["schemas"]["PrintPacketExpression"];
             /** @constant */
             symbology: "code128";
+            /** @description Total encoded Code 128 width including its mandatory quiet zones. */
             width_mm: number;
             height_mm: number;
             /** @default false */
             human_readable?: boolean;
+            /**
+             * @description Horizontal alignment of the complete barcode footprint inside the current layout column.
+             * @default left
+             * @enum {unknown}
+             */
+            align?: "left" | "center" | "right";
+            /**
+             * @description Uniform clear space outside the encoded barcode and optional human-readable value.
+             * @default 0
+             */
+            padding_mm?: number;
+            /**
+             * @description Space between the bars and the human-readable value when it is shown.
+             * @default 1.4
+             */
+            gap_mm?: number;
         };
         PrintPacketTableColumn: {
             header: components["schemas"]["PrintPacketInline"][];

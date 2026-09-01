@@ -1305,6 +1305,26 @@
             "human_readable": {
               "type": "boolean",
               "default": false
+            },
+            "align": {
+              "enum": [
+                "left",
+                "center",
+                "right"
+              ],
+              "default": "left"
+            },
+            "padding_mm": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 50,
+              "default": 0
+            },
+            "gap_mm": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 20,
+              "default": 1.4
             }
           }
         }

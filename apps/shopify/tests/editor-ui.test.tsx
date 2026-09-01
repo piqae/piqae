@@ -841,6 +841,8 @@ describe("Shopify document editor layout", () => {
     expect(page.textContent).toContain(templates[0]!.name);
     expect(page.textContent).toContain(templates[1]!.name);
     expect(page.querySelectorAll("s-table-row")).toHaveLength(2);
+    expect(page.textContent).not.toContain("Quick print");
+    expect(page.querySelector('input[value="set-quick-print"]')).toBeNull();
   });
 
   it("shows workspace, insert, and changing selection tools in one card", async () => {
@@ -920,16 +922,42 @@ describe("Shopify document editor layout", () => {
     const body = page.querySelector<HTMLElement>(
       '[data-document-region="body"]',
     )!;
+    const pageContent = page.querySelector<HTMLElement>(".piqae-page-content")!;
+    const headerHitArea = header.querySelector<HTMLElement>(
+      ":scope > .piqae-document-region-hit-area",
+    )!;
+    const initialHeaderStyle = header.getAttribute("style");
+    const initialPageContentStyle = pageContent.getAttribute("style");
+    const initialRegionOrder = Array.from(pageContent.children).map((child) =>
+      child.getAttribute("data-document-region"),
+    );
 
     expect(header.getAttribute("aria-label")).toContain("double-click");
+    expect(headerHitArea).not.toBeNull();
+    expect(headerHitArea.getAttribute("aria-hidden")).toBe("true");
+    expect(initialRegionOrder).toEqual(["header", "body", "footer"]);
     expect(body.classList.contains("is-dimmed")).toBe(false);
 
     await act(async () => {
-      header.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+      headerHitArea.dispatchEvent(
+        new MouseEvent("dblclick", { bubbles: true }),
+      );
     });
     expect(header.classList.contains("is-active")).toBe(true);
     expect(body.classList.contains("is-dimmed")).toBe(true);
     expect(header.getAttribute("aria-label")).toContain("editing");
+    // Entering region-edit mode may add authoring affordances, but it must not
+    // change any physical page geometry or replace/reorder the document body.
+    expect(header.getAttribute("style")).toBe(initialHeaderStyle);
+    expect(pageContent.getAttribute("style")).toBe(initialPageContentStyle);
+    expect(
+      Array.from(pageContent.children).map((child) =>
+        child.getAttribute("data-document-region"),
+      ),
+    ).toEqual(initialRegionOrder);
+    expect(
+      page.querySelector<HTMLElement>('[data-document-region="body"]'),
+    ).toBe(body);
 
     await act(async () => {
       page
@@ -960,6 +988,99 @@ describe("Shopify document editor layout", () => {
     });
     expect(footer.classList.contains("is-active")).toBe(false);
     expect(body.classList.contains("is-dimmed")).toBe(false);
+  });
+
+  it("renders machine codes at physical size and exposes barcode layout controls", async () => {
+    const codePacket: PrintPacket = {
+      format: "printpacket/v1",
+      media: { kind: "paged", size: "a4" },
+      body: [
+        {
+          type: "qr",
+          value: { type: "literal", value: "https://piqae.com/orders/1001" },
+          size_mm: 24,
+          error_correction: "Q",
+        },
+        {
+          type: "barcode",
+          value: { type: "literal", value: "ORDER-1001" },
+          symbology: "code128",
+          width_mm: 54,
+          height_mm: 14,
+          human_readable: true,
+          align: "right",
+          padding_mm: 2,
+          gap_mm: 1.5,
+        },
+        {
+          type: "stack",
+          gap_mm: 4,
+          children: [
+            { type: "spacer", height_mm: 2 },
+            { type: "spacer", height_mm: 3 },
+          ],
+        },
+        {
+          type: "image",
+          resource: "shop.logo",
+          width_mm: 40,
+          height_mm: 16,
+          fit: "contain",
+        },
+      ],
+    };
+    const page = await render(
+      <StatefulPrintPacketEditor initial={codePacket} />,
+    );
+    const qr = page.querySelector<HTMLElement>(".piqae-canvas-qr")!;
+    const barcode = page.querySelector<HTMLElement>(".piqae-canvas-barcode")!;
+
+    expect(qr.querySelector("svg")).not.toBeNull();
+    expect(qr.style.width).toBe("calc(24 * var(--piqae-mm))");
+    expect(qr.style.height).toBe("calc(24 * var(--piqae-mm))");
+    expect(barcode.querySelector("svg")).not.toBeNull();
+    expect(barcode.style.width).toBe("calc(58 * var(--piqae-mm))");
+    expect(barcode.style.maxWidth).toBe("100%");
+    expect(barcode.style.marginInline).toBe("auto 0");
+    expect(barcode.style.getPropertyValue("--piqae-barcode-width")).toBe(
+      "calc(54 * var(--piqae-mm))",
+    );
+    expect(barcode.style.getPropertyValue("--piqae-barcode-height")).toBe(
+      "calc(14 * var(--piqae-mm))",
+    );
+    const firstSpacer = page.querySelector<HTMLElement>(
+      ".piqae-canvas-stack .piqae-canvas-spacer",
+    )!;
+    const stack = firstSpacer.closest<HTMLElement>(".piqae-canvas-stack")!;
+    const spacers = stack.querySelectorAll<HTMLElement>(".piqae-canvas-spacer");
+    expect(stack.style.gap).toBe("calc(4 * var(--piqae-mm))");
+    expect(Array.from(spacers, (spacer) => spacer.style.height)).toEqual([
+      "calc(2 * var(--piqae-mm))",
+      "calc(3 * var(--piqae-mm))",
+    ]);
+    const image = page.querySelector<HTMLElement>(".piqae-canvas-image")!;
+    expect(image.style.width).toBe("calc(40 * var(--piqae-mm))");
+    expect(image.style.height).toBe("calc(16 * var(--piqae-mm))");
+
+    await act(async () => {
+      barcode.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    const fields = Array.from(
+      page.querySelectorAll<HTMLElement>(
+        ".piqae-selection-rail .piqae-bar-field",
+      ),
+    ).map((field) => field.textContent ?? "");
+    expect(fields.some((label) => label.includes("Alignment"))).toBe(true);
+    expect(fields.some((label) => label.includes("Padding (mm)"))).toBe(true);
+    expect(fields.some((label) => label.includes("Value gap (mm)"))).toBe(true);
+    const toggles = Array.from(
+      page.querySelectorAll<HTMLElement>(
+        ".piqae-selection-rail .piqae-bar-toggle",
+      ),
+    ).map((toggle) => toggle.textContent ?? "");
+    expect(toggles.some((label) => label.includes("Show value below"))).toBe(
+      true,
+    );
   });
 
   it("keeps both toolbar rows keyboard reachable at a narrow viewport", async () => {

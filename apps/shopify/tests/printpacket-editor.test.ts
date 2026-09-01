@@ -13,12 +13,14 @@ import {
   replaceBlockAtPath,
   searchDocumentFields,
   barcodeCanvasStyle,
+  canvasContentStyle,
   canvasGeometry,
   canvasStyle,
   compactCanvasAnnotations,
   documentMargins,
   maximumDocumentMargin,
   responsiveCanvasGeometry,
+  qrCanvasStyle,
   safeAreaStyle,
   withDocumentMargin,
 } from "../app/components/PrintPacketEditor";
@@ -65,7 +67,24 @@ describe("PrintPacket editor serialization", () => {
       bottom_mm: 10,
       left_mm: 10,
     });
-    expect(canvasStyle(document).padding).toBe("10% 10% 10% 10%");
+    expect(canvasStyle(document)).toMatchObject({
+      padding: 0,
+      "--piqae-mm": "calc(100cqw / 100)",
+      "--piqae-margin-top": "calc(10 * var(--piqae-mm))",
+      "--piqae-margin-right": "calc(10 * var(--piqae-mm))",
+      "--piqae-margin-bottom": "calc(10 * var(--piqae-mm))",
+      "--piqae-margin-left": "calc(10 * var(--piqae-mm))",
+    });
+    // Vertical percentages are resolved against the media height, while
+    // horizontal percentages are resolved against the media width. CSS
+    // percentage padding cannot provide that physical guarantee because all
+    // four padding percentages resolve against the containing width.
+    expect(canvasContentStyle(document)).toEqual({
+      top: "20%",
+      right: "10%",
+      bottom: "20%",
+      left: "10%",
+    });
 
     const edited = withDocumentMargin(document, "left", 4.5);
     expect(edited.media.margins).toEqual({
@@ -74,11 +93,38 @@ describe("PrintPacket editor serialization", () => {
       bottom_mm: 10,
       left_mm: 4.5,
     });
-    expect(canvasStyle(edited).padding).toBe("10% 10% 10% 4.5%");
+    expect(canvasStyle(edited).padding).toBe(0);
+    expect(canvasContentStyle(edited)).toEqual({
+      top: "20%",
+      right: "10%",
+      bottom: "20%",
+      left: "4.5%",
+    });
     expect(maximumDocumentMargin(edited, "top")).toBe(39);
     expect(withDocumentMargin(edited, "top", 500).media.margins?.top_mm).toBe(
       39,
     );
+  });
+  it("keeps continuous-media margins in the same physical scale as its content", () => {
+    const receipt: PrintPacket = {
+      format: "printpacket/v1",
+      media: {
+        kind: "continuous",
+        width_mm: 80,
+        margins: { top_mm: 3, right_mm: 4, bottom_mm: 5, left_mm: 6 },
+      },
+      body: [],
+    };
+
+    expect(canvasStyle(receipt)).toMatchObject({
+      aspectRatio: undefined,
+      "--piqae-mm": "calc(100cqw / 80)",
+      "--piqae-media-min-height": "120mm",
+    });
+    expect(canvasContentStyle(receipt)).toEqual({
+      margin:
+        "calc(3 * var(--piqae-mm)) calc(4 * var(--piqae-mm)) calc(5 * var(--piqae-mm)) calc(6 * var(--piqae-mm))",
+    });
   });
   it.each([320, 768])(
     "preserves A4 portrait, landscape, and label ratios at a %i px browser width",
@@ -107,7 +153,7 @@ describe("PrintPacket editor serialization", () => {
       }
     },
   );
-  it("sizes label barcodes from the specification without allowing unsafe placeholders", () => {
+  it("sizes and aligns barcodes from the same physical footprint used by the renderer", () => {
     const label = starterTemplates.find(
       ({ id }) => id === "product-label",
     )!.specification;
@@ -118,19 +164,56 @@ describe("PrintPacket editor serialization", () => {
       width_mm: 88,
       height_mm: 16,
       human_readable: true,
+      align: "center",
+      padding_mm: 1,
+      gap_mm: 2.5,
     } as const;
-    expect(barcodeCanvasStyle(barcode, label.media.kind)).toEqual({
-      width: "min(100%, 88mm)",
-      "--piqae-barcode-height": "16mm",
+    expect(barcodeCanvasStyle(barcode, label.media.kind)).toMatchObject({
+      width: "calc(90 * var(--piqae-mm))",
+      maxWidth: "100%",
+      marginInline: "auto",
+      "--piqae-barcode-width": "calc(88 * var(--piqae-mm))",
+      "--piqae-barcode-height": "calc(16 * var(--piqae-mm))",
+      "--piqae-code-padding": "calc(1 * var(--piqae-mm))",
+      "--piqae-code-gap": "calc(2.5 * var(--piqae-mm))",
     });
     expect(
       barcodeCanvasStyle(
-        { ...barcode, width_mm: 1, height_mm: 1 },
+        {
+          ...barcode,
+          width_mm: 1,
+          height_mm: 1,
+          padding_mm: -1,
+          gap_mm: 200,
+          align: "right",
+        },
         label.media.kind,
       ),
-    ).toEqual({
-      width: "min(100%, 20mm)",
-      "--piqae-barcode-height": "8mm",
+    ).toMatchObject({
+      width: "calc(20 * var(--piqae-mm))",
+      maxWidth: "100%",
+      marginInline: "auto 0",
+      "--piqae-barcode-width": "calc(20 * var(--piqae-mm))",
+      "--piqae-barcode-height": "calc(8 * var(--piqae-mm))",
+      "--piqae-code-padding": "calc(0 * var(--piqae-mm))",
+      "--piqae-code-gap": "calc(20 * var(--piqae-mm))",
+    });
+  });
+  it("gives QR placeholders their declared physical square size", () => {
+    const qr = {
+      type: "qr",
+      value: { type: "literal", value: "https://piqae.com" },
+      size_mm: 24,
+      error_correction: "Q",
+    } as const;
+
+    expect(qrCanvasStyle(qr)).toMatchObject({
+      width: "calc(24 * var(--piqae-mm))",
+      height: "calc(24 * var(--piqae-mm))",
+    });
+    expect(qrCanvasStyle({ ...qr, size_mm: 1 })).toMatchObject({
+      width: "calc(8 * var(--piqae-mm))",
+      height: "calc(8 * var(--piqae-mm))",
     });
   });
   it("preserves computed values, line breaks, and non-text layout blocks", () => {

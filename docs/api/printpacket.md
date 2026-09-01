@@ -92,6 +92,11 @@ never returns template source or render input.
 The format supports paged A4/A5/Letter media, bounded continuous media, and
 simple labels. Its semantic nodes cover flow sections, rich inline text,
 rows/grids, repeats, conditions, tables, headers/footers, QR and Code 128.
+Code 128 `width_mm` includes the mandatory quiet zones encoded by the renderer.
+Barcode `align`, `padding_mm`, and `gap_mm` keep the same physical footprint and
+spacing in editor previews, immutable PDF artifacts, downloads, and direct
+prints. `gap_mm` separates the bars from an enabled human-readable value;
+omitted fields retain the left-aligned and zero-padding defaults.
 Adjacent inline nodes concatenate without an implicit separator. Horizontal
 whitespace collapses to one breakable space, while explicit `line_break` nodes
 and LF, CRLF, or CR characters in resolved values start a new line. The

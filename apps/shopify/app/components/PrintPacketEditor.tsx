@@ -789,6 +789,7 @@ export function PrintPacketEditor({
           focusDocumentRegion(region);
         }}
       >
+        <span className="piqae-document-region-hit-area" aria-hidden="true" />
         <span className="piqae-document-region-label">
           {active ? `Editing repeating ${name}` : `Repeating ${name}`}
         </span>
@@ -1115,46 +1116,51 @@ export function PrintPacketEditor({
             }}
           >
             <SafeAreaGuide value={value} stock={stock} />
-            {value.media.kind === "paged"
-              ? renderRepeatingRegion("header")
-              : null}
-            <main
-              className={`piqae-document-body${activeRegion !== "body" ? " is-dimmed" : ""}`}
-              data-document-region="body"
+            <div
+              className="piqae-page-content"
+              style={canvasContentStyle(value)}
             >
-              <DocumentCanvas
-                blocks={canonicalBody}
-                insertionSlots={false}
-                selectedPath={
-                  selection?.region === "body" ? selection.path : undefined
-                }
-                editable={!disabled && activeRegion === "body"}
-                preview={activeRegion !== "body"}
-                mediaKind={value.media.kind}
-                authoringFields={allAuthoringFields}
-                onSelect={(block, path) =>
-                  setSelection({ position: -1, block, path, region: "body" })
-                }
-                onInsert={(block, path) => insertAtPath(block, path, "body")}
-                onChange={(block, path) => {
-                  setSelection({
-                    position: -1,
-                    block,
-                    path,
-                    region: "body",
-                  });
-                  const body = canonicalizeShopifyEditorBody(
-                    replaceBlockAtPath(canonicalBody, path, block),
-                  );
-                  latest.current = { ...latest.current, body };
-                  syncBodyEditor(latest.current);
-                  publishEditorDocument({ ...latest.current, body });
-                }}
-              />
-            </main>
-            {value.media.kind === "paged"
-              ? renderRepeatingRegion("footer")
-              : null}
+              {value.media.kind === "paged"
+                ? renderRepeatingRegion("header")
+                : null}
+              <main
+                className={`piqae-document-body${activeRegion !== "body" ? " is-dimmed" : ""}`}
+                data-document-region="body"
+              >
+                <DocumentCanvas
+                  blocks={canonicalBody}
+                  insertionSlots={false}
+                  selectedPath={
+                    selection?.region === "body" ? selection.path : undefined
+                  }
+                  editable={!disabled && activeRegion === "body"}
+                  preview={activeRegion !== "body"}
+                  mediaKind={value.media.kind}
+                  authoringFields={allAuthoringFields}
+                  onSelect={(block, path) =>
+                    setSelection({ position: -1, block, path, region: "body" })
+                  }
+                  onInsert={(block, path) => insertAtPath(block, path, "body")}
+                  onChange={(block, path) => {
+                    setSelection({
+                      position: -1,
+                      block,
+                      path,
+                      region: "body",
+                    });
+                    const body = canonicalizeShopifyEditorBody(
+                      replaceBlockAtPath(canonicalBody, path, block),
+                    );
+                    latest.current = { ...latest.current, body };
+                    syncBodyEditor(latest.current);
+                    publishEditorDocument({ ...latest.current, body });
+                  }}
+                />
+              </main>
+              {value.media.kind === "paged"
+                ? renderRepeatingRegion("footer")
+                : null}
+            </div>
           </div>
           <div
             className="piqae-prosemirror-source"
@@ -1299,20 +1305,48 @@ export function compactCanvasAnnotations(value: PrintPacket): boolean {
 }
 
 export function canvasStyle(value: PrintPacket): CSSProperties {
-  const media = value.media;
   const margins = documentMargins(value);
   const { widthMm, heightMm } = canvasGeometry(value);
   const fixed = heightMm !== null;
-  const padding = fixed
-    ? `${(margins.top_mm / widthMm) * 100}% ${(margins.right_mm / widthMm) * 100}% ${(margins.bottom_mm / widthMm) * 100}% ${(margins.left_mm / widthMm) * 100}%`
-    : `${margins.top_mm}mm ${margins.right_mm}mm ${margins.bottom_mm}mm ${margins.left_mm}mm`;
+  const themeFontSize = value.theme?.font_size_pt ?? 10;
   return {
     "--piqae-media-width": `${widthMm}mm`,
     "--piqae-media-height": "auto",
     "--piqae-media-min-height": fixed ? "0" : "120mm",
+    "--piqae-mm": `calc(100cqw / ${widthMm})`,
+    "--piqae-pt": "calc(var(--piqae-mm) * 0.352777778)",
+    "--piqae-theme-font-size": `calc(${themeFontSize} * var(--piqae-pt))`,
+    "--piqae-theme-line-height": value.theme?.line_height ?? 1.25,
+    "--piqae-margin-top": physicalMm(margins.top_mm),
+    "--piqae-margin-right": physicalMm(margins.right_mm),
+    "--piqae-margin-bottom": physicalMm(margins.bottom_mm),
+    "--piqae-margin-left": physicalMm(margins.left_mm),
     aspectRatio: fixed ? `${widthMm} / ${heightMm}` : undefined,
-    padding,
+    padding: 0,
   } as CSSProperties;
+}
+
+export function canvasContentStyle(value: PrintPacket): CSSProperties {
+  const margins = documentMargins(value);
+  const { widthMm, heightMm } = canvasGeometry(value);
+  if (heightMm === null)
+    return {
+      margin: `${physicalMm(margins.top_mm)} ${physicalMm(margins.right_mm)} ${physicalMm(margins.bottom_mm)} ${physicalMm(margins.left_mm)}`,
+    };
+  return {
+    top: `${(margins.top_mm / heightMm) * 100}%`,
+    right: `${(margins.right_mm / widthMm) * 100}%`,
+    bottom: `${(margins.bottom_mm / heightMm) * 100}%`,
+    left: `${(margins.left_mm / widthMm) * 100}%`,
+  };
+}
+
+function physicalMm(value: number): string {
+  return `calc(${value} * var(--piqae-mm))`;
+}
+
+function physicalPt(value: number): string {
+  return `calc(${value} * var(--piqae-pt))`;
 }
 
 export type DocumentMarginEdge = "top" | "right" | "bottom" | "left";
@@ -1382,7 +1416,7 @@ export function withDocumentMargin(
  */
 export function barcodeCanvasStyle(
   block: Extract<Block, { type: "barcode" }>,
-  mediaKind: PrintPacket["media"]["kind"],
+  _mediaKind: PrintPacket["media"]["kind"],
 ): CSSProperties {
   const widthMm = Math.min(
     180,
@@ -1392,9 +1426,109 @@ export function barcodeCanvasStyle(
     80,
     Math.max(8, Number.isFinite(block.height_mm) ? block.height_mm : 8),
   );
+  const paddingMm = Math.min(
+    50,
+    Math.max(
+      0,
+      Number.isFinite(block.padding_mm) ? (block.padding_mm ?? 0) : 0,
+    ),
+  );
+  const gapMm = Math.min(
+    20,
+    Math.max(0, Number.isFinite(block.gap_mm) ? (block.gap_mm ?? 1.4) : 1.4),
+  );
+  const align = block.align ?? "left";
   return {
-    width: mediaKind === "label" ? `min(100%, ${widthMm}mm)` : `${widthMm}mm`,
-    "--piqae-barcode-height": `${heightMm}mm`,
+    width: physicalMm(widthMm + paddingMm * 2),
+    maxWidth: "100%",
+    marginInline:
+      align === "center" ? "auto" : align === "right" ? "auto 0" : "0 auto",
+    "--piqae-barcode-width": physicalMm(widthMm),
+    "--piqae-barcode-height": physicalMm(heightMm),
+    "--piqae-code-padding": physicalMm(paddingMm),
+    "--piqae-code-gap": physicalMm(gapMm),
+  } as CSSProperties;
+}
+
+/** QR placeholders use the same physical square as the PDF renderer. */
+export function qrCanvasStyle(
+  block: Extract<Block, { type: "qr" }>,
+): CSSProperties {
+  const sizeMm = Math.min(
+    2000,
+    Math.max(8, Number.isFinite(block.size_mm) ? block.size_mm : 8),
+  );
+  return {
+    width: physicalMm(sizeMm),
+    height: physicalMm(sizeMm),
+    "--piqae-qr-size": physicalMm(sizeMm),
+  } as CSSProperties;
+}
+
+function textCanvasStyle(
+  block: Extract<Block, { type: "paragraph" | "heading" }>,
+): CSSProperties {
+  const style = block.style;
+  const defaultHeadingSize =
+    block.type === "heading"
+      ? (block.level ?? 1) === 1
+        ? 22
+        : (block.level ?? 1) === 2
+          ? 18
+          : (block.level ?? 1) === 3
+            ? 15
+            : 12
+      : null;
+  const fontSize = style?.font_size_pt ?? defaultHeadingSize;
+  return {
+    textAlign: style?.align ?? "left",
+    fontSize: fontSize === null ? undefined : physicalPt(fontSize),
+    fontWeight: block.type === "heading" || style?.bold ? 700 : undefined,
+    fontStyle: style?.italic ? "italic" : undefined,
+    textDecoration: style?.underline ? "underline" : undefined,
+    color: style?.color ? printPacketColor(style.color) : undefined,
+  };
+}
+
+function printPacketColor(color: {
+  red: number;
+  green: number;
+  blue: number;
+}): string {
+  return `rgb(${color.red} ${color.green} ${color.blue})`;
+}
+
+function boxCanvasStyle(block: Extract<Block, { type: "box" }>): CSSProperties {
+  return {
+    padding: physicalMm(block.style?.padding_mm ?? 0),
+    background: block.style?.background
+      ? printPacketColor(block.style.background)
+      : undefined,
+    borderColor: block.style?.border_color
+      ? printPacketColor(block.style.border_color)
+      : undefined,
+    borderStyle: (block.style?.border_width_pt ?? 0) > 0 ? "solid" : undefined,
+    borderWidth: physicalPt(block.style?.border_width_pt ?? 0),
+  };
+}
+
+function tableCanvasStyle(
+  block: Extract<Block, { type: "table" }>,
+): CSSProperties {
+  return {
+    "--piqae-table-cell-padding": physicalMm(block.style?.cell_padding_mm ?? 1),
+    "--piqae-table-border-width": physicalPt(
+      block.style?.border_width_pt ?? 0.25,
+    ),
+    "--piqae-table-border-color": block.style?.border_color
+      ? printPacketColor(block.style.border_color)
+      : "#202223",
+    "--piqae-table-header-background": block.style?.header_background
+      ? printPacketColor(block.style.header_background)
+      : "transparent",
+    "--piqae-table-header-color": block.style?.header_text_color
+      ? printPacketColor(block.style.header_text_color)
+      : "currentColor",
   } as CSSProperties;
 }
 
@@ -1428,7 +1562,7 @@ export function safeAreaStyle(
   const { widthMm, heightMm } = canvasGeometry(value);
   if (heightMm === null)
     return {
-      inset: `${safe.top}mm ${safe.right}mm ${safe.bottom}mm ${safe.left}mm`,
+      inset: `${physicalMm(safe.top)} ${physicalMm(safe.right)} ${physicalMm(safe.bottom)} ${physicalMm(safe.left)}`,
     };
   return {
     top: `${(safe.top / heightMm) * 100}%`,
@@ -1621,7 +1755,7 @@ function CanvasBlock({
           textBlockElement.current = element;
         }}
         className={`piqae-canvas-text${selected ? " piqae-canvas-selected" : ""}`}
-        style={{ textAlign: block.style?.align ?? "left" }}
+        style={textCanvasStyle(block)}
         tabIndex={selectBeforeEdit ? 0 : undefined}
         aria-label={
           selectBeforeEdit
@@ -1682,6 +1816,7 @@ function CanvasBlock({
     return (
       <hr
         className={`${selectableClass.trim()}${selected ? " piqae-canvas-selected" : ""}`}
+        style={{ borderTopWidth: physicalPt(block.width_pt ?? 0.5) }}
         onClick={preview ? undefined : select}
       />
     );
@@ -1689,7 +1824,7 @@ function CanvasBlock({
     return (
       <div
         className={`piqae-canvas-spacer${selectableClass}${selected ? " piqae-canvas-selected" : ""}`}
-        style={{ height: `${Math.max(8, block.height_mm * 2)}px` }}
+        style={{ height: physicalMm(block.height_mm) }}
         onClick={select}
       >
         <span>{block.height_mm} mm space</span>
@@ -1719,8 +1854,8 @@ function CanvasBlock({
       <div
         className={`piqae-canvas-image${selectableClass}${selected ? " piqae-canvas-selected" : ""}`}
         style={{
-          width: `${Math.max(80, block.width_mm * 2)}px`,
-          height: `${Math.max(40, block.height_mm * 2)}px`,
+          width: physicalMm(block.width_mm),
+          height: physicalMm(block.height_mm),
         }}
         onClick={select}
       >
@@ -1728,19 +1863,52 @@ function CanvasBlock({
         <small>{block.resource}</small>
       </div>
     );
-  if (block.type === "qr" || block.type === "barcode")
+  if (block.type === "qr")
     return (
       <div
-        className={`piqae-canvas-code piqae-canvas-${block.type}${selectableClass}${selected ? " piqae-canvas-selected" : ""}`}
-        style={
-          block.type === "barcode"
-            ? barcodeCanvasStyle(block, mediaKind)
-            : undefined
-        }
+        className={`piqae-canvas-code piqae-canvas-qr${selectableClass}${selected ? " piqae-canvas-selected" : ""}`}
+        style={qrCanvasStyle(block)}
         onClick={select}
       >
-        <span aria-hidden="true">{block.type === "qr" ? "▦" : "▌█▌▌█▌█"}</span>
-        <small>{expressionLabel(block.value)}</small>
+        <svg aria-hidden="true" viewBox="0 0 29 29" shapeRendering="crispEdges">
+          <rect width="29" height="29" fill="white" />
+          <path
+            fill="currentColor"
+            d="M4 4h7v7H4V4m2 2v3h3V6H6m12-2h7v7h-7V4m2 2v3h3V6h-3M4 18h7v7H4v-7m2 2v3h3v-3H6m7-16h2v2h-2V4m0 4h3v3h-3V8m2 5h2v2h-2v-2m3 0h2v2h-2v-2m4 0h3v3h-3v-3m-9 4h3v2h-3v-2m5 0h2v4h-2v-4m4 1h3v2h-3v-2m-9 3h2v3h-2v-3m4 2h3v2h-3v-2m5 0h2v5h-2v-5m-8 4h3v2h-3v-2m5 0h2v2h-2v-2"
+          />
+        </svg>
+        <small className="piqae-canvas-code-annotation">
+          {expressionLabel(block.value)}
+        </small>
+      </div>
+    );
+  if (block.type === "barcode")
+    return (
+      <div
+        className={`piqae-canvas-code piqae-canvas-barcode${selectableClass}${selected ? " piqae-canvas-selected" : ""}`}
+        style={barcodeCanvasStyle(block, mediaKind)}
+        onClick={select}
+      >
+        <svg
+          aria-hidden="true"
+          viewBox="0 0 95 32"
+          preserveAspectRatio="none"
+          shapeRendering="crispEdges"
+        >
+          <path
+            fill="currentColor"
+            d="M0 0h2v32H0zm3 0h1v32H3zm3 0h3v32H6zm5 0h1v32h-1zm3 0h2v32h-2zm4 0h4v32h-4zm6 0h1v32h-1zm3 0h3v32h-3zm5 0h2v32h-2zm5 0h1v32h-1zm3 0h4v32h-4zm6 0h2v32h-2zm4 0h1v32h-1zm3 0h3v32h-3zm5 0h1v32h-1zm3 0h4v32h-4zm6 0h2v32h-2zm5 0h3v32h-3zm5 0h1v32h-1zm3 0h3v32h-3zm5 0h2v32h-2zm4 0h4v32h-4zm6 0h1v32h-1z"
+          />
+        </svg>
+        {block.human_readable ? (
+          <small className="piqae-canvas-code-value">
+            {expressionLabel(block.value)}
+          </small>
+        ) : (
+          <small className="piqae-canvas-code-annotation">
+            {expressionLabel(block.value)}
+          </small>
+        )}
       </div>
     );
   if (block.type === "table") {
@@ -1748,6 +1916,7 @@ function CanvasBlock({
     return (
       <div
         className={`piqae-canvas-table${selectableClass}${selected ? " piqae-canvas-selected" : ""}`}
+        style={tableCanvasStyle(block)}
         onClick={select}
       >
         <div className="piqae-canvas-table-row piqae-canvas-table-head">
@@ -2283,7 +2452,10 @@ function CanvasBlock({
           />
         )}
         {!preview && block.else?.length ? (
-          <>
+          <div
+            className="piqae-canvas-conditional-else"
+            data-conditional-branch="else"
+          >
             <span
               className="piqae-canvas-badge"
               data-label="Otherwise"
@@ -2307,7 +2479,7 @@ function CanvasBlock({
               onInsert={onInsert}
               onChange={onChange}
             />
-          </>
+          </div>
         ) : null}
       </section>
     );
@@ -2321,18 +2493,24 @@ function CanvasBlock({
       ? "piqae-canvas-grid"
       : block.type === "row"
         ? "piqae-canvas-row"
-        : "piqae-canvas-stack";
+        : block.type === "box"
+          ? "piqae-canvas-box"
+          : "piqae-canvas-stack";
   const style =
     block.type === "grid"
       ? {
           gridTemplateColumns: block.columns
             .map((column) => `${column}fr`)
             .join(" "),
-          gap: `${block.gap_mm ?? 0}mm`,
+          gap: physicalMm(block.gap_mm ?? 0),
         }
       : block.type === "repeat"
         ? undefined
-        : { gap: `${"gap_mm" in block ? (block.gap_mm ?? 0) : 0}mm` };
+        : block.type === "box"
+          ? boxCanvasStyle(block)
+          : {
+              gap: physicalMm("gap_mm" in block ? (block.gap_mm ?? 0) : 0),
+            };
   const batchLabel =
     batchPresentation === "one_order_per_page"
       ? "One page per order"
@@ -3532,6 +3710,40 @@ function selectionFields({
           max={80}
           disabled={disabled}
           onChange={(height_mm) => onChange({ ...block, height_mm })}
+        />
+        <BarSegmented
+          label="Alignment"
+          value={block.align ?? "left"}
+          disabled={disabled}
+          options={[
+            ["left", "Left"],
+            ["center", "Centre"],
+            ["right", "Right"],
+          ]}
+          onChange={(align) =>
+            onChange({
+              ...block,
+              align: align as "left" | "center" | "right",
+            })
+          }
+        />
+        <BarNumber
+          label="Padding"
+          unit="mm"
+          value={block.padding_mm ?? 0}
+          min={0}
+          max={50}
+          disabled={disabled}
+          onChange={(padding_mm) => onChange({ ...block, padding_mm })}
+        />
+        <BarNumber
+          label="Value gap"
+          unit="mm"
+          value={block.gap_mm ?? 1.4}
+          min={0}
+          max={20}
+          disabled={disabled}
+          onChange={(gap_mm) => onChange({ ...block, gap_mm })}
         />
         <BarToggle
           label="Show value below"
@@ -4876,6 +5088,9 @@ function defaultBarcode(): Block {
     width_mm: 48,
     height_mm: 16,
     human_readable: true,
+    align: "left",
+    padding_mm: 0,
+    gap_mm: 1.4,
   };
 }
 function defaultTable(): Block {
