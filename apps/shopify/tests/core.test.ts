@@ -206,6 +206,48 @@ describe("Shopify boundary", () => {
       },
     });
   });
+  it("reports standard history access without assuming why Shopify hid the order", async () => {
+    const limitedAdmin = {
+      graphql: vi.fn<AdminGraphql["graphql"]>(async (query) =>
+        query.includes("PiqaeGrantedAccessScopes")
+          ? Response.json({
+              data: {
+                currentAppInstallation: {
+                  accessScopes: [{ handle: "read_orders" }],
+                },
+              },
+            })
+          : Response.json({ data: { order: null } }),
+      ),
+    };
+    await expect(fetchOrders(limitedAdmin, ["42"])).rejects.toMatchObject({
+      name: "ShopifyOrderUnavailableError",
+      reason: "standard_history_only",
+    });
+    expect(limitedAdmin.graphql).toHaveBeenCalledTimes(2);
+  });
+  it("does not mislabel a missing order when all-order access is already granted", async () => {
+    const fullAccessAdmin = {
+      graphql: vi.fn<AdminGraphql["graphql"]>(async (query) =>
+        query.includes("PiqaeGrantedAccessScopes")
+          ? Response.json({
+              data: {
+                currentAppInstallation: {
+                  accessScopes: [
+                    { handle: "read_orders" },
+                    { handle: "read_all_orders" },
+                  ],
+                },
+              },
+            })
+          : Response.json({ data: { order: null } }),
+      ),
+    };
+    await expect(fetchOrders(fullAccessAdmin, ["42"])).rejects.toMatchObject({
+      name: "ShopifyOrderUnavailableError",
+      reason: "unavailable",
+    });
+  });
   it("normalizes only Code128 candidates that fit the fixed product label", () => {
     expect(normalizedLabelCode128Candidate("VALID-BARCODE", "VALID-SKU")).toBe(
       "VALID-BARCODE",

@@ -32,6 +32,20 @@ export class ShopifyAdminApiError extends Error {
   }
 }
 
+export class ShopifyOrderUnavailableError extends Error {
+  readonly reason: "standard_history_only" | "unavailable";
+
+  constructor(reason: "standard_history_only" | "unavailable") {
+    super(
+      reason === "standard_history_only"
+        ? "Shopify order is unavailable with standard order-history access"
+        : "Shopify order is unavailable to the app",
+    );
+    this.name = "ShopifyOrderUnavailableError";
+    this.reason = reason;
+  }
+}
+
 export interface NormalizedOrder {
   id: string;
   name: string;
@@ -133,6 +147,11 @@ const ORDER_QUERY = `#graphql
      totalTaxSet { shopMoney { amount } }
      totalPriceSet { shopMoney { amount } }
    }
+ }`;
+
+const ACCESS_SCOPES_QUERY = `#graphql
+ query PiqaeGrantedAccessScopes {
+   currentAppInstallation { accessScopes { handle } }
  }`;
 
 export function normalizeOrderGid(value: string): string {
@@ -259,6 +278,11 @@ export async function fetchOrders(
   const unique = [...new Set(ids.map(normalizeOrderGid))];
   if (unique.length < 1 || unique.length > 250)
     throw new Error("select between 1 and 250 orders");
+  let grantedScopesPromise: Promise<Set<string> | null> | undefined;
+  const grantedScopes = () => {
+    grantedScopesPromise ??= fetchGrantedAccessScopes(admin);
+    return grantedScopesPromise;
+  };
   const orders = await boundedMap(unique, 8, async (id) => {
     const first = await graphqlWithRetry(admin, ORDER_QUERY, {
       id,
@@ -271,7 +295,18 @@ export async function fetchOrders(
     if (body.errors?.length)
       throw new Error("Shopify Admin API rejected the order query");
     const order = body.data?.order;
-    if (!order) throw new Error(`order not found: ${id}`);
+    if (!order) {
+      const scopes = await grantedScopes();
+      // Shopify deliberately returns null for inaccessible resources. Without
+      // an order timestamp, the API cannot distinguish an older order from a
+      // deleted or otherwise unavailable one. The granted scopes still let the
+      // UI explain the 60-day boundary without claiming a cause it cannot prove.
+      throw new ShopifyOrderUnavailableError(
+        scopes && !scopes.has("read_all_orders")
+          ? "standard_history_only"
+          : "unavailable",
+      );
+    }
     const allLines = [...order.lineItems.nodes];
     let pageInfo = order.lineItems.pageInfo;
     for (let page = 1; pageInfo?.hasNextPage; page += 1) {
@@ -334,6 +369,26 @@ export async function fetchOrders(
   });
   assertOrdersPayload(orders);
   return orders;
+}
+
+async function fetchGrantedAccessScopes(
+  admin: AdminGraphql,
+): Promise<Set<string> | null> {
+  try {
+    const body = await graphqlWithRetry(admin, ACCESS_SCOPES_QUERY, {});
+    if (body.errors?.length) return null;
+    const values = body.data?.currentAppInstallation?.accessScopes;
+    if (!Array.isArray(values)) return null;
+    return new Set(
+      values.flatMap((value: unknown) => {
+        if (!value || typeof value !== "object") return [];
+        const handle = (value as { handle?: unknown }).handle;
+        return typeof handle === "string" ? [handle] : [];
+      }),
+    );
+  } catch {
+    return null;
+  }
 }
 
 /**
