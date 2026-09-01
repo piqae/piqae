@@ -13,7 +13,7 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 /// Changes whenever otherwise-valid input could produce different PDF bytes.
-pub const RENDERER_ABI: &str = "printpacket.pdf-renderer/v1";
+pub const RENDERER_ABI: &str = "printpacket.pdf-renderer/v2";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]

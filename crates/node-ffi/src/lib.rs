@@ -45,7 +45,7 @@ use thiserror::Error;
 pub const NODE_ABI_VERSION: u16 = 1;
 pub const NODE_CONTRACT_VERSION: u16 = 2;
 const PRINTPACKET_CONTRACT: &str = "printpacket/v1";
-const PRINTPACKET_RENDERER_ABI: &str = "printpacket.pdf-renderer/v1";
+const PRINTPACKET_RENDERER_ABI: &str = "printpacket.pdf-renderer/v2";
 const PRINTPACKET_RESOURCE_ABI: &str = "printpacket.resources/v1";
 const PRINTPACKET_CACHE_PROFILE: &str = "printpacket.render-cache/v1";
 const MAX_ABI_INPUT_BYTES: usize = 24 * 1024 * 1024;
@@ -1798,7 +1798,7 @@ fn printpacket_native_capabilities() -> PrintPacketNativeCapabilities {
         renderer_abi: PRINTPACKET_RENDERER_ABI,
         resource_abi: PRINTPACKET_RESOURCE_ABI,
         renderer_build: capabilities.implementation_version,
-        conformance_profile: printpacket::CONFORMANCE_CORE_V1.into(),
+        conformance_profile: printpacket::CONFORMANCE_CORE_V2.into(),
         cache_profile: PRINTPACKET_CACHE_PROFILE,
         supported_features: capabilities.features,
         supported_output_targets: capabilities.output_targets,
@@ -1856,7 +1856,7 @@ fn render_printpacket(
         .unwrap_or(0);
     let requirement = RenderRequirement {
         specification_version: manifest.specification_version.clone(),
-        conformance_suite: printpacket::CONFORMANCE_CORE_V1.into(),
+        conformance_suite: printpacket::CONFORMANCE_CORE_V2.into(),
         required_features: manifest.required_features.clone(),
         output_target: output_target.clone(),
         template_bytes: manifest.canonical_bytes,
@@ -2193,7 +2193,7 @@ mod tests {
         );
         assert_eq!(
             capabilities["data"]["capabilities"]["renderer_abi"],
-            "printpacket.pdf-renderer/v1"
+            "printpacket.pdf-renderer/v2"
         );
         assert_eq!(
             capabilities["data"]["capabilities"]["resource_abi"],

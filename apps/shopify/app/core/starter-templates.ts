@@ -209,7 +209,19 @@ const documents = {
               children: [
                 text("PACKING SLIP", 1),
                 currentValue(["name"], true),
-                currentValue(["createdAt"]),
+                {
+                  type: "paragraph",
+                  content: [
+                    {
+                      type: "value",
+                      value: {
+                        type: "format_date",
+                        value: current("createdAt"),
+                        format: "day_month_year",
+                      },
+                    },
+                  ],
+                },
               ],
             },
           ],

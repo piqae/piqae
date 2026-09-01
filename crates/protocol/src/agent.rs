@@ -1172,7 +1172,7 @@ mod route_protocol_tests {
     #[test]
     fn print_packet_offer_requires_the_complete_negotiated_descriptor() {
         let render = serde_json::from_value::<PrintPacketNodeRender>(serde_json::json!({
-            "renderer_abi": "printpacket.pdf-renderer/v1",
+            "renderer_abi": "printpacket.pdf-renderer/v2",
             "resource_abi": "printpacket.resources/v1",
             "specification": {},
             "input": {},

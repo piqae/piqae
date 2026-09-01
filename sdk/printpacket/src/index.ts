@@ -1,6 +1,7 @@
 export const PRINTPACKET_V1 = "printpacket/v1" as const;
 export const PDF_BASE14_V1 = "printpacket.pdf-base14/v1" as const;
 export const CONFORMANCE_CORE_V1 = "printpacket.conformance/core-v1" as const;
+export const CONFORMANCE_CORE_V2 = "printpacket.conformance/core-v2" as const;
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -240,7 +241,7 @@ function canonicalTarget(target: OutputTarget): string {
     : JSON.stringify({ kind: target.kind, language: target.language, profile: target.profile, dpi: target.dpi, printable_width_dots: target.printable_width_dots });
 }
 export async function renderCacheKey(manifest: TemplateManifest, data: JsonObject, target: OutputTarget = { kind: "pdf", profile: PDF_BASE14_V1 }): Promise<string> {
-  const prefix = encoder.encode(`printpacket.render-cache/v1\0${manifest.canonical_sha256}\0${CONFORMANCE_CORE_V1}\0${canonicalTarget(target)}\0`);
+  const prefix = encoder.encode(`printpacket.render-cache/v1\0${manifest.canonical_sha256}\0${CONFORMANCE_CORE_V2}\0${canonicalTarget(target)}\0`);
   const dataBytes = canonicalDataBytes(data);
   const input = new Uint8Array(prefix.byteLength + dataBytes.byteLength);
   input.set(prefix);

@@ -27,6 +27,19 @@ const label = definePacket({
 preflightPacket(label); // throws before an API or native-SDK call on bad shape
 ```
 
+## Inline text layout
+
+Inline nodes are concatenated exactly; a renderer must not invent a separator
+between adjacent nodes. Horizontal whitespace present in the resulting content
+collapses to one breakable space. A `line_break` node, or an LF, CRLF, or CR in
+an evaluated text value, starts a new line. Leading whitespace on a new or
+automatically wrapped line is discarded.
+
+Conforming PDF rendering measures the declared built-in font face rather than
+positioning separately measured words with an average character width. This
+keeps wrapping and alignment deterministic across editor preview, download, and
+print output.
+
 This package remains marked private until the independent PrintPacket package
 scope, repository, changelog, provenance, and publication ownership are set up.
 It is already usable as a monorepo workspace package.

@@ -1865,7 +1865,7 @@ mod tests {
     fn virtual_print_packet_capabilities() -> piqae_protocol::agent::DocumentRenderCapabilities {
         let neutral = printpacket::RendererCapabilities::reference_pdf();
         piqae_protocol::agent::DocumentRenderCapabilities {
-            renderer_abi: Some("printpacket.pdf-renderer/v1".into()),
+            renderer_abi: Some("printpacket.pdf-renderer/v2".into()),
             resource_abi: Some("printpacket.resources/v1".into()),
             persistent_cache: true,
             image_media_types: vec!["image/jpeg".into()],
@@ -1883,7 +1883,7 @@ mod tests {
                             .to_owned()
                     })
                     .collect(),
-                conformance_profiles: vec![printpacket::CONFORMANCE_CORE_V1.into()],
+                conformance_profiles: vec![printpacket::CONFORMANCE_CORE_V2.into()],
                 output_profiles: vec![piqae_protocol::agent::PrintPacketOutputProfile::Pdf {
                     id: printpacket::PDF_BASE14_V1.into(),
                     media_type: "application/pdf".into(),
@@ -2019,7 +2019,7 @@ mod tests {
             }),
             ("renderer ABI", {
                 let mut value = supported.clone();
-                value.renderer_abi = Some("printpacket.pdf-renderer/v2".into());
+                value.renderer_abi = Some("printpacket.pdf-renderer/v1".into());
                 value
             }),
         ] {

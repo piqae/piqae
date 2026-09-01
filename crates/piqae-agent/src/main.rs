@@ -6880,7 +6880,7 @@ async fn materialize_descriptor(
                     .required_feature_ids
                     .iter()
                     .all(|required| supported_features.contains(required))
-                && render.conformance_profile == printpacket::CONFORMANCE_CORE_V1
+                && render.conformance_profile == printpacket::CONFORMANCE_CORE_V2
                 && render.output_profile == printpacket::PDF_BASE14_V1
                 && render.expected_page_count > 0
                 && template_bytes <= neutral.limits.max_template_bytes

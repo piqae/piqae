@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PDF_BASE14_V1, canonicalData, definePacket, preflightPacket, renderCacheKey, requiredFeatures } from "../src/index.js";
+import { CONFORMANCE_CORE_V2, PDF_BASE14_V1, canonicalData, definePacket, preflightPacket, renderCacheKey, requiredFeatures } from "../src/index.js";
 
 describe("PrintPacket developer contract", () => {
   it("types and preflights one fixed barcode label", () => {
@@ -12,6 +12,7 @@ describe("PrintPacket developer contract", () => {
     expect(requiredFeatures(label)).toContain("media_label");
     expect(requiredFeatures(label)).toContain("barcode_code128");
     expect(PDF_BASE14_V1).toBe("printpacket.pdf-base14/v1");
+    expect(CONFORMANCE_CORE_V2).toBe("printpacket.conformance/core-v2");
   });
 
   it("negotiates features used only in page regions", () => {
@@ -59,7 +60,7 @@ describe("PrintPacket developer contract", () => {
     }, {
       lines: [{ name: "Flat white", total: "$5.50" }, { name: "Bagel", total: "$8.00" }],
       receipt_url: "https://example.invalid/r/R-1042"
-    })).resolves.toBe("67ee0fdf2f856773a6fd7ef05af4823ac98884db695ea2073fe4b5be07a09eb9");
+    })).resolves.toBe("cbaf6b9a0436ff9ca8968b1c7f2fb845af7d1a40f09e1432e1df623027defefa");
   });
 
   it("rejects excessive nesting before an API or SDK call", () => {

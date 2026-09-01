@@ -484,10 +484,13 @@
                       {
                         "type": "value",
                         "value": {
-                          "type": "current_path",
-                          "path": ["createdAt"]
-                        },
-                        "style": {}
+                          "type": "format_date",
+                          "value": {
+                            "type": "current_path",
+                            "path": ["createdAt"]
+                          },
+                          "format": "day_month_year"
+                        }
                       }
                     ]
                   }

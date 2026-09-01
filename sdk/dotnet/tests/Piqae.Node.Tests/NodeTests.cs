@@ -210,7 +210,7 @@ public sealed class NodeTests
         var label = ReadPrintPacketFixture("production-label-100x50");
         var capabilities = node.GetPrintPacketCapabilities();
         Assert.Equal("printpacket/v1", capabilities.Contract);
-        Assert.Equal("printpacket.pdf-renderer/v1", capabilities.RendererAbi);
+        Assert.Equal("printpacket.pdf-renderer/v2", capabilities.RendererAbi);
         Assert.Equal("printpacket.resources/v1", capabilities.ResourceAbi);
         Assert.Equal("printpacket.render-cache/v1", capabilities.CacheProfile);
         Assert.True(capabilities.DirectOfflineRendering);
