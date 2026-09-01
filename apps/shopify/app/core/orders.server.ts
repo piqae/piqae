@@ -129,8 +129,54 @@ const ORDER_QUERY = `#graphql
      shippingAddress { name company address1 address2 city province zip country phone }
      billingAddress { name company address1 address2 city province zip country phone }
      note statusPageUrl shippingLine { title }
-     metafieldsByIdentifiers: metafields(first: 20, keys: $orderFields) { nodes { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } } }
-     lineItems(first: 100, after: $after) { nodes { id title sku quantity originalUnitPriceSet { shopMoney { amount } } discountedTotalSet { shopMoney { amount } } product { id title vendor productType category { id name fullName level ancestorIds } metafieldsByIdentifiers: metafields(first: 20, keys: $productFields) { nodes { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } } } } variant { id title barcode metafieldsByIdentifiers: metafields(first: 20, keys: $variantFields) { nodes { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } } } } } } pageInfo { hasNextPage endCursor } }
+     metafieldsByIdentifiers: metafields(first: 20, keys: $orderFields) {
+       nodes {
+         namespace key type jsonValue
+         reference {
+           ... on Metaobject {
+             id type handle displayName
+             fields { key value jsonValue }
+           }
+         }
+       }
+     }
+     lineItems(first: 100, after: $after) {
+       nodes {
+         id title sku quantity
+         originalUnitPriceSet { shopMoney { amount } }
+         discountedTotalSet { shopMoney { amount } }
+         product {
+           id title vendor productType
+           category { id name fullName level ancestorIds }
+           metafieldsByIdentifiers: metafields(first: 20, keys: $productFields) {
+             nodes {
+               namespace key type jsonValue
+               reference {
+                 ... on Metaobject {
+                   id type handle displayName
+                   fields { key value jsonValue }
+                 }
+               }
+             }
+           }
+         }
+         variant {
+           id title barcode
+           metafieldsByIdentifiers: metafields(first: 20, keys: $variantFields) {
+             nodes {
+               namespace key type jsonValue
+               reference {
+                 ... on Metaobject {
+                   id type handle displayName
+                   fields { key value jsonValue }
+                 }
+               }
+             }
+           }
+         }
+       }
+       pageInfo { hasNextPage endCursor }
+     }
      subtotalPriceSet { shopMoney { amount } }
      totalTaxSet { shopMoney { amount } }
      totalPriceSet { shopMoney { amount } }
@@ -164,10 +210,58 @@ const DRAFT_ORDER_QUERY = `#graphql
  query PiqaePrintableDraftOrder($id: ID!, $after: String, $orderFields: [String!]!, $productFields: [String!]!, $variantFields: [String!]!) {
    draftOrder(id: $id) {
      id name createdAt currencyCode email note
-     metafieldsByIdentifiers: metafields(first: 20, keys: $orderFields) { nodes { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } } }
+     metafieldsByIdentifiers: metafields(first: 20, keys: $orderFields) {
+       nodes {
+         namespace key type jsonValue
+         reference {
+           ... on Metaobject {
+             id type handle displayName
+             fields { key value jsonValue }
+           }
+         }
+       }
+     }
      shippingAddress { name company address1 address2 city province zip country phone }
-     lineItems(first: 100, after: $after) { nodes { id title sku quantity originalUnitPriceSet { shopMoney { amount } } discountedTotalSet { shopMoney { amount } } product { id title vendor productType category { id name fullName level ancestorIds } metafieldsByIdentifiers: metafields(first: 20, keys: $productFields) { nodes { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } } } } variant { id title barcode metafieldsByIdentifiers: metafields(first: 20, keys: $variantFields) { nodes { namespace key type jsonValue reference { ... on Metaobject { id type handle displayName fields { key value jsonValue } } } } } } } } pageInfo { hasNextPage endCursor } }
-     subtotalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } }
+     lineItems(first: 100, after: $after) {
+       nodes {
+         id title sku quantity
+         originalUnitPriceSet { shopMoney { amount } }
+         discountedTotalSet { shopMoney { amount } }
+         product {
+           id title vendor productType
+           category { id name fullName level ancestorIds }
+           metafieldsByIdentifiers: metafields(first: 20, keys: $productFields) {
+             nodes {
+               namespace key type jsonValue
+               reference {
+                 ... on Metaobject {
+                   id type handle displayName
+                   fields { key value jsonValue }
+                 }
+               }
+             }
+           }
+         }
+         variant {
+           id title barcode
+           metafieldsByIdentifiers: metafields(first: 20, keys: $variantFields) {
+             nodes {
+               namespace key type jsonValue
+               reference {
+                 ... on Metaobject {
+                   id type handle displayName
+                   fields { key value jsonValue }
+                 }
+               }
+             }
+           }
+         }
+       }
+       pageInfo { hasNextPage endCursor }
+     }
+     subtotalPriceSet { shopMoney { amount } }
+     totalTaxSet { shopMoney { amount } }
+     totalPriceSet { shopMoney { amount } }
    }
  }`;
 

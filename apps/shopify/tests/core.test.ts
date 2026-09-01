@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { CredentialVault } from "../app/core/credentials.server";
 import {
+  fetchDraftOrders,
   fetchOrders,
   normalizedLabelCode128Candidate,
   normalizeMoneyAmount,
@@ -132,6 +133,20 @@ const admin = {
     Response.json({ data: { order } }),
   ),
 };
+
+function expectBalancedGraphqlDelimiters(query: string) {
+  const pairs: Record<string, string> = { "}": "{", ")": "(", "]": "[" };
+  const stack: string[] = [];
+  for (const character of query) {
+    if (character === "{" || character === "(" || character === "[")
+      stack.push(character);
+    else if (character in pairs)
+      expect(stack.pop(), `unexpected ${character} in GraphQL document`).toBe(
+        pairs[character],
+      );
+  }
+  expect(stack, "unclosed GraphQL document delimiter").toEqual([]);
+}
 
 async function publishPinnedDocument(
   workflow: MemoryWorkflowRepository,
@@ -355,6 +370,7 @@ describe("Shopify boundary", () => {
         .internal_cost,
     ).toBeUndefined();
     const [query, options] = admin.graphql.mock.calls[0] ?? [];
+    expectBalancedGraphqlDelimiters(query!);
     expect(query).toContain("metafieldsByIdentifiers: metafields");
     expect(query).not.toContain("HasMetafieldsIdentifier");
     expect(options).toMatchObject({
@@ -362,6 +378,28 @@ describe("Shopify boundary", () => {
         productFields: ["custom.origin"],
       },
     });
+  });
+
+  it("keeps the stable draft-order GraphQL document structurally balanced", async () => {
+    const draftAdmin = {
+      graphql: vi.fn<AdminGraphql["graphql"]>(async () =>
+        Response.json({
+          data: {
+            draftOrder: {
+              ...order,
+              email: "customer@example.com",
+              customer: undefined,
+              billingAddress: undefined,
+              statusPageUrl: undefined,
+              shippingLine: undefined,
+            },
+          },
+        }),
+      ),
+    };
+    await expect(fetchDraftOrders(draftAdmin, ["42"])).resolves.toHaveLength(1);
+    const [query] = draftAdmin.graphql.mock.calls[0] ?? [];
+    expectBalancedGraphqlDelimiters(query!);
   });
 
   it("rejects broad or excessive Shopify data bindings", async () => {
