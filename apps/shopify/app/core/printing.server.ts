@@ -114,14 +114,22 @@ export class ShopifyPrintingService {
       { expires_in_seconds: 900 },
       `shopify-preview-${digest}`,
     );
+    const previewToken = this.previewTokens?.issuePreview({
+      shop,
+      renderId: completed.id,
+      previewId: preview.id,
+    });
     return {
       previewId: preview.id,
       renderId: completed.id,
       expiresAt: preview.expires_at,
       renderCost: measuredRenderCost(completed, renderInput, orders.length),
-      artifactUrl: this.previewTokens
-        ? `${this.appUrl}/api/public/previews/artifact?token=${encodeURIComponent(this.previewTokens.issuePreview({ shop, renderId: completed.id, previewId: preview.id }))}`
+      artifactUrl: previewToken
+        ? `${this.appUrl}/api/public/previews/artifact?token=${encodeURIComponent(previewToken)}`
         : `${this.appUrl}/api/print/previews/${encodeURIComponent(preview.id)}/artifact?renderId=${encodeURIComponent(completed.id)}`,
+      previewImageUrl: previewToken
+        ? `${this.appUrl}/api/public/previews/image?token=${encodeURIComponent(previewToken)}`
+        : null,
     };
   }
 

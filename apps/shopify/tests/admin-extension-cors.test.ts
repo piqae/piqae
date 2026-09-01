@@ -28,6 +28,9 @@ describe("Admin extension CORS preflight", () => {
     expect(
       isAdminExtensionPreflightPath("/api/print/previews/preview_1/approve"),
     ).toBe(true);
+    expect(isAdminExtensionPreflightPath("/api/public/previews/image")).toBe(
+      true,
+    );
     expect(isAdminExtensionPreflightPath("/api/print/admin/options")).toBe(
       false,
     );

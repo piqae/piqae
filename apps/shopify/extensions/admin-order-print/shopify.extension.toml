@@ -8,4 +8,4 @@ type = "ui_extension"
 
 [[extensions.targeting]]
 module = "./src/PrintAction.jsx"
-target = "admin.order-details.print-action.render"
+target = "admin.order-details.action.render"

@@ -974,12 +974,13 @@ describe("Shopify boundary", () => {
         },
       },
     } as never;
+    const previewTokens = new DownloadTokenVault(Buffer.alloc(32, 5));
     const service = new ShopifyPrintingService(
       repository,
       vault,
       () => client,
       "https://app.example",
-      undefined,
+      previewTokens,
       workflow,
     );
     const preview = await service.previewOrders({
@@ -989,6 +990,12 @@ describe("Shopify boundary", () => {
       templateId: "preview-invoice",
       requestKey: "preview-click",
     });
+    expect(preview.artifactUrl).toMatch(
+      /^https:\/\/app\.example\/api\/public\/previews\/artifact\?token=/,
+    );
+    expect(preview.previewImageUrl).toMatch(
+      /^https:\/\/app\.example\/api\/public\/previews\/image\?token=/,
+    );
     const result = await service.approvePreview({
       shop,
       previewId: preview.previewId,

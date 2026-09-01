@@ -13,8 +13,8 @@ const extensionConfigs = [
   "extensions/admin-draft-bulk-print/shopify.extension.toml",
 ];
 const allowedTargets = new Set([
-  "admin.order-details.print-action.render",
-  "admin.order-index.selection-print-action.render",
+  "admin.order-details.action.render",
+  "admin.order-index.selection-action.render",
   "pos.order-details.action.menu-item.render",
   "pos.order-details.action.render",
   "pos.purchase.post.action.menu-item.render",
