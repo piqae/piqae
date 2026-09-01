@@ -8,6 +8,7 @@ same reviewed source commit.
 
 ### Added
 
+- Shopify-approved all-order history access for historical document reprints.
 - Commit-bound hosted health evidence for protected Shopify promotions.
 - Automated post-CI staging deployment and manual production release workflow.
 - Single-store pilot, rollback, privacy, and ongoing operations runbook.
@@ -23,6 +24,7 @@ same reviewed source commit.
 ### Known limitations
 
 - Shopify approval and live-store/POS evidence remain open.
-- Standard order-history scope applies; `read_all_orders` is not requested.
+- Existing stores must approve the newly released all-orders permission before
+  historical orders become available to Piqae.
 - International typography, independent security review, production soak, and
   physical-printer certification remain open release gates.

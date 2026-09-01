@@ -38,8 +38,10 @@ first approved live-store pilot.
 3. Set the application, callback, webhook, app-proxy, and customer extension
    origins to the matching HTTPS Railway origin.
 4. Select only the protected customer fields required to render the supported
-   documents. `read_all_orders` remains absent until Shopify separately approves
-   it and the product documents the expanded history.
+   documents. Piqae's `read_all_orders` access is approved and declared beside
+   `read_orders`; retain the approval evidence with the Shopify release record.
+   Existing stores are prompted for the added required scope when they next open
+   the app after that configuration version is released.
 5. In the app's **Settings → App Automation Token**, create an app-scoped
    token. Store it once in the GitHub production environment as
    `SHOPIFY_APP_AUTOMATION_TOKEN`. Tokens expire after at most six months;

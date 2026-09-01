@@ -52,6 +52,8 @@ import {
 import { templateDigest } from "../app/core/template-digest.server";
 import { seedStarterTemplates } from "../app/core/template-index.server";
 import { ACCOUNT_DEFAULT_DOCUMENT_ID } from "../app/core/admin-print-options.server";
+import { templatesIndexUrl } from "../app/routes/app._index";
+import { configuredShopifyScopes } from "../app/core/shopify-scopes.server";
 
 const shop = "fixture-shop.myshopify.com";
 const order = {
@@ -160,6 +162,32 @@ async function publishPinnedDocument(
 }
 
 describe("Shopify boundary", () => {
+  it("fails closed unless all-order access is paired with an order scope", () => {
+    expect(configuredShopifyScopes()).toEqual(
+      expect.arrayContaining(["read_orders", "read_all_orders"]),
+    );
+    expect(() => configuredShopifyScopes("read_orders")).toThrow(
+      "must include Shopify-approved read_all_orders",
+    );
+    expect(() =>
+      configuredShopifyScopes("read_all_orders,read_products"),
+    ).toThrow("must pair read_all_orders with read_orders or write_orders");
+    expect(configuredShopifyScopes("read_all_orders,write_orders")).toEqual([
+      "read_all_orders",
+      "write_orders",
+    ]);
+  });
+
+  it("preserves Shopify launch parameters when opening the templates home", () => {
+    expect(
+      templatesIndexUrl(
+        "https://shopify.piqae.com/app?shop=fixture-shop.myshopify.com&host=encoded-admin&embedded=1",
+      ),
+    ).toBe(
+      "/app/templates?shop=fixture-shop.myshopify.com&host=encoded-admin&embedded=1",
+    );
+  });
+
   it("uses named checkbox values and enforces the Admin bulk limit", () => {
     const form = new FormData();
     form.append("orderIds", "gid://shopify/Order/1");
