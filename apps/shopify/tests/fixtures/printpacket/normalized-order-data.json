@@ -1,7 +1,12 @@
 {
   "shop": {
     "name": "Fixture Coffee",
-    "domain": "fixture-coffee.myshopify.com"
+    "domain": "fixture-coffee.myshopify.com",
+    "primaryDomain": "fixture-coffee.example",
+    "email": "hello@fixture-coffee.example",
+    "address": {
+      "formatted": "Fixture Coffee\n1 Roastery Lane\nChristchurch 8011\nNew Zealand"
+    }
   },
   "orders": [
     {

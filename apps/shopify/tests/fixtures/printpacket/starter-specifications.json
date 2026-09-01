@@ -6,15 +6,15 @@
       "size": "a4",
       "orientation": "portrait",
       "margins": {
-        "top_mm": 14,
-        "right_mm": 14,
-        "bottom_mm": 16,
-        "left_mm": 14
+        "top_mm": 13,
+        "right_mm": 13,
+        "bottom_mm": 14,
+        "left_mm": 13
       }
     },
     "theme": {
-      "font_size_pt": 10,
-      "line_height": 1.35,
+      "font_size_pt": 9,
+      "line_height": 1.25,
       "text_color": {
         "red": 32,
         "green": 34,
@@ -39,78 +39,237 @@
           {
             "type": "grid",
             "columns": [2, 1],
-            "gap_mm": 8,
+            "gap_mm": 12,
             "children": [
               {
-                "type": "paragraph",
-                "content": [
+                "type": "conditional",
+                "condition": {
+                  "type": "exists",
+                  "value": {
+                    "type": "path",
+                    "path": ["shop", "logo"]
+                  }
+                },
+                "then": [
                   {
-                    "type": "value",
-                    "value": {
+                    "type": "image_value",
+                    "resource": {
                       "type": "path",
-                      "path": ["shop", "name"]
+                      "path": ["shop", "logo"]
                     },
-                    "style": {
-                      "bold": true
-                    }
+                    "width_mm": 50,
+                    "height_mm": 18,
+                    "fit": "scale_down"
+                  }
+                ],
+                "else": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "value",
+                        "value": {
+                          "type": "path",
+                          "path": ["shop", "name"]
+                        },
+                        "style": {
+                          "bold": true,
+                          "font_size_pt": 18
+                        }
+                      }
+                    ],
+                    "style": {}
                   }
                 ]
               },
               {
-                "type": "heading",
-                "level": 1,
-                "content": [
+                "type": "stack",
+                "gap_mm": 0.8,
+                "children": [
                   {
-                    "type": "text",
-                    "value": "INVOICE"
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "value": "INVOICE",
+                        "style": {
+                          "bold": true
+                        }
+                      }
+                    ],
+                    "style": {
+                      "align": "right",
+                      "font_size_pt": 20
+                    }
+                  },
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "value": "Invoice ",
+                        "style": {
+                          "bold": true
+                        }
+                      },
+                      {
+                        "type": "value",
+                        "value": {
+                          "type": "current_path",
+                          "path": ["name"]
+                        },
+                        "style": {
+                          "bold": true
+                        }
+                      }
+                    ],
+                    "style": {
+                      "align": "right",
+                      "font_size_pt": 9
+                    }
+                  },
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "value",
+                        "value": {
+                          "type": "format_date",
+                          "value": {
+                            "type": "current_path",
+                            "path": ["createdAt"]
+                          },
+                          "format": "day_month_year"
+                        }
+                      }
+                    ],
+                    "style": {
+                      "align": "right",
+                      "font_size_pt": 9
+                    }
                   }
                 ]
               }
             ]
           },
           {
-            "type": "paragraph",
-            "content": [
-              {
-                "type": "value",
-                "value": {
-                  "type": "current_path",
-                  "path": ["name"]
-                },
-                "style": {
-                  "bold": true
-                }
-              }
-            ]
+            "type": "spacer",
+            "height_mm": 10
           },
           {
-            "type": "conditional",
-            "condition": {
-              "type": "exists",
-              "value": {
-                "type": "current_path",
-                "path": ["shippingAddress", "formatted"]
-              }
-            },
-            "then": [
+            "type": "grid",
+            "columns": [1, 1],
+            "gap_mm": 14,
+            "children": [
               {
-                "type": "paragraph",
-                "content": [
+                "type": "stack",
+                "gap_mm": 1,
+                "children": [
                   {
-                    "type": "value",
-                    "value": {
-                      "type": "current_path",
-                      "path": ["shippingAddress", "formatted"]
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "value": "BILLING ADDRESS",
+                        "style": {
+                          "bold": true
+                        }
+                      }
+                    ],
+                    "style": {
+                      "font_size_pt": 8,
+                      "color": {
+                        "red": 102,
+                        "green": 106,
+                        "blue": 110
+                      }
+                    }
+                  },
+                  {
+                    "type": "conditional",
+                    "condition": {
+                      "type": "exists",
+                      "value": {
+                        "type": "current_path",
+                        "path": ["billingAddress", "formatted"]
+                      }
                     },
-                    "style": {}
+                    "then": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "value",
+                            "value": {
+                              "type": "current_path",
+                              "path": ["billingAddress", "formatted"]
+                            },
+                            "style": {}
+                          }
+                        ]
+                      }
+                    ],
+                    "else": []
+                  }
+                ]
+              },
+              {
+                "type": "stack",
+                "gap_mm": 1,
+                "children": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "value": "SHIPPING ADDRESS",
+                        "style": {
+                          "bold": true
+                        }
+                      }
+                    ],
+                    "style": {
+                      "font_size_pt": 8,
+                      "color": {
+                        "red": 102,
+                        "green": 106,
+                        "blue": 110
+                      }
+                    }
+                  },
+                  {
+                    "type": "conditional",
+                    "condition": {
+                      "type": "exists",
+                      "value": {
+                        "type": "current_path",
+                        "path": ["shippingAddress", "formatted"]
+                      }
+                    },
+                    "then": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "value",
+                            "value": {
+                              "type": "current_path",
+                              "path": ["shippingAddress", "formatted"]
+                            },
+                            "style": {}
+                          }
+                        ]
+                      }
+                    ],
+                    "else": []
                   }
                 ]
               }
-            ],
-            "else": []
+            ]
           },
           {
-            "type": "divider"
+            "type": "spacer",
+            "height_mm": 6
           },
           {
             "type": "table",
@@ -124,9 +283,10 @@
                 "header": [
                   {
                     "type": "text",
-                    "value": "Item",
+                    "value": "ITEMS",
                     "style": {
-                      "bold": true
+                      "bold": true,
+                      "font_size_pt": 8
                     }
                   }
                 ],
@@ -136,41 +296,89 @@
                     "value": {
                       "type": "current_path",
                       "path": ["title"]
-                    }
-                  }
-                ],
-                "width": 5,
-                "align": "left"
-              },
-              {
-                "header": [
-                  {
-                    "type": "text",
-                    "value": "SKU",
+                    },
                     "style": {
                       "bold": true
                     }
-                  }
-                ],
-                "cell": [
+                  },
+                  {
+                    "type": "line_break"
+                  },
                   {
                     "type": "value",
                     "value": {
-                      "type": "current_path",
-                      "path": ["sku"]
+                      "type": "coalesce",
+                      "values": [
+                        {
+                          "type": "current_path",
+                          "path": ["variant", "title"]
+                        },
+                        {
+                          "type": "literal",
+                          "value": ""
+                        }
+                      ]
+                    },
+                    "style": {
+                      "font_size_pt": 8,
+                      "color": {
+                        "red": 102,
+                        "green": 106,
+                        "blue": 110
+                      }
+                    }
+                  },
+                  {
+                    "type": "line_break"
+                  },
+                  {
+                    "type": "text",
+                    "value": "SKU: ",
+                    "style": {
+                      "font_size_pt": 8,
+                      "color": {
+                        "red": 102,
+                        "green": 106,
+                        "blue": 110
+                      }
+                    }
+                  },
+                  {
+                    "type": "value",
+                    "value": {
+                      "type": "coalesce",
+                      "values": [
+                        {
+                          "type": "current_path",
+                          "path": ["sku"]
+                        },
+                        {
+                          "type": "literal",
+                          "value": ""
+                        }
+                      ]
+                    },
+                    "style": {
+                      "font_size_pt": 8,
+                      "color": {
+                        "red": 102,
+                        "green": 106,
+                        "blue": 110
+                      }
                     }
                   }
                 ],
-                "width": 2,
+                "width": 6,
                 "align": "left"
               },
               {
                 "header": [
                   {
                     "type": "text",
-                    "value": "Qty",
+                    "value": "QTY",
                     "style": {
-                      "bold": true
+                      "bold": true,
+                      "font_size_pt": 8
                     }
                   }
                 ],
@@ -180,7 +388,8 @@
                     "value": {
                       "type": "current_path",
                       "path": ["quantity"]
-                    }
+                    },
+                    "style": {}
                   }
                 ],
                 "width": 1,
@@ -190,9 +399,10 @@
                 "header": [
                   {
                     "type": "text",
-                    "value": "Price",
+                    "value": "PRICE",
                     "style": {
-                      "bold": true
+                      "bold": true,
+                      "font_size_pt": 8
                     }
                   }
                 ],
@@ -219,9 +429,10 @@
                 "header": [
                   {
                     "type": "text",
-                    "value": "Total",
+                    "value": "TOTAL",
                     "style": {
-                      "bold": true
+                      "bold": true,
+                      "font_size_pt": 8
                     }
                   }
                 ],
@@ -238,6 +449,9 @@
                         "type": "current_path",
                         "path": ["currency"]
                       }
+                    },
+                    "style": {
+                      "bold": true
                     }
                   }
                 ],
@@ -255,83 +469,414 @@
                   }
                 ]
               }
-            ]
+            ],
+            "style": {
+              "cell_padding_mm": 1.5,
+              "header_text_color": {
+                "red": 102,
+                "green": 106,
+                "blue": 110
+              },
+              "border_color": {
+                "red": 210,
+                "green": 213,
+                "blue": 216
+              },
+              "border_width_pt": 0.35
+            }
           },
           {
-            "type": "divider"
+            "type": "spacer",
+            "height_mm": 4
           },
           {
-            "type": "paragraph",
-            "content": [
+            "type": "grid",
+            "columns": [3, 2],
+            "gap_mm": 10,
+            "children": [
               {
-                "type": "text",
-                "value": "Subtotal "
+                "type": "stack",
+                "gap_mm": 1,
+                "children": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "value": "SHIPPING METHOD",
+                        "style": {
+                          "bold": true
+                        }
+                      }
+                    ],
+                    "style": {
+                      "font_size_pt": 8,
+                      "color": {
+                        "red": 102,
+                        "green": 106,
+                        "blue": 110
+                      }
+                    }
+                  },
+                  {
+                    "type": "conditional",
+                    "condition": {
+                      "type": "exists",
+                      "value": {
+                        "type": "current_path",
+                        "path": ["shippingMethod"]
+                      }
+                    },
+                    "then": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "value",
+                            "value": {
+                              "type": "current_path",
+                              "path": ["shippingMethod"]
+                            },
+                            "style": {}
+                          }
+                        ]
+                      }
+                    ],
+                    "else": []
+                  },
+                  {
+                    "type": "conditional",
+                    "condition": {
+                      "type": "exists",
+                      "value": {
+                        "type": "current_path",
+                        "path": ["note"]
+                      }
+                    },
+                    "then": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "value",
+                            "value": {
+                              "type": "current_path",
+                              "path": ["note"]
+                            },
+                            "style": {}
+                          }
+                        ]
+                      }
+                    ],
+                    "else": []
+                  }
+                ]
               },
               {
-                "type": "value",
-                "value": {
-                  "type": "format_money",
-                  "amount": {
-                    "type": "current_path",
-                    "path": ["subtotal"]
+                "type": "stack",
+                "gap_mm": 1,
+                "children": [
+                  {
+                    "type": "grid",
+                    "columns": [1, 1],
+                    "gap_mm": 4,
+                    "children": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "value": "Subtotal",
+                            "style": {
+                              "bold": false
+                            }
+                          }
+                        ],
+                        "style": {
+                          "font_size_pt": 9
+                        }
+                      },
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "value",
+                            "value": {
+                              "type": "format_money",
+                              "amount": {
+                                "type": "current_path",
+                                "path": ["subtotal"]
+                              },
+                              "currency": {
+                                "type": "current_path",
+                                "path": ["currency"]
+                              }
+                            },
+                            "style": {
+                              "bold": false
+                            }
+                          }
+                        ],
+                        "style": {
+                          "align": "right",
+                          "font_size_pt": 9
+                        }
+                      }
+                    ]
                   },
-                  "currency": {
-                    "type": "current_path",
-                    "path": ["currency"]
+                  {
+                    "type": "grid",
+                    "columns": [1, 1],
+                    "gap_mm": 4,
+                    "children": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "value": "Tax",
+                            "style": {
+                              "bold": false
+                            }
+                          }
+                        ],
+                        "style": {
+                          "font_size_pt": 9
+                        }
+                      },
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "value",
+                            "value": {
+                              "type": "format_money",
+                              "amount": {
+                                "type": "current_path",
+                                "path": ["tax"]
+                              },
+                              "currency": {
+                                "type": "current_path",
+                                "path": ["currency"]
+                              }
+                            },
+                            "style": {
+                              "bold": false
+                            }
+                          }
+                        ],
+                        "style": {
+                          "align": "right",
+                          "font_size_pt": 9
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "type": "divider",
+                    "width_pt": 0.75
+                  },
+                  {
+                    "type": "grid",
+                    "columns": [1, 1],
+                    "gap_mm": 4,
+                    "children": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "value": "Total",
+                            "style": {
+                              "bold": true
+                            }
+                          }
+                        ],
+                        "style": {
+                          "font_size_pt": 10
+                        }
+                      },
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "value",
+                            "value": {
+                              "type": "format_money",
+                              "amount": {
+                                "type": "current_path",
+                                "path": ["total"]
+                              },
+                              "currency": {
+                                "type": "current_path",
+                                "path": ["currency"]
+                              }
+                            },
+                            "style": {
+                              "bold": true
+                            }
+                          }
+                        ],
+                        "style": {
+                          "align": "right",
+                          "font_size_pt": 10
+                        }
+                      }
+                    ]
                   }
-                }
+                ]
               }
             ]
           },
           {
-            "type": "paragraph",
-            "content": [
-              {
-                "type": "text",
-                "value": "Tax "
-              },
-              {
-                "type": "value",
-                "value": {
-                  "type": "format_money",
-                  "amount": {
-                    "type": "current_path",
-                    "path": ["tax"]
-                  },
-                  "currency": {
-                    "type": "current_path",
-                    "path": ["currency"]
-                  }
-                }
-              }
-            ]
+            "type": "spacer",
+            "height_mm": 8
           },
           {
-            "type": "paragraph",
-            "content": [
+            "type": "stack",
+            "gap_mm": 0.6,
+            "children": [
               {
-                "type": "text",
-                "value": "Total ",
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "value": "Thank you for shopping with us!"
+                  }
+                ],
                 "style": {
-                  "bold": true
+                  "align": "center",
+                  "font_size_pt": 8,
+                  "color": {
+                    "red": 102,
+                    "green": 106,
+                    "blue": 110
+                  }
                 }
               },
               {
-                "type": "value",
-                "value": {
-                  "type": "format_money",
-                  "amount": {
-                    "type": "current_path",
-                    "path": ["total"]
-                  },
-                  "currency": {
-                    "type": "current_path",
-                    "path": ["currency"]
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "value",
+                    "value": {
+                      "type": "path",
+                      "path": ["shop", "name"]
+                    },
+                    "style": {
+                      "bold": true
+                    }
+                  }
+                ],
+                "style": {
+                  "align": "center",
+                  "font_size_pt": 8
+                }
+              },
+              {
+                "type": "conditional",
+                "condition": {
+                  "type": "exists",
+                  "value": {
+                    "type": "path",
+                    "path": ["shop", "address", "formatted"]
                   }
                 },
-                "style": {
-                  "bold": true
-                }
+                "then": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "value",
+                        "value": {
+                          "type": "path",
+                          "path": ["shop", "address", "formatted"]
+                        },
+                        "style": {}
+                      }
+                    ],
+                    "style": {
+                      "align": "center",
+                      "font_size_pt": 8,
+                      "color": {
+                        "red": 102,
+                        "green": 106,
+                        "blue": 110
+                      }
+                    }
+                  }
+                ],
+                "else": []
+              },
+              {
+                "type": "conditional",
+                "condition": {
+                  "type": "exists",
+                  "value": {
+                    "type": "path",
+                    "path": ["shop", "email"]
+                  }
+                },
+                "then": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "value",
+                        "value": {
+                          "type": "path",
+                          "path": ["shop", "email"]
+                        },
+                        "style": {}
+                      }
+                    ],
+                    "style": {
+                      "align": "center",
+                      "font_size_pt": 8,
+                      "color": {
+                        "red": 102,
+                        "green": 106,
+                        "blue": 110
+                      }
+                    }
+                  }
+                ],
+                "else": []
+              },
+              {
+                "type": "conditional",
+                "condition": {
+                  "type": "exists",
+                  "value": {
+                    "type": "path",
+                    "path": ["shop", "primaryDomain"]
+                  }
+                },
+                "then": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "value",
+                        "value": {
+                          "type": "path",
+                          "path": ["shop", "primaryDomain"]
+                        },
+                        "style": {}
+                      }
+                    ],
+                    "style": {
+                      "align": "center",
+                      "font_size_pt": 8,
+                      "color": {
+                        "red": 102,
+                        "green": 106,
+                        "blue": 110
+                      }
+                    }
+                  }
+                ],
+                "else": []
               }
             ]
           },
@@ -354,15 +899,15 @@
       "size": "a4",
       "orientation": "portrait",
       "margins": {
-        "top_mm": 14,
-        "right_mm": 14,
-        "bottom_mm": 16,
-        "left_mm": 14
+        "top_mm": 13,
+        "right_mm": 13,
+        "bottom_mm": 14,
+        "left_mm": 13
       }
     },
     "theme": {
-      "font_size_pt": 10,
-      "line_height": 1.35,
+      "font_size_pt": 9,
+      "line_height": 1.25,
       "text_color": {
         "red": 32,
         "green": 34,
@@ -387,12 +932,30 @@
           {
             "type": "grid",
             "columns": [2, 1],
-            "gap_mm": 10,
+            "gap_mm": 12,
             "children": [
               {
-                "type": "stack",
-                "gap_mm": 3,
-                "children": [
+                "type": "conditional",
+                "condition": {
+                  "type": "exists",
+                  "value": {
+                    "type": "path",
+                    "path": ["shop", "logo"]
+                  }
+                },
+                "then": [
+                  {
+                    "type": "image_value",
+                    "resource": {
+                      "type": "path",
+                      "path": ["shop", "logo"]
+                    },
+                    "width_mm": 50,
+                    "height_mm": 18,
+                    "fit": "scale_down"
+                  }
+                ],
+                "else": [
                   {
                     "type": "paragraph",
                     "content": [
@@ -403,69 +966,56 @@
                           "path": ["shop", "name"]
                         },
                         "style": {
-                          "bold": true
+                          "bold": true,
+                          "font_size_pt": 18
                         }
-                      }
-                    ]
-                  },
-                  {
-                    "type": "conditional",
-                    "condition": {
-                      "type": "compare",
-                      "operator": "not_equal",
-                      "left": {
-                        "type": "format_string",
-                        "operation": "trim",
-                        "value": {
-                          "type": "coalesce",
-                          "values": [
-                            {
-                              "type": "current_path",
-                              "path": ["statusUrl"]
-                            },
-                            {
-                              "type": "literal",
-                              "value": ""
-                            }
-                          ]
-                        }
-                      },
-                      "right": {
-                        "type": "literal",
-                        "value": ""
-                      }
-                    },
-                    "then": [
-                      {
-                        "type": "qr",
-                        "value": {
-                          "type": "current_path",
-                          "path": ["statusUrl"]
-                        },
-                        "size_mm": 24
                       }
                     ],
-                    "else": []
+                    "style": {}
                   }
                 ]
               },
               {
                 "type": "stack",
-                "gap_mm": 1,
+                "gap_mm": 0.8,
                 "children": [
                   {
-                    "type": "heading",
-                    "level": 1,
+                    "type": "paragraph",
                     "content": [
                       {
                         "type": "text",
-                        "value": "PACKING SLIP"
+                        "value": "PACKING SLIP",
+                        "style": {
+                          "bold": true
+                        }
                       }
-                    ]
+                    ],
+                    "style": {
+                      "align": "right",
+                      "font_size_pt": 20
+                    }
+                  },
+                  {
+                    "type": "barcode",
+                    "value": {
+                      "type": "current_path",
+                      "path": ["name"]
+                    },
+                    "symbology": "code128",
+                    "width_mm": 42,
+                    "height_mm": 9,
+                    "human_readable": false
                   },
                   {
                     "type": "paragraph",
                     "content": [
+                      {
+                        "type": "text",
+                        "value": "Order ",
+                        "style": {
+                          "bold": true
+                        }
+                      },
                       {
                         "type": "value",
                         "value": {
@@ -476,7 +1026,11 @@
                           "bold": true
                         }
                       }
-                    ]
+                    ],
+                    "style": {
+                      "align": "right",
+                      "font_size_pt": 9
+                    }
                   },
                   {
                     "type": "paragraph",
@@ -492,7 +1046,11 @@
                           "format": "day_month_year"
                         }
                       }
-                    ]
+                    ],
+                    "style": {
+                      "align": "right",
+                      "font_size_pt": 9
+                    }
                   }
                 ]
               }
@@ -500,26 +1058,36 @@
           },
           {
             "type": "spacer",
-            "height_mm": 7
+            "height_mm": 10
           },
           {
             "type": "grid",
             "columns": [1, 1],
-            "gap_mm": 12,
+            "gap_mm": 14,
             "children": [
               {
                 "type": "stack",
                 "gap_mm": 1,
                 "children": [
                   {
-                    "type": "heading",
-                    "level": 2,
+                    "type": "paragraph",
                     "content": [
                       {
                         "type": "text",
-                        "value": "SHIP TO"
+                        "value": "SHIPPING ADDRESS",
+                        "style": {
+                          "bold": true
+                        }
                       }
-                    ]
+                    ],
+                    "style": {
+                      "font_size_pt": 8,
+                      "color": {
+                        "red": 102,
+                        "green": 106,
+                        "blue": 110
+                      }
+                    }
                   },
                   {
                     "type": "conditional",
@@ -554,14 +1122,24 @@
                 "gap_mm": 1,
                 "children": [
                   {
-                    "type": "heading",
-                    "level": 2,
+                    "type": "paragraph",
                     "content": [
                       {
                         "type": "text",
-                        "value": "CUSTOMER"
+                        "value": "CUSTOMER",
+                        "style": {
+                          "bold": true
+                        }
                       }
-                    ]
+                    ],
+                    "style": {
+                      "font_size_pt": 8,
+                      "color": {
+                        "red": 102,
+                        "green": 106,
+                        "blue": 110
+                      }
+                    }
                   },
                   {
                     "type": "conditional",
@@ -624,10 +1202,6 @@
             "height_mm": 6
           },
           {
-            "type": "divider",
-            "width_pt": 1
-          },
-          {
             "type": "table",
             "items": {
               "type": "current_path",
@@ -639,9 +1213,10 @@
                 "header": [
                   {
                     "type": "text",
-                    "value": "Item",
+                    "value": "ITEMS",
                     "style": {
-                      "bold": true
+                      "bold": true,
+                      "font_size_pt": 8
                     }
                   }
                 ],
@@ -651,41 +1226,89 @@
                     "value": {
                       "type": "current_path",
                       "path": ["title"]
-                    }
-                  }
-                ],
-                "width": 5,
-                "align": "left"
-              },
-              {
-                "header": [
-                  {
-                    "type": "text",
-                    "value": "SKU",
+                    },
                     "style": {
                       "bold": true
                     }
-                  }
-                ],
-                "cell": [
+                  },
+                  {
+                    "type": "line_break"
+                  },
                   {
                     "type": "value",
                     "value": {
-                      "type": "current_path",
-                      "path": ["sku"]
+                      "type": "coalesce",
+                      "values": [
+                        {
+                          "type": "current_path",
+                          "path": ["variant", "title"]
+                        },
+                        {
+                          "type": "literal",
+                          "value": ""
+                        }
+                      ]
+                    },
+                    "style": {
+                      "font_size_pt": 8,
+                      "color": {
+                        "red": 102,
+                        "green": 106,
+                        "blue": 110
+                      }
+                    }
+                  },
+                  {
+                    "type": "line_break"
+                  },
+                  {
+                    "type": "text",
+                    "value": "SKU: ",
+                    "style": {
+                      "font_size_pt": 8,
+                      "color": {
+                        "red": 102,
+                        "green": 106,
+                        "blue": 110
+                      }
+                    }
+                  },
+                  {
+                    "type": "value",
+                    "value": {
+                      "type": "coalesce",
+                      "values": [
+                        {
+                          "type": "current_path",
+                          "path": ["sku"]
+                        },
+                        {
+                          "type": "literal",
+                          "value": ""
+                        }
+                      ]
+                    },
+                    "style": {
+                      "font_size_pt": 8,
+                      "color": {
+                        "red": 102,
+                        "green": 106,
+                        "blue": 110
+                      }
                     }
                   }
                 ],
-                "width": 2,
+                "width": 8,
                 "align": "left"
               },
               {
                 "header": [
                   {
                     "type": "text",
-                    "value": "Qty",
+                    "value": "QTY",
                     "style": {
-                      "bold": true
+                      "bold": true,
+                      "font_size_pt": 8
                     }
                   }
                 ],
@@ -695,6 +1318,9 @@
                     "value": {
                       "type": "current_path",
                       "path": ["quantity"]
+                    },
+                    "style": {
+                      "bold": true
                     }
                   }
                 ],
@@ -712,30 +1338,171 @@
                   }
                 ]
               }
-            ]
+            ],
+            "style": {
+              "cell_padding_mm": 1.5,
+              "header_text_color": {
+                "red": 102,
+                "green": 106,
+                "blue": 110
+              },
+              "border_color": {
+                "red": 210,
+                "green": 213,
+                "blue": 216
+              },
+              "border_width_pt": 0.35
+            }
           },
           {
-            "type": "divider"
+            "type": "spacer",
+            "height_mm": 7
           },
           {
-            "type": "paragraph",
-            "content": [
+            "type": "stack",
+            "gap_mm": 0.6,
+            "children": [
               {
-                "type": "text",
-                "value": "Thank you for your order."
-              }
-            ]
-          },
-          {
-            "type": "paragraph",
-            "content": [
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "value": "Thank you for shopping with us!"
+                  }
+                ],
+                "style": {
+                  "align": "center",
+                  "font_size_pt": 8,
+                  "color": {
+                    "red": 102,
+                    "green": 106,
+                    "blue": 110
+                  }
+                }
+              },
               {
-                "type": "value",
-                "value": {
-                  "type": "current_path",
-                  "path": ["name"]
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "value",
+                    "value": {
+                      "type": "path",
+                      "path": ["shop", "name"]
+                    },
+                    "style": {
+                      "bold": true
+                    }
+                  }
+                ],
+                "style": {
+                  "align": "center",
+                  "font_size_pt": 8
+                }
+              },
+              {
+                "type": "conditional",
+                "condition": {
+                  "type": "exists",
+                  "value": {
+                    "type": "path",
+                    "path": ["shop", "address", "formatted"]
+                  }
                 },
-                "style": {}
+                "then": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "value",
+                        "value": {
+                          "type": "path",
+                          "path": ["shop", "address", "formatted"]
+                        },
+                        "style": {}
+                      }
+                    ],
+                    "style": {
+                      "align": "center",
+                      "font_size_pt": 8,
+                      "color": {
+                        "red": 102,
+                        "green": 106,
+                        "blue": 110
+                      }
+                    }
+                  }
+                ],
+                "else": []
+              },
+              {
+                "type": "conditional",
+                "condition": {
+                  "type": "exists",
+                  "value": {
+                    "type": "path",
+                    "path": ["shop", "email"]
+                  }
+                },
+                "then": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "value",
+                        "value": {
+                          "type": "path",
+                          "path": ["shop", "email"]
+                        },
+                        "style": {}
+                      }
+                    ],
+                    "style": {
+                      "align": "center",
+                      "font_size_pt": 8,
+                      "color": {
+                        "red": 102,
+                        "green": 106,
+                        "blue": 110
+                      }
+                    }
+                  }
+                ],
+                "else": []
+              },
+              {
+                "type": "conditional",
+                "condition": {
+                  "type": "exists",
+                  "value": {
+                    "type": "path",
+                    "path": ["shop", "primaryDomain"]
+                  }
+                },
+                "then": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "value",
+                        "value": {
+                          "type": "path",
+                          "path": ["shop", "primaryDomain"]
+                        },
+                        "style": {}
+                      }
+                    ],
+                    "style": {
+                      "align": "center",
+                      "font_size_pt": 8,
+                      "color": {
+                        "red": 102,
+                        "green": 106,
+                        "blue": 110
+                      }
+                    }
+                  }
+                ],
+                "else": []
               }
             ]
           },

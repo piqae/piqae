@@ -10,6 +10,7 @@ import type { CredentialVault } from "./credentials.server";
 import {
   fetchDraftOrders,
   fetchOrders,
+  fetchShopPrintIdentity,
   parseShopifyDataBindings,
   shopifyDocumentInput,
   type AdminGraphql,
@@ -70,23 +71,27 @@ export class ShopifyPrintingService {
       input.templateId,
     );
     const settings = await this.workflow.getSettings(shop);
-    const orders = await fetchOrders(
-      input.admin,
-      input.orderIds,
-      parseShopifyDataBindings(settings.metafieldAllowlist),
-    );
+    const [orders, shopIdentity] = await Promise.all([
+      fetchOrders(
+        input.admin,
+        input.orderIds,
+        parseShopifyDataBindings(settings.metafieldAllowlist),
+      ),
+      fetchShopPrintIdentity(input.admin, shop),
+    ]);
+    const renderInput = shopifyDocumentInput(shop, orders, shopIdentity);
     const digest = createHash("sha256")
       .update(
         JSON.stringify({
           shop,
           ids: orders.map((order) => order.id),
+          input: renderInput,
           templateRevisionId: publication.revisionId,
           requestKey: input.requestKey,
         }),
       )
       .digest("hex");
     const client = this.clientFor(link, shop);
-    const renderInput = shopifyDocumentInput(shop, orders);
     const render = await client.printPackets.renders.create(
       {
         template_revision_id: publication.revisionId,
@@ -349,15 +354,19 @@ export class ShopifyPrintingService {
       : null;
     const settings = await this.workflow.getSettings(shop);
     const bindings = parseShopifyDataBindings(settings.metafieldAllowlist);
-    const orders =
+    const [orders, shopIdentity] = await Promise.all([
       input.resourceType === "draft_orders"
-        ? await fetchDraftOrders(input.admin, input.orderIds, bindings)
-        : await fetchOrders(input.admin, input.orderIds, bindings);
+        ? fetchDraftOrders(input.admin, input.orderIds, bindings)
+        : fetchOrders(input.admin, input.orderIds, bindings),
+      fetchShopPrintIdentity(input.admin, shop),
+    ]);
+    const renderInput = shopifyDocumentInput(shop, orders, shopIdentity);
     const digest = createHash("sha256")
       .update(
         JSON.stringify({
           shop,
           ids: orders.map((o) => o.id),
+          input: renderInput,
           template: publication.revisionId,
           destination: input.targetId ?? input.printerId ?? "download",
           targetSpecificationRevision:
@@ -367,7 +376,6 @@ export class ShopifyPrintingService {
       )
       .digest("hex");
     const client = this.clientFor(link, shop);
-    const renderInput = shopifyDocumentInput(shop, orders);
     const render = await client.printPackets.renders.create(
       {
         template_revision_id: publication.revisionId,

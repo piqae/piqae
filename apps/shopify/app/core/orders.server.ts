@@ -67,9 +67,16 @@ export interface ShopifyDocumentInput extends Record<string, unknown> {
   shop: {
     name: string;
     domain: string;
+    primaryDomain: string;
+    email?: string;
+    address?: Record<string, string>;
+    /** Content-addressed PrintPacket resource key when a logo is available. */
+    logo?: string;
   };
   orders: NormalizedOrder[];
 }
+
+export type ShopifyPrintIdentity = ShopifyDocumentInput["shop"];
 
 export type NormalizedMetaobject = {
   id: string;
@@ -186,6 +193,19 @@ const ORDER_QUERY = `#graphql
 const ACCESS_SCOPES_QUERY = `#graphql
  query PiqaeGrantedAccessScopes {
    currentAppInstallation { accessScopes { handle } }
+ }`;
+
+const SHOP_PRINT_IDENTITY_QUERY = `#graphql
+ query PiqaeShopPrintIdentity {
+   shop {
+     name
+     contactEmail
+     email
+     primaryDomain { host }
+     billingAddress {
+       name company address1 address2 city province zip country phone
+     }
+   }
  }`;
 
 export function normalizeOrderGid(value: string): string {
@@ -453,6 +473,46 @@ export async function fetchOrders(
   return orders;
 }
 
+/**
+ * Enrich a document with the non-sensitive shop fields the Admin API already
+ * exposes to this app. Brand logos live on Shopify's Storefront Brand object,
+ * outside the current Admin scopes, so callers may later supply a pinned
+ * PrintPacket resource key without making rendering depend on a mutable URL.
+ */
+export async function fetchShopPrintIdentity(
+  admin: AdminGraphql,
+  shopDomain: string,
+): Promise<ShopifyPrintIdentity> {
+  const fallback = defaultShopPrintIdentity(shopDomain);
+  try {
+    const body = await graphqlWithRetry(admin, SHOP_PRINT_IDENTITY_QUERY, {});
+    if (body.errors?.length || !body.data?.shop) return fallback;
+    const shop = body.data.shop as Record<string, unknown>;
+    const primaryDomainValue =
+      shop.primaryDomain && typeof shop.primaryDomain === "object"
+        ? (shop.primaryDomain as Record<string, unknown>).host
+        : undefined;
+    const name = stringValue(shop.name).trim() || fallback.name;
+    const email = stringValue(shop.contactEmail || shop.email).trim();
+    const primaryDomain = stringValue(primaryDomainValue).trim();
+    const address = normalizedAddress(
+      shop.billingAddress && typeof shop.billingAddress === "object"
+        ? (shop.billingAddress as Record<string, unknown>)
+        : null,
+    );
+    return {
+      ...fallback,
+      name,
+      primaryDomain: primaryDomain || fallback.primaryDomain,
+      ...(email ? { email } : {}),
+      ...(address?.formatted ? { address } : {}),
+    };
+  } catch {
+    // Branding enrichment must never prevent an otherwise printable order.
+    return fallback;
+  }
+}
+
 async function fetchGrantedAccessScopes(
   admin: AdminGraphql,
 ): Promise<Set<string> | null> {
@@ -481,16 +541,41 @@ async function fetchGrantedAccessScopes(
 export function shopifyDocumentInput(
   shopDomain: string,
   orders: NormalizedOrder[],
-  shopName?: string,
+  shopIdentity?: ShopifyPrintIdentity | string,
 ): ShopifyDocumentInput {
-  const domain = shopDomain.trim().toLowerCase();
-  if (!/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(domain))
-    throw new Error("invalid Shopify shop domain");
-  const fallbackName = domain.slice(0, -".myshopify.com".length);
-  const name = stringValue(shopName?.trim() || fallbackName);
+  const fallback = defaultShopPrintIdentity(shopDomain);
+  const supplied =
+    typeof shopIdentity === "string"
+      ? { ...fallback, name: shopIdentity }
+      : shopIdentity;
+  const name = stringValue(supplied?.name?.trim() || fallback.name);
   if (!name) throw new Error("Shopify shop name is required");
+  const email = stringValue(supplied?.email).trim();
+  const primaryDomain = stringValue(supplied?.primaryDomain).trim();
+  const logo = stringValue(supplied?.logo).trim();
+  const normalizedShopAddress = supplied?.address
+    ? normalizedAddress(supplied.address)
+    : null;
+  const suppliedFormattedAddress = stringValue(
+    supplied?.address?.formatted,
+  ).trim();
+  const address = normalizedShopAddress
+    ? {
+        ...normalizedShopAddress,
+        formatted: normalizedShopAddress.formatted || suppliedFormattedAddress,
+      }
+    : suppliedFormattedAddress
+      ? { formatted: suppliedFormattedAddress }
+      : null;
   const input = {
-    shop: { name, domain },
+    shop: {
+      name,
+      domain: fallback.domain,
+      primaryDomain: primaryDomain || fallback.primaryDomain,
+      ...(email ? { email } : {}),
+      ...(address?.formatted ? { address } : {}),
+      ...(logo ? { logo } : {}),
+    },
     orders,
   } satisfies ShopifyDocumentInput;
   try {
@@ -501,6 +586,14 @@ export function shopifyDocumentInput(
     );
   }
   return input;
+}
+
+function defaultShopPrintIdentity(shopDomain: string): ShopifyPrintIdentity {
+  const domain = shopDomain.trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(domain))
+    throw new Error("invalid Shopify shop domain");
+  const name = domain.slice(0, -".myshopify.com".length);
+  return { name, domain, primaryDomain: domain };
 }
 
 /**

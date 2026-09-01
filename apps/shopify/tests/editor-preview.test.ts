@@ -187,7 +187,11 @@ describe("Shopify editor PDF preview", () => {
       {
         specification,
         input: expect.objectContaining({
-          shop: { name: "fixture-shop", domain: shop },
+          shop: {
+            name: "fixture-shop",
+            domain: shop,
+            primaryDomain: shop,
+          },
           orders: [expect.objectContaining({ id: latest.id })],
         }),
         expires_in_seconds: EDITOR_PREVIEW_EXPIRES_SECONDS,
