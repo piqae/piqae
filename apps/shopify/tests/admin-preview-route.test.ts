@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   classifyAdminPreviewFailure,
+  isLegacyNonExpiringTokenFailure,
   isShopifySessionCredentialFailure,
+  ShopifySessionRecoveryError,
   withShopifySessionRecovery,
 } from "../app/routes/api.print.admin-previews";
 import { fetchOrders } from "../app/core/orders.server";
@@ -29,6 +31,18 @@ describe("admin preview failure classification", () => {
     });
   });
 
+  it("surfaces a failed Shopify token migration as an account issue", () => {
+    expect(
+      classifyAdminPreviewFailure(
+        new ShopifySessionRecoveryError(new Error("sensitive OAuth body")),
+      ),
+    ).toEqual({
+      code: "account_connection",
+      message:
+        "Shopify access could not be refreshed. Open Piqae in Shopify Admin once, then retry this print action.",
+    });
+  });
+
   it("recognizes revoked Shopify offline credentials returned as HTTP 403", () => {
     const revoked = {
       response: {
@@ -47,6 +61,28 @@ describe("admin preview failure classification", () => {
         response: {
           code: 403,
           body: { errors: "This operation requires another permission" },
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("distinguishes Shopify's one-time legacy offline-token migration", () => {
+    const legacy = {
+      response: {
+        code: 403,
+        body: {
+          errors:
+            "[API] Non-expiring access tokens are no longer accepted for the Admin API. Start using expiring offline tokens.",
+        },
+      },
+    };
+    expect(isShopifySessionCredentialFailure(legacy)).toBe(true);
+    expect(isLegacyNonExpiringTokenFailure(legacy)).toBe(true);
+    expect(
+      isLegacyNonExpiringTokenFailure({
+        response: {
+          code: 403,
+          body: { errors: "The access token for this shop is invalid" },
         },
       }),
     ).toBe(false);
@@ -78,7 +114,8 @@ describe("admin preview failure classification", () => {
     await expect(
       withShopifySessionRecovery(
         async () => Promise.reject(revoked),
-        async () => {
+        async (error) => {
+          expect(error).toBe(revoked);
           recoveryCalls += 1;
           return "preview-ready";
         },
