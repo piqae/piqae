@@ -100,6 +100,14 @@ The authoritative daily development, Railway, pilot, production, rollback,
 privacy, and App Store process is in
 [`docs/operations/shopify-release.md`](../../docs/operations/shopify-release.md).
 
+### Shopify app icon
+
+The Shopify-ready 1200 × 1200 PNG is
+[`public/piqae-shopify-app-icon-1200.png`](public/piqae-shopify-app-icon-1200.png).
+Shopify does not read an app icon from `shopify.app.toml`: upload this asset
+manually in the app's **Dev Dashboard → Settings → App icon**. Releasing the
+application or its extensions does not update that dashboard asset.
+
 ## Error reporting
 
 Sentry is gated on a configured DSN, the same way `apps/web` gates it. With

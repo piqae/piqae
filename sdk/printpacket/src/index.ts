@@ -49,7 +49,7 @@ export type Node =
   | { type: "image"; resource: string; width_mm: number; height_mm: number; fit?: "contain" | "fill" | "scale_down" }
   | { type: "image_value"; resource: Expression; width_mm: number; height_mm: number; fit?: "contain" | "fill" | "scale_down" }
   | { type: "qr"; value: Expression; size_mm: number; error_correction?: "L" | "M" | "Q" | "H" }
-  | { type: "barcode"; value: Expression; symbology: "code128"; width_mm: number; height_mm: number; human_readable?: boolean };
+  | { type: "barcode"; value: Expression; symbology: "code128"; width_mm: number; height_mm: number; human_readable?: boolean; align?: "left" | "center" | "right"; padding_mm?: number; gap_mm?: number };
 
 export type Media =
   | { kind: "paged"; size: "a4" | "a5" | "letter"; orientation?: "portrait" | "landscape"; margins?: Edges }

@@ -344,6 +344,12 @@ pub enum Node {
         height_mm: f32,
         #[serde(default)]
         human_readable: bool,
+        #[serde(default)]
+        align: TextAlign,
+        #[serde(default)]
+        padding_mm: f32,
+        #[serde(default = "default_barcode_gap")]
+        gap_mm: f32,
     },
 }
 const fn default_heading_level() -> u8 {
@@ -354,6 +360,9 @@ const fn default_true() -> bool {
 }
 const fn default_divider_width() -> f32 {
     0.5
+}
+const fn default_barcode_gap() -> f32 {
+    1.4
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1094,6 +1103,8 @@ fn validate_nodes(
                 value,
                 width_mm,
                 height_mm,
+                padding_mm,
+                gap_mm,
                 ..
             } => {
                 let width = checked_mm(*width_mm, "barcode width")?;
@@ -1102,6 +1113,11 @@ fn validate_nodes(
                     return Err(RenderError::InvalidBarcode(
                         "dimensions are below the supported minimum",
                     ));
+                }
+                checked_mm(*padding_mm, "barcode padding")?;
+                checked_mm(*gap_mm, "barcode gap")?;
+                if *padding_mm > 50.0 || *gap_mm > 20.0 {
+                    return Err(RenderError::Invalid("barcode spacing"));
                 }
                 validate_expr(value, 0, expression_count, limits)?;
             }
@@ -1442,8 +1458,13 @@ fn layout_nodes(nodes: &[Node], state: &mut State, depth: usize) -> Result<(), R
                 paragraph(content, &s, state)?
             }
             Node::Section { children, gap_mm } | Node::Stack { children, gap_mm } => {
-                layout_nodes(children, state, depth + 1)?;
-                state.y -= checked_mm(*gap_mm, "gap")?
+                let gap = checked_mm(*gap_mm, "gap")?;
+                for (index, child) in children.iter().enumerate() {
+                    layout_nodes(std::slice::from_ref(child), state, depth + 1)?;
+                    if index + 1 < children.len() {
+                        state.y -= gap;
+                    }
+                }
             }
             Node::Box { children, style } => box_node(children, style, state, depth)?,
             Node::Row { children, gap_mm } => {
@@ -1473,10 +1494,12 @@ fn layout_nodes(nodes: &[Node], state: &mut State, depth: usize) -> Result<(), R
                     .clone();
                 account_repeat(state, arr.len())?;
                 let old = state.current.clone();
-                for item in &arr {
+                for (index, item) in arr.iter().enumerate() {
                     state.current = item.clone();
                     layout_nodes(children, state, depth + 1)?;
-                    state.y -= checked_mm(*gap_mm, "gap")?
+                    if index + 1 < arr.len() {
+                        state.y -= checked_mm(*gap_mm, "gap")?;
+                    }
                 }
                 state.current = old;
             }
@@ -1585,12 +1608,20 @@ fn layout_nodes(nodes: &[Node], state: &mut State, depth: usize) -> Result<(), R
                 width_mm,
                 height_mm,
                 human_readable,
+                align,
+                padding_mm,
+                gap_mm,
             } => barcode(
                 value,
-                *symbology,
-                *width_mm,
-                *height_mm,
-                *human_readable,
+                BarcodeLayout {
+                    symbology: *symbology,
+                    width_mm: *width_mm,
+                    height_mm: *height_mm,
+                    human_readable: *human_readable,
+                    align: *align,
+                    padding_mm: *padding_mm,
+                    gap_mm: *gap_mm,
+                },
                 state,
             )?,
         }
@@ -1723,16 +1754,19 @@ fn data_list(
         state.doc.theme.font_size_pt,
         state.doc.theme.line_height,
     )?;
-    ensure_space(state, header_height + first_item_height + gap)?;
+    ensure_space(
+        state,
+        header_height + first_item_height + if values.len() > 1 { gap } else { 0.0 },
+    )?;
     render_atomic_nodes(header, state, depth + 1, "data-list header")?;
-    for value in &values {
+    for (index, value) in values.iter().enumerate() {
         state.current = value.clone();
         let estimated = estimate_nodes(
             item,
             state.content_width,
             state.doc.theme.font_size_pt,
             state.doc.theme.line_height,
-        )? + gap;
+        )? + if index + 1 < values.len() { gap } else { 0.0 };
         if !state.continuous && state.y - estimated < state.bottom {
             new_page(state)?;
             if repeat_header {
@@ -1742,7 +1776,9 @@ fn data_list(
             }
         }
         render_atomic_nodes(item, state, depth + 1, "data-list item")?;
-        state.y -= gap;
+        if index + 1 < values.len() {
+            state.y -= gap;
+        }
     }
     state.current = old;
     Ok(())
@@ -2224,14 +2260,27 @@ fn qr(expr: &Expr, size_mm: f32, ec: QrCorrection, state: &mut State) -> Result<
     state.y -= size + 4.0;
     Ok(())
 }
-fn barcode(
-    expr: &Expr,
-    _sym: BarcodeSymbology,
+#[derive(Clone, Copy)]
+struct BarcodeLayout {
+    symbology: BarcodeSymbology,
     width_mm: f32,
     height_mm: f32,
-    human: bool,
-    state: &mut State,
-) -> Result<(), RenderError> {
+    human_readable: bool,
+    align: TextAlign,
+    padding_mm: f32,
+    gap_mm: f32,
+}
+
+fn barcode(expr: &Expr, layout: BarcodeLayout, state: &mut State) -> Result<(), RenderError> {
+    let BarcodeLayout {
+        symbology: _symbology,
+        width_mm,
+        height_mm,
+        human_readable: human,
+        align,
+        padding_mm,
+        gap_mm,
+    } = layout;
     let text = value_text(&eval(expr, state.root, &state.current)?);
     if text.is_empty() || text.len() > 80 || !text.bytes().all(|b| (32..=126).contains(&b)) {
         return Err(RenderError::InvalidBarcode(
@@ -2240,6 +2289,8 @@ fn barcode(
     }
     let width = checked_mm(width_mm, "barcode width")?;
     let height = checked_mm(height_mm, "barcode height")?;
+    let padding = checked_mm(padding_mm, "barcode padding")?;
+    let gap = checked_mm(gap_mm, "barcode gap")?;
     if width < mm(20.0) || height < mm(8.0) {
         return Err(RenderError::InvalidBarcode(
             "dimensions are below the supported minimum",
@@ -2249,44 +2300,59 @@ fn barcode(
     if width / (bits.len() as f32) < 0.45 {
         return Err(RenderError::InvalidBarcode("module width is too small"));
     }
-    ensure_space(
-        state,
-        height
-            + if human {
-                state.doc.theme.font_size_pt * 1.4
-            } else {
-                4.0
-            },
-    )?;
+    let footprint_width = width + padding * 2.0;
+    if footprint_width > state.content_width {
+        return Err(RenderError::InvalidBarcode(
+            "width and padding exceed the available layout width",
+        ));
+    }
+    let line_height = state.doc.theme.font_size_pt * state.doc.theme.line_height;
+    let needed = padding * 2.0 + height + if human { gap + line_height } else { 0.0 };
+    ensure_space(state, needed)?;
+    let footprint_x = match align {
+        TextAlign::Left => state.x,
+        TextAlign::Center => state.x + (state.content_width - footprint_width) / 2.0,
+        TextAlign::Right => state.x + state.content_width - footprint_width,
+    };
+    let bars_x = footprint_x + padding;
+    let bars_y = state.y - padding - height;
     push(
         state,
         Draw::Bars {
-            x: state.x,
-            y: state.y - height,
+            x: bars_x,
+            y: bars_y,
             width,
             height,
             bits,
         },
     )?;
-    state.y -= height + 4.0;
+    state.y -= padding + height;
     if human {
-        paragraph(
-            &[Inline::Text {
-                value: text,
-                style: TextStyle {
-                    align: TextAlign::Center,
-                    ..Default::default()
-                },
-            }],
-            &TextStyle {
-                align: TextAlign::Center,
-                ..Default::default()
-            },
+        state.y -= gap;
+        let label_width = text_width(&text, state.doc.theme.font_size_pt, FontFace::Regular);
+        if label_width > footprint_width {
+            return Err(RenderError::InvalidBarcode(
+                "human-readable value exceeds the barcode footprint",
+            ));
+        }
+        account_text(state, &text)?;
+        validate_text(&text)?;
+        push(
             state,
-        )
-    } else {
-        Ok(())
+            Draw::Text {
+                x: footprint_x + (footprint_width - label_width) / 2.0,
+                y: state.y - state.doc.theme.font_size_pt,
+                size: state.doc.theme.font_size_pt,
+                text,
+                face: FontFace::Regular,
+                underline: false,
+                color: state.doc.theme.text_color,
+            },
+        )?;
+        state.y -= line_height;
     }
+    state.y -= padding;
+    Ok(())
 }
 
 fn image(
@@ -2903,12 +2969,27 @@ fn estimate_nodes(nodes: &[Node], width: f32, size: f32, line: f32) -> Result<f3
             Node::Spacer { height_mm } => checked_mm(*height_mm, "spacer")?,
             Node::Divider { .. } => 3.0,
             Node::Qr { size_mm, .. } => checked_mm(*size_mm, "QR")?,
-            Node::Barcode { height_mm, .. } => checked_mm(*height_mm, "barcode")? + size * line,
+            Node::Barcode {
+                height_mm,
+                human_readable,
+                padding_mm,
+                gap_mm,
+                ..
+            } => {
+                checked_mm(*height_mm, "barcode")?
+                    + checked_mm(*padding_mm, "barcode padding")? * 2.0
+                    + if *human_readable {
+                        checked_mm(*gap_mm, "barcode gap")? + size * line
+                    } else {
+                        0.0
+                    }
+            }
             Node::Image { height_mm, .. } | Node::ImageValue { height_mm, .. } => {
                 checked_mm(*height_mm, "image height")?
             }
             Node::Section { children, gap_mm } | Node::Stack { children, gap_mm } => {
-                estimate_nodes(children, width, size, line)? + checked_mm(*gap_mm, "gap")?
+                estimate_nodes(children, width, size, line)?
+                    + checked_mm(*gap_mm, "gap")? * children.len().saturating_sub(1) as f32
             }
             Node::KeepTogether { children } => estimate_nodes(children, width, size, line)?,
             Node::Row { children, gap_mm } => {
@@ -3378,6 +3459,41 @@ mod tests {
             footer: None,
         }
     }
+    fn test_state<'a>(
+        doc: &'a PrintPacketV1,
+        root: &'a Value,
+        resolved: &'a ResolvedResources,
+    ) -> State<'a> {
+        let limits = RenderLimits::default();
+        let (width, height, margins, continuous) = media_geometry(&doc.media, limits).unwrap();
+        State {
+            doc,
+            limits,
+            root,
+            current: root.clone(),
+            resolved,
+            pages: vec![PageDraw {
+                width,
+                height,
+                draws: vec![],
+                header_draws: 0,
+            }],
+            width,
+            nominal_height: height,
+            margins,
+            x: mm(margins.left_mm),
+            y: height - mm(margins.top_mm),
+            content_width: width - mm(margins.left_mm + margins.right_mm),
+            bottom: mm(margins.bottom_mm),
+            nodes: 0,
+            repeats: 0,
+            text_bytes: 0,
+            continuous,
+            in_region: false,
+            pending_page_break: false,
+            estimated_pdf_bytes: 4_096,
+        }
+    }
     fn path(name: &str) -> Expr {
         Expr::CurrentPath {
             path: vec![name.into()],
@@ -3636,6 +3752,9 @@ mod tests {
                 width_mm: 50.0,
                 height_mm: 15.0,
                 human_readable: true,
+                align: TextAlign::Center,
+                padding_mm: 1.0,
+                gap_mm: 1.4,
             },
         ]);
         assert!(
@@ -3644,6 +3763,132 @@ mod tests {
                 .len()
                 > 1_000
         )
+    }
+
+    #[test]
+    fn barcode_alignment_padding_and_value_gap_have_exact_geometry() {
+        let doc = document(vec![]);
+        let root = json!({});
+        let resolved = ResolvedResources::default();
+        let width = mm(50.0);
+        let height = mm(15.0);
+        let padding = mm(2.0);
+        let gap = mm(3.0);
+
+        for align in [TextAlign::Left, TextAlign::Center, TextAlign::Right] {
+            let mut state = test_state(&doc, &root, &resolved);
+            let initial_y = state.y;
+            let expected_footprint_x = match align {
+                TextAlign::Left => state.x,
+                TextAlign::Center => state.x + (state.content_width - width - padding * 2.0) / 2.0,
+                TextAlign::Right => state.x + state.content_width - width - padding * 2.0,
+            };
+            barcode(
+                &Expr::Literal {
+                    value: json!("ORDER-1001"),
+                },
+                BarcodeLayout {
+                    symbology: BarcodeSymbology::Code128,
+                    width_mm: 50.0,
+                    height_mm: 15.0,
+                    human_readable: true,
+                    align,
+                    padding_mm: 2.0,
+                    gap_mm: 3.0,
+                },
+                &mut state,
+            )
+            .unwrap();
+
+            let bars = state.pages[0]
+                .draws
+                .iter()
+                .find_map(|draw| match draw {
+                    Draw::Bars {
+                        x,
+                        y,
+                        width,
+                        height,
+                        ..
+                    } => Some((*x, *y, *width, *height)),
+                    _ => None,
+                })
+                .unwrap();
+            assert!((bars.0 - (expected_footprint_x + padding)).abs() < 0.001);
+            assert!((bars.1 - (initial_y - padding - height)).abs() < 0.001);
+            assert!((bars.2 - width).abs() < 0.001);
+            assert!((bars.3 - height).abs() < 0.001);
+
+            let label = state.pages[0]
+                .draws
+                .iter()
+                .find_map(|draw| match draw {
+                    Draw::Text {
+                        x, y, text, size, ..
+                    } if text == "ORDER-1001" => Some((*x, *y, *size)),
+                    _ => None,
+                })
+                .unwrap();
+            let label_width = text_width("ORDER-1001", doc.theme.font_size_pt, FontFace::Regular);
+            assert!(
+                (label.0 - (expected_footprint_x + (width + padding * 2.0 - label_width) / 2.0))
+                    .abs()
+                    < 0.001
+            );
+            assert!(
+                (label.1 - (initial_y - padding - height - gap - doc.theme.font_size_pt)).abs()
+                    < 0.001
+            );
+            assert!((label.2 - doc.theme.font_size_pt).abs() < 0.001);
+            let expected_consumed =
+                padding * 2.0 + height + gap + doc.theme.font_size_pt * doc.theme.line_height;
+            assert!((state.y - (initial_y - expected_consumed)).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn qr_geometry_and_inter_element_gaps_do_not_gain_editor_only_space() {
+        let doc = document(vec![]);
+        let root = json!({});
+        let resolved = ResolvedResources::default();
+        let mut qr_state = test_state(&doc, &root, &resolved);
+        let initial_qr_y = qr_state.y;
+        qr(
+            &Expr::Literal {
+                value: json!("https://piqae.com/orders/1001"),
+            },
+            24.0,
+            QrCorrection::Q,
+            &mut qr_state,
+        )
+        .unwrap();
+        let qr_draw = qr_state.pages[0]
+            .draws
+            .iter()
+            .find_map(|draw| match draw {
+                Draw::Qr { x, y, size, .. } => Some((*x, *y, *size)),
+                _ => None,
+            })
+            .unwrap();
+        assert!((qr_draw.0 - qr_state.x).abs() < 0.001);
+        assert!((qr_draw.1 - (initial_qr_y - mm(24.0))).abs() < 0.001);
+        assert!((qr_draw.2 - mm(24.0)).abs() < 0.001);
+
+        let mut stack_state = test_state(&doc, &root, &resolved);
+        let initial_stack_y = stack_state.y;
+        layout_nodes(
+            &[Node::Stack {
+                children: vec![
+                    Node::Spacer { height_mm: 2.0 },
+                    Node::Spacer { height_mm: 3.0 },
+                ],
+                gap_mm: 4.0,
+            }],
+            &mut stack_state,
+            0,
+        )
+        .unwrap();
+        assert!((stack_state.y - (initial_stack_y - mm(9.0))).abs() < 0.001);
     }
 
     #[test]
@@ -4405,6 +4650,9 @@ mod tests {
                     width_mm: 35.0,
                     height_mm: 10.0,
                     human_readable: false,
+                    align: TextAlign::Left,
+                    padding_mm: 0.0,
+                    gap_mm: 1.4,
                 },
             ],
         };

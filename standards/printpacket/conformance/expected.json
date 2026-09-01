@@ -10,10 +10,10 @@
       "pages": 1
     },
     "production-label-100x50": {
-      "template_sha256": "f9bb0f951e30f1a71768a4cd6821bfb2bded3b26062a4b29a344a02fec53107f",
-      "cache_key": "f8865daedfb09697ce3d8132eb55c2f9d9056a05d07c4e8c4101234d219233bc",
-      "output_sha256": "9ec1d66ed65c5c5d247fd629d510794a7c78b3c6b8817ae34c564dcb506cd1d0",
-      "output_bytes": 4388,
+      "template_sha256": "e8bd9125b498af23c218494a4ab59feeeea1db5905729ea7e4d39b9bb17efdfe",
+      "cache_key": "0f7dbf0f015fcae53227ceb4780a3f3e52cfa44a1513cad0237a766acdae6638",
+      "output_sha256": "173bd2c53fb78e6ade3f44a55f9b8b49a7d5b6025fb6468935ea9c1aaa094560",
+      "output_bytes": 4387,
       "pages": 1
     },
     "invoice-a4": {

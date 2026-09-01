@@ -9,8 +9,6 @@ const extensionConfigs = [
   "extensions/admin-bulk-print/shopify.extension.toml",
   "extensions/admin-order-browser-print/shopify.extension.toml",
   "extensions/admin-bulk-browser-print/shopify.extension.toml",
-  "extensions/admin-order-quick-print/shopify.extension.toml",
-  "extensions/admin-bulk-quick-print/shopify.extension.toml",
   "extensions/pos-print/shopify.extension.toml",
   "extensions/customer-order-document/shopify.extension.toml",
   "extensions/admin-draft-print/shopify.extension.toml",
