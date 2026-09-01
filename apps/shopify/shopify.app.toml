@@ -5,7 +5,7 @@ embedded = true
 web_directories = ["web"]
 
 [access_scopes]
-scopes = "read_orders,read_draft_orders,read_products,read_customers,read_metaobjects"
+scopes = "read_orders,read_all_orders,read_draft_orders,read_products,read_customers,read_metaobjects"
 
 [auth]
 redirect_urls = [ "https://example.invalid/auth/callback" ]

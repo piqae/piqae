@@ -804,6 +804,45 @@ describe("Shopify document editor layout", () => {
     expect(page.querySelector('textarea[name="import"]')).toBeNull();
   });
 
+  it("renders populated starter templates without falling into the route boundary", async () => {
+    const templates = starterTemplates.slice(0, 2).map((starter, index) => ({
+      id: `starter-${index + 1}`,
+      name: starter.name,
+      kind: starter.kind,
+      pageSize: starter.pageSize,
+      state: "published" as const,
+      source: starter.source,
+      revision: 1,
+      draftRevision: 1,
+      designTargetId: null,
+      designSpecificationRevision: null,
+      published: {
+        revision: 1,
+        name: starter.name,
+        kind: starter.kind,
+        pageSize: starter.pageSize,
+        source: starter.source,
+        designTargetId: null,
+        designSpecificationRevision: null,
+        media: starter.specification.media,
+      },
+      updatedAt: "2026-09-01T00:00:00Z",
+    }));
+    const Stub = createRoutesStub([
+      {
+        path: "/",
+        Component: Templates,
+        HydrateFallback: () => null,
+        loader: () => ({ templates, hasNodes: true, nodeError: "" }),
+      },
+    ]);
+    const page = await render(<Stub />);
+
+    expect(page.textContent).toContain(templates[0]!.name);
+    expect(page.textContent).toContain(templates[1]!.name);
+    expect(page.querySelectorAll("s-table-row")).toHaveLength(2);
+  });
+
   it("shows workspace, insert, and changing selection tools in one card", async () => {
     const onChange = vi.fn();
     const page = await render(

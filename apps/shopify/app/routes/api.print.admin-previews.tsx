@@ -2,6 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { PiqaeError } from "@piqae/sdk";
 
 import { createProductionServices } from "../services.server";
+import { ShopifyOrderUnavailableError } from "../core/shopify-order-errors";
 import shopify, { migrateLegacyOfflineSession } from "../shopify.server";
 
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -9,6 +10,7 @@ const ID = /^[A-Za-z0-9_-]{1,128}$/;
 export type AdminPreviewFailure = {
   code:
     | "document_publication"
+    | "order_access_window"
     | "order_data"
     | "render_service"
     | "account_connection"
@@ -118,6 +120,15 @@ export function classifyAdminPreviewFailure(
       code: "account_connection",
       message:
         "Shopify access could not be refreshed. Open Piqae in Shopify Admin once, then retry this print action.",
+    };
+  if (
+    error instanceof ShopifyOrderUnavailableError &&
+    error.reason === "standard_history_only"
+  )
+    return {
+      code: "order_access_window",
+      message:
+        "Shopify did not make one or more selected orders available to Piqae. This installation can access the last 60 days; older orders require Shopify's all-orders permission.",
     };
   const message = error instanceof Error ? error.message : "";
   if (

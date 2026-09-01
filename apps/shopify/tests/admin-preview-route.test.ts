@@ -8,6 +8,7 @@ import {
   withShopifySessionRecovery,
 } from "../app/routes/api.print.admin-previews";
 import { fetchOrders } from "../app/core/orders.server";
+import { ShopifyOrderUnavailableError } from "../app/core/shopify-order-errors";
 
 describe("admin preview failure classification", () => {
   it("turns stale publications into a useful republish instruction", () => {
@@ -19,6 +20,18 @@ describe("admin preview failure classification", () => {
       code: "document_publication",
       message:
         "This document publication is no longer available. Open the document, publish it again, then retry the preview.",
+    });
+  });
+
+  it("explains Shopify's order-history window without claiming the missing order is old", () => {
+    expect(
+      classifyAdminPreviewFailure(
+        new ShopifyOrderUnavailableError("standard_history_only"),
+      ),
+    ).toEqual({
+      code: "order_access_window",
+      message:
+        "Shopify did not make one or more selected orders available to Piqae. This installation can access the last 60 days; older orders require Shopify's all-orders permission.",
     });
   });
 

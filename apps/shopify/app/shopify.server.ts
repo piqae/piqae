@@ -8,6 +8,7 @@ import { PostgreSQLSessionStorage } from "@shopify/shopify-app-session-storage-p
 import { recordInstallation } from "./core/installations.server";
 import { migrateLegacyOfflineSessionWith } from "./core/legacy-offline-session.server";
 import { configuredShopifyDistribution } from "./core/shopify-distribution.server";
+import { configuredShopifyScopes } from "./core/shopify-scopes.server";
 
 function required(name: string): string {
   const value = process.env[name];
@@ -18,13 +19,7 @@ function required(name: string): string {
 const apiKey = required("SHOPIFY_API_KEY");
 const apiSecretKey = required("SHOPIFY_API_SECRET");
 const appUrl = required("SHOPIFY_APP_URL");
-const scopes = (
-  process.env.SCOPES ??
-  "read_orders,read_draft_orders,read_products,read_customers,read_metaobjects"
-)
-  .split(",")
-  .map((scope) => scope.trim())
-  .filter(Boolean);
+const scopes = configuredShopifyScopes(process.env.SCOPES);
 
 // Memory storage is development-only. Production must inject a durable SessionStorage
 // implementation before importing this module.
