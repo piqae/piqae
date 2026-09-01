@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  adminExtensionCors,
   adminExtensionPreflight,
   isAdminExtensionPreflightPath,
 } from "../server/admin-extension-cors.mjs";
@@ -20,7 +21,7 @@ function request(
 }
 
 describe("Admin extension CORS preflight", () => {
-  it("intercepts only Shopify extension POST action routes", () => {
+  it("intercepts only Shopify extension action and print-source routes", () => {
     expect(isAdminExtensionPreflightPath("/api/print/admin/previews")).toBe(
       true,
     );
@@ -31,6 +32,41 @@ describe("Admin extension CORS preflight", () => {
       false,
     );
     expect(isAdminExtensionPreflightPath("/app/templates")).toBe(false);
+  });
+
+  it("allows Shopify to fetch public print sources", () => {
+    const response = adminExtensionPreflight(
+      new Request(
+        "https://shopify.piqae.com/api/public/previews/artifact?token=fixture",
+        {
+          method: "OPTIONS",
+          headers: {
+            origin: "https://extensions.shopifycdn.com",
+            "access-control-request-method": "GET",
+            "access-control-request-headers": "authorization, x-requested-with",
+          },
+        },
+      ),
+    );
+
+    expect(response?.status).toBe(204);
+    expect(response?.headers.get("access-control-allow-methods")).toContain(
+      "GET",
+    );
+    expect(response?.headers.get("access-control-allow-origin")).toBe(
+      "https://extensions.shopifycdn.com",
+    );
+  });
+
+  it("adds the trusted origin to printable responses", () => {
+    const response = adminExtensionCors(
+      new Response("preview", { headers: { vary: "Accept-Encoding" } }),
+    );
+    expect(response.headers.get("access-control-allow-origin")).toBe(
+      "https://extensions.shopifycdn.com",
+    );
+    expect(response.headers.get("vary")).toContain("Accept-Encoding");
+    expect(response.headers.get("vary")).toContain("Origin");
   });
 
   it("allows only the headers used by authenticated preview actions", () => {

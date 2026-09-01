@@ -1,5 +1,7 @@
 import type { LoaderFunctionArgs } from "react-router";
 
+import { adminExtensionCors } from "../../server/admin-extension-cors.mjs";
+
 export function loader({ request }: LoaderFunctionArgs) {
   const state = new URL(request.url).searchParams.get("state");
   const content =
@@ -14,8 +16,9 @@ export function loader({ request }: LoaderFunctionArgs) {
       : state === "error"
         ? `<main><h1>Preview unavailable</h1><p>Check the message beside the preview, then try again.</p></main>`
         : `<main><h1>Preparing preview</h1><p>Choose a published document to preview the selected orders.</p></main>`;
-  return new Response(
-    `<!doctype html>
+  return adminExtensionCors(
+    new Response(
+      `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
@@ -39,15 +42,16 @@ export function loader({ request }: LoaderFunctionArgs) {
   </head>
   <body>${content}</body>
 </html>`,
-    {
-      headers: {
-        "content-type": "text/html; charset=utf-8",
-        "cache-control": "no-store, private",
-        "content-security-policy":
-          "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors https://admin.shopify.com https://*.myshopify.com",
-        "referrer-policy": "no-referrer",
-        "x-content-type-options": "nosniff",
+      {
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store, private",
+          "content-security-policy":
+            "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors https://admin.shopify.com https://*.myshopify.com",
+          "referrer-policy": "no-referrer",
+          "x-content-type-options": "nosniff",
+        },
       },
-    },
+    ),
   );
 }

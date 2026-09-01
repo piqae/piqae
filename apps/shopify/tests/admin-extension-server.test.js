@@ -50,6 +50,37 @@ describe("Shopify production server preflight middleware", () => {
     );
   });
 
+  it("answers trusted PDF preview preflights before React Router", async () => {
+    const app = express();
+    app.use(adminExtensionPreflightMiddleware);
+    app.all("*", (_request, response) => response.sendStatus(418));
+    server = app.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string")
+      throw new Error("Test server did not expose a TCP port");
+
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/api/public/previews/artifact?token=fixture`,
+      {
+        method: "OPTIONS",
+        headers: {
+          origin: "https://extensions.shopifycdn.com",
+          "access-control-request-method": "GET",
+          "access-control-request-headers": "authorization, x-requested-with",
+        },
+      },
+    );
+
+    expect(response.status).toBe(204);
+    expect(response.headers.get("access-control-allow-origin")).toBe(
+      "https://extensions.shopifycdn.com",
+    );
+    expect(response.headers.get("access-control-allow-methods")).toContain(
+      "GET",
+    );
+  });
+
   it("leaves trusted POST CORS ownership with React Router", async () => {
     const app = express();
     app.use(adminExtensionPreflightMiddleware);
