@@ -781,7 +781,7 @@ mod tests {
     };
     use rand::rngs::OsRng;
     use sha2::{Digest, Sha256};
-    use std::{collections::BTreeMap, str::FromStr};
+    use std::{collections::BTreeMap, process::Command, str::FromStr, thread};
     use tower::ServiceExt;
 
     struct TestApplication {
@@ -1794,6 +1794,135 @@ mod tests {
             String::from_utf8_lossy(&body)
         );
         serde_json::from_slice(&body).expect("JSON body")
+    }
+
+    async fn approve_document_preview_stack_fixture() {
+        let application = application().await;
+        let template = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                "/v1/printpacket/templates",
+                "piq_test_integration",
+                "bounded-stack-template",
+                Some(
+                    &serde_json::json!({
+                        "name": "Bounded stack approval",
+                        "specification": {
+                            "format": "printpacket/v1",
+                            "media": {"kind": "paged", "size": "a4"},
+                            "body": [{
+                                "type": "paragraph",
+                                "content": [{"type": "text", "value": "Approval"}]
+                            }]
+                        }
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        let template_id = template["id"].as_str().expect("template id");
+        let revision = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                &format!("/v1/printpacket/templates/{template_id}/publish"),
+                "piq_test_integration",
+                "bounded-stack-publish",
+                Some(&serde_json::json!({"specification": template["specification"]}).to_string()),
+            ),
+        )
+        .await;
+        let render = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                "/v1/printpacket/renders",
+                "piq_test_integration",
+                "bounded-stack-render",
+                Some(
+                    &serde_json::json!({
+                        "template_revision_id": revision["id"],
+                        "input": {}
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        let worker = crate::document_render_worker::DocumentRenderWorker::new(
+            application.state.clone(),
+            "bounded-stack-worker",
+        );
+        assert_eq!(worker.run_once(1).await.expect("render batch"), 1);
+        let render_id = render["id"].as_str().expect("render id");
+        let preview = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                &format!("/v1/printpacket/renders/{render_id}/previews"),
+                "piq_test_integration",
+                "bounded-stack-preview",
+                Some(r#"{"expires_in_seconds":600}"#),
+            ),
+        )
+        .await;
+        let preview_id = preview["id"].as_str().expect("preview id");
+        let approval = json_response(
+            &application.router,
+            idempotent_api_request(
+                "POST",
+                &format!("/v1/printpacket/previews/{preview_id}/approve"),
+                "piq_test_integration",
+                "bounded-stack-approval",
+                Some(
+                    &serde_json::json!({
+                        "printer_id": application.printer_id,
+                        "title": "Bounded stack approval"
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(approval["preview"]["state"], "approved");
+        assert_eq!(approval["job"]["state"], "waiting_for_agent");
+    }
+
+    #[test]
+    fn document_preview_approval_fits_production_worker_stack() {
+        const CHILD: &str = "PIQAE_APPROVAL_STACK_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "tests::document_preview_approval_fits_production_worker_stack",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .expect("bounded-stack approval subprocess");
+            assert!(
+                status.success(),
+                "bounded-stack approval subprocess failed with {status}"
+            );
+            return;
+        }
+
+        thread::Builder::new()
+            .name("approval-production-stack".into())
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("bounded-stack runtime")
+                    .block_on(approve_document_preview_stack_fixture());
+            })
+            .expect("bounded-stack approval thread")
+            .join()
+            .expect("bounded-stack approval thread completed");
     }
 
     async fn sync_virtual_document_node(
