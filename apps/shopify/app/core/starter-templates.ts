@@ -4,6 +4,7 @@ import {
   type Block,
   type PrintPacket,
   type Inline,
+  type TextStyle,
 } from "./template-model";
 const path = (...parts: string[]) => ({ type: "path" as const, path: parts });
 const current = (...parts: string[]) => ({
@@ -11,6 +12,8 @@ const current = (...parts: string[]) => ({
   path: parts,
 });
 const literal = (value: string) => ({ type: "literal" as const, value });
+const muted = { red: 102, green: 106, blue: 110 } as const;
+const rule = { red: 210, green: 213, blue: 216 } as const;
 const text = (value: string, level?: 1 | 2 | 3): Block =>
   level
     ? { type: "heading", level, content: [{ type: "text", value }] }
@@ -31,24 +34,50 @@ const currentValue = (parts: string[], bold = false): Block => ({
     },
   ],
 });
+const paragraph = (
+  content: Inline[],
+  style: Extract<Block, { type: "paragraph" }>["style"] = {},
+): Block => ({ type: "paragraph", content, style });
+const pathValue = (parts: string[], style: TextStyle = {}): Inline => ({
+  type: "value",
+  value: path(...parts),
+  style,
+});
+const currentInline = (parts: string[], style: TextStyle = {}): Inline => ({
+  type: "value",
+  value: current(...parts),
+  style,
+});
+const optionalCurrentInline = (
+  parts: string[],
+  style: TextStyle = {},
+): Inline => ({
+  type: "value",
+  value: {
+    type: "coalesce",
+    values: [current(...parts), literal("")],
+  },
+  style,
+});
+const currentDate = (): Block =>
+  paragraph(
+    [
+      {
+        type: "value",
+        value: {
+          type: "format_date",
+          value: current("createdAt"),
+          format: "day_month_year",
+        },
+      },
+    ],
+    { align: "right", font_size_pt: 9 },
+  );
 const optionalCurrentValue = (parts: string[], bold = false): Block => ({
   type: "conditional",
   condition: { type: "exists", value: current(...parts) },
   then: [currentValue(parts, bold)],
   else: [],
-});
-const nonEmptyCurrent = (...parts: string[]) => ({
-  type: "compare" as const,
-  operator: "not_equal" as const,
-  left: {
-    type: "format_string" as const,
-    operation: "trim" as const,
-    value: {
-      type: "coalesce" as const,
-      values: [current(...parts), literal("")],
-    },
-  },
-  right: literal(""),
 });
 const currentMoney = (...parts: string[]) => ({
   type: "format_money" as const,
@@ -76,12 +105,92 @@ const itemColumns = (): Extract<Block, { type: "table" }>["columns"] => [
   column("Price", currentMoney("unitPrice"), 2, "right"),
   column("Total", currentMoney("total"), 2, "right"),
 ];
-const items = (source = "lineItems", columns = itemColumns()): Block => ({
+const compactItemDescription = (): Inline[] => [
+  currentInline(["title"], { bold: true }),
+  { type: "line_break" },
+  optionalCurrentInline(["variant", "title"], {
+    font_size_pt: 8,
+    color: muted,
+  }),
+  { type: "line_break" },
+  { type: "text", value: "SKU: ", style: { font_size_pt: 8, color: muted } },
+  optionalCurrentInline(["sku"], { font_size_pt: 8, color: muted }),
+];
+const documentTableStyle = {
+  cell_padding_mm: 1.5,
+  header_text_color: muted,
+  border_color: rule,
+  border_width_pt: 0.35,
+} as const;
+const packingColumns = (): Extract<Block, { type: "table" }>["columns"] => [
+  {
+    header: [
+      { type: "text", value: "ITEMS", style: { bold: true, font_size_pt: 8 } },
+    ],
+    cell: compactItemDescription(),
+    width: 8,
+    align: "left",
+  },
+  {
+    header: [
+      { type: "text", value: "QTY", style: { bold: true, font_size_pt: 8 } },
+    ],
+    cell: [currentInline(["quantity"], { bold: true })],
+    width: 1,
+    align: "right",
+  },
+];
+const invoiceColumns = (): Extract<Block, { type: "table" }>["columns"] => [
+  {
+    header: [
+      { type: "text", value: "ITEMS", style: { bold: true, font_size_pt: 8 } },
+    ],
+    cell: compactItemDescription(),
+    width: 6,
+    align: "left",
+  },
+  {
+    header: [
+      { type: "text", value: "QTY", style: { bold: true, font_size_pt: 8 } },
+    ],
+    cell: [currentInline(["quantity"])],
+    width: 1,
+    align: "right",
+  },
+  {
+    header: [
+      { type: "text", value: "PRICE", style: { bold: true, font_size_pt: 8 } },
+    ],
+    cell: [{ type: "value", value: currentMoney("unitPrice") }],
+    width: 2,
+    align: "right",
+  },
+  {
+    header: [
+      { type: "text", value: "TOTAL", style: { bold: true, font_size_pt: 8 } },
+    ],
+    cell: [
+      {
+        type: "value",
+        value: currentMoney("total"),
+        style: { bold: true },
+      },
+    ],
+    width: 2,
+    align: "right",
+  },
+];
+const items = (
+  source = "lineItems",
+  columns = itemColumns(),
+  style?: Extract<Block, { type: "table" }>["style"],
+): Block => ({
   type: "table",
   items: current(source),
   repeat_header: true,
   columns,
   empty: [text("No items")],
+  ...(style ? { style } : {}),
 });
 const region = () => ({
   first: [] as Block[],
@@ -112,6 +221,163 @@ const base = (body: Block[], continuous = false): PrintPacket => ({
   body,
   footer: region(),
 });
+const pagedDocument = (body: Block[]): PrintPacket => ({
+  ...base(body),
+  media: {
+    kind: "paged",
+    size: "a4",
+    orientation: "portrait",
+    margins: { top_mm: 13, right_mm: 13, bottom_mm: 14, left_mm: 13 },
+  },
+  theme: {
+    font_size_pt: 9,
+    line_height: 1.25,
+    text_color: { red: 32, green: 34, blue: 35 },
+  },
+});
+const brand = (): Block => ({
+  type: "conditional",
+  condition: { type: "exists", value: path("shop", "logo") },
+  then: [
+    {
+      type: "image_value",
+      resource: path("shop", "logo"),
+      width_mm: 50,
+      height_mm: 18,
+      fit: "scale_down",
+    },
+  ],
+  else: [
+    paragraph([pathValue(["shop", "name"], { bold: true, font_size_pt: 18 })]),
+  ],
+});
+const documentHeading = (
+  title: string,
+  barcode = false,
+  referenceLabel = "Order ",
+): Block => ({
+  type: "grid",
+  columns: [2, 1],
+  gap_mm: 12,
+  children: [
+    brand(),
+    {
+      type: "stack",
+      gap_mm: 0.8,
+      children: [
+        paragraph([{ type: "text", value: title, style: { bold: true } }], {
+          align: "right",
+          font_size_pt: 20,
+        }),
+        ...(barcode
+          ? [
+              {
+                type: "barcode" as const,
+                value: current("name"),
+                symbology: "code128" as const,
+                width_mm: 42,
+                height_mm: 9,
+                human_readable: false,
+              },
+            ]
+          : []),
+        paragraph(
+          [
+            { type: "text", value: referenceLabel, style: { bold: true } },
+            currentInline(["name"], { bold: true }),
+          ],
+          { align: "right", font_size_pt: 9 },
+        ),
+        currentDate(),
+      ],
+    },
+  ],
+});
+const addressBlock = (label: string, parts: string[]): Block => ({
+  type: "stack",
+  gap_mm: 1,
+  children: [
+    paragraph([{ type: "text", value: label, style: { bold: true } }], {
+      font_size_pt: 8,
+      color: muted,
+    }),
+    optionalCurrentValue(parts),
+  ],
+});
+const shopFooter = (message: string): Block => ({
+  type: "stack",
+  gap_mm: 0.6,
+  children: [
+    paragraph([{ type: "text", value: message }], {
+      align: "center",
+      font_size_pt: 8,
+      color: muted,
+    }),
+    paragraph([pathValue(["shop", "name"], { bold: true })], {
+      align: "center",
+      font_size_pt: 8,
+    }),
+    {
+      type: "conditional",
+      condition: {
+        type: "exists",
+        value: path("shop", "address", "formatted"),
+      },
+      then: [
+        paragraph([pathValue(["shop", "address", "formatted"])], {
+          align: "center",
+          font_size_pt: 8,
+          color: muted,
+        }),
+      ],
+      else: [],
+    },
+    {
+      type: "conditional",
+      condition: { type: "exists", value: path("shop", "email") },
+      then: [
+        paragraph([pathValue(["shop", "email"])], {
+          align: "center",
+          font_size_pt: 8,
+          color: muted,
+        }),
+      ],
+      else: [],
+    },
+    {
+      type: "conditional",
+      condition: { type: "exists", value: path("shop", "primaryDomain") },
+      then: [
+        paragraph([pathValue(["shop", "primaryDomain"])], {
+          align: "center",
+          font_size_pt: 8,
+          color: muted,
+        }),
+      ],
+      else: [],
+    },
+  ],
+});
+const totalRow = (label: string, parts: string[], bold = false): Block => ({
+  type: "grid",
+  columns: [1, 1],
+  gap_mm: 4,
+  children: [
+    paragraph([{ type: "text", value: label, style: { bold } }], {
+      font_size_pt: bold ? 10 : 9,
+    }),
+    paragraph(
+      [
+        {
+          type: "value",
+          value: currentMoney(...parts),
+          style: { bold },
+        },
+      ],
+      { align: "right", font_size_pt: bold ? 10 : 9 },
+    ),
+  ],
+});
 const label = (body: Block[]): PrintPacket => ({
   ...base(body),
   media: {
@@ -127,124 +393,89 @@ const label = (body: Block[]): PrintPacket => ({
   },
 });
 const documents = {
-  invoice: base([
+  invoice: pagedDocument([
     {
       type: "repeat",
       items: path("orders"),
       gap_mm: 10,
       children: [
+        documentHeading("INVOICE", false, "Invoice "),
+        { type: "spacer", height_mm: 10 },
         {
           type: "grid",
-          columns: [2, 1],
-          gap_mm: 8,
-          children: [value(["shop", "name"], true), text("INVOICE", 1)],
-        },
-        currentValue(["name"], true),
-        optionalCurrentValue(["shippingAddress", "formatted"]),
-        { type: "divider" },
-        items(),
-        { type: "divider" },
-        {
-          type: "paragraph",
-          content: [
-            { type: "text", value: "Subtotal " },
-            { type: "value", value: currentMoney("subtotal") },
+          columns: [1, 1],
+          gap_mm: 14,
+          children: [
+            addressBlock("BILLING ADDRESS", ["billingAddress", "formatted"]),
+            addressBlock("SHIPPING ADDRESS", ["shippingAddress", "formatted"]),
           ],
         },
-        {
-          type: "paragraph",
-          content: [
-            { type: "text", value: "Tax " },
-            { type: "value", value: currentMoney("tax") },
-          ],
-        },
-        {
-          type: "paragraph",
-          content: [
-            { type: "text", value: "Total ", style: { bold: true } },
-            {
-              type: "value",
-              value: currentMoney("total"),
-              style: { bold: true },
-            },
-          ],
-        },
-        { type: "page_break" },
-      ],
-    },
-  ]),
-  "packing-slip": base([
-    {
-      type: "repeat",
-      items: path("orders"),
-      gap_mm: 10,
-      children: [
+        { type: "spacer", height_mm: 6 },
+        items("lineItems", invoiceColumns(), documentTableStyle),
+        { type: "spacer", height_mm: 4 },
         {
           type: "grid",
-          columns: [2, 1],
+          columns: [3, 2],
           gap_mm: 10,
           children: [
             {
               type: "stack",
-              gap_mm: 3,
+              gap_mm: 1,
               children: [
-                value(["shop", "name"], true),
-                {
-                  type: "conditional",
-                  condition: nonEmptyCurrent("statusUrl"),
-                  then: [
+                paragraph(
+                  [
                     {
-                      type: "qr",
-                      value: current("statusUrl"),
-                      size_mm: 24,
+                      type: "text",
+                      value: "SHIPPING METHOD",
+                      style: { bold: true },
                     },
                   ],
-                  else: [],
-                },
+                  { font_size_pt: 8, color: muted },
+                ),
+                optionalCurrentValue(["shippingMethod"]),
+                optionalCurrentValue(["note"]),
               ],
             },
             {
               type: "stack",
               gap_mm: 1,
               children: [
-                text("PACKING SLIP", 1),
-                currentValue(["name"], true),
-                {
-                  type: "paragraph",
-                  content: [
-                    {
-                      type: "value",
-                      value: {
-                        type: "format_date",
-                        value: current("createdAt"),
-                        format: "day_month_year",
-                      },
-                    },
-                  ],
-                },
+                totalRow("Subtotal", ["subtotal"]),
+                totalRow("Tax", ["tax"]),
+                { type: "divider", width_pt: 0.75 },
+                totalRow("Total", ["total"], true),
               ],
             },
           ],
         },
-        { type: "spacer", height_mm: 7 },
+        { type: "spacer", height_mm: 8 },
+        shopFooter("Thank you for shopping with us!"),
+        { type: "page_break" },
+      ],
+    },
+  ]),
+  "packing-slip": pagedDocument([
+    {
+      type: "repeat",
+      items: path("orders"),
+      gap_mm: 10,
+      children: [
+        documentHeading("PACKING SLIP", true),
+        { type: "spacer", height_mm: 10 },
         {
           type: "grid",
           columns: [1, 1],
-          gap_mm: 12,
+          gap_mm: 14,
           children: [
+            addressBlock("SHIPPING ADDRESS", ["shippingAddress", "formatted"]),
             {
               type: "stack",
               gap_mm: 1,
               children: [
-                text("SHIP TO", 2),
-                optionalCurrentValue(["shippingAddress", "formatted"]),
-              ],
-            },
-            {
-              type: "stack",
-              gap_mm: 1,
-              children: [
-                text("CUSTOMER", 2),
+                paragraph(
+                  [{ type: "text", value: "CUSTOMER", style: { bold: true } }],
+                  { font_size_pt: 8, color: muted },
+                ),
                 optionalCurrentValue(["customer", "displayName"]),
                 optionalCurrentValue(["customer", "email"]),
               ],
@@ -252,11 +483,9 @@ const documents = {
           ],
         },
         { type: "spacer", height_mm: 6 },
-        { type: "divider", width_pt: 1 },
-        items("lineItems", itemColumns().slice(0, 3)),
-        { type: "divider" },
-        text("Thank you for your order."),
-        currentValue(["name"]),
+        items("lineItems", packingColumns(), documentTableStyle),
+        { type: "spacer", height_mm: 7 },
+        shopFooter("Thank you for shopping with us!"),
         { type: "page_break" },
       ],
     },

@@ -12,6 +12,7 @@ export type TextStyle = {
   underline?: boolean;
   font_size_pt?: number;
   align?: "left" | "center" | "right";
+  color?: { red: number; green: number; blue: number };
 };
 export type Inline = PrintPacketInline;
 export type Block = PrintPacketNode;

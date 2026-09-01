@@ -33,6 +33,24 @@ export const SHOPIFY_DOCUMENT_FIELDS: readonly ShopifyDocumentField[] = [
     conditionable: true,
   },
   {
+    label: "Shop primary domain",
+    path: "shop.primaryDomain",
+    group: "Shop",
+    conditionable: true,
+  },
+  {
+    label: "Shop contact email",
+    path: "shop.email",
+    group: "Shop",
+    conditionable: true,
+  },
+  {
+    label: "Shop business address",
+    path: "shop.address.formatted",
+    group: "Shop",
+    conditionable: true,
+  },
+  {
     label: "Order number",
     path: "order.name",
     group: "Order",

@@ -42,11 +42,17 @@ class PrintActionErrorBoundary extends Component {
   render() {
     if (this.state.error)
       return (
-        <s-admin-print-action>
+        <s-admin-action heading="Print order documents">
           <s-banner tone="critical">
             Piqae Order Printing could not start: {this.state.error}
           </s-banner>
-        </s-admin-print-action>
+          <s-button slot="primary-action" disabled>
+            Print to Node
+          </s-button>
+          <s-button slot="secondary-actions" onClick={() => shopify.close()}>
+            Cancel
+          </s-button>
+        </s-admin-action>
       );
     return this.props.children;
   }
@@ -261,6 +267,7 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   const [result, setResult] = useState("");
   const [preview, setPreview] = useState(null);
   const [previewState, setPreviewState] = useState("idle");
+  const [previewImageState, setPreviewImageState] = useState("idle");
   const [previewError, setPreviewError] = useState("");
   const [previewAttempt, setPreviewAttempt] = useState(0);
   const requestSequence = useRef(0);
@@ -370,16 +377,9 @@ function AdminOrderPrintActionContent({ bulk = false }) {
     };
   }, [options, selectedDocument?.id, orderIds.join(","), previewAttempt]);
 
-  const src =
-    preview?.artifactUrl ??
-    previewPlaceholderUrl(
-      options?.previewPlaceholderUrl,
-      previewState === "failed"
-        ? "error"
-        : previewState === "loading"
-          ? "loading"
-          : "empty",
-    );
+  useEffect(() => {
+    setPreviewImageState(preview?.previewImageUrl ? "loading" : "idle");
+  }, [preview?.previewImageUrl]);
 
   useEffect(() => {
     if (!preview) return;
@@ -460,8 +460,13 @@ function AdminOrderPrintActionContent({ bulk = false }) {
       canUseDestinationForPolicy(selectedDestination, policy)),
   );
 
+  const downloadUrl = previewDownloadUrl(preview?.artifactUrl);
+
   return (
-    <s-admin-print-action {...(src ? { src } : {})}>
+    <s-admin-action
+      heading="Print order documents"
+      loading={state === "loading"}
+    >
       <s-stack direction="block" gap="base">
         {bulk && (
           <s-text type="strong">{orderIds.length} selected orders</s-text>
@@ -549,25 +554,73 @@ function AdminOrderPrintActionContent({ bulk = false }) {
             )}
             {error && <s-banner tone="critical">{error}</s-banner>}
             {result && <s-banner tone="success">{result}</s-banner>}
-            {previewState === "ready" && preview ? (
-              <s-stack direction="inline" gap="small">
-                <s-button
-                  href={previewDownloadUrl(preview.artifactUrl)}
-                  target="_blank"
-                  icon="download"
+            {previewImageState === "loading" ? (
+              <s-stack direction="inline" gap="small" alignItems="center">
+                <s-spinner accessibilityLabel="Loading PDF preview image" />
+                <s-text>Loading the rendered PDF preview…</s-text>
+              </s-stack>
+            ) : null}
+            {previewImageState === "failed" ? (
+              <s-banner tone="warning">
+                The preview image could not be displayed. The generated PDF is
+                still available to download.
+              </s-banner>
+            ) : null}
+            {previewState === "ready" && preview?.previewImageUrl ? (
+              <s-stack direction="block" gap="small">
+                <s-box
+                  background="subdued"
+                  border="base"
+                  borderRadius="base"
+                  padding="base"
                 >
-                  Download PDF
-                </s-button>
-                {canPrint ? (
-                  <s-button variant="primary" onClick={printDirect}>
-                    {state === "printing" ? "Sending…" : "Print with Piqae"}
-                  </s-button>
+                  <s-image
+                    src={preview.previewImageUrl}
+                    alt="First page of the generated PDF"
+                    inlineSize="fill"
+                    maxBlockSize="600px"
+                    objectFit="contain"
+                    onLoad={() => setPreviewImageState("ready")}
+                    onError={() => setPreviewImageState("failed")}
+                  />
+                </s-box>
+                {preview.renderCost?.page_count > 1 ? (
+                  <s-text color="subdued">
+                    First page shown · {preview.renderCost.page_count} pages in
+                    the PDF
+                  </s-text>
                 ) : null}
               </s-stack>
             ) : null}
           </>
         )}
       </s-stack>
-    </s-admin-print-action>
+      <s-button
+        slot="primary-action"
+        variant="primary"
+        loading={state === "printing"}
+        disabled={!canPrint}
+        onClick={printDirect}
+      >
+        Print to Node
+      </s-button>
+      {downloadUrl ? (
+        <s-button
+          slot="secondary-actions"
+          href={downloadUrl}
+          target="_blank"
+          icon="download"
+        >
+          Download PDF
+        </s-button>
+      ) : (
+        <s-button slot="secondary-actions" icon="download" disabled>
+          Download PDF
+        </s-button>
+      )}
+      <s-button slot="secondary-actions" onClick={() => shopify.close()}>
+        Cancel
+      </s-button>
+    </s-admin-action>
   );
 }

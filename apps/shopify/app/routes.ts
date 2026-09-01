@@ -42,6 +42,7 @@ export default [
     "api/public/previews/artifact",
     "routes/api.public.preview-artifact.tsx",
   ),
+  route("api/public/previews/image", "routes/api.public.preview-image.tsx"),
   route(
     "api/renders/:renderId/download",
     "routes/api.renders.$renderId.download.tsx",

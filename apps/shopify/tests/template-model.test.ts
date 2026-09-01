@@ -96,6 +96,59 @@ describe("PrintPacket model", () => {
       { type: "page_break" },
     ]);
   });
+  it("ships coordinated compact invoice and packing-slip defaults", () => {
+    const invoice = starterTemplates.find(
+      ({ id }) => id === "invoice",
+    )!.specification;
+    const packing = starterTemplates.find(
+      ({ id }) => id === "packing-slip",
+    )!.specification;
+
+    for (const document of [invoice, packing]) {
+      expect(document.media).toMatchObject({
+        kind: "paged",
+        margins: { top_mm: 13, right_mm: 13, bottom_mm: 14, left_mm: 13 },
+      });
+      expect(document.theme).toMatchObject({
+        font_size_pt: 9,
+        line_height: 1.25,
+      });
+      const nodes = allNodes(document.body);
+      expect(
+        nodes.find(
+          (node) =>
+            node.type === "conditional" &&
+            node.condition?.type === "exists" &&
+            node.condition.value?.path?.join(".") === "shop.logo",
+        ),
+      ).toMatchObject({
+        then: [{ type: "image_value", resource: { path: ["shop", "logo"] } }],
+        else: [{ type: "paragraph" }],
+      });
+      expect(
+        nodes.find(
+          (node) =>
+            node.type === "table" &&
+            node.items?.path?.join(".") === "lineItems",
+        ),
+      ).toMatchObject({
+        repeat_header: true,
+        style: { cell_padding_mm: 1.5, border_width_pt: 0.35 },
+      });
+      expect(JSON.stringify(document)).toContain('"primaryDomain"');
+      expect(JSON.stringify(document)).toContain('"address","formatted"');
+    }
+
+    expect(
+      allNodes(packing.body).find((node) => node.type === "barcode"),
+    ).toMatchObject({
+      value: { type: "current_path", path: ["name"] },
+      symbology: "code128",
+      human_readable: false,
+    });
+    expect(JSON.stringify(invoice)).toContain("BILLING ADDRESS");
+    expect(JSON.stringify(invoice)).toContain("Subtotal");
+  });
   it("rejects noncanonical packets and excessive nesting", () => {
     expect(() => parseTemplateEnvelope('{"schema":"unsupported"}')).toThrow(
       "piqae.shopify-printpacket-template/v1",

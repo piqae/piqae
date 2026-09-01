@@ -3,6 +3,7 @@ import { CredentialVault } from "../app/core/credentials.server";
 import {
   fetchDraftOrders,
   fetchOrders,
+  fetchShopPrintIdentity,
   normalizedLabelCode128Candidate,
   normalizeMoneyAmount,
   normalizeOrderGid,
@@ -345,12 +346,59 @@ describe("Shopify boundary", () => {
     const [normalized] = await fetchOrders(admin, ["42"]);
     const input = shopifyDocumentInput(shop, [normalized!], "Fixture Shop");
     expect(input).toMatchObject({
-      shop: { name: "Fixture Shop", domain: shop },
+      shop: {
+        name: "Fixture Shop",
+        domain: shop,
+        primaryDomain: shop,
+      },
       orders: [{ name: "#1042", total: 23 }],
     });
     expect(() =>
       shopifyDocumentInput("attacker.example", [normalized!]),
     ).toThrow("invalid Shopify shop domain");
+  });
+  it("loads printable shop branding and falls back without blocking orders", async () => {
+    const brandedAdmin = {
+      graphql: vi.fn<AdminGraphql["graphql"]>(async () =>
+        Response.json({
+          data: {
+            shop: {
+              name: "C4 Coffee",
+              contactEmail: "hello@c4coffee.co.nz",
+              primaryDomain: { host: "c4coffee.co.nz" },
+              billingAddress: {
+                company: "C4 Coffee",
+                address1: "113 Fitzgerald Avenue",
+                city: "Christchurch",
+                zip: "8011",
+                country: "New Zealand",
+              },
+            },
+          },
+        }),
+      ),
+    };
+    await expect(fetchShopPrintIdentity(brandedAdmin, shop)).resolves.toEqual({
+      name: "C4 Coffee",
+      domain: shop,
+      primaryDomain: "c4coffee.co.nz",
+      email: "hello@c4coffee.co.nz",
+      address: expect.objectContaining({
+        formatted:
+          "C4 Coffee\n113 Fitzgerald Avenue\nChristchurch 8011\nNew Zealand",
+      }),
+    });
+
+    const unavailable = {
+      graphql: vi.fn<AdminGraphql["graphql"]>(async () =>
+        Response.json({ errors: [{ message: "Unavailable" }] }),
+      ),
+    };
+    await expect(fetchShopPrintIdentity(unavailable, shop)).resolves.toEqual({
+      name: "fixture-shop",
+      domain: shop,
+      primaryDomain: shop,
+    });
   });
   it("normalizes taxonomy and only explicitly allowlisted custom data", async () => {
     admin.graphql.mockClear();
@@ -606,6 +654,85 @@ describe("Shopify boundary", () => {
       });
     }
   });
+  it("changes render idempotency when printable shop branding changes", async () => {
+    const repository = new MemoryShopRepository();
+    const workflow = new MemoryWorkflowRepository();
+    const vault = new CredentialVault(Buffer.alloc(32, 9));
+    await repository.put({
+      shop,
+      piqaeAccountId: "acct_1",
+      encryptedCredential: vault.seal("token", shop),
+      templateRevisionId: "rev_1",
+      createdAt: new Date().toISOString(),
+    });
+    await publishPinnedDocument(workflow, {
+      id: "invoice",
+      piqaeRevisionId: "rev_1",
+      targetId: "tgt_orders",
+      specificationRevision: "spec_orders_4",
+    });
+    let shopName = "First Shop Name";
+    const brandedAdmin = {
+      graphql: vi.fn<AdminGraphql["graphql"]>(async (query) =>
+        Response.json(
+          query.includes("PiqaeShopPrintIdentity")
+            ? {
+                data: {
+                  shop: {
+                    name: shopName,
+                    primaryDomain: { host: "fixture.example" },
+                  },
+                },
+              }
+            : { data: { order } },
+        ),
+      ),
+    };
+    const create = vi.fn(async (..._args: unknown[]) => ({
+      id: "render_1",
+      state: "completed",
+      failure_code: null,
+    }));
+    const service = new ShopifyPrintingService(
+      repository,
+      vault,
+      () =>
+        ({
+          printPackets: {
+            renders: {
+              create,
+              print: vi.fn(async () => ({ id: "job_1" })),
+              retrieve: vi.fn(),
+            },
+          },
+        }) as never,
+      "https://app.example",
+      undefined,
+      workflow,
+    );
+    const print = () =>
+      service.printOrders({
+        admin: brandedAdmin,
+        shop,
+        orderIds: ["42"],
+        targetId: "tgt_orders",
+        targetSpecificationRevision: "spec_orders_4",
+        templateId: "invoice",
+        requestKey: "same-click",
+      });
+
+    await print();
+    shopName = "Updated Shop Name";
+    await print();
+
+    expect(create.mock.calls[0]?.[0]).toMatchObject({
+      input: { shop: { name: "First Shop Name" } },
+    });
+    expect(create.mock.calls[1]?.[0]).toMatchObject({
+      input: { shop: { name: "Updated Shop Name" } },
+    });
+    expect(create.mock.calls[0]?.[1]).not.toBe(create.mock.calls[1]?.[1]);
+  });
   it("fails closed when a selected published document has no pinned Piqae revision", async () => {
     const repository = new MemoryShopRepository();
     const workflow = new MemoryWorkflowRepository();
@@ -847,12 +974,13 @@ describe("Shopify boundary", () => {
         },
       },
     } as never;
+    const previewTokens = new DownloadTokenVault(Buffer.alloc(32, 5));
     const service = new ShopifyPrintingService(
       repository,
       vault,
       () => client,
       "https://app.example",
-      undefined,
+      previewTokens,
       workflow,
     );
     const preview = await service.previewOrders({
@@ -862,6 +990,12 @@ describe("Shopify boundary", () => {
       templateId: "preview-invoice",
       requestKey: "preview-click",
     });
+    expect(preview.artifactUrl).toMatch(
+      /^https:\/\/app\.example\/api\/public\/previews\/artifact\?token=/,
+    );
+    expect(preview.previewImageUrl).toMatch(
+      /^https:\/\/app\.example\/api\/public\/previews\/image\?token=/,
+    );
     const result = await service.approvePreview({
       shop,
       previewId: preview.previewId,

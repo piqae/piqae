@@ -11,6 +11,7 @@ const ALLOWED_REQUEST_HEADERS = new Set([
 const ADMIN_EXTENSION_PRINT_SOURCE_PATHS = new Set([
   "/api/public/print-placeholder",
   "/api/public/previews/artifact",
+  "/api/public/previews/image",
 ]);
 
 function allowedOrigin(request, allowAdminOrigin = false) {

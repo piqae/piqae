@@ -8,6 +8,7 @@ import type {
 import type { ShopRepository } from "./model";
 import {
   fetchOrders,
+  fetchShopPrintIdentity,
   normalizeOrderGid,
   parseShopifyDataBindings,
   shopifyDocumentInput,
@@ -96,15 +97,19 @@ export async function createEditorDraftPreview(input: {
 }): Promise<{ renderId: string }> {
   input.signal?.throwIfAborted();
   validatePrintPacket(input.specification);
-  const [order] = await fetchOrders(
-    input.admin,
-    [input.latestOrder.id],
-    parseShopifyDataBindings(input.metafieldAllowlist),
-  );
+  const [orders, shopIdentity] = await Promise.all([
+    fetchOrders(
+      input.admin,
+      [input.latestOrder.id],
+      parseShopifyDataBindings(input.metafieldAllowlist),
+    ),
+    fetchShopPrintIdentity(input.admin, input.shop),
+  ]);
+  const [order] = orders;
   if (!order || order.id !== input.latestOrder.id)
     throw new Error("The latest Shopify order is no longer available");
   input.signal?.throwIfAborted();
-  const renderInput = shopifyDocumentInput(input.shop, [order]);
+  const renderInput = shopifyDocumentInput(input.shop, [order], shopIdentity);
   const fetchAsset = input.assetFetcher ?? fetchTemplateAsset;
   await mapWithConcurrency(input.assets, 4, async (asset) => {
     input.signal?.throwIfAborted();
