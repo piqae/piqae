@@ -72,6 +72,8 @@ jobs:
         run: python3 release/tools/check_workflow_pins.py .github/workflows/*.yml
       - name: Require switchable runner indirection
         run: python3 release/tools/check_workflow_runners.py .github/workflows/*.yml
+      - name: Parse-check explicit Bash workflow steps
+        run: python3 release/tools/check_workflow_bash.py .github/workflows/*.yml
 
   rust-dependencies:
     name: Rust dependency policy

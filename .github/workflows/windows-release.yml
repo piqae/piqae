@@ -53,11 +53,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${REQUESTED_PUBLISH:-false}" == true ]] && (
-            [[ "${ORCHESTRATED_RELEASE:-false}" != true ]]
-            || [[ "$GITHUB_WORKFLOW" != 'Piqae release' ]]
-            || [[ "$GITHUB_REPOSITORY" != 'piqae/piqae' ]]
-          ); then
+          if [[ "${REQUESTED_PUBLISH:-false}" == true
+            && ( "${ORCHESTRATED_RELEASE:-false}" != true
+              || "$GITHUB_WORKFLOW" != 'Piqae release'
+              || "$GITHUB_REPOSITORY" != 'piqae/piqae' )
+          ]]; then
             echo 'Stable Windows publication is callable only from canonical release.yml after its shared gates.' >&2
             exit 1
           fi
