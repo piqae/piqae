@@ -125,9 +125,9 @@ const MAX_JSON_DEPTH: usize = 64;
 const MAX_JSON_NODES: usize = 50_000;
 const PRINT_PACKET_NEGOTIATION_VERSION: u16 = 2;
 const PRINT_PACKET_VERSION: &str = printpacket::DOCUMENT_V1;
-const PRINT_PACKET_CONFORMANCE_PROFILE: &str = printpacket::CONFORMANCE_CORE_V1;
+const PRINT_PACKET_CONFORMANCE_PROFILE: &str = printpacket::CONFORMANCE_CORE_V2;
 const PRINT_PACKET_OUTPUT_PROFILE: &str = printpacket::PDF_BASE14_V1;
-const PRINT_PACKET_RENDERER_ABI: &str = "printpacket.pdf-renderer/v1";
+const PRINT_PACKET_RENDERER_ABI: &str = "printpacket.pdf-renderer/v2";
 const PRINT_PACKET_RESOURCE_ABI: &str = "printpacket.resources/v1";
 
 fn print_packet_feature_id(feature: &printpacket::Feature) -> String {

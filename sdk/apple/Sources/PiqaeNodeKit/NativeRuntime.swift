@@ -425,9 +425,9 @@ public actor PiqaeNativeRuntime: PiqaeEmbeddedNodeRuntime, PiqaeOpaqueIdentityPr
     private func ensurePrintPacketSupport(for packet: PiqaePrintPacket) async throws {
         let capabilities = try await printPacketCapabilities()
         guard capabilities.contract == "printpacket/v1",
-            capabilities.rendererABI == "printpacket.pdf-renderer/v1",
+            capabilities.rendererABI == "printpacket.pdf-renderer/v2",
             capabilities.resourceABI == "printpacket.resources/v1",
-            capabilities.conformanceProfile == "printpacket.conformance/core-v1",
+            capabilities.conformanceProfile == "printpacket.conformance/core-v2",
             capabilities.cacheProfile == "printpacket.render-cache/v1",
             capabilities.directOfflineRendering
         else {

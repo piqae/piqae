@@ -92,6 +92,11 @@ never returns template source or render input.
 The format supports paged A4/A5/Letter media, bounded continuous media, and
 simple labels. Its semantic nodes cover flow sections, rich inline text,
 rows/grids, repeats, conditions, tables, headers/footers, QR and Code 128.
+Adjacent inline nodes concatenate without an implicit separator. Horizontal
+whitespace collapses to one breakable space, while explicit `line_break` nodes
+and LF, CRLF, or CR characters in resolved values start a new line. The
+canonical PDF renderer measures its built-in Helvetica face for wrapping and
+alignment, so preview and final output use the same typography decisions.
 The initial renderer ABI supports host-resolved, content-addressed JPEG
 resources after verifying their digest, length, dimensions and decoded-pixel
 bounds. It rejects characters outside Windows-1252, PNG/SVG, downloadable

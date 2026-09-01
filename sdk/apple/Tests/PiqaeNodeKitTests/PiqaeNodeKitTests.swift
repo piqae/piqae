@@ -459,7 +459,7 @@ final class PiqaeNodeKitTests: XCTestCase {
 
         let capabilities = try await node.printPackets.capabilities()
         XCTAssertEqual(capabilities.contract, "printpacket/v1")
-        XCTAssertEqual(capabilities.rendererABI, "printpacket.pdf-renderer/v1")
+        XCTAssertEqual(capabilities.rendererABI, "printpacket.pdf-renderer/v2")
         XCTAssertEqual(capabilities.resourceABI, "printpacket.resources/v1")
         XCTAssertEqual(capabilities.cacheProfile, "printpacket.render-cache/v1")
         XCTAssertTrue(capabilities.directOfflineRendering)

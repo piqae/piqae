@@ -4062,7 +4062,7 @@ fn supports_print_packet_offer(
     render.negotiation_version == 2
         && render.input.is_object()
         && render.packet_version == printpacket::DOCUMENT_V1
-        && render.conformance_profile == printpacket::CONFORMANCE_CORE_V1
+        && render.conformance_profile == printpacket::CONFORMANCE_CORE_V2
         && render.output_profile == printpacket::PDF_BASE14_V1
         && packet.negotiation_version == render.negotiation_version
         && packet
@@ -4376,7 +4376,7 @@ mod adaptive_poll_tests {
 
     fn packet_capabilities() -> DocumentRenderCapabilities {
         DocumentRenderCapabilities {
-            renderer_abi: Some("printpacket.pdf-renderer/v1".into()),
+            renderer_abi: Some("printpacket.pdf-renderer/v2".into()),
             resource_abi: Some("printpacket.resources/v1".into()),
             persistent_cache: true,
             font_rendering: false,
@@ -4387,7 +4387,7 @@ mod adaptive_poll_tests {
                 negotiation_version: 2,
                 supported_packet_versions: vec!["printpacket/v1".into()],
                 feature_ids: vec!["typography_base14_windows1252".into()],
-                conformance_profiles: vec!["printpacket.conformance/core-v1".into()],
+                conformance_profiles: vec!["printpacket.conformance/core-v2".into()],
                 output_profiles: vec![
                     PrintPacketOutputProfile::Pdf {
                         id: "printpacket.pdf-base14/v1".into(),
@@ -4429,7 +4429,7 @@ mod adaptive_poll_tests {
     #[test]
     fn document_renderer_capabilities_are_truthful_and_bounded() {
         let supported = DocumentRenderCapabilities {
-            renderer_abi: Some("printpacket.pdf-renderer/v1".into()),
+            renderer_abi: Some("printpacket.pdf-renderer/v2".into()),
             resource_abi: Some("printpacket.resources/v1".into()),
             persistent_cache: true,
             font_rendering: false,
@@ -4539,9 +4539,9 @@ mod adaptive_poll_tests {
             negotiation_version: 2,
             packet_version: "printpacket/v1".into(),
             required_feature_ids: vec!["typography_base14_windows1252".into()],
-            conformance_profile: "printpacket.conformance/core-v1".into(),
+            conformance_profile: "printpacket.conformance/core-v2".into(),
             output_profile: "printpacket.pdf-base14/v1".into(),
-            renderer_abi: "printpacket.pdf-renderer/v1".into(),
+            renderer_abi: "printpacket.pdf-renderer/v2".into(),
             resource_abi: "printpacket.resources/v1".into(),
             specification: serde_json::json!({
                 "format": "printpacket/v1",

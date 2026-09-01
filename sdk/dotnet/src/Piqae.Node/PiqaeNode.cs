@@ -439,9 +439,9 @@ public sealed class PiqaeNode : IDisposable
     {
         var capabilities = GetPrintPacketCapabilities();
         if (capabilities.Contract != "printpacket/v1"
-            || capabilities.RendererAbi != "printpacket.pdf-renderer/v1"
+            || capabilities.RendererAbi != "printpacket.pdf-renderer/v2"
             || capabilities.ResourceAbi != "printpacket.resources/v1"
-            || capabilities.ConformanceProfile != "printpacket.conformance/core-v1"
+            || capabilities.ConformanceProfile != "printpacket.conformance/core-v2"
             || capabilities.CacheProfile != "printpacket.render-cache/v1"
             || !capabilities.DirectOfflineRendering)
             throw new PiqaeNodeException(

@@ -634,7 +634,7 @@ enum Draw {
         resource_id: String,
     },
 }
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FontFace {
     Regular,
     Bold,
@@ -1791,7 +1791,7 @@ fn paragraph(content: &[Inline], style: &TextStyle, state: &mut State) -> Result
         ensure_space(state, line_h)?;
         let width = line
             .iter()
-            .map(|run| text_width(&run.text, run.size))
+            .map(|run| text_width(&run.text, run.size, run.face))
             .sum::<f32>();
         let x = match style.align {
             TextAlign::Left => state.x,
@@ -1802,7 +1802,7 @@ fn paragraph(content: &[Inline], style: &TextStyle, state: &mut State) -> Result
         for run in line {
             account_text(state, &run.text)?;
             validate_text(&run.text)?;
-            let run_width = text_width(&run.text, run.size);
+            let run_width = text_width(&run.text, run.size, run.face);
             push(
                 state,
                 Draw::Text {
@@ -1889,43 +1889,123 @@ fn resolve_runs(
 fn wrap_runs(runs: Vec<StyledRun>, width: f32) -> Result<Vec<Vec<StyledRun>>, RenderError> {
     let mut lines = vec![Vec::new()];
     let mut used = 0.0;
+    let mut pending_space: Option<StyledRun> = None;
     for run in runs {
         if run.line_break {
             lines.push(Vec::new());
             used = 0.0;
+            pending_space = None;
             continue;
         }
-        for word in run.text.split_whitespace() {
-            let leading_space = used > 0.0;
-            let text = if leading_space {
-                format!(" {word}")
-            } else {
-                word.to_owned()
-            };
-            let word_width = text_width(&text, run.size);
-            if word_width > width {
-                return Err(RenderError::Limit("unbreakable inline run width"));
-            }
-            if used + word_width > width && used > 0.0 {
+
+        let mut word = String::new();
+        let mut characters = run.text.chars().peekable();
+        while let Some(character) = characters.next() {
+            if matches!(character, '\r' | '\n') {
+                append_wrapped_word(
+                    &mut lines,
+                    &mut used,
+                    width,
+                    &mut word,
+                    &run,
+                    &mut pending_space,
+                )?;
+                if character == '\r' && characters.peek() == Some(&'\n') {
+                    let _ = characters.next();
+                }
                 lines.push(Vec::new());
                 used = 0.0;
-            }
-            let text = if used == 0.0 {
-                text.trim_start().to_owned()
+                pending_space = None;
+            } else if character.is_whitespace() {
+                append_wrapped_word(
+                    &mut lines,
+                    &mut used,
+                    width,
+                    &mut word,
+                    &run,
+                    &mut pending_space,
+                )?;
+                pending_space = Some(run.clone());
             } else {
-                text
-            };
-            used += text_width(&text, run.size);
-            lines
-                .last_mut()
-                .ok_or(RenderError::Invalid("inline line"))?
-                .push(StyledRun {
-                    text,
-                    ..run.clone()
-                });
+                word.push(character);
+            }
         }
+        append_wrapped_word(
+            &mut lines,
+            &mut used,
+            width,
+            &mut word,
+            &run,
+            &mut pending_space,
+        )?;
     }
     Ok(lines)
+}
+
+fn append_wrapped_word(
+    lines: &mut Vec<Vec<StyledRun>>,
+    used: &mut f32,
+    width: f32,
+    word: &mut String,
+    style: &StyledRun,
+    pending_space: &mut Option<StyledRun>,
+) -> Result<(), RenderError> {
+    if word.is_empty() {
+        return Ok(());
+    }
+
+    let word_width = text_width(word, style.size, style.face);
+    if word_width > width {
+        return Err(RenderError::Limit("unbreakable inline run width"));
+    }
+    let space_width = if *used > 0.0 {
+        pending_space
+            .as_ref()
+            .map_or(0.0, |space| text_width(" ", space.size, space.face))
+    } else {
+        0.0
+    };
+    if *used > 0.0 && *used + space_width + word_width > width {
+        lines.push(Vec::new());
+        *used = 0.0;
+    }
+
+    let line = lines
+        .last_mut()
+        .ok_or(RenderError::Invalid("inline line"))?;
+    if *used > 0.0
+        && let Some(space) = pending_space.take()
+    {
+        append_styled_text(line, &space, " ");
+        *used += text_width(" ", space.size, space.face);
+    } else {
+        *pending_space = None;
+    }
+    append_styled_text(line, style, word);
+    *used += word_width;
+    word.clear();
+    Ok(())
+}
+
+fn append_styled_text(line: &mut Vec<StyledRun>, style: &StyledRun, text: &str) {
+    if let Some(previous) = line.last_mut()
+        && same_text_style(previous, style)
+    {
+        previous.text.push_str(text);
+        return;
+    }
+    line.push(StyledRun {
+        text: text.to_owned(),
+        line_break: false,
+        ..style.clone()
+    });
+}
+
+fn same_text_style(left: &StyledRun, right: &StyledRun) -> bool {
+    left.size.to_bits() == right.size.to_bits()
+        && left.face == right.face
+        && left.underline == right.underline
+        && left.color == right.color
 }
 fn table(
     items: &Expr,
@@ -2059,7 +2139,7 @@ fn draw_table_row(
         for line in lines {
             let tw = line
                 .iter()
-                .map(|run| text_width(&run.text, run.size))
+                .map(|run| text_width(&run.text, run.size, run.face))
                 .sum::<f32>();
             let tx = match col.align {
                 TextAlign::Left => x + padding,
@@ -2077,7 +2157,7 @@ fn draw_table_row(
             for run in line {
                 account_text(state, &run.text)?;
                 validate_text(&run.text)?;
-                let run_width = text_width(&run.text, run.size);
+                let run_width = text_width(&run.text, run.size, run.face);
                 push(
                     state,
                     Draw::Text {
@@ -2642,8 +2722,153 @@ fn validate_text(s: &str) -> Result<(), RenderError> {
     }
     Ok(())
 }
-fn text_width(s: &str, size: f32) -> f32 {
-    display_width_text(s).chars().count() as f32 * size * 0.52
+fn text_width(s: &str, size: f32, face: FontFace) -> f32 {
+    let bold = matches!(face, FontFace::Bold | FontFace::BoldItalic);
+    display_width_text(s)
+        .chars()
+        .map(|character| f32::from(helvetica_width(character, bold)))
+        .sum::<f32>()
+        * size
+        / 1_000.0
+}
+
+fn helvetica_width(character: char, bold: bool) -> u16 {
+    const REGULAR_ASCII: [u16; 95] = [
+        278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556,
+        556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556, 1015, 667, 667, 722,
+        722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722, 667, 611, 722,
+        667, 944, 667, 667, 611, 333, 278, 333, 469, 556, 333, 556, 556, 500, 556, 556, 278, 556,
+        556, 222, 222, 500, 222, 833, 556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500,
+        500, 334, 260, 334, 584,
+    ];
+    const BOLD_ASCII: [u16; 95] = [
+        278, 333, 474, 556, 556, 889, 722, 238, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556,
+        556, 556, 556, 556, 556, 556, 556, 556, 333, 333, 584, 584, 584, 611, 975, 722, 722, 722,
+        722, 667, 611, 778, 722, 278, 556, 722, 611, 833, 722, 778, 667, 778, 722, 667, 611, 722,
+        667, 944, 667, 667, 611, 333, 278, 333, 584, 556, 333, 556, 611, 556, 611, 556, 333, 611,
+        611, 278, 278, 556, 278, 889, 611, 611, 611, 611, 389, 556, 333, 611, 556, 778, 556, 556,
+        500, 389, 280, 389, 584,
+    ];
+
+    if character.is_ascii() && (' '..='~').contains(&character) {
+        let index = character as usize - ' ' as usize;
+        return if bold {
+            BOLD_ASCII[index]
+        } else {
+            REGULAR_ASCII[index]
+        };
+    }
+
+    if let Some(width) = helvetica_extended_width(character, bold) {
+        return width;
+    }
+
+    let base = match character {
+        '\u{00a0}' => ' ',
+        '\u{00c0}'..='\u{00c5}' => 'A',
+        '\u{00c7}' => 'C',
+        '\u{00c8}'..='\u{00cb}' => 'E',
+        '\u{00cc}'..='\u{00cf}' => 'I',
+        '\u{00d0}' => 'D',
+        '\u{00d1}' => 'N',
+        '\u{00d2}'..='\u{00d6}' | '\u{00d8}' => 'O',
+        '\u{00d9}'..='\u{00dc}' => 'U',
+        '\u{00dd}' | '\u{0178}' => 'Y',
+        '\u{0161}' | '\u{017e}' => 's',
+        '\u{00e0}'..='\u{00e5}' => 'a',
+        '\u{00e7}' => 'c',
+        '\u{00e8}'..='\u{00eb}' => 'e',
+        '\u{00ec}'..='\u{00ef}' => 'i',
+        '\u{00f1}' => 'n',
+        '\u{00f2}'..='\u{00f6}' => 'o',
+        '\u{00f9}'..='\u{00fc}' => 'u',
+        '\u{00fd}' | '\u{00ff}' => 'y',
+        '\u{0160}' | '\u{017d}' => 'S',
+        '\u{0192}' => 'f',
+        _ => return 556,
+    };
+    let index = base as usize - ' ' as usize;
+    if bold {
+        BOLD_ASCII[index]
+    } else {
+        REGULAR_ASCII[index]
+    }
+}
+
+const fn helvetica_extended_width(character: char, bold: bool) -> Option<u16> {
+    let width = match character {
+        '\u{00a6}' => {
+            if bold {
+                280
+            } else {
+                260
+            }
+        }
+        '\u{00b5}' | '\u{00f0}' | '\u{00fe}' => {
+            if bold {
+                611
+            } else {
+                556
+            }
+        }
+        '\u{00b6}' => {
+            if bold {
+                556
+            } else {
+                537
+            }
+        }
+        '\u{2018}' | '\u{2019}' | '\u{201a}' => {
+            if bold {
+                278
+            } else {
+                222
+            }
+        }
+        '\u{201c}' | '\u{201d}' | '\u{201e}' => {
+            if bold {
+                500
+            } else {
+                333
+            }
+        }
+        '\u{00a0}' | '\u{00b7}' => 278,
+        '\u{00a1}'
+        | '\u{00a8}'
+        | '\u{00ad}'
+        | '\u{00af}'
+        | '\u{00b2}'..='\u{00b4}'
+        | '\u{00b8}'
+        | '\u{00b9}'
+        | '\u{02c6}'
+        | '\u{02dc}'
+        | '\u{2039}'
+        | '\u{203a}' => 333,
+        '\u{2022}' => 350,
+        '\u{00ba}' => 365,
+        '\u{00aa}' => 370,
+        '\u{00b0}' => 400,
+        '\u{017e}' => 500,
+        '\u{00a2}'..='\u{00a5}'
+        | '\u{00a7}'
+        | '\u{00ab}'
+        | '\u{00bb}'
+        | '\u{0192}'
+        | '\u{2013}'
+        | '\u{2020}'
+        | '\u{2021}'
+        | '\u{20ac}' => 556,
+        '\u{00ac}' | '\u{00b1}' | '\u{00d7}' | '\u{00f7}' => 584,
+        '\u{00bf}' | '\u{00df}' | '\u{00f8}' | '\u{017d}' => 611,
+        '\u{00de}' => 667,
+        '\u{00a9}' | '\u{00ae}' => 737,
+        '\u{00bc}'..='\u{00be}' => 834,
+        '\u{00e6}' => 889,
+        '\u{0153}' => 944,
+        '\u{00c6}' | '\u{0152}' | '\u{2014}' | '\u{2026}' | '\u{2030}' | '\u{2122}' => 1_000,
+        _ => return None,
+    };
+    Some(width)
 }
 fn display_width_text(value: &str) -> String {
     value
@@ -2935,7 +3160,7 @@ fn write_pdf(
                         pdf_escape(&rendered_text)
                     );
                     if *underline {
-                        let x2 = *x + text_width(&rendered_text, *size);
+                        let x2 = *x + text_width(&rendered_text, *size, *face);
                         let line_y = *y - 1.2;
                         let _ = writeln!(
                             stream,
@@ -3479,10 +3704,10 @@ mod tests {
         });
         let pdf =
             String::from_utf8(render(&d, &json!({}), RenderLimits::default()).unwrap()).unwrap();
-        assert!(pdf.matches("( FOOTER)").count() >= 3);
-        assert_eq!(pdf.matches("(LAST)").count(), 1);
-        assert_eq!(pdf.matches("(FIRST)").count(), 1);
-        assert!(pdf.contains("( HEADER)"));
+        assert!(pdf.matches("(PAGE FOOTER)").count() >= 3);
+        assert_eq!(pdf.matches("(LAST FOOTER)").count(), 1);
+        assert_eq!(pdf.matches("(FIRST HEADER)").count(), 1);
+        assert!(pdf.contains("(PAGE HEADER)"));
     }
 
     #[test]
@@ -3530,8 +3755,7 @@ mod tests {
         )
         .unwrap();
         let pdf = String::from_utf8_lossy(&pdf);
-        assert!(pdf.contains("(Batch)"));
-        assert!(pdf.contains("( LOT-42)"));
+        assert!(pdf.contains("(Batch LOT-42)"));
     }
 
     #[test]
@@ -3658,6 +3882,86 @@ mod tests {
         assert!(pdf.contains("Issued"));
         assert!(pdf.contains("19/08/2026"));
         assert!(pdf.contains("/F2 12.00 Tf"));
+    }
+
+    #[test]
+    fn inline_whitespace_is_preserved_without_fragmenting_same_style_text() {
+        let style = StyledRun {
+            text: String::new(),
+            size: 10.0,
+            face: FontFace::Regular,
+            underline: false,
+            line_break: false,
+            color: Color::default(),
+        };
+        let lines = wrap_runs(
+            vec![
+                StyledRun {
+                    text: "PACKING   ".into(),
+                    ..style.clone()
+                },
+                StyledRun {
+                    text: "SLIP".into(),
+                    ..style.clone()
+                },
+                StyledRun {
+                    text: "\nBen Smith\r\n8 Iris Taylor Avenue".into(),
+                    ..style
+                },
+            ],
+            500.0,
+        )
+        .unwrap();
+
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].len(), 1);
+        assert_eq!(lines[0][0].text, "PACKING SLIP");
+        assert_eq!(lines[1].len(), 1);
+        assert_eq!(lines[1][0].text, "Ben Smith");
+        assert_eq!(lines[2].len(), 1);
+        assert_eq!(lines[2][0].text, "8 Iris Taylor Avenue");
+    }
+
+    #[test]
+    fn adjacent_inline_runs_do_not_gain_an_implicit_space() {
+        let style = StyledRun {
+            text: String::new(),
+            size: 10.0,
+            face: FontFace::Bold,
+            underline: false,
+            line_break: false,
+            color: Color::default(),
+        };
+        let lines = wrap_runs(
+            vec![
+                StyledRun {
+                    text: "SHIP".into(),
+                    ..style.clone()
+                },
+                StyledRun {
+                    text: "TO".into(),
+                    ..style
+                },
+            ],
+            500.0,
+        )
+        .unwrap();
+
+        assert_eq!(lines[0].len(), 1);
+        assert_eq!(lines[0][0].text, "SHIPTO");
+    }
+
+    #[test]
+    fn win_ansi_text_uses_base14_helvetica_glyph_widths() {
+        assert_eq!(helvetica_width('\u{00c6}', false), 1_000);
+        assert_eq!(helvetica_width('\u{0153}', true), 944);
+        assert_eq!(helvetica_width('\u{00df}', false), 611);
+        assert_eq!(helvetica_width('\u{00f8}', false), 611);
+        assert_eq!(helvetica_width('\u{017d}', true), 611);
+        assert_eq!(helvetica_width('\u{017e}', true), 500);
+        assert_eq!(helvetica_width('\u{2014}', false), 1_000);
+        assert_eq!(helvetica_width('\u{201c}', false), 333);
+        assert_eq!(helvetica_width('\u{201c}', true), 500);
     }
 
     #[test]
@@ -4126,8 +4430,11 @@ mod tests {
         .unwrap();
         assert!(output.page_count > 1);
         let pdf = String::from_utf8(output.pdf).unwrap();
-        assert_eq!(pdf.matches("(ITEM) Tj").count(), output.page_count as usize);
-        assert_eq!(pdf.matches("(Coffee)").count(), 120);
+        assert_eq!(
+            pdf.matches("(ITEM DESCRIPTION) Tj").count(),
+            output.page_count as usize
+        );
+        assert_eq!(pdf.matches("(Coffee ").count(), 120);
     }
 
     #[test]
@@ -4163,8 +4470,8 @@ mod tests {
         .unwrap();
         let count = output.page_count;
         let pdf = String::from_utf8(output.pdf).unwrap();
-        assert!(pdf.contains("(1) Tj"));
-        assert!(pdf.contains(&format!("({count}) Tj")));
+        assert!(pdf.contains(&format!("(1 of {count}) Tj")));
+        assert!(pdf.contains(&format!("({count} of {count}) Tj")));
         assert!(!pdf.contains(PAGE_NUMBER_MARKER));
         assert!(!pdf.contains(PAGE_COUNT_MARKER));
         assert_eq!(

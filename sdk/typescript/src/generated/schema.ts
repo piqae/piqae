@@ -3559,12 +3559,18 @@ export interface components {
                 /** @constant */
                 packet_version: "printpacket/v1";
                 required_feature_ids: string[];
-                /** @constant */
-                conformance_profile: "printpacket.conformance/core-v1";
+                /**
+                 * @description Exact deterministic fixture suite required by this render. Core v2 preserves resolved line breaks and uses Base-14 glyph metrics.
+                 * @enum {string}
+                 */
+                conformance_profile: "printpacket.conformance/core-v1" | "printpacket.conformance/core-v2";
                 /** @constant */
                 output_profile: "printpacket.pdf-base14/v1";
-                /** @constant */
-                renderer_abi: "printpacket.pdf-renderer/v1";
+                /**
+                 * @description Exact byte-producing renderer ABI. A node must use the retained PDF fallback when this value is unsupported.
+                 * @enum {string}
+                 */
+                renderer_abi: "printpacket.pdf-renderer/v1" | "printpacket.pdf-renderer/v2";
                 /** @constant */
                 resource_abi: "printpacket.resources/v1";
                 specification: components["schemas"]["PrintPacketV1"];

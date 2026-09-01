@@ -45,6 +45,9 @@ generic `application/octet-stream`, or a failed PDF attempt.
 - [schema/printpacket-v1.schema.json](schema/printpacket-v1.schema.json) is the
   portable JSON Schema.
 - [conformance](conformance) contains deterministic receipt, label, and paged
-  document fixtures. The Rust `printpacket` crate is the reference validator.
+  document fixtures. `printpacket.conformance/core-v2` captures the current
+  whitespace and Base-14 typography rules; `core-v1` is retained as a historical
+  compatibility identifier. The Rust `printpacket` crate is the reference
+  validator.
 
 The specification and reference implementation are licensed under Apache-2.0.

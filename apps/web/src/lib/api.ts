@@ -295,10 +295,10 @@ export function createLiveApi(
       ];
       const reasons: string[] = [];
       if (capability?.negotiation_version !== 2) reasons.push('negotiation_v2_missing');
-      if (agent.document_render?.renderer_abi !== 'printpacket.pdf-renderer/v1') reasons.push('renderer_update_required');
+      if (agent.document_render?.renderer_abi !== 'printpacket.pdf-renderer/v2') reasons.push('renderer_update_required');
       if (agent.document_render?.resource_abi !== 'printpacket.resources/v1') reasons.push('resource_runtime_update_required');
       if (!capability?.supported_packet_versions.includes('printpacket/v1')) reasons.push('packet_version_missing');
-      if (!capability?.conformance_profiles.includes('printpacket.conformance/core-v1')) reasons.push('conformance_profile_missing');
+      if (!capability?.conformance_profiles.includes('printpacket.conformance/core-v2')) reasons.push('conformance_profile_missing');
       if (!capability?.deterministic) reasons.push('deterministic_output_missing');
       if (!capability?.output_profiles.some(
         (profile) => profile.kind === 'pdf'

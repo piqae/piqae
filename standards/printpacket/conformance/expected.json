@@ -1,26 +1,26 @@
 {
-  "suite": "printpacket.conformance/core-v1",
+  "suite": "printpacket.conformance/core-v2",
   "profile": "printpacket.pdf-base14/v1",
   "fixtures": {
     "receipt-80mm": {
       "template_sha256": "93554bac881890441088531a9030a2c7b89e7221400b1b8226aed33a86a25a1b",
-      "cache_key": "67ee0fdf2f856773a6fd7ef05af4823ac98884db695ea2073fe4b5be07a09eb9",
-      "output_sha256": "e2f2460c1071dee78cabec044376a7eda900af36aa0e9858701ad1de04d78660",
-      "output_bytes": 14774,
+      "cache_key": "cbaf6b9a0436ff9ca8968b1c7f2fb845af7d1a40f09e1432e1df623027defefa",
+      "output_sha256": "8368350c457971e736090a78a2e04e802fc20651ff043b1dd13b630a3f898e82",
+      "output_bytes": 14646,
       "pages": 1
     },
     "production-label-100x50": {
       "template_sha256": "f9bb0f951e30f1a71768a4cd6821bfb2bded3b26062a4b29a344a02fec53107f",
-      "cache_key": "1dc15d623b39f27c3aea17a3d8e182c723b6d7ae5ed85608b6a95bd848e91415",
-      "output_sha256": "18efd4f249d394efdc8515f2957d18b03c4ba0878e1680db3ef64ed49ae79120",
-      "output_bytes": 4650,
+      "cache_key": "f8865daedfb09697ce3d8132eb55c2f9d9056a05d07c4e8c4101234d219233bc",
+      "output_sha256": "9ec1d66ed65c5c5d247fd629d510794a7c78b3c6b8817ae34c564dcb506cd1d0",
+      "output_bytes": 4388,
       "pages": 1
     },
     "invoice-a4": {
       "template_sha256": "89943b5462fbc9968d4f98c7b5e7a93b203e00b7976f54fe756467ee09a4ec17",
-      "cache_key": "20547da5ed49fe26f2e274a3f0e6b80bc36d881f3d7e2fdca23cca2e9135e49b",
-      "output_sha256": "c8a446971ef9c106f68912dba5c8ba478478ab7a737eb6e48c3be850bb1af081",
-      "output_bytes": 1584,
+      "cache_key": "392b6002e5301def6bc22588d0886c49638d846538eef56fcd111f6cc6278a98",
+      "output_sha256": "c853ffe496a3ab9a64ac564d0597e4112dbbebf9fe7307a5703cb434eb2aadfd",
+      "output_bytes": 1518,
       "pages": 1
     }
   }

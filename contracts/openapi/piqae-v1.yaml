@@ -5128,9 +5128,15 @@ components:
                   maxItems: 256
                   uniqueItems: true
                   items: { type: string, pattern: '^[a-z][a-z0-9._-]{0,127}$' }
-                conformance_profile: { type: string, const: printpacket.conformance/core-v1 }
+                conformance_profile:
+                  type: string
+                  enum: [printpacket.conformance/core-v1, printpacket.conformance/core-v2]
+                  description: Exact deterministic fixture suite required by this render. Core v2 preserves resolved line breaks and uses Base-14 glyph metrics.
                 output_profile: { type: string, const: printpacket.pdf-base14/v1 }
-                renderer_abi: { type: string, const: printpacket.pdf-renderer/v1 }
+                renderer_abi:
+                  type: string
+                  enum: [printpacket.pdf-renderer/v1, printpacket.pdf-renderer/v2]
+                  description: Exact byte-producing renderer ABI. A node must use the retained PDF fallback when this value is unsupported.
                 resource_abi: { type: string, const: printpacket.resources/v1 }
                 specification: { $ref: "#/components/schemas/PrintPacketV1" }
                 input: { type: object, additionalProperties: true }

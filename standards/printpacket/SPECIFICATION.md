@@ -65,6 +65,10 @@ and bytes may update this text and conformance suite metadata.
 
 Rows and grids contain at most 32 children; a grid has exactly one positive
 column weight for each child. Layout gaps are finite and between 0 and 2,000 mm.
+Adjacent inline nodes concatenate without an implicit separator. Horizontal
+whitespace in resolved content collapses to one breakable space. A `line_break`
+node, or LF, CRLF, or CR in a resolved value, starts a new line; leading
+whitespace on that line or an automatically wrapped line is discarded.
 Image dimensions are greater than 0 and at most 2,000 mm; v1 supports
 `contain`, `fill`, and `scale_down`, with `scale_down` never enlarging an image.
 QR size is 8 through 2,000 mm, Code 128 is at least 20 by 8 mm and at most 2,000
@@ -78,6 +82,11 @@ region's maximum rendered height is 60 mm.
 The initial `printpacket.pdf-base14/v1` profile uses deterministic PDF Base-14
 Helvetica faces and Windows-1252 text. Other scripts and downloadable fonts
 require a new explicit output profile containing a fixed font bundle digest.
+
+Renderers measure the selected Helvetica face using its Base-14 glyph widths
+for wrapping, alignment, and decoration. `printpacket.conformance/core-v2` is
+the first public suite that enforces these metrics and the inline whitespace
+rules above; `core-v1` remains a historical compatibility identifier only.
 
 V1 image resources are JPEG and are referenced by an application-chosen local
 resource key plus their SHA-256, media type, and byte length. Remote URLs and

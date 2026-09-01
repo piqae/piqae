@@ -24,6 +24,8 @@ pub const DOCUMENT_V1: &str = "printpacket/v1";
 pub const PDF_BASE14_V1: &str = "printpacket.pdf-base14/v1";
 /// Identifies the exact public fixtures that compatible renderers must pass.
 pub const CONFORMANCE_CORE_V1: &str = "printpacket.conformance/core-v1";
+/// Corrected inline whitespace and Base-14 glyph-metric conformance fixtures.
+pub const CONFORMANCE_CORE_V2: &str = "printpacket.conformance/core-v2";
 /// Canonical JSON algorithm used for template, data, and cache identities.
 pub const CANONICAL_JSON_V1: &str = "printpacket.canonical-json/v1";
 /// Typed, cross-runtime data encoding used by render cache identities.
@@ -162,7 +164,7 @@ impl RendererCapabilities {
         Self {
             negotiation_version: 1,
             specification_versions: BTreeSet::from([DOCUMENT_V1.into()]),
-            conformance_suites: BTreeSet::from([CONFORMANCE_CORE_V1.into()]),
+            conformance_suites: BTreeSet::from([CONFORMANCE_CORE_V2.into()]),
             features: all_v1_features(),
             output_targets: vec![OutputTarget::pdf_v1()],
             resource_media_types: BTreeSet::from(["image/jpeg".into()]),
@@ -371,7 +373,7 @@ pub fn render_cache_key(
     hash.update(b"printpacket.render-cache/v1\0");
     hash.update(manifest.canonical_sha256.as_bytes());
     hash.update(b"\0");
-    hash.update(CONFORMANCE_CORE_V1.as_bytes());
+    hash.update(CONFORMANCE_CORE_V2.as_bytes());
     hash.update(b"\0");
     hash.update(target);
     hash.update(b"\0");
@@ -642,7 +644,7 @@ mod tests {
         let capabilities = RendererCapabilities::reference_pdf();
         let mut requirement = RenderRequirement {
             specification_version: DOCUMENT_V1.into(),
-            conformance_suite: CONFORMANCE_CORE_V1.into(),
+            conformance_suite: CONFORMANCE_CORE_V2.into(),
             required_features: BTreeSet::from([Feature::MediaLabel, Feature::BarcodeCode128]),
             output_target: OutputTarget::pdf_v1(),
             template_bytes: 1024,

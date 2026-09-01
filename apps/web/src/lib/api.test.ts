@@ -16,7 +16,7 @@ const uncertainJob = (id: string, since: string) => ({
 describe('live dashboard overview', () => {
   it('reports PrintPacket ready only for the exact negotiated renderer contract', async () => {
     const capability = {
-      renderer_abi: 'printpacket.pdf-renderer/v1',
+      renderer_abi: 'printpacket.pdf-renderer/v2',
       resource_abi: 'printpacket.resources/v1',
       persistent_cache: true,
       font_rendering: false,
@@ -32,7 +32,7 @@ describe('live dashboard overview', () => {
           'data_expressions', 'data_repeat', 'image_jpeg', 'barcode_qr',
           'barcode_code128', 'typography_base14_windows1252'
         ],
-        conformance_profiles: ['printpacket.conformance/core-v1'],
+        conformance_profiles: ['printpacket.conformance/core-v2'],
         output_profiles: [{
           id: 'printpacket.pdf-base14/v1',
           kind: 'pdf',
@@ -63,7 +63,7 @@ describe('live dashboard overview', () => {
       {
         id: 'agt_wrong_abi', name: 'Old renderer', platform: 'macos/arm64', state: 'connected',
         version: '0.1.0', last_seen_at: '2026-08-27T00:00:00Z', labels: [],
-        document_render: { ...capability, renderer_abi: 'printpacket.pdf-renderer/v2' }
+        document_render: { ...capability, renderer_abi: 'printpacket.pdf-renderer/v1' }
       },
       {
         id: 'agt_missing_feature', name: 'Missing feature', platform: 'macos/arm64', state: 'connected',
