@@ -2,7 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { PiqaeError } from "@piqae/sdk";
 
 import { createProductionServices } from "../services.server";
-import { ShopifyOrderUnavailableError } from "../core/orders.server";
+import { ShopifyOrderUnavailableError } from "../core/shopify-order-errors";
 import shopify, { migrateLegacyOfflineSession } from "../shopify.server";
 
 const ID = /^[A-Za-z0-9_-]{1,128}$/;

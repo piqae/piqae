@@ -4,6 +4,8 @@ import {
   type ShopifyDataBindings,
 } from "./shopify-data-bindings";
 import { canonicalDataBytes, type JsonObject } from "@printpacket/core";
+import { ShopifyOrderUnavailableError } from "./shopify-order-errors";
+export { ShopifyOrderUnavailableError } from "./shopify-order-errors";
 export {
   parseShopifyDataBindings,
   type ShopifyDataBindings,
@@ -29,20 +31,6 @@ export class ShopifyAdminApiError extends Error {
     super(`Shopify Admin API failed (${status})`);
     this.name = "ShopifyAdminApiError";
     this.response = { code: status, body };
-  }
-}
-
-export class ShopifyOrderUnavailableError extends Error {
-  readonly reason: "standard_history_only" | "unavailable";
-
-  constructor(reason: "standard_history_only" | "unavailable") {
-    super(
-      reason === "standard_history_only"
-        ? "Shopify order is unavailable with standard order-history access"
-        : "Shopify order is unavailable to the app",
-    );
-    this.name = "ShopifyOrderUnavailableError";
-    this.reason = reason;
   }
 }
 

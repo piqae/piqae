@@ -7,10 +7,8 @@ import {
   ShopifySessionRecoveryError,
   withShopifySessionRecovery,
 } from "../app/routes/api.print.admin-previews";
-import {
-  fetchOrders,
-  ShopifyOrderUnavailableError,
-} from "../app/core/orders.server";
+import { fetchOrders } from "../app/core/orders.server";
+import { ShopifyOrderUnavailableError } from "../app/core/shopify-order-errors";
 
 describe("admin preview failure classification", () => {
   it("turns stale publications into a useful republish instruction", () => {
