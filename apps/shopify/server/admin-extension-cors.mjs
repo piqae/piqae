@@ -4,10 +4,27 @@ const ALLOWED_REQUEST_HEADERS = new Set([
   "authorization",
   "content-type",
   "idempotency-key",
+  "x-requested-with",
 ]);
+
+const ADMIN_EXTENSION_PRINT_SOURCE_PATHS = new Set([
+  "/api/public/print-placeholder",
+  "/api/public/previews/artifact",
+]);
+
+export function adminExtensionCors(response) {
+  response.headers.set("access-control-allow-origin", ADMIN_EXTENSION_ORIGIN);
+  response.headers.append("vary", "Origin");
+  return response;
+}
+
+export function isAdminExtensionPrintSourcePath(pathname) {
+  return ADMIN_EXTENSION_PRINT_SOURCE_PATHS.has(pathname);
+}
 
 export function isAdminExtensionPreflightPath(pathname) {
   return (
+    isAdminExtensionPrintSourcePath(pathname) ||
     pathname === "/api/print/admin" ||
     pathname === "/api/print/admin-drafts" ||
     pathname === "/api/print/admin/readiness" ||
@@ -22,7 +39,12 @@ export function adminExtensionPreflight(request) {
   if (origin !== ADMIN_EXTENSION_ORIGIN)
     return Response.json({ error: "origin not allowed" }, { status: 403 });
   const requestedMethod = request.headers.get("access-control-request-method");
-  if (requestedMethod !== "POST")
+  const allowedMethod = isAdminExtensionPrintSourcePath(
+    new URL(request.url).pathname,
+  )
+    ? "GET"
+    : "POST";
+  if (requestedMethod !== allowedMethod)
     return Response.json({ error: "method not allowed" }, { status: 405 });
   const requestedHeaders = (
     request.headers.get("access-control-request-headers") ?? ""
@@ -39,7 +61,7 @@ export function adminExtensionPreflight(request) {
     status: 204,
     headers: {
       "access-control-allow-origin": ADMIN_EXTENSION_ORIGIN,
-      "access-control-allow-methods": "POST, OPTIONS",
+      "access-control-allow-methods": `${allowedMethod}, OPTIONS`,
       "access-control-allow-headers": [...ALLOWED_REQUEST_HEADERS].join(", "),
       "access-control-max-age": "600",
       vary: "Origin, Access-Control-Request-Headers",
@@ -57,10 +79,10 @@ export async function adminExtensionPreflightMiddleware(
     return;
   }
   if (request.method !== "OPTIONS") {
-    // React Router actions authenticate the request and own CORS on their
-    // response through Shopify's `cors()` helper. Adding another origin here
-    // produces two Access-Control-Allow-Origin values, which browsers reject
-    // before the extension can read the real response.
+    // Authenticated React Router actions use Shopify's `cors()` helper, while
+    // public print-source loaders add the same trusted origin explicitly.
+    // Adding another header here produces two Access-Control-Allow-Origin
+    // values, which browsers reject before the extension can read the response.
     next();
     return;
   }

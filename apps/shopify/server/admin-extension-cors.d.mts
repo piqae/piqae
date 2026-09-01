@@ -1,4 +1,8 @@
 export declare const ADMIN_EXTENSION_ORIGIN: string;
+export declare function adminExtensionCors(response: Response): Response;
+export declare function isAdminExtensionPrintSourcePath(
+  pathname: string,
+): boolean;
 export declare function isAdminExtensionPreflightPath(
   pathname: string,
 ): boolean;

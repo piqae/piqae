@@ -15,6 +15,9 @@ describe("admin print preview placeholder", () => {
   it("shows an accessible shimmer while the real order PDF renders", async () => {
     const { response, body } = await load("loading");
     expect(response.status).toBe(200);
+    expect(response.headers.get("access-control-allow-origin")).toBe(
+      "https://extensions.shopifycdn.com",
+    );
     expect(response.headers.get("cache-control")).toContain("no-store");
     expect(body).toContain('aria-label="Generating document preview"');
     expect(body).toContain('aria-busy="true"');
