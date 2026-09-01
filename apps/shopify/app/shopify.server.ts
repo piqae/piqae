@@ -2,9 +2,11 @@ import {
   ApiVersion,
   shopifyApp,
 } from "@shopify/shopify-app-react-router/server";
+import { shopifyApi } from "@shopify/shopify-api";
 import { MemorySessionStorage } from "@shopify/shopify-app-session-storage-memory";
 import { PostgreSQLSessionStorage } from "@shopify/shopify-app-session-storage-postgresql";
 import { recordInstallation } from "./core/installations.server";
+import { migrateLegacyOfflineSessionWith } from "./core/legacy-offline-session.server";
 import { configuredShopifyDistribution } from "./core/shopify-distribution.server";
 
 function required(name: string): string {
@@ -12,6 +14,17 @@ function required(name: string): string {
   if (!value) throw new Error(`${name} is required`);
   return value;
 }
+
+const apiKey = required("SHOPIFY_API_KEY");
+const apiSecretKey = required("SHOPIFY_API_SECRET");
+const appUrl = required("SHOPIFY_APP_URL");
+const scopes = (
+  process.env.SCOPES ??
+  "read_orders,read_draft_orders,read_products,read_customers,read_metaobjects"
+)
+  .split(",")
+  .map((scope) => scope.trim())
+  .filter(Boolean);
 
 // Memory storage is development-only. Production must inject a durable SessionStorage
 // implementation before importing this module.
@@ -22,18 +35,43 @@ const sessionStorage =
       })
     : new MemorySessionStorage();
 
-const shopify = shopifyApp({
-  apiKey: required("SHOPIFY_API_KEY"),
-  apiSecretKey: required("SHOPIFY_API_SECRET"),
-  appUrl: required("SHOPIFY_APP_URL"),
+const legacyTokenMigrationApi = shopifyApi({
+  apiKey,
+  apiSecretKey,
   apiVersion: ApiVersion.July26,
-  scopes: (
-    process.env.SCOPES ??
-    "read_orders,read_draft_orders,read_products,read_customers,read_metaobjects"
-  )
-    .split(",")
-    .map((scope) => scope.trim())
-    .filter(Boolean),
+  hostName: new URL(appUrl).host,
+  isEmbeddedApp: true,
+  scopes,
+});
+
+/**
+ * Shopify now rejects legacy non-expiring offline tokens at the Admin API.
+ * Its regular request-token exchange cannot migrate those stored credentials;
+ * the dedicated migration grant must use the legacy offline token itself.
+ *
+ * The migration is intentionally attempted exactly once. Shopify revokes the
+ * old token when it issues the expiring access/refresh pair, so callers must
+ * surface a reauthorization state instead of blindly replaying a failed grant.
+ */
+export async function migrateLegacyOfflineSession(session: {
+  shop: string;
+  accessToken?: string;
+}) {
+  return migrateLegacyOfflineSessionWith(
+    session,
+    async (input) =>
+      (await legacyTokenMigrationApi.auth.migrateToExpiringToken(input))
+        .session,
+    (migrated) => sessionStorage.storeSession(migrated),
+  );
+}
+
+const shopify = shopifyApp({
+  apiKey,
+  apiSecretKey,
+  appUrl,
+  apiVersion: ApiVersion.July26,
+  scopes,
   distribution: configuredShopifyDistribution(),
   future: {
     expiringOfflineAccessTokens: true,

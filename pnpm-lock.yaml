@@ -105,6 +105,9 @@ importers:
       '@sentry/react-router':
         specifier: 10.69.0
         version: 10.69.0(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(@react-router/node@7.12.0(react-router@7.12.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(typescript@5.9.3))(react-router@7.12.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react@19.2.4)(rollup@4.62.3)
+      '@shopify/shopify-api':
+        specifier: 13.1.0
+        version: 13.1.0
       '@shopify/shopify-app-react-router':
         specifier: 1.2.1
         version: 1.2.1(react-dom@19.2.4(react@19.2.4))(react-router@7.12.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react@19.2.4)

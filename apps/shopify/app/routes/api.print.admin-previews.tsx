@@ -2,7 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { PiqaeError } from "@piqae/sdk";
 
 import { createProductionServices } from "../services.server";
-import shopify from "../shopify.server";
+import shopify, { migrateLegacyOfflineSession } from "../shopify.server";
 
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -22,6 +22,14 @@ type ShopifyHttpFailure = {
     body?: unknown;
   };
 };
+
+export class ShopifySessionRecoveryError extends Error {
+  override readonly name = "ShopifySessionRecoveryError";
+
+  constructor(cause: unknown) {
+    super("Shopify access-token recovery failed", { cause });
+  }
+}
 
 /**
  * Shopify's client normally invalidates an offline session on HTTP 401. Some
@@ -48,15 +56,31 @@ export function isShopifySessionCredentialFailure(error: unknown): boolean {
   );
 }
 
+export function isLegacyNonExpiringTokenFailure(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const response = (error as ShopifyHttpFailure).response;
+  if (
+    response?.code !== 403 ||
+    !response.body ||
+    typeof response.body !== "object"
+  )
+    return false;
+  const errors = (response.body as Record<string, unknown>).errors;
+  return (
+    typeof errors === "string" &&
+    /non-expiring access tokens are no longer accepted/i.test(errors)
+  );
+}
+
 export async function withShopifySessionRecovery<T>(
   operation: () => Promise<T>,
-  recover: () => Promise<T>,
+  recover: (error: unknown) => Promise<T>,
 ): Promise<T> {
   try {
     return await operation();
   } catch (error) {
     if (!isShopifySessionCredentialFailure(error)) throw error;
-    return recover();
+    return recover(error);
   }
 }
 
@@ -86,7 +110,10 @@ function safeFailureMetadata(error: unknown) {
 export function classifyAdminPreviewFailure(
   error: unknown,
 ): AdminPreviewFailure {
-  if (isShopifySessionCredentialFailure(error))
+  if (
+    isShopifySessionCredentialFailure(error) ||
+    error instanceof ShopifySessionRecoveryError
+  )
     return {
       code: "account_connection",
       message:
@@ -152,14 +179,24 @@ export async function action({ request }: ActionFunctionArgs) {
   try {
     const result = await withShopifySessionRecovery(
       () => preview(admin, session.shop),
-      async () => {
-        // The retry request still carries Shopify's short-lived admin session
-        // token. Removing only the invalid offline session makes the official
-        // authentication strategy exchange it for a fresh offline token.
-        await shopify.sessionStorage.deleteSession(session.id);
-        const refreshed = await shopify.authenticate.admin(
-          reauthorizationRequest,
-        );
+      async (credentialFailure) => {
+        let refreshed;
+        try {
+          if (isLegacyNonExpiringTokenFailure(credentialFailure)) {
+            await migrateLegacyOfflineSession(session);
+            refreshed = await shopify.unauthenticated.admin(session.shop);
+          } else {
+            // The retry request still carries Shopify's short-lived admin
+            // session token. Removing only the invalid offline session makes
+            // the official strategy exchange it for a fresh offline token.
+            await shopify.sessionStorage.deleteSession(session.id);
+            refreshed = await shopify.authenticate.admin(
+              reauthorizationRequest,
+            );
+          }
+        } catch (error) {
+          throw new ShopifySessionRecoveryError(error);
+        }
         return preview(refreshed.admin, refreshed.session.shop);
       },
     );
