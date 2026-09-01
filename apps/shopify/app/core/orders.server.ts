@@ -674,9 +674,12 @@ async function graphqlWithRetry(
     } catch {
       throw new Error("Shopify Admin API returned invalid JSON");
     }
+    const graphqlErrors = Array.isArray(body.errors) ? body.errors : [];
     const throttled =
       response.status === 429 ||
-      body.errors?.some((error: any) => error.extensions?.code === "THROTTLED");
+      graphqlErrors.some(
+        (error: any) => error.extensions?.code === "THROTTLED",
+      );
     if (!throttled) {
       if (!response.ok)
         throw new Error(`Shopify Admin API failed (${response.status})`);

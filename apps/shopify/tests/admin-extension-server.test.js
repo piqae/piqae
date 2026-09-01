@@ -50,10 +50,13 @@ describe("Shopify production server preflight middleware", () => {
     );
   });
 
-  it("keeps trusted POST authentication in React Router and exposes its response", async () => {
+  it("leaves trusted POST CORS ownership with React Router", async () => {
     const app = express();
     app.use(adminExtensionPreflightMiddleware);
-    app.all("*", (_request, response) => response.sendStatus(418));
+    app.all("*", (_request, response) => {
+      response.append("access-control-allow-origin", "*");
+      response.sendStatus(418);
+    });
     server = app.listen(0, "127.0.0.1");
     await once(server, "listening");
     const address = server.address();
@@ -69,8 +72,6 @@ describe("Shopify production server preflight middleware", () => {
     );
 
     expect(response.status).toBe(418);
-    expect(response.headers.get("access-control-allow-origin")).toBe(
-      "https://extensions.shopifycdn.com",
-    );
+    expect(response.headers.get("access-control-allow-origin")).toBe("*");
   });
 });

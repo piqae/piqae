@@ -1,4 +1,5 @@
 import type { ActionFunctionArgs } from "react-router";
+import { PiqaeError } from "@piqae/sdk";
 
 import { createProductionServices } from "../services.server";
 import shopify from "../shopify.server";
@@ -15,6 +16,68 @@ export type AdminPreviewFailure = {
   message: string;
 };
 
+type ShopifyHttpFailure = {
+  response?: {
+    code?: unknown;
+    body?: unknown;
+  };
+};
+
+/**
+ * Shopify's client normally invalidates an offline session on HTTP 401. Some
+ * invalid or revoked offline tokens are returned as HTTP 403 instead, so the
+ * client leaves that session in storage forever. Match only Shopify's
+ * credential-shaped 403 response; an ordinary permission failure must not
+ * trigger a token exchange loop.
+ */
+export function isShopifySessionCredentialFailure(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const response = (error as ShopifyHttpFailure).response;
+  if (!response || typeof response.code !== "number") return false;
+  if (response.code === 401) return true;
+  if (
+    response.code !== 403 ||
+    !response.body ||
+    typeof response.body !== "object"
+  )
+    return false;
+  const errors = (response.body as Record<string, unknown>).errors;
+  return (
+    typeof errors === "string" &&
+    /(?:access token|api key|credential)/i.test(errors)
+  );
+}
+
+export async function withShopifySessionRecovery<T>(
+  operation: () => Promise<T>,
+  recover: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (!isShopifySessionCredentialFailure(error)) throw error;
+    return recover();
+  }
+}
+
+function safeFailureMetadata(error: unknown) {
+  if (error instanceof PiqaeError)
+    return {
+      upstreamCode: error.code,
+      upstreamStatus: error.status,
+      upstreamRequestId: error.requestId,
+      retryable: error.retryable,
+    };
+  if (error && typeof error === "object") {
+    const status = (error as ShopifyHttpFailure).response?.code;
+    if (typeof status === "number")
+      return { upstream: "shopify_admin", upstreamStatus: status };
+    const name = (error as { name?: unknown }).name;
+    if (typeof name === "string") return { errorName: name };
+  }
+  return {};
+}
+
 /**
  * Keep production logs useful without copying order ids, shop domains, document
  * contents, or upstream response bodies into them. The original error is still
@@ -23,6 +86,12 @@ export type AdminPreviewFailure = {
 export function classifyAdminPreviewFailure(
   error: unknown,
 ): AdminPreviewFailure {
+  if (isShopifySessionCredentialFailure(error))
+    return {
+      code: "account_connection",
+      message:
+        "Shopify access could not be refreshed. Open Piqae in Shopify Admin once, then retry this print action.",
+    };
   const message = error instanceof Error ? error.message : "";
   if (
     /published|pinned piqae revision|template revision|document.*unavailable/i.test(
@@ -58,6 +127,7 @@ export function classifyAdminPreviewFailure(
 }
 
 export async function action({ request }: ActionFunctionArgs) {
+  const reauthorizationRequest = request.clone();
   const { admin, session, cors } = await shopify.authenticate.admin(request);
   const body = (await request.json()) as Record<string, unknown>;
   const orderIds = Array.isArray(body.orderIds)
@@ -71,14 +141,28 @@ export async function action({ request }: ActionFunctionArgs) {
     return cors(
       Response.json({ error: "invalid preview request" }, { status: 400 }),
     );
-  try {
-    const result = await createProductionServices().printing.previewOrders({
-      admin,
-      shop: session.shop,
+  const preview = (previewAdmin: typeof admin, shop: string) =>
+    createProductionServices().printing.previewOrders({
+      admin: previewAdmin,
+      shop,
       orderIds,
       templateId,
       requestKey,
     });
+  try {
+    const result = await withShopifySessionRecovery(
+      () => preview(admin, session.shop),
+      async () => {
+        // The retry request still carries Shopify's short-lived admin session
+        // token. Removing only the invalid offline session makes the official
+        // authentication strategy exchange it for a fresh offline token.
+        await shopify.sessionStorage.deleteSession(session.id);
+        const refreshed = await shopify.authenticate.admin(
+          reauthorizationRequest,
+        );
+        return preview(refreshed.admin, refreshed.session.shop);
+      },
+    );
     return cors(Response.json(result, { status: 201 }));
   } catch (error) {
     const failure = classifyAdminPreviewFailure(error);
@@ -86,6 +170,7 @@ export async function action({ request }: ActionFunctionArgs) {
       JSON.stringify({
         event: "shopify_admin_preview_failed",
         code: failure.code,
+        ...safeFailureMetadata(error),
       }),
     );
     return cors(
