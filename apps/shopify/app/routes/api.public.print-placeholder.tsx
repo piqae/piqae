@@ -53,5 +53,6 @@ export function loader({ request }: LoaderFunctionArgs) {
         },
       },
     ),
+    request,
   );
 }

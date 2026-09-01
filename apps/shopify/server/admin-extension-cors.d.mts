@@ -1,5 +1,9 @@
 export declare const ADMIN_EXTENSION_ORIGIN: string;
-export declare function adminExtensionCors(response: Response): Response;
+export declare const SHOPIFY_ADMIN_ORIGIN: string;
+export declare function adminExtensionCors(
+  response: Response,
+  request?: Request,
+): Response;
 export declare function isAdminExtensionPrintSourcePath(
   pathname: string,
 ): boolean;

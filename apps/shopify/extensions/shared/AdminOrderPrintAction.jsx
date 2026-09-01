@@ -195,6 +195,13 @@ export function previewPlaceholderUrl(baseUrl, status) {
   return url.toString();
 }
 
+export function previewDownloadUrl(artifactUrl) {
+  if (!artifactUrl) return undefined;
+  const url = new URL(artifactUrl);
+  url.searchParams.set("download", "1");
+  return url.toString();
+}
+
 export function canUsePublishedBinding(document) {
   return Boolean(
     document?.targetBindingStatus === "ready" &&
@@ -542,10 +549,21 @@ function AdminOrderPrintActionContent({ bulk = false }) {
             )}
             {error && <s-banner tone="critical">{error}</s-banner>}
             {result && <s-banner tone="success">{result}</s-banner>}
-            {canPrint ? (
-              <s-button variant="primary" onClick={printDirect}>
-                {state === "printing" ? "Sending…" : "Print"}
-              </s-button>
+            {previewState === "ready" && preview ? (
+              <s-stack direction="inline" gap="small">
+                <s-button
+                  href={previewDownloadUrl(preview.artifactUrl)}
+                  target="_blank"
+                  icon="download"
+                >
+                  Download PDF
+                </s-button>
+                {canPrint ? (
+                  <s-button variant="primary" onClick={printDirect}>
+                    {state === "printing" ? "Sending…" : "Print with Piqae"}
+                  </s-button>
+                ) : null}
+              </s-stack>
             ) : null}
           </>
         )}
