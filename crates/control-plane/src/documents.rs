@@ -1732,20 +1732,29 @@ async fn approve_preview(
         .repository
         .begin_document_preview_approval(t.workspace_id, t.environment_id, &id, &key, &hash)
         .await?;
-    // `print_render` owns the complete render-to-job handoff future. Keeping
-    // that large future inline beneath the equally stateful approval handler
-    // can exceed the bounded Tokio worker stack in optimized server builds.
-    // The public `/renders/{id}/print` route does not have this extra nesting,
-    // which is why preview and download can succeed immediately before an
-    // approval crashes the process. Put the nested state machine on the heap;
-    // this changes no request, idempotency, or delivery semantics.
-    let response = Box::pin(print_render(
+    // `print_render` owns the complete render-to-job handoff state machine.
+    // Polling it from this already stateful HTTP handler nests both generated
+    // futures on one Tokio worker call stack and can overflow the bounded
+    // production worker stack. Merely pinning the child future does not break
+    // that poll chain. Schedule the handoff as its own task so the executor
+    // polls it from a fresh task boundary, while this request still awaits the
+    // exact result before completing the durable preview approval.
+    let response = tokio::spawn(print_render(
         State(state.clone()),
         headers,
         Path(preview.render_id.clone()),
         Json(request),
     ))
-    .await?;
+    .await
+    .map_err(|error| {
+        tracing::error!(
+            error.type = "document_preview_approval_task_failed",
+            task.cancelled = error.is_cancelled(),
+            task.panicked = error.is_panic(),
+            "document preview approval handoff task failed"
+        );
+        AppError::service_unavailable("document_preview_approval_failed")
+    })??;
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await
