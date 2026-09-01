@@ -1,7 +1,7 @@
 api_version = "2026-07"
 
 [[extensions]]
-name = "Print selected orders"
+name = "Print selected to Piqae Node"
 handle = "piqae-bulk-order-print"
 uid = "04ac0f17-d4f6-7123-977e-7cfd150d1e0000dd625e"
 type = "ui_extension"

@@ -272,12 +272,25 @@ const documentHeading = (
         ...(barcode
           ? [
               {
-                type: "barcode" as const,
-                value: current("name"),
-                symbology: "code128" as const,
-                width_mm: 42,
-                height_mm: 9,
-                human_readable: false,
+                type: "conditional" as const,
+                condition: {
+                  type: "exists" as const,
+                  value: current("referenceCode128"),
+                },
+                then: [
+                  {
+                    type: "barcode" as const,
+                    value: current("referenceCode128"),
+                    symbology: "code128" as const,
+                    // Fill nearly the complete metadata column. Code128
+                    // module widths remain uniform rather than being visually
+                    // stretched, and unsuitable order references are omitted.
+                    width_mm: 56,
+                    height_mm: 10,
+                    human_readable: false,
+                  },
+                ],
+                else: [],
               },
             ]
           : []),
@@ -399,7 +412,7 @@ const documents = {
       items: path("orders"),
       gap_mm: 10,
       children: [
-        documentHeading("INVOICE", false, "Invoice "),
+        documentHeading("INVOICE", true, "Invoice "),
         { type: "spacer", height_mm: 10 },
         {
           type: "grid",

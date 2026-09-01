@@ -1732,12 +1732,19 @@ async fn approve_preview(
         .repository
         .begin_document_preview_approval(t.workspace_id, t.environment_id, &id, &key, &hash)
         .await?;
-    let response = print_render(
+    // `print_render` owns the complete render-to-job handoff future. Keeping
+    // that large future inline beneath the equally stateful approval handler
+    // can exceed the bounded Tokio worker stack in optimized server builds.
+    // The public `/renders/{id}/print` route does not have this extra nesting,
+    // which is why preview and download can succeed immediately before an
+    // approval crashes the process. Put the nested state machine on the heap;
+    // this changes no request, idempotency, or delivery semantics.
+    let response = Box::pin(print_render(
         State(state.clone()),
         headers,
         Path(preview.render_id.clone()),
         Json(request),
-    )
+    ))
     .await?;
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)

@@ -103,6 +103,30 @@
                     }
                   },
                   {
+                    "type": "conditional",
+                    "condition": {
+                      "type": "exists",
+                      "value": {
+                        "type": "current_path",
+                        "path": ["referenceCode128"]
+                      }
+                    },
+                    "then": [
+                      {
+                        "type": "barcode",
+                        "value": {
+                          "type": "current_path",
+                          "path": ["referenceCode128"]
+                        },
+                        "symbology": "code128",
+                        "width_mm": 56,
+                        "height_mm": 10,
+                        "human_readable": false
+                      }
+                    ],
+                    "else": []
+                  },
+                  {
                     "type": "paragraph",
                     "content": [
                       {
@@ -996,15 +1020,28 @@
                     }
                   },
                   {
-                    "type": "barcode",
-                    "value": {
-                      "type": "current_path",
-                      "path": ["name"]
+                    "type": "conditional",
+                    "condition": {
+                      "type": "exists",
+                      "value": {
+                        "type": "current_path",
+                        "path": ["referenceCode128"]
+                      }
                     },
-                    "symbology": "code128",
-                    "width_mm": 42,
-                    "height_mm": 9,
-                    "human_readable": false
+                    "then": [
+                      {
+                        "type": "barcode",
+                        "value": {
+                          "type": "current_path",
+                          "path": ["referenceCode128"]
+                        },
+                        "symbology": "code128",
+                        "width_mm": 56,
+                        "height_mm": 10,
+                        "human_readable": false
+                      }
+                    ],
+                    "else": []
                   },
                   {
                     "type": "paragraph",

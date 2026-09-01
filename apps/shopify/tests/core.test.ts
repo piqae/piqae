@@ -5,6 +5,7 @@ import {
   fetchOrders,
   fetchShopPrintIdentity,
   normalizedLabelCode128Candidate,
+  normalizedOrderCode128Candidate,
   normalizeMoneyAmount,
   normalizeOrderGid,
   parseShopifyDataBindings,
@@ -315,6 +316,14 @@ describe("Shopify boundary", () => {
       normalizedLabelCode128Candidate("A".repeat(81), "B".repeat(81)),
     ).toBeNull();
     expect(normalizedLabelCode128Candidate("\n", "")).toBeNull();
+  });
+  it("omits an order barcode when the reference cannot fit safely", () => {
+    expect(normalizedOrderCode128Candidate("#1001")).toBe("#1001");
+    expect(normalizedOrderCode128Candidate("A".repeat(27))).toBe(
+      "A".repeat(27),
+    );
+    expect(normalizedOrderCode128Candidate("A".repeat(28))).toBeNull();
+    expect(normalizedOrderCode128Candidate("™1001")).toBeNull();
   });
   it("rejects an RFC3339-shaped order timestamp with an impossible calendar date", async () => {
     const invalidDateAdmin = {

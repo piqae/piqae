@@ -42,6 +42,10 @@ const migration6 = await readFile(
   path.join(root, "migrations/0006_template_draft_published_pointers.sql"),
   "utf8",
 );
+const migration7 = await readFile(
+  path.join(root, "migrations/0007_print_order_settings.sql"),
+  "utf8",
+);
 const suffix = randomBytes(8).toString("hex");
 const schemas = [
   `piqae_shopify_fresh_${suffix}`,
@@ -81,15 +85,27 @@ async function assertions(client) {
     "23514",
   );
   await client.query(
-    "INSERT INTO shopify_merchant_settings(shop,retention_days,render_execution_policy) VALUES($1,30,'require_node')",
-    ["alpha.myshopify.com"],
+    "INSERT INTO shopify_merchant_settings(shop,retention_days,render_execution_policy,print_order) VALUES($1,30,'require_node',$2::jsonb)",
+    [
+      "alpha.myshopify.com",
+      JSON.stringify({
+        hierarchy: ["taxonomy", "primary_product"],
+        taxonomyDepth: "family",
+        mixedOrderMode: "dominant",
+      }),
+    ],
   );
   const settings = await client.query(
-    "SELECT render_execution_policy FROM shopify_merchant_settings WHERE shop=$1",
+    "SELECT render_execution_policy,print_order FROM shopify_merchant_settings WHERE shop=$1",
     ["alpha.myshopify.com"],
   );
   if (settings.rows[0]?.render_execution_policy !== "require_node")
     throw new Error("render execution policy was not retained");
+  if (
+    settings.rows[0]?.print_order?.hierarchy?.join(",") !==
+    "taxonomy,primary_product"
+  )
+    throw new Error("print grouping hierarchy was not retained");
   await rejects(
     client,
     "UPDATE shopify_merchant_settings SET render_execution_policy='unsafe' WHERE shop=$1",
@@ -239,6 +255,10 @@ try {
       await client.query(migration4);
       if (index === 1) {
         await client.query(
+          "INSERT INTO shopify_merchant_settings(shop) VALUES($1)",
+          ["existing.myshopify.com"],
+        );
+        await client.query(
           "INSERT INTO shopify_workflow_templates(id,shop,name,kind,page_size,state,source) VALUES($1,$2,'Existing invoice','invoice','A4','draft','{}')",
           ["33333333-3333-4333-8333-333333333333", "existing.myshopify.com"],
         );
@@ -251,6 +271,8 @@ try {
       await client.query(migration5);
       await client.query(migration6);
       await client.query(migration6);
+      await client.query(migration7);
+      await client.query(migration7);
       if (index === 1) {
         const retained = await client.query(
           "SELECT state FROM shopify_installations WHERE shop=$1",
@@ -258,6 +280,17 @@ try {
         );
         if (retained.rows[0]?.state !== "installed")
           throw new Error("N-1 installation was not retained");
+        const upgradedSettings = await client.query(
+          "SELECT print_order FROM shopify_merchant_settings WHERE shop=$1",
+          ["existing.myshopify.com"],
+        );
+        if (
+          upgradedSettings.rows[0]?.print_order?.taxonomyDepth !== "family" ||
+          upgradedSettings.rows[0]?.print_order?.hierarchy?.length !== 0
+        )
+          throw new Error(
+            "N-1 print order settings were not backfilled safely",
+          );
         const columns = await client.query(
           "SELECT state,source,revision,design_target_id,design_specification_revision,draft_source,draft_revision,published_revision FROM shopify_workflow_templates WHERE shop=$1 AND id=$2",
           ["existing.myshopify.com", "33333333-3333-4333-8333-333333333333"],

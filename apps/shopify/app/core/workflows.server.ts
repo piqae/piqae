@@ -3,6 +3,11 @@ import pg, { type Pool, type PoolClient } from "pg";
 import { normalizeShopDomain } from "./model";
 import { parseTemplateEnvelope, type PrintPacket } from "./template-model";
 import { resolveShopifyStorage } from "./piqae-runtime.server";
+import {
+  DEFAULT_PRINT_ORDER_SETTINGS,
+  parsePrintOrderSettings,
+  type PrintOrderSettings,
+} from "./print-order";
 
 export type MerchantSettings = {
   defaultPrinterId: string;
@@ -12,6 +17,7 @@ export type MerchantSettings = {
   metafieldAllowlist: string[];
   retentionDays: number;
   renderExecutionPolicy: RenderExecutionPolicy;
+  printOrder: PrintOrderSettings;
 };
 export type RenderExecutionPolicy =
   | "automatic"
@@ -93,6 +99,7 @@ const DEFAULT_SETTINGS: MerchantSettings = {
   metafieldAllowlist: [],
   retentionDays: 30,
   renderExecutionPolicy: "automatic",
+  printOrder: DEFAULT_PRINT_ORDER_SETTINGS,
 };
 const DEFAULT_BILLING: BillingState = {
   mode: "existing_piqae",
@@ -105,6 +112,10 @@ const DEFAULT_BILLING: BillingState = {
 export interface WorkflowRepository {
   getSettings(shop: string): Promise<MerchantSettings>;
   saveSettings(shop: string, settings: MerchantSettings): Promise<void>;
+  updateSettings(
+    shop: string,
+    settings: Partial<MerchantSettings>,
+  ): Promise<void>;
   listTemplates(shop: string): Promise<MerchantTemplate[]>;
   getTemplate(shop: string, id: string): Promise<MerchantTemplate | null>;
   saveTemplate(
@@ -148,6 +159,14 @@ export class MemoryWorkflowRepository implements WorkflowRepository {
   }
   async saveSettings(shop: string, value: MerchantSettings) {
     this.settings.set(normalizeShopDomain(shop), structuredClone(value));
+  }
+  async updateSettings(shop: string, value: Partial<MerchantSettings>) {
+    const key = normalizeShopDomain(shop);
+    const current = this.settings.get(key) ?? DEFAULT_SETTINGS;
+    this.settings.set(key, {
+      ...structuredClone(current),
+      ...structuredClone(value),
+    });
   }
   async listTemplates(shop: string) {
     return structuredClone(this.templates.get(normalizeShopDomain(shop)) ?? []);
@@ -290,7 +309,7 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
   constructor(private pool: Pool) {}
   async getSettings(shop: string) {
     const result = await this.pool.query(
-      "SELECT default_printer_id,default_template_id,prefer_direct,offer_pdf,metafield_allowlist,retention_days,render_execution_policy FROM shopify_merchant_settings WHERE shop=$1",
+      "SELECT default_printer_id,default_template_id,prefer_direct,offer_pdf,metafield_allowlist,retention_days,render_execution_policy,print_order FROM shopify_merchant_settings WHERE shop=$1",
       [normalizeShopDomain(shop)],
     );
     const r = result.rows[0];
@@ -305,12 +324,13 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
           renderExecutionPolicy: parseRenderExecutionPolicy(
             r.render_execution_policy,
           ),
+          printOrder: parsePrintOrderSettings(r.print_order),
         }
       : structuredClone(DEFAULT_SETTINGS);
   }
   async saveSettings(shop: string, v: MerchantSettings) {
     await this.pool.query(
-      "INSERT INTO shopify_merchant_settings(shop,default_printer_id,default_template_id,prefer_direct,offer_pdf,metafield_allowlist,retention_days,render_execution_policy) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(shop) DO UPDATE SET default_printer_id=EXCLUDED.default_printer_id,default_template_id=EXCLUDED.default_template_id,prefer_direct=EXCLUDED.prefer_direct,offer_pdf=EXCLUDED.offer_pdf,metafield_allowlist=EXCLUDED.metafield_allowlist,retention_days=EXCLUDED.retention_days,render_execution_policy=EXCLUDED.render_execution_policy,updated_at=now()",
+      "INSERT INTO shopify_merchant_settings(shop,default_printer_id,default_template_id,prefer_direct,offer_pdf,metafield_allowlist,retention_days,render_execution_policy,print_order) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(shop) DO UPDATE SET default_printer_id=EXCLUDED.default_printer_id,default_template_id=EXCLUDED.default_template_id,prefer_direct=EXCLUDED.prefer_direct,offer_pdf=EXCLUDED.offer_pdf,metafield_allowlist=EXCLUDED.metafield_allowlist,retention_days=EXCLUDED.retention_days,render_execution_policy=EXCLUDED.render_execution_policy,print_order=EXCLUDED.print_order,updated_at=now()",
       [
         normalizeShopDomain(shop),
         v.defaultPrinterId || null,
@@ -320,8 +340,63 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
         v.metafieldAllowlist,
         v.retentionDays,
         v.renderExecutionPolicy,
+        JSON.stringify(v.printOrder),
       ],
     );
+  }
+  async updateSettings(shop: string, value: Partial<MerchantSettings>) {
+    const candidates: Array<[keyof MerchantSettings, string, unknown]> = [
+      [
+        "defaultPrinterId",
+        "default_printer_id",
+        value.defaultPrinterId || null,
+      ],
+      [
+        "defaultTemplateId",
+        "default_template_id",
+        value.defaultTemplateId || null,
+      ],
+      ["preferDirect", "prefer_direct", value.preferDirect],
+      ["offerPdf", "offer_pdf", value.offerPdf],
+      ["metafieldAllowlist", "metafield_allowlist", value.metafieldAllowlist],
+      ["retentionDays", "retention_days", value.retentionDays],
+      [
+        "renderExecutionPolicy",
+        "render_execution_policy",
+        value.renderExecutionPolicy,
+      ],
+      [
+        "printOrder",
+        "print_order",
+        value.printOrder === undefined
+          ? undefined
+          : JSON.stringify(value.printOrder),
+      ],
+    ];
+    const columns = candidates.filter(([key]) => value[key] !== undefined);
+    if (!columns.length) return;
+    const normalizedShop = normalizeShopDomain(shop);
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        "INSERT INTO shopify_merchant_settings(shop) VALUES($1) ON CONFLICT(shop) DO NOTHING",
+        [normalizedShop],
+      );
+      const assignments = columns.map(
+        ([, column], index) => `${column}=$${index + 2}`,
+      );
+      await client.query(
+        `UPDATE shopify_merchant_settings SET ${assignments.join(",")},updated_at=now() WHERE shop=$1`,
+        [normalizedShop, ...columns.map(([, , setting]) => setting)],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
   async listTemplates(shop: string) {
     const result = await this.pool.query(
@@ -613,7 +688,10 @@ export function newWorkflowId() {
   return randomUUID();
 }
 
-export function parseSettings(form: FormData): MerchantSettings {
+export function parseSettings(
+  form: FormData,
+  existing: MerchantSettings = DEFAULT_SETTINGS,
+): MerchantSettings {
   const fields = String(form.get("metafields") ?? "")
     .split(/[\n,]/)
     .map((v) => v.trim())
@@ -643,6 +721,7 @@ export function parseSettings(form: FormData): MerchantSettings {
     renderExecutionPolicy: parseRenderExecutionPolicy(
       form.get("renderExecutionPolicy"),
     ),
+    printOrder: structuredClone(existing.printOrder),
   };
 }
 export function parseRenderExecutionPolicy(

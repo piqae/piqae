@@ -1,10 +1,51 @@
 import type { ActionFunctionArgs } from "react-router";
+import { PiqaeError } from "@piqae/sdk";
 
 import { createProductionServices } from "../services.server";
 import { parseRenderCost } from "../core/printing.server";
 import shopify from "../shopify.server";
 
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+export function approvalErrorMessage(error: unknown): string {
+  if (error instanceof PiqaeError) {
+    if (error.code === "node_render_not_ready")
+      return "The selected Node is not ready for this document. Check the Node and try again.";
+    if (error.code === "node_render_destination_unresolved")
+      return "Piqae could not resolve the selected printer. Refresh the printer list and try again.";
+    if (error.status >= 500 || error.code === "unexpected_response")
+      return "Piqae could not reach the print service. The PDF is still available to download; try direct printing again in a moment.";
+    return error.message;
+  }
+  if (error instanceof Error && error.message === "Bad Gateway")
+    return "Piqae could not reach the print service. The PDF is still available to download; try direct printing again in a moment.";
+  return error instanceof Error ? error.message : "Approval failed";
+}
+
+export function approvalErrorStatus(error: unknown): number {
+  if (error instanceof PiqaeError)
+    return error.status >= 500 || error.code === "unexpected_response"
+      ? 502
+      : 409;
+  if (
+    error instanceof TypeError ||
+    (error instanceof Error && error.message === "Bad Gateway")
+  )
+    return 502;
+  return 409;
+}
+
+function safeApprovalFailureMetadata(error: unknown) {
+  if (error instanceof PiqaeError)
+    return {
+      upstreamCode: error.code,
+      upstreamStatus: error.status,
+      upstreamRequestId: error.requestId,
+      retryable: error.retryable,
+    };
+  return error instanceof Error ? { errorName: error.name } : {};
+}
+
 export async function action({ request, params }: ActionFunctionArgs) {
   const { session, cors } = await shopify.authenticate.admin(request);
   const previewId = params.previewId ?? "";
@@ -45,11 +86,16 @@ export async function action({ request, params }: ActionFunctionArgs) {
     });
     return cors(Response.json(result, { status: 202 }));
   } catch (error) {
+    const status = approvalErrorStatus(error);
+    console.error(
+      JSON.stringify({
+        event: "shopify_admin_preview_approval_failed",
+        status,
+        ...safeApprovalFailureMetadata(error),
+      }),
+    );
     return cors(
-      Response.json(
-        { error: error instanceof Error ? error.message : "Approval failed" },
-        { status: 409 },
-      ),
+      Response.json({ error: approvalErrorMessage(error) }, { status }),
     );
   }
 }

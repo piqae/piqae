@@ -16,6 +16,7 @@ export default function App() {
         <a href="/app/automations">Automations</a>
         <a href="/app/activity">Activity</a>
         <a href="/app/printers">Printers</a>
+        <a href="/app/settings">Settings</a>
         <a href="/app/billing">Plan</a>
       </ui-nav-menu>
       <Outlet />
