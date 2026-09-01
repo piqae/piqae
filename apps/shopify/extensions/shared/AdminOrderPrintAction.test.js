@@ -17,6 +17,7 @@ import {
   printerCompatibilityMessage,
   approvalForDocumentPrinter,
   previewPlaceholderUrl,
+  previewDownloadUrl,
 } from "./AdminOrderPrintAction.jsx";
 
 describe("admin print action state", () => {
@@ -46,6 +47,16 @@ describe("admin print action state", () => {
       ),
     ).toBe(
       "https://shopify.example.com/api/public/print-placeholder?state=loading",
+    );
+  });
+
+  it("turns a signed preview URL into a download URL", () => {
+    expect(
+      previewDownloadUrl(
+        "https://shopify.example.com/api/public/previews/artifact?token=fixture",
+      ),
+    ).toBe(
+      "https://shopify.example.com/api/public/previews/artifact?token=fixture&download=1",
     );
   });
   it("uses the configured ready default", () => {

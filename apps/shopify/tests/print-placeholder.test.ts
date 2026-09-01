@@ -11,6 +11,16 @@ async function load(state: string) {
   return { response, body: await response.text() };
 }
 
+async function loadFromAdmin(state: string) {
+  const response = loader({
+    request: new Request(
+      `https://shopify.example.com/api/public/print-placeholder?state=${state}`,
+      { headers: { origin: "https://admin.shopify.com" } },
+    ),
+  } as never);
+  return { response, body: await response.text() };
+}
+
 describe("admin print preview placeholder", () => {
   it("shows an accessible shimmer while the real order PDF renders", async () => {
     const { response, body } = await load("loading");
@@ -30,5 +40,12 @@ describe("admin print preview placeholder", () => {
     const failed = await load("error");
     expect(loading.body).not.toContain("Preview unavailable");
     expect(failed.body).toContain("Preview unavailable");
+  });
+
+  it("can be embedded by the Shopify Admin print host", async () => {
+    const { response } = await loadFromAdmin("loading");
+    expect(response.headers.get("access-control-allow-origin")).toBe(
+      "https://admin.shopify.com",
+    );
   });
 });

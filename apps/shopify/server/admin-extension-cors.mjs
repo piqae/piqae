@@ -1,4 +1,5 @@
 export const ADMIN_EXTENSION_ORIGIN = "https://extensions.shopifycdn.com";
+export const SHOPIFY_ADMIN_ORIGIN = "https://admin.shopify.com";
 
 const ALLOWED_REQUEST_HEADERS = new Set([
   "authorization",
@@ -12,8 +13,18 @@ const ADMIN_EXTENSION_PRINT_SOURCE_PATHS = new Set([
   "/api/public/previews/artifact",
 ]);
 
-export function adminExtensionCors(response) {
-  response.headers.set("access-control-allow-origin", ADMIN_EXTENSION_ORIGIN);
+function allowedOrigin(request, allowAdminOrigin = false) {
+  const origin = request?.headers?.get("origin");
+  if (origin === ADMIN_EXTENSION_ORIGIN) return origin;
+  if (allowAdminOrigin && origin === SHOPIFY_ADMIN_ORIGIN) return origin;
+  return ADMIN_EXTENSION_ORIGIN;
+}
+
+export function adminExtensionCors(response, request) {
+  response.headers.set(
+    "access-control-allow-origin",
+    allowedOrigin(request, true),
+  );
   response.headers.append("vary", "Origin");
   return response;
 }
@@ -35,15 +46,17 @@ export function isAdminExtensionPreflightPath(pathname) {
 
 export function adminExtensionPreflight(request) {
   if (request.method !== "OPTIONS") return null;
+  const isPrintSource = isAdminExtensionPrintSourcePath(
+    new URL(request.url).pathname,
+  );
   const origin = request.headers.get("origin");
-  if (origin !== ADMIN_EXTENSION_ORIGIN)
+  if (
+    origin !== ADMIN_EXTENSION_ORIGIN &&
+    !(isPrintSource && origin === SHOPIFY_ADMIN_ORIGIN)
+  )
     return Response.json({ error: "origin not allowed" }, { status: 403 });
   const requestedMethod = request.headers.get("access-control-request-method");
-  const allowedMethod = isAdminExtensionPrintSourcePath(
-    new URL(request.url).pathname,
-  )
-    ? "GET"
-    : "POST";
+  const allowedMethod = isPrintSource ? "GET" : "POST";
   if (requestedMethod !== allowedMethod)
     return Response.json({ error: "method not allowed" }, { status: 405 });
   const requestedHeaders = (
@@ -60,7 +73,7 @@ export function adminExtensionPreflight(request) {
   return new Response(null, {
     status: 204,
     headers: {
-      "access-control-allow-origin": ADMIN_EXTENSION_ORIGIN,
+      "access-control-allow-origin": allowedOrigin(request, isPrintSource),
       "access-control-allow-methods": `${allowedMethod}, OPTIONS`,
       "access-control-allow-headers": [...ALLOWED_REQUEST_HEADERS].join(", "),
       "access-control-max-age": "600",

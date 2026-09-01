@@ -58,6 +58,27 @@ describe("Admin extension CORS preflight", () => {
     );
   });
 
+  it("allows the Shopify Admin host to fetch public print sources", () => {
+    const response = adminExtensionPreflight(
+      new Request(
+        "https://shopify.piqae.com/api/public/previews/artifact?token=fixture",
+        {
+          method: "OPTIONS",
+          headers: {
+            origin: "https://admin.shopify.com",
+            "access-control-request-method": "GET",
+            "access-control-request-headers": "authorization",
+          },
+        },
+      ),
+    );
+
+    expect(response?.status).toBe(204);
+    expect(response?.headers.get("access-control-allow-origin")).toBe(
+      "https://admin.shopify.com",
+    );
+  });
+
   it("adds the trusted origin to printable responses", () => {
     const response = adminExtensionCors(
       new Response("preview", { headers: { vary: "Accept-Encoding" } }),
@@ -67,6 +88,17 @@ describe("Admin extension CORS preflight", () => {
     );
     expect(response.headers.get("vary")).toContain("Accept-Encoding");
     expect(response.headers.get("vary")).toContain("Origin");
+  });
+
+  it("echoes the Shopify Admin origin on printable responses", () => {
+    const request = new Request(
+      "https://shopify.piqae.com/api/public/previews/artifact?token=fixture",
+      { headers: { origin: "https://admin.shopify.com" } },
+    );
+    const response = adminExtensionCors(new Response("preview"), request);
+    expect(response.headers.get("access-control-allow-origin")).toBe(
+      "https://admin.shopify.com",
+    );
   });
 
   it("allows only the headers used by authenticated preview actions", () => {
@@ -91,6 +123,12 @@ describe("Admin extension CORS preflight", () => {
         request("https://extensions.shopifycdn.com", "authorization, x-unsafe"),
       )?.status,
     ).toBe(400);
+  });
+
+  it("does not allow the Shopify Admin host to call authenticated actions", () => {
+    expect(
+      adminExtensionPreflight(request("https://admin.shopify.com"))?.status,
+    ).toBe(403);
   });
 
   it("rejects preflights for methods other than POST", () => {
