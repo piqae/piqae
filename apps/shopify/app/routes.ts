@@ -9,6 +9,14 @@ export default [
   route("connect/complete", "routes/connect.complete.tsx"),
   route("api/print/admin", "routes/api.print.admin.tsx"),
   route("api/print/admin/options", "routes/api.print.admin-options.tsx"),
+  route(
+    "api/print/admin/product-options",
+    "routes/api.print.admin-product-options.tsx",
+  ),
+  route(
+    "api/print/admin/product-previews",
+    "routes/api.print.admin-product-previews.tsx",
+  ),
   route("api/print/admin/readiness", "routes/api.print.admin-readiness.tsx"),
   route(
     "api/public/print-placeholder",
@@ -50,6 +58,10 @@ export default [
   route(
     "api/editor-preview-renders/:renderId/artifact",
     "routes/api.editor-preview-renders.$renderId.artifact.tsx",
+  ),
+  route(
+    "api/editor-preview-renders/:renderId/image",
+    "routes/api.editor-preview-renders.$renderId.image.tsx",
   ),
   route("app", "routes/app.tsx", [
     index("routes/app._index.tsx"),

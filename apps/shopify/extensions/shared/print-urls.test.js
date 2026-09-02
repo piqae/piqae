@@ -29,6 +29,36 @@ describe("print URL contracts", () => {
     expect(headers.get("accept")).toBe("application/json");
     vi.unstubAllGlobals();
   });
+
+  it("uses a fresh POS session token when the Admin auth API is unavailable", async () => {
+    vi.stubGlobal("shopify", {
+      session: { getSessionToken: vi.fn().mockResolvedValue("pos-token") },
+    });
+    const fetcher = vi.fn().mockResolvedValue(Response.json({ ok: true }));
+    vi.stubGlobal("fetch", fetcher);
+    await authorizedJson("/api/print/admin/product-options");
+    expect(fetcher.mock.calls[0][1].headers.get("authorization")).toBe(
+      "Bearer pos-token",
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it("falls back to the POS token when the Admin token is empty", async () => {
+    const getSessionToken = vi.fn().mockResolvedValue("pos-token");
+    vi.stubGlobal("shopify", {
+      auth: { idToken: vi.fn().mockResolvedValue(undefined) },
+      session: { getSessionToken },
+    });
+    const fetcher = vi.fn().mockResolvedValue(Response.json({ ok: true }));
+    vi.stubGlobal("fetch", fetcher);
+    await authorizedJson("/api/print/admin/product-options");
+    expect(getSessionToken).toHaveBeenCalledOnce();
+    expect(fetcher.mock.calls[0][1].headers.get("authorization")).toBe(
+      "Bearer pos-token",
+    );
+    vi.unstubAllGlobals();
+  });
+
   it("builds an encoded bulk admin PDF URL and removes duplicate document types", () => {
     const url = buildAdminPrintUrl({
       orderIds: ["gid://shopify/Order/1", "gid://shopify/Order/2"],

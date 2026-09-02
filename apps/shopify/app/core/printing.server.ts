@@ -22,6 +22,7 @@ import { findSystemTemplate, systemTemplateId } from "./template-index.server";
 import { ACCOUNT_DEFAULT_DOCUMENT_ID } from "./admin-print-options.server";
 import type { DownloadTokenVault } from "./download-token.server";
 import { orderPrintSequence } from "./print-order";
+import { fetchProductDocumentInput } from "./products.server";
 
 export type PrintResult =
   | { mode: "direct"; renderId: string; jobId: string }
@@ -111,6 +112,11 @@ export class ShopifyPrintingService {
       throw new Error(
         `document render failed: ${completed.failure_code ?? completed.state}`,
       );
+    await this.workflow.recordUsage(
+      shop,
+      `preview:${completed.id}`,
+      orders.length,
+    );
     const preview = await client.printPackets.previews.create(
       completed.id,
       { expires_in_seconds: 900 },
@@ -126,6 +132,96 @@ export class ShopifyPrintingService {
       renderId: completed.id,
       expiresAt: preview.expires_at,
       renderCost: measuredRenderCost(completed, renderInput, orders.length),
+      artifactUrl: previewToken
+        ? `${this.appUrl}/api/public/previews/artifact?token=${encodeURIComponent(previewToken)}`
+        : `${this.appUrl}/api/print/previews/${encodeURIComponent(preview.id)}/artifact?renderId=${encodeURIComponent(completed.id)}`,
+      previewImageUrl: previewToken
+        ? `${this.appUrl}/api/public/previews/image?token=${encodeURIComponent(previewToken)}`
+        : null,
+    };
+  }
+
+  async previewProducts(input: {
+    admin: AdminGraphql;
+    shop: string;
+    productIds: string[];
+    templateId: string;
+    requestKey: string;
+  }) {
+    const shop = normalizeShopDomain(input.shop);
+    const link = await this.shops.get(shop);
+    if (!link) throw new Error("Connect a Piqae account before printing");
+    const selectedTemplate = await this.workflow.getTemplate(
+      shop,
+      input.templateId,
+    );
+    if (selectedTemplate?.published?.kind !== "label")
+      throw new Error("Select a published product label document");
+    const publication = await this.resolveTemplatePublication(
+      shop,
+      link.templateRevisionId,
+      link.piqaeAccountId,
+      link.piqaeLiveEnvironmentId ?? null,
+      input.templateId,
+    );
+    const productData = await fetchProductDocumentInput(
+      input.admin,
+      shop,
+      input.productIds,
+    );
+    const digest = createHash("sha256")
+      .update(
+        JSON.stringify({
+          shop,
+          productIds: input.productIds,
+          input: productData.input,
+          templateRevisionId: publication.revisionId,
+          requestKey: input.requestKey,
+        }),
+      )
+      .digest("hex");
+    const client = this.clientFor(link, shop);
+    const render = await client.printPackets.renders.create(
+      {
+        template_revision_id: publication.revisionId,
+        input: productData.input,
+      },
+      `shopify-product-preview-render-${digest}`,
+    );
+    await this.shops.recordRender(
+      shop,
+      render.id,
+      `shopify-product-preview-render-${digest}`,
+    );
+    const completed = await waitForRender(client, render);
+    if (completed.state !== "completed")
+      throw new Error(
+        `product label render failed: ${completed.failure_code ?? completed.state}`,
+      );
+    await this.workflow.recordUsage(
+      shop,
+      `product-preview:${completed.id}`,
+      productData.documentCount,
+    );
+    const preview = await client.printPackets.previews.create(
+      completed.id,
+      { expires_in_seconds: 900 },
+      `shopify-product-preview-${digest}`,
+    );
+    const previewToken = this.previewTokens?.issuePreview({
+      shop,
+      renderId: completed.id,
+      previewId: preview.id,
+    });
+    return {
+      previewId: preview.id,
+      renderId: completed.id,
+      expiresAt: preview.expires_at,
+      renderCost: measuredRenderCost(
+        completed,
+        productData.input,
+        productData.documentCount,
+      ),
       artifactUrl: previewToken
         ? `${this.appUrl}/api/public/previews/artifact?token=${encodeURIComponent(previewToken)}`
         : `${this.appUrl}/api/print/previews/${encodeURIComponent(preview.id)}/artifact?renderId=${encodeURIComponent(completed.id)}`,

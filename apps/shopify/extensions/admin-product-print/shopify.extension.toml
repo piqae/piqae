@@ -1,0 +1,27 @@
+api_version = "2026-07"
+
+[[extensions]]
+name = "Print product labels"
+handle = "piqae-product-print"
+uid = "701a744c-31c0-49e5-98f2-06d83df6b4a1"
+type = "ui_extension"
+
+[[extensions.targeting]]
+module = "./src/ProductAction.jsx"
+target = "admin.product-details.action.render"
+
+[[extensions.targeting]]
+module = "./src/ProductBulkAction.jsx"
+target = "admin.product-index.selection-action.render"
+
+[[extensions.targeting]]
+module = "./src/VariantAction.jsx"
+target = "admin.product-variant-details.action.render"
+
+[[extensions.targeting]]
+module = "./src/ProductBrowserPrintAction.jsx"
+target = "admin.product-details.print-action.render"
+
+[[extensions.targeting]]
+module = "./src/ProductBulkBrowserPrintAction.jsx"
+target = "admin.product-index.selection-print-action.render"

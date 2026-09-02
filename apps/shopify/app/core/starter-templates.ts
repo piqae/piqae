@@ -285,9 +285,16 @@ const documentHeading = (
                     // Fill nearly the complete metadata column. Code128
                     // module widths remain uniform rather than being visually
                     // stretched, and unsuitable order references are omitted.
-                    width_mm: 56,
+                    // Keep the complete footprint (bars + quiet padding)
+                    // inside the narrow metadata column at every supported
+                    // A4/Letter margin. The PDF renderer rejects overflow
+                    // instead of silently scaling a barcode.
+                    width_mm: 50,
                     height_mm: 10,
                     human_readable: false,
+                    align: "right" as const,
+                    padding_mm: 1.5,
+                    gap_mm: 1.2,
                   },
                 ],
                 else: [],
@@ -601,6 +608,9 @@ const documents = {
                       width_mm: 88,
                       height_mm: 16,
                       human_readable: true,
+                      align: "center",
+                      padding_mm: 1.5,
+                      gap_mm: 1.2,
                     },
                   ],
                   else: [],

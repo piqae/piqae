@@ -6,7 +6,7 @@ import {
   useFetcher,
   useLoaderData,
 } from "react-router";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import shopify from "../shopify.server";
 import {
   bounded,
@@ -22,6 +22,8 @@ import {
   createPrintPacketEditorHistory,
   DocumentSettingsFields,
   Icon,
+  canvasContentStyle,
+  canvasStyle,
   type PdfPreviewState,
 } from "../components/PrintPacketEditor";
 import { starterTemplates } from "../core/starter-templates";
@@ -66,12 +68,12 @@ export const customizedTemplateName = (name: string) =>
 export const editorTitleBarActions = (starter: boolean) =>
   starter
     ? {
-        primary: { label: "Save as copy", intent: "draft" as const },
-        secondary: { label: "Publish copy", intent: "publish" as const },
+        primary: { label: "Save", intent: "draft" as const },
+        secondary: { label: "Publish", intent: "publish" as const },
       }
     : {
-        primary: { label: "Publish", intent: "publish" as const },
-        secondary: { label: "Save draft", intent: "draft" as const },
+        primary: { label: "Save", intent: "draft" as const },
+        secondary: { label: "Publish", intent: "publish" as const },
       };
 export const documentNameError = (
   name: string,
@@ -455,6 +457,165 @@ const WORKSPACES = [
   ["preview", "Preview", "preview"],
 ] as const;
 
+export function formatLiquidSource(source: string): string {
+  const opening = /^{%\s*(?:for|if|unless)\b/;
+  const closing = /^{%\s*(?:endfor|endif|endunless)\b/;
+  const middle = /^{%\s*else\b/;
+  let depth = 0;
+  return source
+    .replaceAll("\r\n", "\n")
+    .split("\n")
+    .map((raw) => {
+      const line = raw.trim();
+      if (closing.test(line) || middle.test(line))
+        depth = Math.max(0, depth - 1);
+      const formatted = `${"  ".repeat(depth)}${line}`;
+      if (opening.test(line) || middle.test(line))
+        depth = Math.min(12, depth + 1);
+      return formatted;
+    })
+    .join("\n")
+    .trim()
+    .concat("\n");
+}
+
+function LiquidCodeWorkspace({
+  document,
+  value,
+  onChange,
+}: {
+  document: PrintPacket;
+  value: string;
+  onChange(value: string): void;
+}) {
+  const diagnostics = useMemo(() => {
+    const result = liquidToCanonical(value, document);
+    return result.ok ? [] : result.diagnostics;
+  }, [document, value]);
+  const codeRef = useRef<HTMLTextAreaElement>(null);
+  const highlightRef = useRef<HTMLPreElement>(null);
+  return (
+    <div className="piqae-code-workspace">
+      <div className="piqae-code-tools" role="toolbar" aria-label="Code tools">
+        <button
+          type="button"
+          onClick={() => onChange(formatLiquidSource(value))}
+        >
+          <Icon name="code" /> Format code
+        </button>
+        <span
+          className={diagnostics.length ? "is-invalid" : "is-valid"}
+          role="status"
+        >
+          {diagnostics.length
+            ? `${diagnostics.length} issue${diagnostics.length === 1 ? "" : "s"}`
+            : "Code is valid"}
+        </span>
+      </div>
+      <div
+        className="piqae-code-paper piqae-page-sheet"
+        style={canvasStyle(document)}
+      >
+        <div
+          className="piqae-code-page-content"
+          style={canvasContentStyle(document)}
+        >
+          <label className="piqae-code-editor">
+            <span className="piqae-visually-hidden">
+              Shopify Liquid template
+            </span>
+            <pre ref={highlightRef} aria-hidden="true">
+              {highlightLiquid(
+                value,
+                new Set(diagnostics.map((item) => item.line)),
+              )}
+            </pre>
+            <textarea
+              ref={codeRef}
+              className="piqae-code"
+              name="liquid"
+              maxLength={65536}
+              spellCheck={false}
+              value={value}
+              onScroll={() => {
+                if (!codeRef.current || !highlightRef.current) return;
+                highlightRef.current.scrollTop = codeRef.current.scrollTop;
+                highlightRef.current.scrollLeft = codeRef.current.scrollLeft;
+              }}
+              onChange={(event) => onChange(event.currentTarget.value)}
+            />
+          </label>
+          {diagnostics.length ? (
+            <ol className="piqae-code-diagnostics" aria-label="Code issues">
+              {diagnostics.map((diagnostic, index) => (
+                <li key={`${diagnostic.code}-${index}`}>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      focusCodeLine(
+                        codeRef.current,
+                        value,
+                        diagnostic.line,
+                        diagnostic.column,
+                      )
+                    }
+                  >
+                    Line {diagnostic.line}:{diagnostic.column} —{" "}
+                    {diagnostic.message}
+                  </button>
+                </li>
+              ))}
+            </ol>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function highlightLiquid(source: string, errorLines: Set<number>) {
+  return source.split("\n").map((line, index) => {
+    const parts = line.split(/({{[-]?[\s\S]*?[-]?}}|{%[-]?[\s\S]*?[-]?%})/g);
+    return (
+      <span
+        className={`piqae-code-line${errorLines.has(index + 1) ? " is-error" : ""}`}
+        key={index}
+      >
+        {parts.map((part, partIndex) =>
+          part.startsWith("{{") ? (
+            <mark className="piqae-code-output" key={partIndex}>
+              {part}
+            </mark>
+          ) : part.startsWith("{%") ? (
+            <mark className="piqae-code-tag" key={partIndex}>
+              {part}
+            </mark>
+          ) : (
+            part
+          ),
+        )}
+        {"\n"}
+      </span>
+    );
+  });
+}
+
+function focusCodeLine(
+  textarea: HTMLTextAreaElement | null,
+  source: string,
+  line: number,
+  column: number,
+) {
+  if (!textarea) return;
+  const offset = source
+    .split("\n")
+    .slice(0, Math.max(0, line - 1))
+    .reduce((sum, item) => sum + item.length + 1, 0);
+  const position = Math.min(source.length, offset + Math.max(0, column - 1));
+  textarea.focus();
+  textarea.setSelectionRange(position, position);
+}
+
 export type EditorPreviewResponse = {
   ok: boolean;
   requestId: string;
@@ -506,7 +667,7 @@ export default function TemplateEditor() {
   const [name, setName] = useState(
     template?.name ??
       (initialTemplate
-        ? `${initialTemplate.name} — copy`.slice(0, 200)
+        ? initialTemplate.name.slice(0, 200)
         : "Untitled document"),
   );
   const [mode, setMode] = useState<TemplateEditorMode>(
@@ -658,10 +819,12 @@ export default function TemplateEditor() {
           key={key}
           type="button"
           aria-pressed={workspace === key}
+          aria-label={`${label} view`}
+          title={`${label} view`}
           onClick={() => switchWorkspace(key)}
         >
           <Icon name={icon} />
-          {label}
+          <span className="piqae-visually-hidden">{label}</span>
         </button>
       ))}
     </div>
@@ -953,6 +1116,7 @@ export default function TemplateEditor() {
         <s-section padding="none">
           {flowNote ? <p className="piqae-actionbar-note">{flowNote}</p> : null}
           <s-stack direction="block" gap="base">
+            <div className="piqae-workspace-dock">{workspaceControls}</div>
             {result?.ok ? (
               <s-banner tone="success">
                 {"imported" in result
@@ -988,46 +1152,26 @@ export default function TemplateEditor() {
                 ))}
               </div>
             ) : null}
-            {workspace === "liquid" ? (
-              <div className="piqae-workspace-toolbar">{workspaceControls}</div>
-            ) : null}
             {workspace === "preview" ? (
-              <PdfPreviewWorkspace
-                state={pdfPreview}
-                workspaceControls={workspaceControls}
-              />
+              <PdfPreviewWorkspace state={pdfPreview} />
             ) : workspace === "visual" ? (
               <PrintPacketEditor
                 value={document}
                 disabled={false}
                 customFields={customFields}
                 stock={selectedTarget?.stock}
-                workspaceControls={workspaceControls}
                 history={editorHistory}
                 onChange={setDocument}
               />
             ) : (
-              <div className="piqae-code-workspace">
-                <label>
-                  Shopify Liquid / Order Printer template
-                  <textarea
-                    className="piqae-code"
-                    name="liquid"
-                    maxLength={65536}
-                    value={liquid}
-                    onChange={(event) => setLiquid(event.currentTarget.value)}
-                  />
-                </label>
+              <>
+                <LiquidCodeWorkspace
+                  document={document}
+                  value={liquid}
+                  onChange={setLiquid}
+                />
                 <input type="hidden" name="orderPrinterSource" value={liquid} />
-                <button
-                  className="piqae-button"
-                  type="submit"
-                  name="intent"
-                  value="import_order_printer"
-                >
-                  Convert code to visual document
-                </button>
-              </div>
+              </>
             )}
           </s-stack>
           <input type="hidden" name="mode" value={mode} />

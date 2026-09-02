@@ -42,11 +42,25 @@ export function AdminOrderBrowserPrintAction(props) {
   );
 }
 
-function AdminOrderBrowserPrintActionContent({ bulk = false }) {
-  const orderIds = useMemo(
+export function AdminProductBrowserPrintAction(props) {
+  return <AdminOrderBrowserPrintAction {...props} resourceType="products" />;
+}
+
+function AdminOrderBrowserPrintActionContent({
+  bulk = false,
+  resourceType = "orders",
+}) {
+  const resourceIds = useMemo(
     () => (shopify.data.selected ?? []).map(({ id }) => id),
     [],
   );
+  const productMode = resourceType === "products";
+  const optionsPath = productMode
+    ? "/api/print/admin/product-options"
+    : "/api/print/admin/options";
+  const previewsPath = productMode
+    ? "/api/print/admin/product-previews"
+    : "/api/print/admin/previews";
   const [options, setOptions] = useState(null);
   const [documentId, setDocumentId] = useState("");
   const [state, setState] = useState("loading");
@@ -58,15 +72,13 @@ function AdminOrderBrowserPrintActionContent({ bulk = false }) {
   const requestSequence = useRef(0);
   const previewSequence = useRef(0);
   const currentPreview = useRef(null);
-  const interactionId = useRef(newInteractionId(orderIds));
+  const interactionId = useRef(newInteractionId(resourceIds));
 
   useEffect(() => {
     const sequence = ++requestSequence.current;
     setState("loading");
     setError("");
-    loadWithTimeout((signal) =>
-      authorizedJson("/api/print/admin/options", { signal }),
-    )
+    loadWithTimeout((signal) => authorizedJson(optionsPath, { signal }))
       .then((value) => {
         if (sequence !== requestSequence.current) return;
         const document = chooseDefaultDocument(value.documents ?? []);
@@ -89,7 +101,7 @@ function AdminOrderBrowserPrintActionContent({ bulk = false }) {
     : undefined;
 
   useEffect(() => {
-    if (!options?.linked || !selectedDocument || orderIds.length === 0) {
+    if (!options?.linked || !selectedDocument || resourceIds.length === 0) {
       setPreview(null);
       setPreviewState("idle");
       return;
@@ -114,13 +126,16 @@ function AdminOrderBrowserPrintActionContent({ bulk = false }) {
     setPreviewState("loading");
     loadWithTimeout(
       (signal) =>
-        authorizedJson("/api/print/admin/previews", {
+        authorizedJson(previewsPath, {
           method: "POST",
           headers: {
             "content-type": "application/json",
             "idempotency-key": `shopify-browser-preview-${interactionId.current}-${selectedDocument.id}`,
           },
-          body: JSON.stringify({ orderIds, templateId: selectedDocument.id }),
+          body: JSON.stringify({
+            [productMode ? "productIds" : "orderIds"]: resourceIds,
+            templateId: selectedDocument.id,
+          }),
           signal,
         }),
       15_000,
@@ -139,7 +154,14 @@ function AdminOrderBrowserPrintActionContent({ bulk = false }) {
     return () => {
       previewSequence.current += 1;
     };
-  }, [options, selectedDocument?.id, orderIds.join(","), previewAttempt]);
+  }, [
+    options,
+    selectedDocument?.id,
+    resourceIds.join(","),
+    previewAttempt,
+    previewsPath,
+    productMode,
+  ]);
 
   // Shopify enables its native Print action as soon as `src` exists. Never
   // supply a loading/error placeholder here or it can be printed as if it were
@@ -151,7 +173,9 @@ function AdminOrderBrowserPrintActionContent({ bulk = false }) {
     <s-admin-print-action {...(src ? { src } : {})}>
       <s-stack direction="block" gap="base">
         {bulk ? (
-          <s-text type="strong">{orderIds.length} selected orders</s-text>
+          <s-text type="strong">
+            {resourceIds.length} selected {productMode ? "products" : "orders"}
+          </s-text>
         ) : null}
         {state === "loading" ? <s-text>Loading documents…</s-text> : null}
         {state === "failed" ? (
@@ -162,9 +186,10 @@ function AdminOrderBrowserPrintActionContent({ bulk = false }) {
             </s-button>
           </s-banner>
         ) : null}
-        {orderIds.length === 0 ? (
+        {resourceIds.length === 0 ? (
           <s-banner tone="critical">
-            No order was selected. Close this view and try again.
+            No {productMode ? "product or variant" : "order"} was selected.
+            Close this view and try again.
           </s-banner>
         ) : null}
         {options && !options.linked ? (

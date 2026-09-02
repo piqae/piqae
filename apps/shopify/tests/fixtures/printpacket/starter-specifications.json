@@ -119,9 +119,12 @@
                           "path": ["referenceCode128"]
                         },
                         "symbology": "code128",
-                        "width_mm": 56,
+                        "width_mm": 50,
                         "height_mm": 10,
-                        "human_readable": false
+                        "human_readable": false,
+                        "align": "right",
+                        "padding_mm": 1.5,
+                        "gap_mm": 1.2
                       }
                     ],
                     "else": []
@@ -1036,9 +1039,12 @@
                           "path": ["referenceCode128"]
                         },
                         "symbology": "code128",
-                        "width_mm": 56,
+                        "width_mm": 50,
                         "height_mm": 10,
-                        "human_readable": false
+                        "human_readable": false,
+                        "align": "right",
+                        "padding_mm": 1.5,
+                        "gap_mm": 1.2
                       }
                     ],
                     "else": []
@@ -1946,7 +1952,10 @@
                         "symbology": "code128",
                         "width_mm": 88,
                         "height_mm": 16,
-                        "human_readable": true
+                        "human_readable": true,
+                        "align": "center",
+                        "padding_mm": 1.5,
+                        "gap_mm": 1.2
                       }
                     ],
                     "else": []

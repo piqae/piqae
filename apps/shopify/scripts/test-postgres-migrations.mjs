@@ -46,6 +46,10 @@ const migration7 = await readFile(
   path.join(root, "migrations/0007_print_order_settings.sql"),
   "utf8",
 );
+const migration8 = await readFile(
+  path.join(root, "migrations/0008_document_usage_events.sql"),
+  "utf8",
+);
 const suffix = randomBytes(8).toString("hex");
 const schemas = [
   `piqae_shopify_fresh_${suffix}`,
@@ -82,6 +86,33 @@ async function assertions(client) {
     client,
     "INSERT INTO shopify_installations(shop,state) VALUES ($1,'installed')",
     ["https://invalid.myshopify.com"],
+    "23514",
+  );
+  await client.query(
+    "INSERT INTO shopify_document_usage_events(shop,event_key,document_count) VALUES($1,$2,4),($3,$4,7) ON CONFLICT DO NOTHING",
+    [
+      "alpha.myshopify.com",
+      "render_alpha",
+      "beta.myshopify.com",
+      "render_beta",
+    ],
+  );
+  const duplicateUsage = await client.query(
+    "INSERT INTO shopify_document_usage_events(shop,event_key,document_count) VALUES($1,$2,9) ON CONFLICT(shop,event_key) DO NOTHING",
+    ["alpha.myshopify.com", "render_alpha"],
+  );
+  if (duplicateUsage.rowCount !== 0)
+    throw new Error("document usage idempotency did not fail closed");
+  const usage = await client.query(
+    "SELECT COALESCE(SUM(document_count),0)::integer AS used FROM shopify_document_usage_events WHERE shop=$1",
+    ["alpha.myshopify.com"],
+  );
+  if (usage.rows[0]?.used !== 4)
+    throw new Error("document usage was not tenant-scoped and idempotent");
+  await rejects(
+    client,
+    "INSERT INTO shopify_document_usage_events(shop,event_key,document_count) VALUES($1,$2,0)",
+    ["alpha.myshopify.com", "invalid_count"],
     "23514",
   );
   await client.query(
@@ -273,6 +304,8 @@ try {
       await client.query(migration6);
       await client.query(migration7);
       await client.query(migration7);
+      await client.query(migration8);
+      await client.query(migration8);
       if (index === 1) {
         const retained = await client.query(
           "SELECT state FROM shopify_installations WHERE shop=$1",

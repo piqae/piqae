@@ -33,13 +33,62 @@
   color: #202223;
   font-size: 1rem;
 }
-.piqae-preview-frame {
-  display: block;
+.piqae-preview-document {
+  display: grid;
+  justify-items: center;
+  gap: 0.75rem;
   width: 100%;
-  min-height: 48rem;
-  border: 0;
-  border-radius: 6px;
+  min-height: 100%;
+  padding: 1rem;
+  box-sizing: border-box;
+}
+.piqae-preview-image {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  max-height: calc(100vh - 15rem);
   background: white;
+  box-shadow: 0 2px 14px rgb(0 0 0 / 14%);
+}
+.piqae-preview-image.is-loading,
+.piqae-preview-image.is-failed {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.piqae-preview-shimmer {
+  width: min(100%, 44rem);
+  aspect-ratio: 210 / 297;
+  border-radius: 3px;
+  background: linear-gradient(100deg, #f1f1f1 20%, #fafafa 38%, #f1f1f1 56%);
+  background-size: 200% 100%;
+  box-shadow: 0 2px 14px rgb(0 0 0 / 8%);
+  animation: piqae-preview-shimmer 1.2s linear infinite;
+}
+.piqae-preview-image-error {
+  max-width: 32rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid #f1aeb5;
+  border-radius: 7px;
+  background: #fff1f2;
+  color: #8e1f0b;
+  text-align: center;
+}
+@keyframes piqae-preview-shimmer {
+  to {
+    background-position-x: -200%;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .piqae-preview-shimmer {
+    animation: none;
+  }
+}
+.piqae-preview-open {
+  color: #005bd3;
+  font-size: 0.8rem;
 }
 .piqae-import-panel {
   border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
@@ -283,18 +332,7 @@
   padding: 1.35rem;
   border: 1px solid #b5d3ff;
   background: linear-gradient(135deg, #f5f9ff 0%, Canvas 76%);
-}
-.piqae-plan-mark {
-  display: grid;
-  flex: 0 0 2.75rem;
-  width: 2.75rem;
-  height: 2.75rem;
-  place-items: center;
-  border-radius: 0.75rem;
-  background: #eaf3ff;
-  color: #005bd3;
-  font-size: 1.35rem;
-  font-weight: 700;
+  margin-bottom: 1rem;
 }
 .piqae-plan-overview-copy {
   display: grid;
@@ -349,6 +387,10 @@
 }
 .piqae-plan-allowance {
   font-size: 1rem;
+}
+.piqae-plan-price-note {
+  color: #616161;
+  font-size: 0.72rem;
 }
 .piqae-plan-card ul {
   display: grid;
@@ -659,6 +701,8 @@
 }
 .piqae-media-continuous {
   height: auto;
+  min-height: 0;
+  overflow: visible;
 }
 .piqae-media-label {
   overflow: auto;
@@ -675,7 +719,18 @@
 }
 .piqae-media-continuous .piqae-page-content {
   position: relative;
-  min-height: var(--piqae-media-min-height, 120mm);
+  min-height: 0;
+}
+.piqae-media-continuous::after {
+  display: block;
+  margin: 0 calc(-1 * var(--piqae-margin-right)) 0
+    calc(-1 * var(--piqae-margin-left));
+  border-top: 1px dashed #d97706;
+  color: #8a4b08;
+  content: "Cut edge";
+  font-size: 0.62rem;
+  line-height: 1.5rem;
+  text-align: center;
 }
 .piqae-media-label .piqae-page-content {
   grid-template-rows: minmax(0, 1fr);
@@ -1466,7 +1521,8 @@
   padding: var(--piqae-code-padding, 0);
 }
 .piqae-canvas-barcode svg {
-  width: min(100%, var(--piqae-barcode-width));
+  width: var(--piqae-barcode-width);
+  max-width: 100%;
   height: var(--piqae-barcode-height);
 }
 .piqae-canvas-code-value {
@@ -1536,9 +1592,9 @@
 .piqae-canvas-page-break {
   margin: var(--piqae-mm) calc(-1 * var(--piqae-margin-right)) var(--piqae-mm)
     calc(-1 * var(--piqae-margin-left));
-  border-top: 2px dashed #8c9196;
+  border-top: 1px dashed #d97706;
   text-align: center;
-  color: #616161;
+  color: #8a4b08;
   font-size: 0.7rem;
 }
 .piqae-variable {
@@ -2472,17 +2528,30 @@
   > [data-collection-branch="empty"],
 .piqae-compact-annotations .piqae-canvas-conditional-else,
 .piqae-compact-annotations .piqae-canvas-table-empty {
-  display: none;
+  min-height: 1.4rem;
+  margin-block: 0.2rem;
+  padding: 0.2rem;
+  opacity: 0.32;
+  transition: opacity 120ms ease;
+}
+.piqae-compact-annotations
+  .piqae-canvas-data-list-editor
+  > [data-collection-branch="empty"]:hover,
+.piqae-compact-annotations .piqae-canvas-conditional-else:hover,
+.piqae-compact-annotations .piqae-canvas-table-empty:hover,
+.piqae-compact-annotations
+  .piqae-canvas-data-list-editor
+  > [data-collection-branch="empty"]:focus-within,
+.piqae-compact-annotations .piqae-canvas-conditional-else:focus-within,
+.piqae-compact-annotations .piqae-canvas-table-empty:focus-within {
+  opacity: 1;
 }
 .piqae-compact-annotations .piqae-canvas-badge::before,
 .piqae-compact-annotations .piqae-canvas-structure-note::before {
-  content: "ƒ";
+  content: attr(data-symbol);
   font-size: 0.65rem;
   font-weight: 700;
   text-transform: none;
-}
-.piqae-compact-annotations .piqae-canvas-structure-note::before {
-  content: "↻";
 }
 .piqae-compact-annotations .piqae-canvas-badge:hover::after,
 .piqae-compact-annotations .piqae-canvas-badge:focus-visible::after,
@@ -2534,14 +2603,171 @@
 .piqae-code-workspace {
   display: grid;
   gap: 0.75rem;
-  justify-items: start;
+  justify-items: stretch;
 }
-.piqae-code-workspace label {
-  display: grid;
+.piqae-workspace-dock {
+  position: sticky;
+  z-index: 25;
+  top: 0.75rem;
+  width: fit-content;
+  margin: 0 auto -0.25rem;
+  padding: 0.25rem;
+  border: 1px solid #e3e3e3;
+  border-radius: 10px;
+  background: Canvas;
+  box-shadow: 0 1px 2px rgb(26 26 26 / 8%);
+}
+.piqae-workspace-dock .piqae-segmented button {
+  width: 2.25rem;
+  justify-content: center;
+  padding: 0;
+}
+.piqae-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.piqae-code-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  width: min(52rem, 100%);
+  margin: 0 auto;
+}
+.piqae-code-tools button,
+.piqae-code-diagnostics button {
+  border: 1px solid #c9cccf;
+  border-radius: 7px;
+  background: Canvas;
+  color: CanvasText;
+  font: inherit;
+  cursor: pointer;
+}
+.piqae-code-tools button {
+  display: inline-flex;
+  align-items: center;
   gap: 0.35rem;
+  min-height: 2rem;
+  padding: 0 0.65rem;
+}
+.piqae-code-tools .is-valid {
+  color: #008060;
+}
+.piqae-code-tools .is-invalid {
+  color: #b42318;
+}
+.piqae-code-paper {
+  overflow: hidden;
+}
+.piqae-code-page-content {
+  position: absolute;
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 0.75rem;
+}
+.piqae-media-continuous.piqae-code-paper .piqae-code-page-content {
+  position: relative;
+}
+.piqae-code-editor {
+  position: relative;
+  display: block;
+  min-width: 0;
+  min-height: 100%;
+  border: 1px solid #c9cccf;
+  border-radius: 7px;
+  overflow: hidden;
+  background: #fbfbfc;
+}
+.piqae-code-editor pre,
+.piqae-code-editor .piqae-code {
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
   width: 100%;
-  color: #616161;
-  font-size: 0.8rem;
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+  padding: 0.75rem 0.75rem 0.75rem 3.25rem;
+  overflow: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font:
+    12px/1.55 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  tab-size: 2;
+  white-space: pre;
+}
+.piqae-code-editor pre {
+  pointer-events: none;
+}
+.piqae-code-editor .piqae-code {
+  resize: none;
+  color: transparent;
+  caret-color: #202223;
+  -webkit-text-fill-color: transparent;
+}
+.piqae-code-editor .piqae-code::selection {
+  background: rgb(69 143 255 / 28%);
+}
+.piqae-code-line {
+  display: block;
+  counter-increment: code-line;
+  color: #202223;
+}
+.piqae-code-editor pre {
+  counter-reset: code-line;
+}
+.piqae-code-line::before {
+  position: absolute;
+  left: 0.75rem;
+  width: 1.8rem;
+  color: #8c9196;
+  content: counter(code-line);
+  text-align: right;
+}
+.piqae-code-line.is-error {
+  background: rgb(255 230 230 / 75%);
+}
+.piqae-code-output,
+.piqae-code-tag {
+  padding: 0;
+  background: transparent;
+}
+.piqae-code-output {
+  color: #005bd3;
+}
+.piqae-code-tag {
+  color: #8a4b08;
+}
+.piqae-code-diagnostics {
+  max-height: 7rem;
+  margin: 0;
+  padding: 0.5rem 0.5rem 0.5rem 1.75rem;
+  overflow: auto;
+  border: 1px solid #f1aeb5;
+  border-radius: 7px;
+  background: #fff1f2;
+  color: #8e1f0b;
+  font-size: 0.72rem;
+}
+.piqae-code-diagnostics button {
+  padding: 0.2rem;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
 }
 .piqae-grouping-list {
   display: grid;

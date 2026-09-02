@@ -1233,6 +1233,25 @@ export function PdfPreviewWorkspace({
     state.status === "ready" && isEditorPreviewArtifactUrl(state.artifactUrl)
       ? state
       : null;
+  const previewImageUrl = ready
+    ? ready.artifactUrl.replace(/\/artifact$/, "/image")
+    : null;
+  const previewImage = useRef<HTMLImageElement>(null);
+  const [imageStatus, setImageStatus] = useState<
+    "idle" | "loading" | "ready" | "failed"
+  >(previewImageUrl ? "loading" : "idle");
+  useEffect(() => {
+    if (!previewImageUrl) {
+      setImageStatus("idle");
+      return;
+    }
+    const image = previewImage.current;
+    if (image?.getAttribute("src") === previewImageUrl && image.complete) {
+      setImageStatus(image.naturalWidth > 0 ? "ready" : "failed");
+      return;
+    }
+    setImageStatus("loading");
+  }, [previewImageUrl]);
   return (
     <div className="piqae-pdf-preview" aria-label="Rendered PDF preview">
       {workspaceControls ? (
@@ -1255,11 +1274,37 @@ export function PdfPreviewWorkspace({
             <span>{state.message}</span>
           </div>
         ) : ready ? (
-          <iframe
-            className="piqae-preview-frame"
-            src={ready.artifactUrl}
-            title="Rendered order PDF preview"
-          />
+          <div className="piqae-preview-document">
+            {imageStatus === "loading" ? (
+              <div
+                className="piqae-preview-shimmer"
+                role="status"
+                aria-label="Loading rendered PDF preview"
+              />
+            ) : null}
+            <img
+              ref={previewImage}
+              className={`piqae-preview-image is-${imageStatus}`}
+              src={previewImageUrl ?? undefined}
+              alt="First page of the rendered order PDF"
+              onLoad={() => setImageStatus("ready")}
+              onError={() => setImageStatus("failed")}
+            />
+            {imageStatus === "failed" ? (
+              <div className="piqae-preview-image-error" role="alert">
+                The first-page image could not be shown. The generated PDF is
+                still available.
+              </div>
+            ) : null}
+            <a
+              className="piqae-preview-open"
+              href={ready.artifactUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open full PDF
+            </a>
+          </div>
         ) : (
           <div className="piqae-preview-status" role="alert">
             <strong>PDF preview unavailable</strong>
@@ -1311,8 +1356,11 @@ export function canvasStyle(value: PrintPacket): CSSProperties {
   const themeFontSize = value.theme?.font_size_pt ?? 10;
   return {
     "--piqae-media-width": `${widthMm}mm`,
+    // Width is responsive inside Shopify Admin; aspect-ratio scales the page
+    // height by the same factor. Absolute millimetre heights would leave a
+    // narrow canvas with an unscaled A4 height.
     "--piqae-media-height": "auto",
-    "--piqae-media-min-height": fixed ? "0" : "120mm",
+    "--piqae-media-min-height": "0",
     "--piqae-mm": `calc(100cqw / ${widthMm})`,
     "--piqae-pt": "calc(var(--piqae-mm) * 0.352777778)",
     "--piqae-theme-font-size": `calc(${themeFontSize} * var(--piqae-pt))`,
@@ -2306,6 +2354,7 @@ function CanvasBlock({
             <span
               className="piqae-canvas-badge"
               data-label="Empty state"
+              data-symbol="∅"
               title="Empty state"
               role="note"
               tabIndex={0}
@@ -2349,6 +2398,7 @@ function CanvasBlock({
           <span
             className="piqae-canvas-badge"
             data-label={`Data list · ${expressionLabel(block.items)}`}
+            data-symbol="↻"
             title={`Data list · ${expressionLabel(block.items)}`}
             role="note"
             tabIndex={0}
@@ -2421,6 +2471,7 @@ function CanvasBlock({
           <span
             className="piqae-canvas-badge"
             data-label={`Shown when ${expressionLabel(block.condition)}`}
+            data-symbol="◇"
             title={`Shown when ${expressionLabel(block.condition)}`}
             role="note"
             tabIndex={0}
@@ -2459,6 +2510,7 @@ function CanvasBlock({
             <span
               className="piqae-canvas-badge"
               data-label="Otherwise"
+              data-symbol="↳"
               title="Otherwise"
               role="note"
               tabIndex={0}
@@ -2533,6 +2585,7 @@ function CanvasBlock({
           role="note"
           aria-label="Order batching behavior"
           data-label={batchLabel}
+          data-symbol="↻"
           title={batchLabel}
           tabIndex={0}
         >
@@ -2542,6 +2595,7 @@ function CanvasBlock({
         <span
           className="piqae-canvas-badge"
           data-label={`Repeats for each ${expressionLabel(block.items)}`}
+          data-symbol="↻"
           title={`Repeats for each ${expressionLabel(block.items)}`}
           role="note"
           tabIndex={0}
@@ -2660,6 +2714,9 @@ function CollectionCanvasBranch({
         <span
           className="piqae-canvas-badge"
           data-label={label}
+          data-symbol={
+            branch === "empty" ? "∅" : branch === "header" ? "H" : "I"
+          }
           title={label}
           role="note"
           tabIndex={0}
@@ -5088,9 +5145,9 @@ function defaultBarcode(): Block {
     width_mm: 48,
     height_mm: 16,
     human_readable: true,
-    align: "left",
-    padding_mm: 0,
-    gap_mm: 1.4,
+    align: "center",
+    padding_mm: 1.5,
+    gap_mm: 1.2,
   };
 }
 function defaultTable(): Block {

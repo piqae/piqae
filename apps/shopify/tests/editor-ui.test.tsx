@@ -598,16 +598,14 @@ describe("Shopify document editor layout", () => {
       />,
     );
     const stage = page.querySelector(".piqae-preview-stage");
-    const frame = stage?.querySelector<HTMLIFrameElement>(
-      ".piqae-preview-frame",
+    const image = stage?.querySelector<HTMLImageElement>(
+      ".piqae-preview-image",
     );
 
     expect(
       page.querySelector(".piqae-workspace-toolbar [role=group]"),
     ).not.toBeNull();
-    expect(frame?.src).toContain(
-      "/api/editor-preview-renders/pprv_123/artifact",
-    );
+    expect(image?.src).toContain("/api/editor-preview-renders/pprv_123/image");
     expect(stage?.querySelector(".piqae-presentation-canvas")).toBeNull();
     expect(stage?.querySelector(".piqae-word-editor")).toBeNull();
     expect(stage?.querySelector(".piqae-canvas-table")).toBeNull();
@@ -719,12 +717,12 @@ describe("Shopify document editor layout", () => {
 
   it("keeps starter and editable actions in the Shopify title bar contract", () => {
     expect(editorTitleBarActions(true)).toEqual({
-      primary: { label: "Save as copy", intent: "draft" },
-      secondary: { label: "Publish copy", intent: "publish" },
+      primary: { label: "Save", intent: "draft" },
+      secondary: { label: "Publish", intent: "publish" },
     });
     expect(editorTitleBarActions(false)).toEqual({
-      primary: { label: "Publish", intent: "publish" },
-      secondary: { label: "Save draft", intent: "draft" },
+      primary: { label: "Save", intent: "draft" },
+      secondary: { label: "Publish", intent: "publish" },
     });
     expect(templateFlowNote(null, true)).toBeNull();
     expect(documentNameError("", "publish")).toBe(

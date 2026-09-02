@@ -235,7 +235,10 @@ fn exact_product_label_starter_renders_variant_price_and_safe_barcode_data() {
             "symbology": "code128",
             "width_mm": 88,
             "height_mm": 16,
-            "human_readable": true
+            "human_readable": true,
+            "align": "center",
+            "padding_mm": 1.5,
+            "gap_mm": 1.2
         })
     ));
 
