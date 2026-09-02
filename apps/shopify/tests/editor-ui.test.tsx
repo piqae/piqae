@@ -513,6 +513,9 @@ describe("Shopify document editor layout", () => {
     const repeat = invoice.body[0];
     if (repeat?.type !== "repeat") throw new Error("invoice repeat missing");
     const finalAuthorSlot = framing.previousElementSibling as HTMLElement;
+    const boundary = page.querySelector<HTMLElement>(
+      ".piqae-canvas-page-boundary",
+    )!;
 
     expect(framing.getAttribute("role")).toBe("note");
     expect(framing.tabIndex).toBe(-1);
@@ -527,6 +530,10 @@ describe("Shopify document editor layout", () => {
         `.piqae-canvas-insertion-slot[data-insertion-index="${repeat.children.length}"]`,
       ),
     ).toBeNull();
+    expect(boundary.textContent).toContain("Page break between orders");
+    expect(boundary.parentElement).toBe(
+      page.querySelector(".piqae-page-sheet"),
+    );
 
     await act(async () => framing.click());
     expect(page.querySelector(".piqae-selection-rail")).toBeNull();
@@ -702,6 +709,13 @@ describe("Shopify document editor layout", () => {
     const page = await render(
       <Stub initialEntries={["/app/templates/draft-preview-fixture"]} />,
     );
+    const designSheet = page.querySelector<HTMLElement>(".piqae-page-sheet")!;
+    const designGrid = page.querySelector<HTMLElement>(".piqae-canvas-grid");
+    const gridColumns = designGrid?.style.gridTemplateColumns;
+    expect(
+      page.querySelector(".piqae-editor-toolbar .piqae-segmented"),
+    ).not.toBeNull();
+    expect(page.querySelector(".piqae-workspace-dock")).toBeNull();
     const workspaceButton = (label: string) =>
       Array.from(page.querySelectorAll<HTMLButtonElement>("button")).find(
         (button) => button.textContent?.includes(label),
@@ -710,9 +724,15 @@ describe("Shopify document editor layout", () => {
     await act(async () => workspaceButton("Preview").click());
     await started;
     expect(previewRequest?.signal.aborted).toBe(false);
+    expect(page.querySelector(".piqae-page-sheet")).toBe(designSheet);
     await act(async () => workspaceButton("Design").click());
     expect(previewRequest?.signal.aborted).toBe(true);
     expect(page.querySelector(".piqae-preview-frame")).toBeNull();
+    expect(page.querySelector(".piqae-page-sheet")).toBe(designSheet);
+    expect(
+      page.querySelector<HTMLElement>(".piqae-canvas-grid")?.style
+        .gridTemplateColumns,
+    ).toBe(gridColumns);
   });
 
   it("keeps starter and editable actions in the Shopify title bar contract", () => {

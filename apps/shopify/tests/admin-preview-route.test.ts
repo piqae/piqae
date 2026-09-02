@@ -9,6 +9,8 @@ import {
 } from "../app/routes/api.print.admin-previews";
 import { fetchOrders } from "../app/core/orders.server";
 import { ShopifyOrderUnavailableError } from "../app/core/shopify-order-errors";
+import { DocumentRenderFailedError } from "../app/core/document-render-errors";
+import { safeFailureMetadata } from "../app/core/safe-failure-metadata.server";
 
 describe("admin preview failure classification", () => {
   it("turns stale publications into a useful republish instruction", () => {
@@ -42,6 +44,32 @@ describe("admin preview failure classification", () => {
       code: "preview_failed",
       message: "Piqae could not generate this preview. Try again in a moment.",
     });
+  });
+
+  it("logs only the renderer failure code for a terminal render", () => {
+    const failure = new DocumentRenderFailedError(
+      "document_render_failed",
+      "document",
+    );
+
+    expect(classifyAdminPreviewFailure(failure)).toEqual({
+      code: "render_service",
+      message: "Piqae could not generate this preview. Try again in a moment.",
+    });
+    expect(safeFailureMetadata(failure)).toEqual({
+      renderFailureCode: "document_render_failed",
+    });
+  });
+
+  it("redacts unknown renderer codes and untrusted object names", () => {
+    expect(
+      safeFailureMetadata(
+        new DocumentRenderFailedError("buyer@example.test", "document"),
+      ),
+    ).toEqual({ renderFailureCode: "unknown_render_failure" });
+    expect(
+      safeFailureMetadata({ name: "buyer@example.test", response: {} }),
+    ).toEqual({});
   });
 
   it("classifies missing product data without referring to orders", () => {

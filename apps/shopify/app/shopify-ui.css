@@ -699,6 +699,25 @@
   color: #202223;
   box-shadow: 0 2px 14px rgb(0 0 0 / 14%);
 }
+.piqae-canvas-page-boundary {
+  position: absolute;
+  z-index: 6;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  border-top: 1px dashed #d97706;
+  color: #8a4b08;
+  font-size: 0.68rem;
+  line-height: 1;
+  text-align: center;
+  pointer-events: none;
+}
+.piqae-canvas-page-boundary span {
+  display: inline-block;
+  padding: 0 0.45rem;
+  background: white;
+  transform: translateY(-50%);
+}
 .piqae-media-continuous {
   height: auto;
   min-height: 0;
@@ -1597,6 +1616,9 @@
   color: #8a4b08;
   font-size: 0.7rem;
 }
+.piqae-media-paged .piqae-canvas-protected-framing {
+  display: none;
+}
 .piqae-variable {
   display: inline-block;
   padding: 0.08rem 0.3rem;
@@ -2143,6 +2165,15 @@
   border-radius: 10px;
   background: #f4f4f5;
 }
+.piqae-editor-surface {
+  min-height: calc(100vh - 8rem);
+  box-sizing: border-box;
+  padding: 1rem;
+  background: #f4f4f5;
+}
+.piqae-workspace-panel[hidden] {
+  display: none;
+}
 .piqae-editor-workspace {
   display: block;
 }
@@ -2167,26 +2198,51 @@
 }
 .piqae-workspace-toolbar {
   box-sizing: border-box;
+  margin-right: auto;
+  margin-left: 0;
   padding: 0.3rem;
 }
+.piqae-editor-toolbar {
+  width: min(100%, 90rem);
+  overflow: visible;
+  background: transparent;
+  box-shadow: none;
+}
 .piqae-editor-toolbar-primary {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: stretch;
-  justify-content: center;
   min-width: 0;
-  padding: 0.3rem;
+  padding: 0;
 }
 .piqae-editor-toolbar-workspaces {
   display: flex;
+  grid-column: 1;
   align-items: center;
+  justify-self: start;
+  padding: 0.3rem;
+  border: 1px solid #e3e3e3;
+  border-radius: 10px;
+  background: Canvas;
+  box-shadow: 0 1px 2px rgb(26 26 26 / 8%);
 }
 .piqae-tool-rail {
   display: flex;
+  grid-column: 2;
   flex: 0 0 auto;
   flex-wrap: nowrap;
   align-items: center;
   justify-content: center;
   gap: 0.15rem;
+  padding: 0.3rem;
+  border-radius: 10px;
+  background: Canvas;
+  box-shadow:
+    0 1px 2px rgb(26 26 26 / 8%),
+    0 6px 20px rgb(26 26 26 / 10%);
+}
+.piqae-editor-toolbar-workspaces + .piqae-tool-divider {
+  display: none;
 }
 .piqae-tool-group {
   display: flex;
@@ -2605,23 +2661,6 @@
   gap: 0.75rem;
   justify-items: stretch;
 }
-.piqae-workspace-dock {
-  position: sticky;
-  z-index: 25;
-  top: 0.75rem;
-  width: fit-content;
-  margin: 0 auto -0.25rem;
-  padding: 0.25rem;
-  border: 1px solid #e3e3e3;
-  border-radius: 10px;
-  background: Canvas;
-  box-shadow: 0 1px 2px rgb(26 26 26 / 8%);
-}
-.piqae-workspace-dock .piqae-segmented button {
-  width: 2.25rem;
-  justify-content: center;
-  padding: 0;
-}
 .piqae-visually-hidden {
   position: absolute;
   width: 1px;
@@ -2864,12 +2903,12 @@
     width: 100%;
   }
   .piqae-workspace-toolbar {
-    position: static;
+    position: sticky;
     overflow: hidden;
   }
   .piqae-editor-toolbar {
-    position: relative;
-    top: auto;
+    position: sticky;
+    top: 0.5rem;
     overflow: visible;
   }
   .piqae-editor-toolbar-primary,
@@ -2880,7 +2919,21 @@
     scrollbar-width: thin;
   }
   .piqae-editor-toolbar-primary {
+    grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
+    gap: 0.5rem;
+  }
+  .piqae-editor-toolbar-workspaces,
+  .piqae-tool-rail {
+    grid-column: 1;
+  }
+  .piqae-tool-rail {
+    width: 100%;
+    box-sizing: border-box;
+    justify-content: flex-start;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: thin;
   }
   .piqae-selection-rail {
     right: 0;

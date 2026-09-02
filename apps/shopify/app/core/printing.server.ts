@@ -23,6 +23,7 @@ import { ACCOUNT_DEFAULT_DOCUMENT_ID } from "./admin-print-options.server";
 import type { DownloadTokenVault } from "./download-token.server";
 import { orderPrintSequence } from "./print-order";
 import { fetchProductDocumentInput } from "./products.server";
+import { DocumentRenderFailedError } from "./document-render-errors";
 
 export type PrintResult =
   | { mode: "direct"; renderId: string; jobId: string }
@@ -109,8 +110,9 @@ export class ShopifyPrintingService {
     );
     const completed = await waitForRender(client, render);
     if (completed.state !== "completed")
-      throw new Error(
-        `document render failed: ${completed.failure_code ?? completed.state}`,
+      throw new DocumentRenderFailedError(
+        completed.failure_code ?? completed.state,
+        "document",
       );
     await this.workflow.recordUsage(
       shop,
@@ -195,8 +197,9 @@ export class ShopifyPrintingService {
     );
     const completed = await waitForRender(client, render);
     if (completed.state !== "completed")
-      throw new Error(
-        `product label render failed: ${completed.failure_code ?? completed.state}`,
+      throw new DocumentRenderFailedError(
+        completed.failure_code ?? completed.state,
+        "product label",
       );
     await this.workflow.recordUsage(
       shop,

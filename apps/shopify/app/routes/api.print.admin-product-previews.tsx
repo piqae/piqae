@@ -5,9 +5,9 @@ import {
   ShopifySessionRecoveryError,
   classifyAdminPreviewFailure,
   isLegacyNonExpiringTokenFailure,
-  safeFailureMetadata,
   withShopifySessionRecovery,
 } from "./api.print.admin-previews";
+import { safeFailureMetadata } from "../core/safe-failure-metadata.server";
 import shopify, { migrateLegacyOfflineSession } from "../shopify.server";
 
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
