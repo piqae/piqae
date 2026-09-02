@@ -54,6 +54,7 @@ import {
   createEditorDraftPreview,
   fetchLatestOrderSummary,
 } from "../core/editor-preview.server";
+import { safeFailureMetadata } from "../core/safe-failure-metadata.server";
 export type EditorMode = TemplateEditorMode;
 export const liquidCompatibilityNotice = (mode: EditorMode) =>
   mode === "liquid"
@@ -223,6 +224,12 @@ export async function action({ request, params }: ActionFunctionArgs) {
         noOrder: false,
       });
     } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: "shopify_editor_preview_failed",
+          ...safeFailureMetadata(error),
+        }),
+      );
       return previewJson(
         {
           ok: false,
@@ -1114,87 +1121,105 @@ export default function TemplateEditor() {
           </s-button>
         </s-modal>
         <s-section padding="none">
-          {flowNote ? <p className="piqae-actionbar-note">{flowNote}</p> : null}
-          <s-stack direction="block" gap="base">
-            <div className="piqae-workspace-dock">{workspaceControls}</div>
-            {result?.ok ? (
-              <s-banner tone="success">
-                {"imported" in result
-                  ? "Template imported into the visual editor. Review highlighted compatibility notes, then save it."
-                  : result.deleted
-                    ? "Draft deleted."
-                    : "Template saved."}
-              </s-banner>
-            ) : result?.error ? (
-              <s-banner tone="critical">{result.error}</s-banner>
+          <div className="piqae-editor-surface">
+            {flowNote ? (
+              <p className="piqae-actionbar-note">{flowNote}</p>
             ) : null}
-            {error ? <s-banner tone="critical">{error}</s-banner> : null}
-            {result &&
-            "imported" in result &&
-            result.imported?.diagnostics.length ? (
-              <div className="piqae-import-diagnostics">
-                <strong>Import compatibility</strong>
-                {result.imported.diagnostics.map((diagnostic, index) => (
-                  <p key={`${diagnostic.code}-${index}`}>
-                    <s-badge
-                      tone={
-                        diagnostic.fidelity === "unsupported"
-                          ? "critical"
-                          : diagnostic.fidelity === "lossy"
-                            ? "warning"
-                            : "info"
-                      }
-                    >
-                      {diagnostic.fidelity}
-                    </s-badge>{" "}
-                    {diagnostic.message}
-                  </p>
-                ))}
-              </div>
-            ) : null}
-            {workspace === "preview" ? (
-              <PdfPreviewWorkspace state={pdfPreview} />
-            ) : workspace === "visual" ? (
-              <PrintPacketEditor
-                value={document}
-                disabled={false}
-                customFields={customFields}
-                stock={selectedTarget?.stock}
-                history={editorHistory}
-                onChange={setDocument}
-              />
-            ) : (
-              <>
-                <LiquidCodeWorkspace
-                  document={document}
-                  value={liquid}
-                  onChange={setLiquid}
+            <s-stack direction="block" gap="base">
+              {result?.ok ? (
+                <s-banner tone="success">
+                  {"imported" in result
+                    ? "Template imported into the visual editor. Review highlighted compatibility notes, then save it."
+                    : result.deleted
+                      ? "Draft deleted."
+                      : "Template saved."}
+                </s-banner>
+              ) : result?.error ? (
+                <s-banner tone="critical">{result.error}</s-banner>
+              ) : null}
+              {error ? <s-banner tone="critical">{error}</s-banner> : null}
+              {result &&
+              "imported" in result &&
+              result.imported?.diagnostics.length ? (
+                <div className="piqae-import-diagnostics">
+                  <strong>Import compatibility</strong>
+                  {result.imported.diagnostics.map((diagnostic, index) => (
+                    <p key={`${diagnostic.code}-${index}`}>
+                      <s-badge
+                        tone={
+                          diagnostic.fidelity === "unsupported"
+                            ? "critical"
+                            : diagnostic.fidelity === "lossy"
+                              ? "warning"
+                              : "info"
+                        }
+                      >
+                        {diagnostic.fidelity}
+                      </s-badge>{" "}
+                      {diagnostic.message}
+                    </p>
+                  ))}
+                </div>
+              ) : null}
+              <div
+                className="piqae-workspace-panel"
+                hidden={workspace !== "visual"}
+              >
+                <PrintPacketEditor
+                  value={document}
+                  disabled={false}
+                  customFields={customFields}
+                  stock={selectedTarget?.stock}
+                  history={editorHistory}
+                  workspaceControls={workspaceControls}
+                  onChange={setDocument}
                 />
-                <input type="hidden" name="orderPrinterSource" value={liquid} />
-              </>
+              </div>
+              {workspace === "preview" ? (
+                <PdfPreviewWorkspace
+                  state={pdfPreview}
+                  workspaceControls={workspaceControls}
+                />
+              ) : workspace === "liquid" ? (
+                <>
+                  <div className="piqae-workspace-toolbar">
+                    {workspaceControls}
+                  </div>
+                  <LiquidCodeWorkspace
+                    document={document}
+                    value={liquid}
+                    onChange={setLiquid}
+                  />
+                  <input
+                    type="hidden"
+                    name="orderPrinterSource"
+                    value={liquid}
+                  />
+                </>
+              ) : null}
+            </s-stack>
+            <input type="hidden" name="mode" value={mode} />
+            <input
+              type="hidden"
+              name="document"
+              value={JSON.stringify(document)}
+            />
+            <input type="hidden" name="source" value={source} />
+            <input
+              type="hidden"
+              name="expectedDraftRevision"
+              value={template?.draftRevision ?? ""}
+            />
+            {workspace === "liquid" ? null : (
+              <input type="hidden" name="liquid" value={liquid} />
             )}
-          </s-stack>
-          <input type="hidden" name="mode" value={mode} />
-          <input
-            type="hidden"
-            name="document"
-            value={JSON.stringify(document)}
-          />
-          <input type="hidden" name="source" value={source} />
-          <input
-            type="hidden"
-            name="expectedDraftRevision"
-            value={template?.draftRevision ?? ""}
-          />
-          {workspace === "liquid" ? null : (
-            <input type="hidden" name="liquid" value={liquid} />
-          )}
-          <input
-            ref={intentRef}
-            type="hidden"
-            name="intent"
-            defaultValue={starter ? "draft" : "publish"}
-          />
+            <input
+              ref={intentRef}
+              type="hidden"
+              name="intent"
+              defaultValue={starter ? "draft" : "publish"}
+            />
+          </div>
         </s-section>
       </s-page>
     </Form>

@@ -1,0 +1,37 @@
+import { PiqaeError } from "@piqae/sdk";
+
+import { DocumentRenderFailedError } from "./document-render-errors";
+
+const SAFE_ERROR_NAMES = new Set([
+  "AbortError",
+  "Error",
+  "ShopifySessionRecoveryError",
+  "TypeError",
+]);
+
+type ShopifyHttpFailure = {
+  response?: {
+    code?: unknown;
+  };
+};
+
+/** Operational metadata only: never include request bodies or error messages. */
+export function safeFailureMetadata(error: unknown) {
+  if (error instanceof DocumentRenderFailedError)
+    return { renderFailureCode: error.failureCode };
+  if (error instanceof PiqaeError)
+    return {
+      upstreamCode: error.code,
+      upstreamStatus: error.status,
+      upstreamRequestId: error.requestId,
+      retryable: error.retryable,
+    };
+  if (error && typeof error === "object") {
+    const status = (error as ShopifyHttpFailure).response?.code;
+    if (typeof status === "number")
+      return { upstream: "shopify_admin", upstreamStatus: status };
+    if (error instanceof Error && SAFE_ERROR_NAMES.has(error.name))
+      return { errorName: error.name };
+  }
+  return {};
+}

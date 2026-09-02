@@ -20,6 +20,7 @@ import {
   type ExternalAsset,
   type PrintPacket,
 } from "./template-model";
+import { DocumentRenderFailedError } from "./document-render-errors";
 
 const LATEST_ORDER_QUERY = `#graphql
   query PiqaeLatestPreviewOrder {
@@ -161,8 +162,9 @@ export async function createEditorDraftPreview(input: {
   if (render.state === "registered" || render.state === "rendering")
     throw new Error("The PDF preview timed out");
   if (render.state !== "completed")
-    throw new Error(
-      `The PDF preview failed: ${render.failure_code ?? render.state}`,
+    throw new DocumentRenderFailedError(
+      render.failure_code ?? render.state,
+      "PDF preview",
     );
   return { renderId: render.id };
 }

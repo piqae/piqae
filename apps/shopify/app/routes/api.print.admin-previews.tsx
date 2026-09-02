@@ -1,8 +1,8 @@
 import type { ActionFunctionArgs } from "react-router";
-import { PiqaeError } from "@piqae/sdk";
 
 import { createProductionServices } from "../services.server";
 import { ShopifyOrderUnavailableError } from "../core/shopify-order-errors";
+import { safeFailureMetadata } from "../core/safe-failure-metadata.server";
 import shopify, { migrateLegacyOfflineSession } from "../shopify.server";
 
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -84,24 +84,6 @@ export async function withShopifySessionRecovery<T>(
     if (!isShopifySessionCredentialFailure(error)) throw error;
     return recover(error);
   }
-}
-
-export function safeFailureMetadata(error: unknown) {
-  if (error instanceof PiqaeError)
-    return {
-      upstreamCode: error.code,
-      upstreamStatus: error.status,
-      upstreamRequestId: error.requestId,
-      retryable: error.retryable,
-    };
-  if (error && typeof error === "object") {
-    const status = (error as ShopifyHttpFailure).response?.code;
-    if (typeof status === "number")
-      return { upstream: "shopify_admin", upstreamStatus: status };
-    const name = (error as { name?: unknown }).name;
-    if (typeof name === "string") return { errorName: name };
-  }
-  return {};
 }
 
 /**

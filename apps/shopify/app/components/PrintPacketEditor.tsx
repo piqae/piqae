@@ -287,6 +287,16 @@ export function PrintPacketEditor({
   const currentDocumentKey = JSON.stringify(currentDocument);
   const continuousPageBreaks =
     value.media.kind === "continuous" && documentHasPageBreak(value);
+  const showsOrderPageBoundary =
+    value.media.kind === "paged" &&
+    canonicalBody.some(
+      (block, index) =>
+        orderBatchPresentation(
+          block,
+          [{ branch: "root", index }],
+          value.media.kind,
+        ) === "one_order_per_page",
+    );
   const editorRoot = useRef<HTMLDivElement>(null);
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
@@ -1161,6 +1171,15 @@ export function PrintPacketEditor({
                 ? renderRepeatingRegion("footer")
                 : null}
             </div>
+            {showsOrderPageBoundary ? (
+              <div
+                className="piqae-canvas-page-boundary"
+                role="note"
+                aria-label="Required page break between orders"
+              >
+                <span>Page break between orders</span>
+              </div>
+            ) : null}
           </div>
           <div
             className="piqae-prosemirror-source"
