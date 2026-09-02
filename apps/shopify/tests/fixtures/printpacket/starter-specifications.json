@@ -1245,53 +1245,35 @@
             "height_mm": 6
           },
           {
-            "type": "table",
+            "type": "data_list",
             "items": {
               "type": "current_path",
               "path": ["lineItems"]
             },
             "repeat_header": true,
-            "columns": [
+            "gap_mm": 0,
+            "header": [
               {
-                "header": [
+                "type": "grid",
+                "columns": [1.4, 7.6, 1],
+                "gap_mm": 1.5,
+                "children": [
                   {
-                    "type": "text",
-                    "value": "ITEMS",
-                    "style": {
-                      "bold": true,
-                      "font_size_pt": 8
-                    }
-                  }
-                ],
-                "cell": [
-                  {
-                    "type": "value",
-                    "value": {
-                      "type": "current_path",
-                      "path": ["title"]
-                    },
-                    "style": {
-                      "bold": true
-                    }
+                    "type": "paragraph",
+                    "content": [],
+                    "style": {}
                   },
                   {
-                    "type": "line_break"
-                  },
-                  {
-                    "type": "value",
-                    "value": {
-                      "type": "coalesce",
-                      "values": [
-                        {
-                          "type": "current_path",
-                          "path": ["variant", "title"]
-                        },
-                        {
-                          "type": "literal",
-                          "value": ""
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "value": "ITEMS",
+                        "style": {
+                          "bold": true
                         }
-                      ]
-                    },
+                      }
+                    ],
                     "style": {
                       "font_size_pt": 8,
                       "color": {
@@ -1302,36 +1284,18 @@
                     }
                   },
                   {
-                    "type": "line_break"
-                  },
-                  {
-                    "type": "text",
-                    "value": "SKU: ",
-                    "style": {
-                      "font_size_pt": 8,
-                      "color": {
-                        "red": 102,
-                        "green": 106,
-                        "blue": 110
-                      }
-                    }
-                  },
-                  {
-                    "type": "value",
-                    "value": {
-                      "type": "coalesce",
-                      "values": [
-                        {
-                          "type": "current_path",
-                          "path": ["sku"]
-                        },
-                        {
-                          "type": "literal",
-                          "value": ""
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "value": "QTY",
+                        "style": {
+                          "bold": true
                         }
-                      ]
-                    },
+                      }
+                    ],
                     "style": {
+                      "align": "right",
                       "font_size_pt": 8,
                       "color": {
                         "red": 102,
@@ -1340,35 +1304,147 @@
                       }
                     }
                   }
-                ],
-                "width": 8,
-                "align": "left"
+                ]
               },
               {
-                "header": [
+                "type": "divider",
+                "width_pt": 0.35
+              }
+            ],
+            "item": [
+              {
+                "type": "grid",
+                "columns": [1.4, 7.6, 1],
+                "gap_mm": 1.5,
+                "children": [
                   {
-                    "type": "text",
-                    "value": "QTY",
-                    "style": {
-                      "bold": true,
-                      "font_size_pt": 8
-                    }
-                  }
-                ],
-                "cell": [
-                  {
-                    "type": "value",
-                    "value": {
-                      "type": "current_path",
-                      "path": ["quantity"]
+                    "type": "conditional",
+                    "condition": {
+                      "type": "exists",
+                      "value": {
+                        "type": "current_path",
+                        "path": ["imageResource"]
+                      }
                     },
+                    "then": [
+                      {
+                        "type": "image_value",
+                        "resource": {
+                          "type": "current_path",
+                          "path": ["imageResource"]
+                        },
+                        "width_mm": 14,
+                        "height_mm": 14,
+                        "fit": "contain"
+                      }
+                    ],
+                    "else": []
+                  },
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "value",
+                        "value": {
+                          "type": "current_path",
+                          "path": ["title"]
+                        },
+                        "style": {
+                          "bold": true
+                        }
+                      },
+                      {
+                        "type": "line_break"
+                      },
+                      {
+                        "type": "value",
+                        "value": {
+                          "type": "coalesce",
+                          "values": [
+                            {
+                              "type": "current_path",
+                              "path": ["variant", "title"]
+                            },
+                            {
+                              "type": "literal",
+                              "value": ""
+                            }
+                          ]
+                        },
+                        "style": {
+                          "font_size_pt": 8,
+                          "color": {
+                            "red": 102,
+                            "green": 106,
+                            "blue": 110
+                          }
+                        }
+                      },
+                      {
+                        "type": "line_break"
+                      },
+                      {
+                        "type": "text",
+                        "value": "SKU: ",
+                        "style": {
+                          "font_size_pt": 8,
+                          "color": {
+                            "red": 102,
+                            "green": 106,
+                            "blue": 110
+                          }
+                        }
+                      },
+                      {
+                        "type": "value",
+                        "value": {
+                          "type": "coalesce",
+                          "values": [
+                            {
+                              "type": "current_path",
+                              "path": ["sku"]
+                            },
+                            {
+                              "type": "literal",
+                              "value": ""
+                            }
+                          ]
+                        },
+                        "style": {
+                          "font_size_pt": 8,
+                          "color": {
+                            "red": 102,
+                            "green": 106,
+                            "blue": 110
+                          }
+                        }
+                      }
+                    ],
+                    "style": {}
+                  },
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "value",
+                        "value": {
+                          "type": "current_path",
+                          "path": ["quantity"]
+                        },
+                        "style": {
+                          "bold": true
+                        }
+                      }
+                    ],
                     "style": {
-                      "bold": true
+                      "align": "right"
                     }
                   }
-                ],
-                "width": 1,
-                "align": "right"
+                ]
+              },
+              {
+                "type": "divider",
+                "width_pt": 0.35
               }
             ],
             "empty": [
@@ -1381,21 +1457,7 @@
                   }
                 ]
               }
-            ],
-            "style": {
-              "cell_padding_mm": 1.5,
-              "header_text_color": {
-                "red": 102,
-                "green": 106,
-                "blue": 110
-              },
-              "border_color": {
-                "red": 210,
-                "green": 213,
-                "blue": 216
-              },
-              "border_width_pt": 0.35
-            }
+            ]
           },
           {
             "type": "spacer",

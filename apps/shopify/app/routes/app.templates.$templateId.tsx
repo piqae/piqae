@@ -460,7 +460,7 @@ function previewJson(value: unknown, init?: ResponseInit) {
 }
 const WORKSPACES = [
   ["visual", "Design", "design"],
-  ["liquid", "Code", "code"],
+  ["source", "Code", "code"],
   ["preview", "Preview", "preview"],
 ] as const;
 
@@ -486,7 +486,27 @@ export function formatLiquidSource(source: string): string {
     .concat("\n");
 }
 
-function LiquidCodeWorkspace({
+export function parsePrintPacketSource(
+  source: string,
+): { ok: true; document: PrintPacket } | { ok: false; error: string } {
+  try {
+    const document = JSON.parse(source) as PrintPacket;
+    validatePrintPacket(document);
+    return { ok: true, document };
+  } catch (error) {
+    return {
+      ok: false,
+      error:
+        error instanceof SyntaxError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "PrintPacket source is invalid",
+    };
+  }
+}
+
+function PrintPacketCodeWorkspace({
   document,
   value,
   onChange,
@@ -495,10 +515,7 @@ function LiquidCodeWorkspace({
   value: string;
   onChange(value: string): void;
 }) {
-  const diagnostics = useMemo(() => {
-    const result = liquidToCanonical(value, document);
-    return result.ok ? [] : result.diagnostics;
-  }, [document, value]);
+  const parsed = useMemo(() => parsePrintPacketSource(value), [value]);
   const codeRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLPreElement>(null);
   return (
@@ -506,17 +523,16 @@ function LiquidCodeWorkspace({
       <div className="piqae-code-tools" role="toolbar" aria-label="Code tools">
         <button
           type="button"
-          onClick={() => onChange(formatLiquidSource(value))}
+          disabled={!parsed.ok}
+          onClick={() => {
+            if (parsed.ok)
+              onChange(`${JSON.stringify(parsed.document, null, 2)}\n`);
+          }}
         >
           <Icon name="code" /> Format code
         </button>
-        <span
-          className={diagnostics.length ? "is-invalid" : "is-valid"}
-          role="status"
-        >
-          {diagnostics.length
-            ? `${diagnostics.length} issue${diagnostics.length === 1 ? "" : "s"}`
-            : "Code is valid"}
+        <span className={parsed.ok ? "is-valid" : "is-invalid"} role="status">
+          {parsed.ok ? "PrintPacket is valid" : parsed.error}
         </span>
       </div>
       <div
@@ -529,18 +545,16 @@ function LiquidCodeWorkspace({
         >
           <label className="piqae-code-editor">
             <span className="piqae-visually-hidden">
-              Shopify Liquid template
+              Canonical PrintPacket JSON
             </span>
             <pre ref={highlightRef} aria-hidden="true">
-              {highlightLiquid(
-                value,
-                new Set(diagnostics.map((item) => item.line)),
-              )}
+              {highlightJson(value)}
             </pre>
             <textarea
               ref={codeRef}
               className="piqae-code"
-              name="liquid"
+              name="printPacketSource"
+              aria-label="Canonical PrintPacket JSON"
               maxLength={65536}
               spellCheck={false}
               value={value}
@@ -552,27 +566,10 @@ function LiquidCodeWorkspace({
               onChange={(event) => onChange(event.currentTarget.value)}
             />
           </label>
-          {diagnostics.length ? (
-            <ol className="piqae-code-diagnostics" aria-label="Code issues">
-              {diagnostics.map((diagnostic, index) => (
-                <li key={`${diagnostic.code}-${index}`}>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      focusCodeLine(
-                        codeRef.current,
-                        value,
-                        diagnostic.line,
-                        diagnostic.column,
-                      )
-                    }
-                  >
-                    Line {diagnostic.line}:{diagnostic.column} —{" "}
-                    {diagnostic.message}
-                  </button>
-                </li>
-              ))}
-            </ol>
+          {!parsed.ok ? (
+            <p className="piqae-code-diagnostics" role="alert">
+              {parsed.error}
+            </p>
           ) : null}
         </div>
       </div>
@@ -580,47 +577,36 @@ function LiquidCodeWorkspace({
   );
 }
 
-function highlightLiquid(source: string, errorLines: Set<number>) {
-  return source.split("\n").map((line, index) => {
-    const parts = line.split(/({{[-]?[\s\S]*?[-]?}}|{%[-]?[\s\S]*?[-]?%})/g);
-    return (
-      <span
-        className={`piqae-code-line${errorLines.has(index + 1) ? " is-error" : ""}`}
-        key={index}
-      >
-        {parts.map((part, partIndex) =>
-          part.startsWith("{{") ? (
-            <mark className="piqae-code-output" key={partIndex}>
+function highlightJson(source: string) {
+  return source.split("\n").map((line, index) => (
+    <span className="piqae-code-line" key={index}>
+      {line
+        .split(
+          /("(?:\\.|[^"\\])*"(?=\s*:)|"(?:\\.|[^"\\])*"|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?)/g,
+        )
+        .map((part, partIndex) =>
+          /^".*"$/.test(part) ? (
+            <mark
+              className={
+                /^".*"$/.test(part) && line.includes(`${part}:`)
+                  ? "piqae-code-tag"
+                  : "piqae-code-output"
+              }
+              key={partIndex}
+            >
               {part}
             </mark>
-          ) : part.startsWith("{%") ? (
-            <mark className="piqae-code-tag" key={partIndex}>
+          ) : /^(?:true|false|null|-?\d)/.test(part) ? (
+            <mark className="piqae-code-literal" key={partIndex}>
               {part}
             </mark>
           ) : (
             part
           ),
         )}
-        {"\n"}
-      </span>
-    );
-  });
-}
-
-function focusCodeLine(
-  textarea: HTMLTextAreaElement | null,
-  source: string,
-  line: number,
-  column: number,
-) {
-  if (!textarea) return;
-  const offset = source
-    .split("\n")
-    .slice(0, Math.max(0, line - 1))
-    .reduce((sum, item) => sum + item.length + 1, 0);
-  const position = Math.min(source.length, offset + Math.max(0, column - 1));
-  textarea.focus();
-  textarea.setSelectionRange(position, position);
+      {"\n"}
+    </span>
+  ));
 }
 
 export type EditorPreviewResponse = {
@@ -678,12 +664,15 @@ export default function TemplateEditor() {
         : "Untitled document"),
   );
   const [mode, setMode] = useState<TemplateEditorMode>(
-    initial.editor.mode === "liquid" ? "liquid" : "visual",
+    initial.editor.mode === "source" ? "source" : "visual",
   );
   const [liquid, setLiquid] = useState(initial.editor.liquid);
+  const [sourceDraft, setSourceDraft] = useState(
+    `${JSON.stringify(initial.document, null, 2)}\n`,
+  );
   const [importMetadata, setImportMetadata] = useState(initial.editor.import);
-  const [workspace, setWorkspace] = useState<"visual" | "preview" | "liquid">(
-    initial.editor.mode === "liquid" ? "liquid" : "visual",
+  const [workspace, setWorkspace] = useState<"visual" | "preview" | "source">(
+    initial.editor.mode === "source" ? "source" : "visual",
   );
   const [error, setError] = useState("");
   const previewFetcher = useFetcher<EditorPreviewResponse>();
@@ -701,8 +690,9 @@ export default function TemplateEditor() {
   );
   useEffect(() => {
     setDocument(initial.document);
-    setMode(initial.editor.mode === "liquid" ? "liquid" : "visual");
+    setMode(initial.editor.mode === "source" ? "source" : "visual");
     setLiquid(initial.editor.liquid);
+    setSourceDraft(`${JSON.stringify(initial.document, null, 2)}\n`);
     setImportMetadata(initial.editor.import);
     setKind(initialTemplate?.kind ?? "invoice");
     setDesignTargetId(initialTemplate?.designTargetId ?? "");
@@ -720,21 +710,17 @@ export default function TemplateEditor() {
       setWorkspace("visual");
     }
   }, [result]);
-  const switchMode = (next: TemplateEditorMode): boolean => {
-    if (mode === "liquid" && next !== "liquid") {
-      const conversion = liquidToCanonical(liquid, document);
-      if (!conversion.ok) {
-        const d = conversion.diagnostics[0]!;
-        setError(`${d.message} (${d.line}:${d.column})`);
-        return false;
-      }
-      if (!printPacketsEqual(document, conversion.document))
-        setDocument(conversion.document);
-      setLiquid(conversion.normalizedSource);
-    } else if (mode !== "liquid" && next === "liquid")
-      setLiquid(canonicalToLiquid(document).source);
+  const commitSourceDraft = (): boolean => {
+    const parsed = parsePrintPacketSource(sourceDraft);
+    if (!parsed.ok) {
+      setError(parsed.error);
+      return false;
+    }
+    if (!printPacketsEqual(document, parsed.document))
+      setDocument(parsed.document);
+    setSourceDraft(`${JSON.stringify(parsed.document, null, 2)}\n`);
+    setLiquid(canonicalToLiquid(parsed.document).source);
     setError("");
-    setMode(next);
     return true;
   };
   const source = serializeTemplateEnvelope({
@@ -748,9 +734,23 @@ export default function TemplateEditor() {
       ...(importMetadata ? { import: importMetadata } : {}),
     },
   });
-  const switchWorkspace = (next: "visual" | "preview" | "liquid") => {
+  const switchWorkspace = (next: "visual" | "preview" | "source") => {
+    if (workspace === "source" && next !== "source" && !commitSourceDraft())
+      return;
+    if (next === "source") {
+      setSourceDraft(`${JSON.stringify(document, null, 2)}\n`);
+      setMode("source");
+      setError("");
+    } else if (next === "visual") {
+      setMode("visual");
+      setLiquid(canonicalToLiquid(document).source);
+    }
     if (next === "preview") {
-      const compilation = compileDocumentForPreview(mode, liquid, document);
+      const compilation = compileDocumentForPreview(
+        mode === "liquid" ? "visual" : mode,
+        liquid,
+        document,
+      );
       if (!compilation.ok) {
         setError(compilation.error);
         return;
@@ -769,7 +769,7 @@ export default function TemplateEditor() {
         }),
       );
       setError("");
-    } else if (!switchMode(next)) return;
+    }
     if (next !== "preview") {
       activePreviewRequest.current = "";
       setPreviewSource(null);
@@ -777,6 +777,15 @@ export default function TemplateEditor() {
     }
     setPdfPreview({ status: "loading" });
     setWorkspace(next);
+  };
+  const updateSourceDraft = (next: string) => {
+    setSourceDraft(next);
+    const parsed = parsePrintPacketSource(next);
+    if (!parsed.ok) return;
+    if (!printPacketsEqual(document, parsed.document))
+      setDocument(parsed.document);
+    setLiquid(canonicalToLiquid(parsed.document).source);
+    setError("");
   };
   useEffect(() => {
     if (workspace !== "preview" || !previewSource) {
@@ -1180,20 +1189,15 @@ export default function TemplateEditor() {
                   state={pdfPreview}
                   workspaceControls={workspaceControls}
                 />
-              ) : workspace === "liquid" ? (
+              ) : workspace === "source" ? (
                 <>
                   <div className="piqae-workspace-toolbar">
                     {workspaceControls}
                   </div>
-                  <LiquidCodeWorkspace
+                  <PrintPacketCodeWorkspace
                     document={document}
-                    value={liquid}
-                    onChange={setLiquid}
-                  />
-                  <input
-                    type="hidden"
-                    name="orderPrinterSource"
-                    value={liquid}
+                    value={sourceDraft}
+                    onChange={updateSourceDraft}
                   />
                 </>
               ) : null}
@@ -1210,9 +1214,7 @@ export default function TemplateEditor() {
               name="expectedDraftRevision"
               value={template?.draftRevision ?? ""}
             />
-            {workspace === "liquid" ? null : (
-              <input type="hidden" name="liquid" value={liquid} />
-            )}
+            <input type="hidden" name="liquid" value={liquid} />
             <input
               ref={intentRef}
               type="hidden"

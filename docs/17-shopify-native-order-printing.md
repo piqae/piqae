@@ -86,7 +86,9 @@ printing without a PDF-download detour.
   summary for batches.
 - Piqae node/printer connection, zero-configuration current driver defaults,
   optional named immutable profiles, readiness, queue, and recovery.
-- Code-free branding editor plus an advanced sandboxed Liquid/HTML/CSS editor.
+- A code-free semantic editor and a canonical `printpacket/v1` Code view that
+  round-trip one document tree without flattening its layout. Bounded Liquid is
+  an explicit compatibility/import path, not a second live source of truth.
 - Locale, currency, tax, discounts, refunds, duties, tips, notes, metafields,
   line-item properties, B2B company data, and partial fulfillment.
 - QR and common 1D/2D barcode generation with render-time validation.
@@ -226,7 +228,7 @@ Pipeline:
 Shopify IDs from authenticated action
   -> bulk GraphQL fetch with bounded pagination/cost
   -> normalized immutable document model
-  -> Shopify Liquid/visual source compiled into typed PrintPacket nodes
+  -> canonical typed PrintPacket nodes authored in Design or Code
   -> deterministic Piqae flow layout with content-addressed assets
   -> PrintPacket PDF generation per order (parallel, bounded)
   -> PDF structural and visual preflight

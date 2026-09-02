@@ -11,6 +11,7 @@ import {
   insertBlockAtPath,
   insertStaticTableRowAt,
   insertTableColumnAt,
+  fitTableColumnToContent,
   moveBlockAtPath,
   PdfPreviewWorkspace,
   PrintPacketEditor,
@@ -21,9 +22,11 @@ import {
   siblingsAtPath,
   orderBatchPresentation,
   tableColumnResizeGeometry,
+  tableToRichDataList,
 } from "../app/components/PrintPacketEditor";
 import {
   parseTemplateEnvelope,
+  serializeTemplateEnvelope,
   type PrintPacket,
 } from "../app/core/template-model";
 import { starterTemplates } from "../app/core/starter-templates";
@@ -33,6 +36,7 @@ import TemplateEditor, {
   documentNameError,
   editorTitleBarActions,
   previewStateForResponse,
+  parsePrintPacketSource,
   templateFlowNote,
 } from "../app/routes/app.templates.$templateId";
 
@@ -288,13 +292,18 @@ function StatefulPrintPacketEditor({
 }) {
   const [document, setDocument] = useState(initial);
   return (
-    <PrintPacketEditor
-      value={document}
-      onChange={(next) => {
-        onChange?.(next);
-        setDocument(next);
-      }}
-    />
+    <>
+      <PrintPacketEditor
+        value={document}
+        onChange={(next) => {
+          onChange?.(next);
+          setDocument(next);
+        }}
+      />
+      <output hidden data-testid="document-json">
+        {JSON.stringify(document)}
+      </output>
+    </>
   );
 }
 
@@ -354,6 +363,98 @@ afterEach(async () => {
 });
 
 describe("Shopify document editor layout", () => {
+  it("round trips canonical Code without losing visual layout properties", () => {
+    const source = `${JSON.stringify(unequalTablePacket, null, 2)}\n`;
+    const parsed = parsePrintPacketSource(source);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.document).toEqual(unequalTablePacket);
+    expect(
+      (
+        parsed.document.body[0] as Extract<
+          PrintPacket["body"][number],
+          { type: "table" }
+        >
+      ).columns.map((column) => column.width),
+    ).toEqual([1, 3]);
+    expect(parsePrintPacketSource('{"format":')).toMatchObject({ ok: false });
+  });
+
+  it("promotes a selected text table cell to rich repeating content", () => {
+    const table = tablePacket.body[0] as Extract<
+      PrintPacket["body"][number],
+      { type: "table" }
+    >;
+    const image = {
+      type: "image_value" as const,
+      resource: { type: "current_path" as const, path: ["imageResource"] },
+      width_mm: 16,
+      height_mm: 16,
+      fit: "contain" as const,
+    };
+    const list = tableToRichDataList(table, 0, image);
+    expect(list.items).toEqual(table.items);
+    expect(list.repeat_header).toBe(table.repeat_header ?? false);
+    const row = list.item[0];
+    expect(row.type).toBe("grid");
+    if (row.type !== "grid") return;
+    expect(row.columns).toEqual([1, 1]);
+    expect(row.children[0]).toMatchObject({
+      type: "stack",
+      children: [image, { type: "paragraph" }],
+    });
+  });
+
+  it("inserts a dynamic product image into the selected repeating table cell", async () => {
+    const page = await render(
+      <StatefulPrintPacketEditor initial={tablePacket} />,
+    );
+    const firstCell = page.querySelector<HTMLElement>(
+      ".piqae-canvas-table-binding-row > div",
+    )!;
+    const imageButton = page.querySelector<HTMLButtonElement>(
+      'button[aria-label="Image"]',
+    )!;
+
+    await act(async () => firstCell.click());
+    await act(async () => imageButton.click());
+
+    const output = page.parentElement?.querySelector<HTMLOutputElement>(
+      '[data-testid="document-json"]',
+    );
+    const document = JSON.parse(output?.textContent ?? "null") as PrintPacket;
+    const list = authoredBody(document)[0];
+    expect(list.type).toBe("data_list");
+    if (list.type !== "data_list") return;
+    const itemGrid = list.item[0];
+    expect(itemGrid.type).toBe("grid");
+    if (itemGrid.type !== "grid") return;
+    expect(itemGrid.children[0]).toMatchObject({
+      type: "stack",
+      children: [
+        {
+          type: "image_value",
+          resource: { type: "current_path", path: ["imageResource"] },
+          fit: "contain",
+        },
+        { type: "paragraph" },
+      ],
+    });
+    expect(authoredBody(document)).toHaveLength(1);
+  });
+
+  it("fits a table column to its visible content without a schema extension", () => {
+    const table = tablePacket.body[0] as Extract<
+      PrintPacket["body"][number],
+      { type: "table" }
+    >;
+    const fitted = fitTableColumnToContent(table, 1);
+    expect(fitted.columns[1]?.width).toBeGreaterThan(
+      fitted.columns[0]?.width ?? 0,
+    );
+    expect(table.columns.map((column) => column.width)).toEqual([1, 1]);
+  });
+
   it("compiles current Liquid before Preview and refuses an invalid mode switch", () => {
     const envelope = parseTemplateEnvelope(starterTemplates[0]!.source);
     const valid = compileDocumentForPreview(
@@ -733,6 +834,97 @@ describe("Shopify document editor layout", () => {
       page.querySelector<HTMLElement>(".piqae-canvas-grid")?.style
         .gridTemplateColumns,
     ).toBe(gridColumns);
+  });
+
+  it("edits the canonical document live in Code and returns to Design losslessly", async () => {
+    const starter = starterTemplates[0]!;
+    const envelope = parseTemplateEnvelope(starter.source);
+    envelope.document = unequalTablePacket;
+    envelope.editor.mode = "visual";
+    const template = {
+      id: "source-round-trip-fixture",
+      name: starter.name,
+      kind: starter.kind,
+      pageSize: starter.pageSize,
+      state: "draft" as const,
+      source: serializeTemplateEnvelope(envelope),
+      revision: 1,
+      draftRevision: 1,
+      designTargetId: null,
+      designSpecificationRevision: null,
+      published: null,
+      updatedAt: "2026-09-02T00:00:00Z",
+    };
+    const Stub = createRoutesStub([
+      {
+        path: "/app/templates/:templateId",
+        Component: TemplateEditor,
+        HydrateFallback: () => null,
+        loader: () => ({
+          template,
+          initialTemplate: template,
+          printTargets: [],
+          printTargetError: "",
+          customFields: [],
+        }),
+      },
+    ]);
+    const page = await render(
+      <Stub initialEntries={["/app/templates/source-round-trip-fixture"]} />,
+    );
+    const workspaceButton = (label: string) =>
+      Array.from(page.querySelectorAll<HTMLButtonElement>("button")).find(
+        (button) => button.textContent?.includes(label),
+      )!;
+
+    await act(async () => workspaceButton("Code").click());
+    const source = page.querySelector<HTMLTextAreaElement>(
+      "textarea.piqae-code",
+    )!;
+    const edited = JSON.parse(source.value) as PrintPacket;
+    if (edited.media.kind !== "paged") throw new Error("paged fixture missing");
+    edited.media = {
+      ...edited.media,
+      margins: { top_mm: 7, right_mm: 8, bottom_mm: 9, left_mm: 10 },
+    };
+    const editedTable = edited.body[0];
+    if (editedTable?.type !== "table") throw new Error("table fixture missing");
+    editedTable.columns[0]!.width = 2;
+    editedTable.columns[1]!.width = 5;
+    await act(async () => {
+      const value = `${JSON.stringify(edited, null, 2)}\n`;
+      Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        "value",
+      )?.set?.call(source, value);
+      source.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(
+      JSON.parse(
+        page.querySelector<HTMLInputElement>('input[name="document"]')!.value,
+      ),
+    ).toEqual(edited);
+
+    await act(async () => workspaceButton("Design").click());
+    const after = JSON.parse(
+      page.querySelector<HTMLInputElement>('input[name="document"]')!.value,
+    ) as PrintPacket;
+    expect(after).toEqual(edited);
+    expect(
+      (
+        authoredBody(after)[0] as Extract<
+          PrintPacket["body"][number],
+          { type: "table" }
+        >
+      ).columns.map(({ width }) => width),
+    ).toEqual([2, 5]);
+    expect(
+      Array.from(
+        page.querySelectorAll<HTMLElement>(
+          ".piqae-canvas-table-head > .piqae-canvas-table-column",
+        ),
+      ).map((column) => column.style.flex),
+    ).toEqual(["2 1 0%", "5 1 0%"]);
   });
 
   it("keeps starter and editable actions in the Shopify title bar contract", () => {

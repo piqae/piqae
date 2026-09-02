@@ -122,24 +122,61 @@ const documentTableStyle = {
   border_color: rule,
   border_width_pt: 0.35,
 } as const;
-const packingColumns = (): Extract<Block, { type: "table" }>["columns"] => [
-  {
-    header: [
-      { type: "text", value: "ITEMS", style: { bold: true, font_size_pt: 8 } },
-    ],
-    cell: compactItemDescription(),
-    width: 8,
-    align: "left",
-  },
-  {
-    header: [
-      { type: "text", value: "QTY", style: { bold: true, font_size_pt: 8 } },
-    ],
-    cell: [currentInline(["quantity"], { bold: true })],
-    width: 1,
-    align: "right",
-  },
-];
+const packingItems = (): Block => ({
+  type: "data_list",
+  items: current("lineItems"),
+  repeat_header: true,
+  gap_mm: 0,
+  header: [
+    {
+      type: "grid",
+      columns: [1.4, 7.6, 1],
+      gap_mm: 1.5,
+      children: [
+        paragraph([]),
+        paragraph([{ type: "text", value: "ITEMS", style: { bold: true } }], {
+          font_size_pt: 8,
+          color: muted,
+        }),
+        paragraph([{ type: "text", value: "QTY", style: { bold: true } }], {
+          align: "right",
+          font_size_pt: 8,
+          color: muted,
+        }),
+      ],
+    },
+    { type: "divider", width_pt: 0.35 },
+  ],
+  item: [
+    {
+      type: "grid",
+      columns: [1.4, 7.6, 1],
+      gap_mm: 1.5,
+      children: [
+        {
+          type: "conditional",
+          condition: { type: "exists", value: current("imageResource") },
+          then: [
+            {
+              type: "image_value",
+              resource: current("imageResource"),
+              width_mm: 14,
+              height_mm: 14,
+              fit: "contain",
+            },
+          ],
+          else: [],
+        },
+        paragraph(compactItemDescription()),
+        paragraph([currentInline(["quantity"], { bold: true })], {
+          align: "right",
+        }),
+      ],
+    },
+    { type: "divider", width_pt: 0.35 },
+  ],
+  empty: [text("No items")],
+});
 const invoiceColumns = (): Extract<Block, { type: "table" }>["columns"] => [
   {
     header: [
@@ -503,7 +540,7 @@ const documents = {
           ],
         },
         { type: "spacer", height_mm: 6 },
-        items("lineItems", packingColumns(), documentTableStyle),
+        packingItems(),
         { type: "spacer", height_mm: 7 },
         shopFooter("Thank you for shopping with us!"),
         { type: "page_break" },

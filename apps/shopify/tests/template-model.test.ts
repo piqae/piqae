@@ -13,6 +13,9 @@ const allNodes = (nodes: any[]): any[] =>
     ...(Array.isArray(node.children) ? allNodes(node.children) : []),
     ...(Array.isArray(node.then) ? allNodes(node.then) : []),
     ...(Array.isArray(node.else) ? allNodes(node.else) : []),
+    ...(Array.isArray(node.header) ? allNodes(node.header) : []),
+    ...(Array.isArray(node.item) ? allNodes(node.item) : []),
+    ...(Array.isArray(node.empty) ? allNodes(node.empty) : []),
   ]);
 describe("PrintPacket model", () => {
   it("keeps the checked cross-runtime renderer fixtures identical to every starter", () => {
@@ -32,7 +35,7 @@ describe("PrintPacket model", () => {
         nodes.some((node) =>
           starter.kind === "label"
             ? node.type === "barcode"
-            : node.type === "table",
+            : node.type === "table" || node.type === "data_list",
         ),
       ).toBe(true);
       expect(parseTemplateEnvelope(starter.source).document).toEqual(
@@ -125,16 +128,12 @@ describe("PrintPacket model", () => {
         then: [{ type: "image_value", resource: { path: ["shop", "logo"] } }],
         else: [{ type: "paragraph" }],
       });
-      expect(
-        nodes.find(
-          (node) =>
-            node.type === "table" &&
-            node.items?.path?.join(".") === "lineItems",
-        ),
-      ).toMatchObject({
-        repeat_header: true,
-        style: { cell_padding_mm: 1.5, border_width_pt: 0.35 },
-      });
+      const lineItems = nodes.find(
+        (node) =>
+          (node.type === "table" || node.type === "data_list") &&
+          node.items?.path?.join(".") === "lineItems",
+      );
+      expect(lineItems).toMatchObject({ repeat_header: true });
       expect(JSON.stringify(document)).toContain('"primaryDomain"');
       expect(JSON.stringify(document)).toContain('"address","formatted"');
     }
@@ -146,6 +145,14 @@ describe("PrintPacket model", () => {
       symbology: "code128",
       human_readable: false,
     });
+    expect(
+      allNodes(packing.body).find(
+        (node) =>
+          node.type === "image_value" &&
+          node.resource?.type === "current_path" &&
+          node.resource.path?.join(".") === "imageResource",
+      ),
+    ).toMatchObject({ width_mm: 14, height_mm: 14, fit: "contain" });
     expect(JSON.stringify(invoice)).toContain("BILLING ADDRESS");
     expect(JSON.stringify(invoice)).toContain("Subtotal");
   });
