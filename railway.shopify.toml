@@ -1,6 +1,16 @@
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "deploy/docker/Dockerfile.shopify"
+watchPatterns = [
+  "/apps/shopify/**",
+  "/sdk/typescript/**",
+  "/sdk/printpacket/**",
+  "/deploy/docker/Dockerfile.shopify",
+  "/railway.shopify.toml",
+  "/package.json",
+  "/pnpm-lock.yaml",
+  "/pnpm-workspace.yaml",
+]
 
 [deploy]
 preDeployCommand = "node scripts/migrate-postgres.mjs"
