@@ -6,7 +6,11 @@ import {
   approvalForDocumentPrinter,
   chooseDefaultDocument,
   chooseDefaultPrinterOption,
+  loadWithTimeout,
+  messageForLoadError,
   newInteractionId,
+  previewDownloadUrl,
+  printerCompatibilityMessage,
   printerOptionsForDocument,
   stableOptionKey,
 } from "../../shared/AdminOrderPrintAction.jsx";
@@ -22,18 +26,30 @@ export function ProductPrintModal() {
   const resourceId =
     Number.isSafeInteger(variantId) && variantId > 0
       ? `gid://shopify/ProductVariant/${variantId}`
-      : `gid://shopify/Product/${productId}`;
+      : Number.isSafeInteger(productId) && productId > 0
+        ? `gid://shopify/Product/${productId}`
+        : "";
   const [options, setOptions] = useState(null);
   const [documentId, setDocumentId] = useState("");
   const [printerId, setPrinterId] = useState("");
   const [preview, setPreview] = useState(null);
   const [state, setState] = useState("loading");
   const [error, setError] = useState("");
+  const [errorStage, setErrorStage] = useState("");
+  const [optionsAttempt, setOptionsAttempt] = useState(0);
+  const [previewAttempt, setPreviewAttempt] = useState(0);
   const interactionId = useRef(newInteractionId([resourceId]));
+  const approvedPreview = useRef("");
+  const previewRequest = useRef(0);
 
   useEffect(() => {
     let active = true;
-    authorizedJson("/api/print/admin/product-options")
+    setState("loading");
+    setError("");
+    setErrorStage("");
+    loadWithTimeout((signal) =>
+      authorizedJson("/api/print/admin/product-options", { signal }),
+    )
       .then((value) => {
         if (!active) return;
         const document = chooseDefaultDocument(value.documents ?? []);
@@ -51,15 +67,14 @@ export function ProductPrintModal() {
       })
       .catch((cause) => {
         if (!active) return;
-        setError(
-          cause instanceof Error ? cause.message : "Labels could not be loaded",
-        );
+        setError(messageForLoadError(cause));
+        setErrorStage("options");
         setState("failed");
       });
     return () => {
       active = false;
     };
-  }, []);
+  }, [optionsAttempt]);
 
   const document = options?.documents?.find(({ id }) => id === documentId);
   const printers = useMemo(
@@ -89,20 +104,27 @@ export function ProductPrintModal() {
   useEffect(() => {
     if (!documentId || !resourceId) return;
     let active = true;
+    const requestNumber = ++previewRequest.current;
     setPreview(null);
     setError("");
+    setErrorStage("");
     setState("previewing");
-    authorizedJson("/api/print/admin/product-previews", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "idempotency-key": `shopify-pos-product-${interactionId.current}-${documentId}`,
-      },
-      body: JSON.stringify({
-        productIds: [resourceId],
-        templateId: documentId,
-      }),
-    })
+    loadWithTimeout(
+      (signal) =>
+        authorizedJson("/api/print/admin/product-previews", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": `shopify-pos-product-${interactionId.current}-${documentId}-${requestNumber}`,
+          },
+          body: JSON.stringify({
+            productIds: [resourceId],
+            templateId: documentId,
+          }),
+          signal,
+        }),
+      15_000,
+    )
       .then((value) => {
         if (!active) return;
         setPreview(value);
@@ -110,22 +132,38 @@ export function ProductPrintModal() {
       })
       .catch((cause) => {
         if (!active) return;
-        setError(
-          cause instanceof Error
-            ? cause.message
-            : "The label preview could not be generated",
-        );
+        setError(messageForLoadError(cause));
+        setErrorStage("preview");
         setState("failed");
       });
     return () => {
       active = false;
     };
-  }, [documentId, resourceId]);
+  }, [documentId, resourceId, previewAttempt]);
+
+  useEffect(() => {
+    if (!preview) return;
+    return () => {
+      if (approvedPreview.current === preview.previewId) return;
+      authorizedJson(
+        `/api/print/previews/${encodeURIComponent(preview.previewId)}/cancel`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": `shopify-pos-product-cancel-${interactionId.current}-${preview.previewId}`,
+          },
+          body: JSON.stringify({ renderId: preview.renderId }),
+        },
+      ).catch(() => {});
+    };
+  }, [preview?.previewId]);
 
   async function printToNode() {
     if (!preview || !approval || !document) return;
     setState("printing");
     setError("");
+    setErrorStage("");
     try {
       const destination =
         approval.mode === "target"
@@ -139,42 +177,74 @@ export function ProductPrintModal() {
         approval.mode === "target"
           ? `${printerId}:${approval.targetId}:${approval.specificationRevision}`
           : `${approval.printerId}:current-defaults`;
-      await authorizedJson(
-        `/api/print/previews/${encodeURIComponent(preview.previewId)}/approve`,
-        {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "idempotency-key": `shopify-pos-product-print-${interactionId.current}-${stableOptionKey(key)}`,
-          },
-          body: JSON.stringify({
-            renderId: preview.renderId,
-            ...destination,
-            renderCost: preview.renderCost,
-          }),
-        },
+      await loadWithTimeout(
+        (signal) =>
+          authorizedJson(
+            `/api/print/previews/${encodeURIComponent(preview.previewId)}/approve`,
+            {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                "idempotency-key": `shopify-pos-product-print-${interactionId.current}-${stableOptionKey(key)}`,
+              },
+              body: JSON.stringify({
+                renderId: preview.renderId,
+                ...destination,
+                renderCost: preview.renderCost,
+              }),
+              signal,
+            },
+          ),
+        15_000,
       );
+      approvedPreview.current = preview.previewId;
       shopify.toast.show("Product label sent to Piqae Node");
       setState("complete");
       shopify.action.dismissModal();
     } catch (cause) {
-      setError(
-        cause instanceof Error
-          ? cause.message
-          : "The label could not be printed",
-      );
+      setError(messageForLoadError(cause) || "The label could not be printed");
+      setErrorStage("print");
       setState("failed");
     }
   }
+
+  const compatibilityMessage = printerCompatibilityMessage(document, printer);
+  const downloadUrl = previewDownloadUrl(preview?.artifactUrl);
 
   return (
     <s-page heading="Print product label">
       <s-scroll-box>
         <s-stack direction="block" gap="base">
           {state === "loading" || state === "previewing" ? (
-            <s-text>Preparing label…</s-text>
+            <s-stack direction="inline" gap="small" alignItems="center">
+              <s-spinner accessibilityLabel="Preparing product label" />
+              <s-text>Preparing label…</s-text>
+            </s-stack>
           ) : null}
-          {error ? <s-banner tone="critical">{error}</s-banner> : null}
+          {!resourceId ? (
+            <s-banner tone="critical">
+              Shopify did not provide a product or variant for this action.
+            </s-banner>
+          ) : null}
+          {error ? (
+            <s-banner tone="critical">
+              {error}
+              {errorStage === "options" ? (
+                <s-button
+                  onClick={() => setOptionsAttempt((value) => value + 1)}
+                >
+                  Try again
+                </s-button>
+              ) : null}
+              {errorStage === "preview" ? (
+                <s-button
+                  onClick={() => setPreviewAttempt((value) => value + 1)}
+                >
+                  Try again
+                </s-button>
+              ) : null}
+            </s-banner>
+          ) : null}
           {options && !options.linked ? (
             <s-banner tone="info">
               Connect Piqae before printing product labels.
@@ -215,6 +285,9 @@ export function ProductPrintModal() {
               No connected Node printers are available.
             </s-banner>
           ) : null}
+          {compatibilityMessage ? (
+            <s-banner tone="warning">{compatibilityMessage}</s-banner>
+          ) : null}
           {preview?.previewImageUrl ? (
             <s-image
               src={preview.previewImageUrl}
@@ -223,11 +296,22 @@ export function ProductPrintModal() {
           ) : null}
           <s-button
             variant="primary"
-            disabled={!preview || !approval || state === "printing"}
+            disabled={
+              !preview || !approval || state === "printing" || !resourceId
+            }
             onClick={printToNode}
           >
             Print to Node
           </s-button>
+          {downloadUrl ? (
+            <s-button href={downloadUrl} target="_blank" icon="download">
+              Download PDF
+            </s-button>
+          ) : (
+            <s-button icon="download" disabled>
+              Download PDF
+            </s-button>
+          )}
           <s-button onClick={() => shopify.action.dismissModal()}>
             Cancel
           </s-button>

@@ -86,7 +86,7 @@ export async function withShopifySessionRecovery<T>(
   }
 }
 
-function safeFailureMetadata(error: unknown) {
+export function safeFailureMetadata(error: unknown) {
   if (error instanceof PiqaeError)
     return {
       upstreamCode: error.code,
@@ -111,6 +111,7 @@ function safeFailureMetadata(error: unknown) {
  */
 export function classifyAdminPreviewFailure(
   error: unknown,
+  resourceType: "orders" | "products" = "orders",
 ): AdminPreviewFailure {
   if (
     isShopifySessionCredentialFailure(error) ||
@@ -122,6 +123,7 @@ export function classifyAdminPreviewFailure(
         "Shopify access could not be refreshed. Open Piqae in Shopify Admin once, then retry this print action.",
     };
   if (
+    resourceType === "orders" &&
     error instanceof ShopifyOrderUnavailableError &&
     error.reason === "standard_history_only"
   )
@@ -140,6 +142,15 @@ export function classifyAdminPreviewFailure(
       code: "document_publication",
       message:
         "This document publication is no longer available. Open the document, publish it again, then retry the preview.",
+    };
+  if (
+    resourceType === "products" &&
+    /product|variant|shopify.*data|graphql/i.test(message)
+  )
+    return {
+      code: "order_data",
+      message:
+        "Piqae could not load every selected Shopify product or variant. Refresh the products and try again.",
     };
   if (/order|shopify.*data|graphql/i.test(message))
     return {

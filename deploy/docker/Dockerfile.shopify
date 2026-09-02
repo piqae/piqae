@@ -25,11 +25,19 @@ RUN pnpm --filter @piqae/shopify-app exec node --input-type=module \
     --eval "await import('@printpacket/core')"
 
 FROM shopify-workspace-dependencies AS shopify-production-build
+ARG PIQAE_RELEASE_SHA=""
+ARG RAILWAY_GIT_COMMIT_SHA=""
 COPY apps/shopify apps/shopify
 RUN pnpm --filter @piqae/shopify-app build
 RUN pnpm --filter @piqae/shopify-app --prod deploy --legacy /app
 RUN cp -R apps/shopify/build /app/build
 RUN cp -R apps/shopify/migrations apps/shopify/scripts /app/
+# Bind health evidence to the immutable image rather than a mutable runtime
+# variable. A local-source Railway deployment must provide PIQAE_RELEASE_SHA;
+# a repository-linked build receives RAILWAY_GIT_COMMIT_SHA.
+RUN RELEASE_SHA="${PIQAE_RELEASE_SHA:-$RAILWAY_GIT_COMMIT_SHA}" \
+    node --input-type=module --eval \
+    "import { writeFileSync } from 'node:fs'; const value = process.env.RELEASE_SHA ?? ''; writeFileSync('/app/.piqae-release-sha', /^[0-9a-f]{40}$/i.test(value) ? value.toLowerCase() : 'unknown');"
 # Prove the production deployment tree contains the workspace package. Running
 # from /app prevents Node from resolving it through /source/node_modules.
 RUN cd /app && node --input-type=module \

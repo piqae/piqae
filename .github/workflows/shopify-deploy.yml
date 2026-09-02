@@ -150,7 +150,6 @@ jobs:
           release_output=$(pnpm --package=@shopify/cli@4.6.1 dlx shopify app release \
             --config release \
             --allow-updates \
-            --allow-deletes \
             --no-color \
             --version "$SHOPIFY_VERSION" 2>&1)
           release_status=$?

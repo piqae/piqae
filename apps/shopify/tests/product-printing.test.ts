@@ -19,62 +19,62 @@ function productAdmin(): AdminGraphql {
             },
           },
         });
-      const ids = (options?.variables as { ids?: string[] })?.ids ?? [];
+      if (query.includes("PiqaeProductLabelCurrency"))
+        return Response.json({ data: { shop: { currencyCode: "NZD" } } });
+      const id = (options?.variables as { id?: string })?.id ?? "";
       return Response.json({
         data: {
-          shop: { currencyCode: "NZD" },
-          nodes: ids.map((id) =>
-            id.includes("ProductVariant")
-              ? {
-                  __typename: "ProductVariant",
-                  id,
-                  title: "500 g",
-                  sku: "COF-500",
-                  barcode: "942000000001",
-                  price: "19.50",
-                  product: {
-                    id: "gid://shopify/Product/7",
-                    title: "Krank Blend",
-                    vendor: "C4 Coffee",
-                    productType: "Coffee",
-                    tags: ["coffee", "retail"],
-                    category: {
-                      id: "gid://shopify/TaxonomyCategory/aa-1",
-                      name: "Coffee",
-                      fullName: "Food > Beverages > Coffee",
-                      level: 3,
-                      ancestorIds: ["gid://shopify/TaxonomyCategory/aa"],
-                    },
-                  },
-                }
-              : {
-                  __typename: "Product",
-                  id,
+          node: id.includes("ProductVariant")
+            ? {
+                __typename: "ProductVariant",
+                id,
+                title: "500 g",
+                sku: "COF-500",
+                barcode: "942000000001",
+                price: "19.50",
+                product: {
+                  id: "gid://shopify/Product/7",
                   title: "Krank Blend",
                   vendor: "C4 Coffee",
                   productType: "Coffee",
-                  tags: ["retail", "coffee", "coffee"],
-                  category: null,
-                  variants: {
-                    nodes: [
-                      {
-                        id: "gid://shopify/ProductVariant/11",
-                        title: "250 g",
-                        sku: "COF-250",
-                        barcode: "",
-                        price: "12.00",
-                      },
-                      {
-                        id: "gid://shopify/ProductVariant/12",
-                        title: "500 g",
-                        sku: "COF-500",
-                        barcode: "942000000001",
-                        price: "19.50",
-                      },
-                    ],
+                  tags: ["coffee", "retail"],
+                  category: {
+                    id: "gid://shopify/TaxonomyCategory/aa-1",
+                    name: "Coffee",
+                    fullName: "Food > Beverages > Coffee",
+                    level: 3,
+                    ancestorIds: ["gid://shopify/TaxonomyCategory/aa"],
                   },
                 },
-          ),
+              }
+            : {
+                __typename: "Product",
+                id,
+                title: "Krank Blend",
+                vendor: "C4 Coffee",
+                productType: "Coffee",
+                tags: ["retail", "coffee", "coffee"],
+                category: null,
+                variants: {
+                  nodes: [
+                    {
+                      id: "gid://shopify/ProductVariant/11",
+                      title: "250 g",
+                      sku: "COF-250",
+                      barcode: "",
+                      price: "12.00",
+                    },
+                    {
+                      id: "gid://shopify/ProductVariant/12",
+                      title: "500 g",
+                      sku: "COF-500",
+                      barcode: "942000000001",
+                      price: "19.50",
+                    },
+                  ],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
         },
       });
     }) as AdminGraphql["graphql"],
@@ -131,7 +131,126 @@ describe("Shopify product label data", () => {
     const admin = productAdmin();
     await expect(
       fetchProductDocumentInput(admin, shop, ["gid://shopify/Order/42"]),
-    ).rejects.toThrow("Select at least one Shopify product or variant");
+    ).rejects.toThrow("Select between 1 and 100 Shopify products or variants");
     expect(admin.graphql).not.toHaveBeenCalled();
+  });
+
+  it("paginates every variant instead of silently truncating a product", async () => {
+    const admin = productAdmin();
+    const baseGraphql = admin.graphql as ReturnType<typeof vi.fn>;
+    baseGraphql.mockImplementation(
+      async (query: string, options?: { variables?: unknown }) => {
+        if (query.includes("PiqaeShopPrintIdentity"))
+          return Response.json({
+            data: {
+              shop: {
+                name: "Label Shop",
+                contactEmail: null,
+                primaryDomain: null,
+                billingAddress: null,
+              },
+            },
+          });
+        if (query.includes("PiqaeProductLabelCurrency"))
+          return Response.json({ data: { shop: { currencyCode: "NZD" } } });
+        const after = (options?.variables as { after?: string | null })?.after;
+        return Response.json({
+          data: {
+            node: {
+              __typename: "Product",
+              id: "gid://shopify/Product/7",
+              title: "Krank Blend",
+              vendor: "C4 Coffee",
+              productType: "Coffee",
+              tags: [],
+              category: null,
+              variants: after
+                ? {
+                    nodes: [
+                      {
+                        id: "gid://shopify/ProductVariant/12",
+                        title: "500 g",
+                        sku: "COF-500",
+                        barcode: "942000000001",
+                        price: "19.50",
+                      },
+                    ],
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                  }
+                : {
+                    nodes: [
+                      {
+                        id: "gid://shopify/ProductVariant/11",
+                        title: "250 g",
+                        sku: "COF-250",
+                        barcode: "",
+                        price: "12.00",
+                      },
+                    ],
+                    pageInfo: { hasNextPage: true, endCursor: "page-2" },
+                  },
+            },
+          },
+        });
+      },
+    );
+
+    const result = await fetchProductDocumentInput(admin, shop, [
+      "gid://shopify/Product/7",
+    ]);
+
+    expect(result.documentCount).toBe(2);
+    expect(result.input.orders[0]?.lineItems.map(({ id }) => id)).toEqual([
+      "gid://shopify/ProductVariant/11",
+      "gid://shopify/ProductVariant/12",
+    ]);
+    const productQueries = baseGraphql.mock.calls.filter(([query]) =>
+      query.includes("PiqaeProductLabelResource"),
+    );
+    expect(productQueries).toHaveLength(2);
+    expect(productQueries[1]?.[1]).toMatchObject({
+      variables: { id: "gid://shopify/Product/7", after: "page-2" },
+    });
+  });
+
+  it("fails the complete selection when Shopify returns a missing resource", async () => {
+    const admin = productAdmin();
+    const baseGraphql = admin.graphql as ReturnType<typeof vi.fn>;
+    const original = baseGraphql.getMockImplementation() as (
+      query: string,
+      options?: { variables?: unknown },
+    ) => Promise<Response>;
+    baseGraphql.mockImplementation(
+      async (query: string, options?: { variables?: unknown }) => {
+        if (
+          query.includes("PiqaeProductLabelResource") &&
+          (options?.variables as { id?: string })?.id ===
+            "gid://shopify/Product/8"
+        )
+          return Response.json({ data: { node: null } });
+        return original(query, options);
+      },
+    );
+
+    await expect(
+      fetchProductDocumentInput(admin, shop, [
+        "gid://shopify/Product/7",
+        "gid://shopify/Product/8",
+      ]),
+    ).rejects.toThrow("products or variants are unavailable");
+  });
+
+  it("uses one bounded resource query per selected product, not one nested bulk query", async () => {
+    const admin = productAdmin();
+    await fetchProductDocumentInput(admin, shop, [
+      "gid://shopify/Product/7",
+      "gid://shopify/Product/8",
+    ]);
+
+    const calls = (admin.graphql as ReturnType<typeof vi.fn>).mock.calls;
+    expect(
+      calls.filter(([query]) => query.includes("PiqaeProductLabelResource")),
+    ).toHaveLength(2);
+    expect(calls.some(([query]) => query.includes("nodes(ids:"))).toBe(false);
   });
 });
