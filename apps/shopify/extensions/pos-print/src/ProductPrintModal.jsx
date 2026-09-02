@@ -288,6 +288,14 @@ export function ProductPrintModal() {
           {compatibilityMessage ? (
             <s-banner tone="warning">{compatibilityMessage}</s-banner>
           ) : null}
+          {(preview?.warnings ?? []).map((warning, index) => (
+            <s-banner
+              key={`${warning.code ?? "preview-warning"}-${index}`}
+              tone="warning"
+            >
+              {warning.message}
+            </s-banner>
+          ))}
           {preview?.previewImageUrl ? (
             <s-image
               src={preview.previewImageUrl}

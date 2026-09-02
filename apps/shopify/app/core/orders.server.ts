@@ -34,6 +34,28 @@ export class ShopifyAdminApiError extends Error {
   }
 }
 
+/**
+ * A bounded replacement for the many error shapes emitted by Shopify's Admin
+ * GraphQL client. The upstream response can contain merchant data, so callers
+ * may classify this error but must never copy its body into logs or UI text.
+ */
+export class ShopifyAdminGraphqlError extends Error {
+  constructor() {
+    super("Shopify Admin API rejected the GraphQL query");
+    this.name = "ShopifyAdminGraphqlError";
+  }
+}
+
+export type ShopifyDocumentWarning = {
+  code: "optional_order_data_unavailable" | "optional_product_data_unavailable";
+  message: string;
+};
+
+export type ShopifyOrdersForDocument = {
+  orders: NormalizedOrder[];
+  warnings: ShopifyDocumentWarning[];
+};
+
 export interface NormalizedOrder {
   id: string;
   name: string;
@@ -185,6 +207,34 @@ const ORDER_QUERY = `#graphql
              }
            }
          }
+       }
+       pageInfo { hasNextPage endCursor }
+     }
+     subtotalPriceSet { shopMoney { amount } }
+     totalTaxSet { shopMoney { amount } }
+     totalPriceSet { shopMoney { amount } }
+   }
+ }`;
+
+// Keep this query deliberately boring. Taxonomy, tags and custom data improve
+// a document, but must not make an otherwise printable Shopify order depend on
+// one particular Admin API schema revision. When the rich query is rejected we
+// retry this stable contract and tell the merchant exactly what was omitted.
+const BASELINE_ORDER_QUERY = `#graphql
+ query PiqaePrintableOrderBaseline($id: ID!, $after: String) {
+   order(id: $id) {
+     id name createdAt currencyCode
+     customer { id displayName email }
+     shippingAddress { name company address1 address2 city province zip country phone }
+     billingAddress { name company address1 address2 city province zip country phone }
+     note statusPageUrl shippingLine { title }
+     lineItems(first: 100, after: $after) {
+       nodes {
+         id title sku quantity
+         originalUnitPriceSet { shopMoney { amount } }
+         discountedTotalSet { shopMoney { amount } }
+         product { id title vendor productType }
+         variant { id title barcode }
        }
        pageInfo { hasNextPage endCursor }
      }
@@ -382,6 +432,46 @@ export async function fetchOrders(
   ids: string[],
   bindings: ShopifyDataBindings = {},
 ): Promise<NormalizedOrder[]> {
+  return fetchOrdersUsingQuery(admin, ids, bindings, "rich");
+}
+
+/**
+ * Document generation prefers Shopify taxonomy and allowlisted custom data,
+ * but can safely render from the stable order contract when that optional
+ * enrichment is unavailable. Authentication, permissions, missing selected
+ * orders and invalid mandatory values still fail closed.
+ */
+export async function fetchOrdersForDocument(
+  admin: AdminGraphql,
+  ids: string[],
+  bindings: ShopifyDataBindings = {},
+): Promise<ShopifyOrdersForDocument> {
+  try {
+    return {
+      orders: await fetchOrdersUsingQuery(admin, ids, bindings, "rich"),
+      warnings: [],
+    };
+  } catch (error) {
+    if (!isOptionalOrderEnrichmentFailure(error)) throw error;
+    return {
+      orders: await fetchOrdersUsingQuery(admin, ids, {}, "baseline"),
+      warnings: [
+        {
+          code: "optional_order_data_unavailable",
+          message:
+            "This document used standard Shopify order data because optional product categories, tags, or custom fields were unavailable.",
+        },
+      ],
+    };
+  }
+}
+
+async function fetchOrdersUsingQuery(
+  admin: AdminGraphql,
+  ids: string[],
+  bindings: ShopifyDataBindings,
+  mode: "rich" | "baseline",
+): Promise<NormalizedOrder[]> {
   const selection = normalizeBindings(bindings);
   const unique = [...new Set(ids.map(normalizeOrderGid))];
   if (unique.length < 1 || unique.length > 250)
@@ -392,16 +482,13 @@ export async function fetchOrders(
     return grantedScopesPromise;
   };
   const orders = await boundedMap(unique, 8, async (id) => {
-    const first = await graphqlWithRetry(admin, ORDER_QUERY, {
-      id,
-      after: null,
-      orderFields: metafieldKeys(selection.order),
-      productFields: metafieldKeys(selection.product),
-      variantFields: metafieldKeys(selection.variant),
-    });
+    const first = await graphqlWithRetry(
+      admin,
+      mode === "rich" ? ORDER_QUERY : BASELINE_ORDER_QUERY,
+      orderQueryVariables(id, null, selection, mode),
+    );
     const body = first;
-    if (body.errors?.length)
-      throw new Error("Shopify Admin API rejected the order query");
+    if (hasGraphqlErrors(body)) throw new ShopifyAdminGraphqlError();
     const order = body.data?.order;
     if (!order) {
       const scopes = await grantedScopes();
@@ -420,13 +507,12 @@ export async function fetchOrders(
     for (let page = 1; pageInfo?.hasNextPage; page += 1) {
       if (page >= 100 || !pageInfo.endCursor)
         throw new Error(`order line-item pagination limit reached: ${id}`);
-      const next = await graphqlWithRetry(admin, ORDER_QUERY, {
-        id,
-        after: pageInfo.endCursor,
-        orderFields: metafieldKeys(selection.order),
-        productFields: metafieldKeys(selection.product),
-        variantFields: metafieldKeys(selection.variant),
-      });
+      const next = await graphqlWithRetry(
+        admin,
+        mode === "rich" ? ORDER_QUERY : BASELINE_ORDER_QUERY,
+        orderQueryVariables(id, pageInfo.endCursor, selection, mode),
+      );
+      if (hasGraphqlErrors(next)) throw new ShopifyAdminGraphqlError();
       const connection = next.data?.order?.lineItems;
       if (!connection) throw new Error(`order changed while paginating: ${id}`);
       allLines.push(...connection.nodes);
@@ -479,6 +565,38 @@ export async function fetchOrders(
   });
   assertOrdersPayload(orders);
   return orders;
+}
+
+function orderQueryVariables(
+  id: string,
+  after: string | null,
+  selection: NormalizedBindingSelection,
+  mode: "rich" | "baseline",
+): Record<string, unknown> {
+  if (mode === "baseline") return { id, after };
+  return {
+    id,
+    after,
+    orderFields: metafieldKeys(selection.order),
+    productFields: metafieldKeys(selection.product),
+    variantFields: metafieldKeys(selection.variant),
+  };
+}
+
+function isOptionalOrderEnrichmentFailure(error: unknown): boolean {
+  if (error instanceof ShopifyAdminGraphqlError) return true;
+  return (
+    error instanceof ShopifyAdminApiError &&
+    (error.response.code === 400 || error.response.code === 422) &&
+    hasGraphqlErrors(error.response.body)
+  );
+}
+
+function hasGraphqlErrors(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const errors = (value as { errors?: unknown }).errors;
+  if (Array.isArray(errors)) return errors.length > 0;
+  return Boolean(errors && typeof errors === "object");
 }
 
 /**
@@ -961,7 +1079,12 @@ async function graphqlWithRetry(
   variables: Record<string, unknown>,
 ): Promise<any> {
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    const response = await admin.graphql(query, { variables });
+    let response: Response;
+    try {
+      response = await admin.graphql(query, { variables });
+    } catch (error) {
+      throw await normalizeShopifyGraphqlRejection(error);
+    }
     let body: any;
     try {
       body = await response.json();
@@ -994,6 +1117,55 @@ async function graphqlWithRetry(
     await new Promise((resolve) => setTimeout(resolve, delay));
   }
   throw new Error("unreachable");
+}
+
+export async function normalizeShopifyGraphqlRejection(
+  error: unknown,
+): Promise<Error> {
+  if (error instanceof ShopifyAdminApiError) return error;
+  if (error instanceof Response) {
+    let body: unknown = null;
+    try {
+      body = await error.clone().json();
+    } catch {
+      // The bounded status is sufficient; never copy response text into logs.
+    }
+    return new ShopifyAdminApiError(error.status, body);
+  }
+  if (error && typeof error === "object") {
+    const source = error as Record<string, unknown>;
+    const response =
+      source.response && typeof source.response === "object"
+        ? (source.response as Record<string, unknown>)
+        : null;
+    const status = [
+      response?.code,
+      response?.status,
+      source.status,
+      source.statusCode,
+    ].find((value): value is number => typeof value === "number");
+    if (status !== undefined)
+      return new ShopifyAdminApiError(
+        status,
+        response?.body ?? source.body ?? null,
+      );
+    if (
+      hasGraphqlErrors(source) ||
+      hasGraphqlErrors(response) ||
+      Array.isArray(source.graphQLErrors) ||
+      Array.isArray(source.errors)
+    )
+      return new ShopifyAdminGraphqlError();
+    if (
+      error instanceof Error &&
+      /graphql/i.test(`${error.name} ${error.message}`)
+    )
+      return new ShopifyAdminGraphqlError();
+  }
+  if (error instanceof Error) return error;
+  const failure = new Error("Shopify Admin API request failed");
+  failure.name = "ShopifyAdminTransportError";
+  return failure;
 }
 
 async function boundedMap<T, R>(

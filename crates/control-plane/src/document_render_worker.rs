@@ -12,8 +12,8 @@ use bytes::{Bytes, BytesMut};
 use futures::StreamExt as _;
 use piqae_storage_postgres::DocumentRenderWork;
 use printpacket_renderer::{
-    PrintPacketV1, RenderLimits, ResolvedResources, Resource, render_with_metrics, validate,
-    validate_resolved_resources,
+    PrintPacketV1, RenderError, RenderLimits, ResolvedResources, Resource, render_with_metrics,
+    validate, validate_resolved_resources,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -229,7 +229,7 @@ impl DocumentRenderWorker {
             .await
             .map_err(|_| ("render_timeout", true))?
             .map_err(|_| ("render_worker_panic", true))?
-            .map_err(|_| ("document_render_failed", false))?;
+            .map_err(|error| (render_failure_code(&error), false))?;
         if work.render.purpose == "preview" && work.render.expires_at <= chrono::Utc::now() {
             return Err(("preview_expired", false));
         }
@@ -407,6 +407,19 @@ impl DocumentRenderWorker {
     }
 }
 
+const fn render_failure_code(error: &RenderError) -> &'static str {
+    match error {
+        RenderError::UnsupportedVersion(_) => "renderer_version_unsupported",
+        RenderError::Unsupported(_) => "renderer_feature_unsupported",
+        RenderError::MissingPath(_) => "document_data_missing",
+        RenderError::Expression(_) => "document_data_invalid",
+        RenderError::UnsupportedCharacter { .. } => "document_typography_unsupported",
+        RenderError::QrTooLarge | RenderError::InvalidBarcode(_) => "document_barcode_invalid",
+        RenderError::Limit(_) => "document_render_limit_exceeded",
+        RenderError::Invalid(_) => "invalid_document_spec",
+    }
+}
+
 fn render_artifact_object_key(work: &DocumentRenderWork) -> String {
     let lease_digest = hex::encode(Sha256::digest(
         [
@@ -445,6 +458,26 @@ mod tests {
     use piqae_storage_postgres::CreateDocumentResult;
     use sha2::{Digest, Sha256};
     use std::str::FromStr;
+
+    #[test]
+    fn renderer_failures_have_stable_safe_public_codes() {
+        assert_eq!(
+            render_failure_code(&RenderError::UnsupportedVersion("printpacket/v2".into())),
+            "renderer_version_unsupported"
+        );
+        assert_eq!(
+            render_failure_code(&RenderError::MissingPath("orders.0.customer".into())),
+            "document_data_missing"
+        );
+        assert_eq!(
+            render_failure_code(&RenderError::Unsupported("future feature")),
+            "renderer_feature_unsupported"
+        );
+        assert_eq!(
+            render_failure_code(&RenderError::Limit("pages")),
+            "document_render_limit_exceeded"
+        );
+    }
 
     async fn queued() -> Result<
         (
@@ -575,6 +608,35 @@ mod tests {
             "completed"
         );
         assert_eq!(worker.run_once(10).await?, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_required_data_has_an_actionable_terminal_code()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let specification = br#"{
+          "format":"printpacket/v1",
+          "media":{"kind":"paged","size":"a4"},
+          "body":[{
+            "type":"paragraph",
+            "content":[{
+              "type":"value",
+              "value":{"type":"path","path":["missing","field"]}
+            }]
+          }]
+        }"#;
+        let (worker, repository, workspace, environment, id) =
+            queued_with_spec(specification, Arc::new(MemoryObjectStore::default())).await?;
+
+        assert_eq!(worker.run_once(1).await?, 1);
+        let render = repository
+            .get_document_render(workspace, environment, &id)
+            .await?;
+        assert_eq!(render.state, "failed_terminal");
+        assert_eq!(
+            render.failure_code.as_deref(),
+            Some("document_data_missing")
+        );
         Ok(())
     }
 

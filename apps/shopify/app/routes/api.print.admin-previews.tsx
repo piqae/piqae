@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs } from "react-router";
 
 import { createProductionServices } from "../services.server";
+import { DocumentRenderFailedError } from "../core/document-render-errors";
 import { ShopifyOrderUnavailableError } from "../core/shopify-order-errors";
 import { safeFailureMetadata } from "../core/safe-failure-metadata.server";
 import shopify, { migrateLegacyOfflineSession } from "../shopify.server";
@@ -103,6 +104,25 @@ export function classifyAdminPreviewFailure(
       code: "account_connection",
       message:
         "Shopify access could not be refreshed. Open Piqae in Shopify Admin once, then retry this print action.",
+    };
+  if (
+    error instanceof DocumentRenderFailedError &&
+    error.failureCode === "document_data_missing"
+  )
+    return {
+      code: "order_data",
+      message:
+        "This document requires data that was not available for the selection. Add a fallback or condition to the missing field in the template, then try again.",
+    };
+  if (
+    error instanceof DocumentRenderFailedError &&
+    (error.failureCode === "renderer_version_unsupported" ||
+      error.failureCode === "renderer_feature_unsupported")
+  )
+    return {
+      code: "render_service",
+      message:
+        "This document uses a renderer capability that is not active across Piqae yet. Republish the document after the update completes, then try again.",
     };
   if (
     resourceType === "orders" &&

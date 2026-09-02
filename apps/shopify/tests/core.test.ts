@@ -3,6 +3,7 @@ import { CredentialVault } from "../app/core/credentials.server";
 import {
   fetchDraftOrders,
   fetchOrders,
+  fetchOrdersForDocument,
   fetchShopPrintIdentity,
   normalizedLabelCode128Candidate,
   normalizedOrderCode128Candidate,
@@ -252,6 +253,77 @@ describe("Shopify boundary", () => {
         body: { errors: "The stored Admin API credential is invalid" },
       },
     });
+  });
+  it("renders from the stable order contract when optional enrichment is rejected", async () => {
+    const fallbackAdmin = {
+      graphql: vi.fn<AdminGraphql["graphql"]>(async (query) =>
+        query.includes("PiqaePrintableOrderBaseline")
+          ? Response.json({ data: { order } })
+          : Response.json({
+              errors: [
+                {
+                  message: "A newly added optional field is unavailable",
+                  extensions: { code: "GRAPHQL_VALIDATION_FAILED" },
+                },
+              ],
+            }),
+      ),
+    };
+
+    await expect(
+      fetchOrdersForDocument(fallbackAdmin, ["42"]),
+    ).resolves.toMatchObject({
+      orders: [{ name: "#1042", total: 23 }],
+      warnings: [
+        {
+          code: "optional_order_data_unavailable",
+          message: expect.stringContaining("standard Shopify order data"),
+        },
+      ],
+    });
+    expect(fallbackAdmin.graphql).toHaveBeenCalledTimes(2);
+    const baselineCall = fallbackAdmin.graphql.mock.calls[1];
+    expect(baselineCall?.[0]).not.toContain("metafields");
+    expect(baselineCall?.[0]).not.toContain("category");
+    expect(baselineCall?.[1]?.variables).toEqual({
+      id: "gid://shopify/Order/42",
+      after: null,
+    });
+  });
+  it("normalizes an SDK-thrown GraphQL object before using the stable contract", async () => {
+    const fallbackAdmin = {
+      graphql: vi.fn<AdminGraphql["graphql"]>(async (query) => {
+        if (!query.includes("PiqaePrintableOrderBaseline"))
+          throw {
+            graphQLErrors: [
+              {
+                message: "untrusted GraphQL response",
+              },
+            ],
+          };
+        return Response.json({ data: { order } });
+      }),
+    };
+
+    const result = await fetchOrdersForDocument(fallbackAdmin, ["42"]);
+    expect(result.orders).toHaveLength(1);
+    expect(result.warnings).toHaveLength(1);
+    expect(fallbackAdmin.graphql).toHaveBeenCalledTimes(2);
+  });
+  it("does not downgrade Shopify authentication failures to baseline data", async () => {
+    const rejectedAdmin = {
+      graphql: vi.fn<AdminGraphql["graphql"]>(async () =>
+        Response.json(
+          { errors: "The stored Admin API credential is invalid" },
+          { status: 403 },
+        ),
+      ),
+    };
+
+    await expect(
+      fetchOrdersForDocument(rejectedAdmin, ["42"]),
+    ).rejects.toMatchObject({ response: { code: 403 } });
+    expect(rejectedAdmin.graphql).toHaveBeenCalledTimes(1);
   });
   it("reports standard history access without assuming why Shopify hid the order", async () => {
     const limitedAdmin = {

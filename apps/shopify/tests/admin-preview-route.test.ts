@@ -7,7 +7,10 @@ import {
   ShopifySessionRecoveryError,
   withShopifySessionRecovery,
 } from "../app/routes/api.print.admin-previews";
-import { fetchOrders } from "../app/core/orders.server";
+import {
+  fetchOrders,
+  ShopifyAdminGraphqlError,
+} from "../app/core/orders.server";
 import { ShopifyOrderUnavailableError } from "../app/core/shopify-order-errors";
 import { DocumentRenderFailedError } from "../app/core/document-render-errors";
 import { safeFailureMetadata } from "../app/core/safe-failure-metadata.server";
@@ -58,6 +61,40 @@ describe("admin preview failure classification", () => {
     });
     expect(safeFailureMetadata(failure)).toEqual({
       renderFailureCode: "document_render_failed",
+    });
+  });
+
+  it("turns renderer data and version failures into actionable bounded guidance", () => {
+    expect(
+      classifyAdminPreviewFailure(
+        new DocumentRenderFailedError("document_data_missing"),
+      ),
+    ).toEqual({
+      code: "order_data",
+      message:
+        "This document requires data that was not available for the selection. Add a fallback or condition to the missing field in the template, then try again.",
+    });
+    expect(
+      classifyAdminPreviewFailure(
+        new DocumentRenderFailedError("renderer_version_unsupported"),
+      ),
+    ).toEqual({
+      code: "render_service",
+      message:
+        "This document uses a renderer capability that is not active across Piqae yet. Republish the document after the update completes, then try again.",
+    });
+  });
+
+  it("reports a bounded Shopify GraphQL failure without logging its body", () => {
+    const failure = new ShopifyAdminGraphqlError();
+    expect(classifyAdminPreviewFailure(failure)).toEqual({
+      code: "order_data",
+      message:
+        "Piqae could not load the selected Shopify order data. Refresh the orders and try again.",
+    });
+    expect(safeFailureMetadata(failure)).toEqual({
+      upstream: "shopify_admin",
+      failureKind: "graphql_query",
     });
   });
 

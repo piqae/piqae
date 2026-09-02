@@ -10,6 +10,7 @@ import type { CredentialVault } from "./credentials.server";
 import {
   fetchDraftOrders,
   fetchOrders,
+  fetchOrdersForDocument,
   fetchShopPrintIdentity,
   parseShopifyDataBindings,
   shopifyDocumentInput,
@@ -74,15 +75,15 @@ export class ShopifyPrintingService {
       input.templateId,
     );
     const settings = await this.workflow.getSettings(shop);
-    const [fetchedOrders, shopIdentity] = await Promise.all([
-      fetchOrders(
+    const [fetched, shopIdentity] = await Promise.all([
+      fetchOrdersForDocument(
         input.admin,
         input.orderIds,
         parseShopifyDataBindings(settings.metafieldAllowlist),
       ),
       fetchShopPrintIdentity(input.admin, shop),
     ]);
-    const orders = orderPrintSequence(fetchedOrders, settings.printOrder);
+    const orders = orderPrintSequence(fetched.orders, settings.printOrder);
     const renderInput = shopifyDocumentInput(shop, orders, shopIdentity);
     const digest = createHash("sha256")
       .update(
@@ -140,6 +141,7 @@ export class ShopifyPrintingService {
       previewImageUrl: previewToken
         ? `${this.appUrl}/api/public/previews/image?token=${encodeURIComponent(previewToken)}`
         : null,
+      warnings: fetched.warnings,
     };
   }
 
@@ -231,6 +233,7 @@ export class ShopifyPrintingService {
       previewImageUrl: previewToken
         ? `${this.appUrl}/api/public/previews/image?token=${encodeURIComponent(previewToken)}`
         : null,
+      warnings: productData.warnings,
     };
   }
 

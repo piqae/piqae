@@ -5007,6 +5007,7 @@ export interface components {
             /** @enum {string|null} */
             artifact_media_type?: "application/pdf" | null;
             page_count?: number | null;
+            /** @description Stable machine-readable terminal reason. Renderer compatibility and data failures use renderer_version_unsupported, renderer_feature_unsupported, document_data_missing, document_data_invalid, document_typography_unsupported, document_barcode_invalid, document_render_limit_exceeded, or invalid_document_spec; clients must tolerate additional codes. */
             failure_code?: string | null;
             /** Format: date-time */
             expires_at: string;
@@ -5025,6 +5026,7 @@ export interface components {
             /** @enum {string|null} */
             artifact_media_type?: "application/pdf" | null;
             page_count?: number | null;
+            /** @description Stable machine-readable terminal reason. Renderer compatibility and data failures use renderer_version_unsupported, renderer_feature_unsupported, document_data_missing, document_data_invalid, document_typography_unsupported, document_barcode_invalid, document_render_limit_exceeded, or invalid_document_spec; clients must tolerate additional codes. */
             failure_code?: string | null;
             /** Format: date-time */
             created_at: string;
