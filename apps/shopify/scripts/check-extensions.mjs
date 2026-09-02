@@ -14,7 +14,10 @@ const extensionConfigs = [
   "extensions/admin-draft-print/shopify.extension.toml",
   "extensions/admin-draft-bulk-print/shopify.extension.toml",
   "extensions/admin-product-print/shopify.extension.toml",
+  "extensions/admin-product-bulk-print/shopify.extension.toml",
+  "extensions/admin-variant-print/shopify.extension.toml",
   "extensions/admin-product-browser-print/shopify.extension.toml",
+  "extensions/admin-product-bulk-browser-print/shopify.extension.toml",
 ];
 const allowedTargets = new Set([
   "admin.order-details.action.render",
@@ -54,6 +57,12 @@ for (const configPath of extensionConfigs) {
   );
   if (modules.length === 0 || modules.length !== targets.length) {
     throw new Error(`${configPath} must pair every target with one module`);
+  }
+  if (configPath.includes("admin-product") && targets.length !== 1) {
+    throw new Error(`${configPath} must declare exactly one product target`);
+  }
+  if (configPath.includes("admin-variant") && targets.length !== 1) {
+    throw new Error(`${configPath} must declare exactly one variant target`);
   }
   const hasNativePrintTarget = targets.some((target) =>
     target.includes("print-action.render"),

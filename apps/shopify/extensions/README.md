@@ -8,8 +8,14 @@ These extensions use Shopify's native Admin and POS surfaces. They never print o
 - `admin-bulk-print`: selected orders **More actions** menu for direct Node printing, using `admin.order-index.selection-action.render`.
 - `admin-order-browser-print`: order-details **Print** menu for Shopify's standard PDF print flow, using `admin.order-details.print-action.render`.
 - `admin-bulk-browser-print`: selected orders **Print** menu for Shopify's standard PDF print flow, using `admin.order-index.selection-print-action.render`.
-- `admin-product-print`: product-details and product-variant-details **More actions** entries for direct Node label printing, plus a selected-products bulk action.
-- `admin-product-browser-print`: the separate Shopify-native product-detail and selected-products **Print** entries required by Shopify's extension-family rules.
+- `admin-product-print`: product-details **More actions** entry for direct Node label printing.
+- `admin-product-bulk-print`: selected-products **More actions** entry for direct Node label printing.
+- `admin-variant-print`: product-variant-details **More actions** entry for direct Node label printing.
+- `admin-product-browser-print`: Shopify-native product-details **Print** entry.
+- `admin-product-bulk-browser-print`: Shopify-native selected-products **Print** entry.
+
+Each product or variant Admin target has its own extension identity. Shopify validates and deploys these surfaces independently, so their configuration files intentionally declare exactly one target apiece.
+
 - `pos-print`: completed-order/post-purchase actions plus a product-details action menu/modal for printing product or variant labels.
 
 The Admin extensions create a 15-minute Piqae preview from the selected orders. The **Print** menu surfaces hand the exact PDF to Shopify's standard browser-print flow and also expose a PDF download link. The separate **More actions** surfaces render a signed first-page image of that PDF, expose **Print to Node** as the primary modal action, and keep **Download PDF** as the alternate completion path. They always show the document and printer choices before submission. An unpinned published document can be sent directly to any connected printer using that computer's current operating-system/driver defaults; optional saved profiles do not replace this zero-configuration path. A document pinned to an immutable target/profile/stock binding remains fail-closed and can only approve that exact target and specification revision—Piqae never silently falls back to current defaults. Missing, stale, or untrusted loaded-media evidence is described as unverified rather than incompatible. Changing the document or closing the extension cancels the superseded preview on a best-effort basis, with server expiry as the durable fallback. The first release selects one published document per action; document bundling is not implied. The POS extension targets API version `2026-07`: its PDF/system-dialog path uses the published canonical 80 mm PrintPacket receipt. Shopify's connected receipt-printer API accepts HTML rather than a PrintPacket/PDF artifact, so that explicitly selected hardware path remains a bounded, script-free HTML projection until Shopify or the printer API accepts the canonical artifact. A PDF is never passed to a hardware `Printer`.
