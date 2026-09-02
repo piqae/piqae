@@ -140,6 +140,11 @@ sent. `tests/sentry.test.ts` asserts on the real redaction output.
 
 ## PostgreSQL migration gate
 
+Production startup discovers every contiguous, numbered SQL file in
+`migrations/` and applies the complete sequence under one advisory-locked
+transaction. Adding a migration file without adding it to a separate runner
+list is therefore not possible.
+
 Run the fresh-database and N−1 upgrade assertions against a disposable PostgreSQL database:
 
 ```console

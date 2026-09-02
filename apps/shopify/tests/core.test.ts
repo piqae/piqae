@@ -1056,6 +1056,14 @@ describe("Shopify boundary", () => {
       },
     } as never;
     const previewTokens = new DownloadTokenVault(Buffer.alloc(32, 5));
+    const usageFailure = Object.assign(new Error("relation is unavailable"), {
+      name: "error",
+      code: "42P01",
+    });
+    vi.spyOn(workflow, "recordUsage").mockRejectedValueOnce(usageFailure);
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
     const service = new ShopifyPrintingService(
       repository,
       vault,
@@ -1077,6 +1085,19 @@ describe("Shopify boundary", () => {
     expect(preview.previewImageUrl).toMatch(
       /^https:\/\/app\.example\/api\/public\/previews\/image\?token=/,
     );
+    expect(preview.warnings).toContainEqual({
+      code: "usage_tracking_delayed",
+      message:
+        "Usage tracking is temporarily unavailable. This preview is still available to print or download.",
+    });
+    expect(consoleError).toHaveBeenCalledWith(
+      JSON.stringify({
+        event: "shopify_preview_usage_recording_failed",
+        upstream: "shopify_database",
+        upstreamCode: "42P01",
+      }),
+    );
+    consoleError.mockRestore();
     const result = await service.approvePreview({
       shop,
       previewId: preview.previewId,

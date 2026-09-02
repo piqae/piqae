@@ -47,7 +47,10 @@ export class ShopifyAdminGraphqlError extends Error {
 }
 
 export type ShopifyDocumentWarning = {
-  code: "optional_order_data_unavailable" | "optional_product_data_unavailable";
+  code:
+    | "optional_order_data_unavailable"
+    | "optional_product_data_unavailable"
+    | "usage_tracking_delayed";
   message: string;
 };
 

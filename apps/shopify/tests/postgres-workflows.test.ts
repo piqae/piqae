@@ -84,6 +84,7 @@ postgresDescribe("PostgreSQL starter publication transactions", () => {
       "0005_template_targets_and_media.sql",
       "0006_template_draft_published_pointers.sql",
       "0007_print_order_settings.sql",
+      "0008_document_usage_events.sql",
     ])
       await pool.query(
         await readFile(
