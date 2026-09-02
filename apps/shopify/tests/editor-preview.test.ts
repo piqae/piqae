@@ -95,6 +95,17 @@ describe("Shopify editor PDF preview", () => {
     expect(proxy).toContain('"cache-control": "private, no-store"');
     expect(proxy).toContain('"referrer-policy": "no-referrer"');
     expect(proxy).toContain('"x-content-type-options": "nosniff"');
+
+    const imageProxy = readFileSync(
+      join(
+        process.cwd(),
+        "app/routes/api.editor-preview-renders.$renderId.image.tsx",
+      ),
+      "utf8",
+    );
+    expect(imageProxy).toContain("renderFirstPdfPagePng");
+    expect(imageProxy).toContain("downloadPreviewDraftArtifact");
+    expect(imageProxy).toContain('"cache-control": "private, no-store"');
   });
 
   it("queries only the newest order identifier", async () => {

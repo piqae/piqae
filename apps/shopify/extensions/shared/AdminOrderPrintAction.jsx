@@ -40,9 +40,14 @@ class PrintActionErrorBoundary extends Component {
   }
 
   render() {
+    const productMode = this.props.resourceType === "products";
     if (this.state.error)
       return (
-        <s-admin-action heading="Print order documents">
+        <s-admin-action
+          heading={
+            productMode ? "Print product labels" : "Print order documents"
+          }
+        >
           <s-banner tone="critical">
             Piqae Order Printing could not start: {this.state.error}
           </s-banner>
@@ -248,17 +253,32 @@ export async function loadWithTimeout(
 
 export function AdminOrderPrintAction(props) {
   return (
-    <PrintActionErrorBoundary>
+    <PrintActionErrorBoundary resourceType={props.resourceType}>
       <AdminOrderPrintActionContent {...props} />
     </PrintActionErrorBoundary>
   );
 }
 
-function AdminOrderPrintActionContent({ bulk = false }) {
-  const orderIds = useMemo(
+export function AdminProductPrintAction(props) {
+  return <AdminOrderPrintAction {...props} resourceType="products" />;
+}
+
+function AdminOrderPrintActionContent({
+  bulk = false,
+  resourceType = "orders",
+}) {
+  const resourceIds = useMemo(
     () => (shopify.data.selected ?? []).map(({ id }) => id),
     [],
   );
+  const productMode = resourceType === "products";
+  const optionsPath = productMode
+    ? "/api/print/admin/product-options"
+    : "/api/print/admin/options";
+  const previewsPath = productMode
+    ? "/api/print/admin/product-previews"
+    : "/api/print/admin/previews";
+  const resourceName = productMode ? "product or variant" : "order";
   const [options, setOptions] = useState(null);
   const [documentId, setDocumentId] = useState("");
   const [printerId, setPrinterId] = useState("");
@@ -272,7 +292,7 @@ function AdminOrderPrintActionContent({ bulk = false }) {
   const [previewAttempt, setPreviewAttempt] = useState(0);
   const requestSequence = useRef(0);
   const previewSequence = useRef(0);
-  const interactionId = useRef(newInteractionId(orderIds));
+  const interactionId = useRef(newInteractionId(resourceIds));
   const approvedPreview = useRef("");
 
   async function loadOptions() {
@@ -281,7 +301,7 @@ function AdminOrderPrintActionContent({ bulk = false }) {
     setError("");
     try {
       const value = await loadWithTimeout((signal) =>
-        authorizedJson("/api/print/admin/options", { signal }),
+        authorizedJson(optionsPath, { signal }),
       );
       if (sequence !== requestSequence.current) return;
       const defaultDocument = chooseDefaultDocument(value.documents ?? []);
@@ -339,7 +359,7 @@ function AdminOrderPrintActionContent({ bulk = false }) {
     setPrinterId(next?.value ?? "");
   }, [selectedDocument?.id, options]);
   useEffect(() => {
-    if (!options?.linked || !selectedDocument || orderIds.length === 0) {
+    if (!options?.linked || !selectedDocument || resourceIds.length === 0) {
       setPreview(null);
       setPreviewState("idle");
       setPreviewError("");
@@ -351,13 +371,16 @@ function AdminOrderPrintActionContent({ bulk = false }) {
     setPreviewState("loading");
     loadWithTimeout(
       (signal) =>
-        authorizedJson("/api/print/admin/previews", {
+        authorizedJson(previewsPath, {
           method: "POST",
           headers: {
             "content-type": "application/json",
             "idempotency-key": `shopify-preview-${interactionId.current}-${selectedDocument.id}`,
           },
-          body: JSON.stringify({ orderIds, templateId: selectedDocument.id }),
+          body: JSON.stringify({
+            [productMode ? "productIds" : "orderIds"]: resourceIds,
+            templateId: selectedDocument.id,
+          }),
           signal,
         }),
       15_000,
@@ -375,7 +398,14 @@ function AdminOrderPrintActionContent({ bulk = false }) {
     return () => {
       previewSequence.current += 1;
     };
-  }, [options, selectedDocument?.id, orderIds.join(","), previewAttempt]);
+  }, [
+    options,
+    selectedDocument?.id,
+    resourceIds.join(","),
+    previewAttempt,
+    previewsPath,
+    productMode,
+  ]);
 
   useEffect(() => {
     setPreviewImageState(preview?.previewImageUrl ? "loading" : "idle");
@@ -464,16 +494,18 @@ function AdminOrderPrintActionContent({ bulk = false }) {
 
   return (
     <s-admin-action
-      heading="Print order documents"
+      heading={productMode ? "Print product labels" : "Print order documents"}
       loading={state === "loading"}
     >
       <s-stack direction="block" gap="base">
         {bulk && (
-          <s-text type="strong">{orderIds.length} selected orders</s-text>
+          <s-text type="strong">
+            {resourceIds.length} selected {productMode ? "products" : "orders"}
+          </s-text>
         )}
-        {orderIds.length === 0 && (
+        {resourceIds.length === 0 && (
           <s-banner tone="critical">
-            No order was selected. Close this view and try again.
+            No {resourceName} was selected. Close this view and try again.
           </s-banner>
         )}
         {state === "loading" && (
@@ -487,7 +519,8 @@ function AdminOrderPrintActionContent({ bulk = false }) {
         )}
         {options && !options.linked && (
           <s-banner tone="info">
-            Connect Piqae to preview, download, or print order documents.
+            Connect Piqae to preview, download, or print{" "}
+            {productMode ? "product labels" : "order documents"}.
             <s-button href={options.setupDestinationUrl}>Set up Piqae</s-button>
           </s-banner>
         )}
@@ -539,7 +572,10 @@ function AdminOrderPrintActionContent({ bulk = false }) {
             {previewState === "loading" && (
               <s-stack direction="inline" gap="small" alignItems="center">
                 <s-spinner accessibilityLabel="Generating document preview" />
-                <s-text>Generating a preview with the selected orders…</s-text>
+                <s-text>
+                  Generating a preview with the selected{" "}
+                  {productMode ? "products" : "orders"}…
+                </s-text>
               </s-stack>
             )}
             {previewState === "failed" && previewError && (

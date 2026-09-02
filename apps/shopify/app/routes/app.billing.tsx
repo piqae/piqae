@@ -61,15 +61,12 @@ export default function Billing() {
         </s-banner>
       ) : null}
       <div className="piqae-plan-overview">
-        <span className="piqae-plan-mark" aria-hidden="true">
-          ↗
-        </span>
         <div className="piqae-plan-overview-copy">
           <span className="piqae-eyebrow">Current plan</span>
           <s-heading>{billing.plan} plan</s-heading>
           <s-paragraph>
             {billing.used.toLocaleString()} of {billing.limit.toLocaleString()}{" "}
-            documents used this period
+            documents rendered this month
           </s-paragraph>
           <div
             className="piqae-plan-progress"
@@ -107,6 +104,9 @@ export default function Billing() {
                   {detail.allowance}
                 </strong>
                 <s-paragraph>{detail.description}</s-paragraph>
+                <span className="piqae-plan-price-note">
+                  Local price and currency shown in Shopify
+                </span>
                 <ul>
                   <li>Managed Piqae workspace included</li>
                   <li>Direct printing and PDF fallback</li>

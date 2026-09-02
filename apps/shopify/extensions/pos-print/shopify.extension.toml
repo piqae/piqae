@@ -30,3 +30,11 @@ module = "./src/ActionMenuItem.jsx"
 [[extensions.targeting]]
 target = "pos.purchase.post.action.render"
 module = "./src/PrintModal.jsx"
+
+[[extensions.targeting]]
+target = "pos.product-details.action.menu-item.render"
+module = "./src/ProductActionMenuItem.jsx"
+
+[[extensions.targeting]]
+target = "pos.product-details.action.render"
+module = "./src/ProductPrintModal.jsx"

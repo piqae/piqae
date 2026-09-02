@@ -13,6 +13,7 @@ const extensionConfigs = [
   "extensions/customer-order-document/shopify.extension.toml",
   "extensions/admin-draft-print/shopify.extension.toml",
   "extensions/admin-draft-bulk-print/shopify.extension.toml",
+  "extensions/admin-product-print/shopify.extension.toml",
 ];
 const allowedTargets = new Set([
   "admin.order-details.action.render",
@@ -28,6 +29,13 @@ const allowedTargets = new Set([
   "customer-account.order-status.block.render",
   "admin.draft-order-details.action.render",
   "admin.draft-order-index.selection-action.render",
+  "admin.product-details.action.render",
+  "admin.product-index.selection-action.render",
+  "admin.product-variant-details.action.render",
+  "admin.product-details.print-action.render",
+  "admin.product-index.selection-print-action.render",
+  "pos.product-details.action.menu-item.render",
+  "pos.product-details.action.render",
 ]);
 
 const entryPoints = [];

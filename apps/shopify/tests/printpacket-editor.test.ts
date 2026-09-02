@@ -119,7 +119,8 @@ describe("PrintPacket editor serialization", () => {
     expect(canvasStyle(receipt)).toMatchObject({
       aspectRatio: undefined,
       "--piqae-mm": "calc(100cqw / 80)",
-      "--piqae-media-min-height": "120mm",
+      "--piqae-media-height": "auto",
+      "--piqae-media-min-height": "0",
     });
     expect(canvasContentStyle(receipt)).toEqual({
       margin:

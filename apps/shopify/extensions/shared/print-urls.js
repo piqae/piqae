@@ -18,7 +18,9 @@ export function buildAdminPrintUrl({ orderIds, documents, templateId }) {
 }
 
 export async function authorizedJson(url, options = {}) {
-  const token = await shopify.auth.idToken();
+  let token = await shopify.auth?.idToken?.();
+  if (!token) token = await shopify.session?.getSessionToken?.();
+  if (!token) throw new Error("Shopify could not authenticate this action");
   const headers = new Headers(options.headers);
   headers.set("authorization", `Bearer ${token}`);
   headers.set("accept", "application/json");

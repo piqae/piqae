@@ -11,8 +11,10 @@ rest with AES-256-GCM and shop-bound associated data; the wrapping key belongs i
 the deployment secret manager.
 
 Printable endpoints authenticate Shopify session tokens and derive the shop
-from that context. Callers cannot provide a shop domain. Order IDs are validated
-as Shopify Order GIDs and re-fetched with the authenticated GraphQL client.
+from that context. Callers cannot provide a shop domain. Order, Product, and
+ProductVariant IDs are validated as Shopify GIDs and re-fetched with the
+authenticated GraphQL client. A Product label action expands the product's
+variants, while a ProductVariant action remains scoped to that exact variant.
 
 The configuration requests both `read_orders` and Shopify-approved
 `read_all_orders` because historical invoice reprints and exports are core app

@@ -200,6 +200,9 @@ export function liquidToCanonical(
         width_mm: 48,
         height_mm: 16,
         human_readable: true,
+        align: "center",
+        padding_mm: 1.5,
+        gap_mm: 1.2,
       });
     } else if (tag === "piqae_divider")
       stack.at(-1)!.blocks.push({ type: "divider" });

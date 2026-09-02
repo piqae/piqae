@@ -423,6 +423,28 @@ describe("hybrid template authority", () => {
     );
   });
 
+  it("counts rendered documents once per tenant and idempotency event", async () => {
+    const repository = new MemoryWorkflowRepository();
+    await repository.saveBilling(alpha, {
+      mode: "shopify_child",
+      plan: "starter",
+      used: 900,
+      limit: 500,
+      status: "active",
+    });
+    expect(await repository.recordUsage(alpha, "render_1", 4)).toBe(true);
+    expect(await repository.recordUsage(alpha, "render_1", 4)).toBe(false);
+    expect(await repository.recordUsage(beta, "render_1", 7)).toBe(true);
+    expect(await repository.getBilling(alpha)).toMatchObject({
+      used: 4,
+      limit: 500,
+    });
+    expect(await repository.getBilling(beta)).toMatchObject({ used: 7 });
+    await expect(repository.recordUsage(alpha, "invalid", 0)).rejects.toThrow(
+      "Document usage event is invalid",
+    );
+  });
+
   it("rejects unpinned and non-Shopify asset ingestion", () => {
     const envelope = parseTemplateEnvelope(starterTemplates[0]!.source);
     expect(() =>

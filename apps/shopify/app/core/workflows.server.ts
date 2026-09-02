@@ -144,6 +144,11 @@ export interface WorkflowRepository {
   ): Promise<void>;
   getBilling(shop: string): Promise<BillingState>;
   saveBilling(shop: string, value: BillingState): Promise<void>;
+  recordUsage(
+    shop: string,
+    eventKey: string,
+    documents: number,
+  ): Promise<boolean>;
 }
 
 export class MemoryWorkflowRepository implements WorkflowRepository {
@@ -152,6 +157,10 @@ export class MemoryWorkflowRepository implements WorkflowRepository {
   private automations = new Map<string, AutomationRule[]>();
   private activity = new Map<string, ActivityEntry[]>();
   private billing = new Map<string, BillingState>();
+  private usage = new Map<
+    string,
+    Map<string, { documents: number; createdAt: Date }>
+  >();
   async getSettings(shop: string) {
     return structuredClone(
       this.settings.get(normalizeShopDomain(shop)) ?? DEFAULT_SETTINGS,
@@ -296,12 +305,34 @@ export class MemoryWorkflowRepository implements WorkflowRepository {
     );
   }
   async getBilling(shop: string) {
-    return structuredClone(
-      this.billing.get(normalizeShopDomain(shop)) ?? DEFAULT_BILLING,
-    );
+    const key = normalizeShopDomain(shop);
+    const billing = structuredClone(this.billing.get(key) ?? DEFAULT_BILLING);
+    const start = new Date();
+    start.setUTCDate(1);
+    start.setUTCHours(0, 0, 0, 0);
+    billing.used = [...(this.usage.get(key)?.values() ?? [])]
+      .filter((item) => item.createdAt >= start)
+      .reduce((sum, item) => sum + item.documents, 0);
+    return billing;
   }
   async saveBilling(shop: string, value: BillingState) {
     this.billing.set(normalizeShopDomain(shop), structuredClone(value));
+  }
+  async recordUsage(shop: string, eventKey: string, documents: number) {
+    if (
+      !eventKey ||
+      eventKey.length > 200 ||
+      !Number.isInteger(documents) ||
+      documents < 1 ||
+      documents > 10_000
+    )
+      throw new Error("Document usage event is invalid");
+    const key = normalizeShopDomain(shop);
+    const events = this.usage.get(key) ?? new Map();
+    if (events.has(eventKey)) return false;
+    events.set(eventKey, { documents, createdAt: new Date() });
+    this.usage.set(key, events);
+    return true;
   }
 }
 
@@ -588,7 +619,17 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
   }
   async getBilling(shop: string) {
     const r = await this.pool.query(
-      "SELECT mode,plan_handle,used_count,plan_limit,status FROM shopify_billing_state WHERE shop=$1",
+      `SELECT COALESCE(b.mode,'existing_piqae') AS mode,
+        COALESCE(b.plan_handle,'free') AS plan_handle,
+        COALESCE(b.plan_limit,50) AS plan_limit,
+        COALESCE(b.status,'active') AS status,
+        COALESCE((SELECT SUM(u.document_count)::integer
+          FROM shopify_document_usage_events u
+          WHERE u.shop=$1
+            AND u.created_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'),0) AS used_count
+       FROM shopify_installations i
+       LEFT JOIN shopify_billing_state b ON b.shop=i.shop
+       WHERE i.shop=$1`,
       [normalizeShopDomain(shop)],
     );
     const x = r.rows[0];
@@ -607,6 +648,21 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
       "INSERT INTO shopify_billing_state(shop,mode,plan_handle,used_count,plan_limit,status) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(shop) DO UPDATE SET mode=EXCLUDED.mode,plan_handle=EXCLUDED.plan_handle,used_count=EXCLUDED.used_count,plan_limit=EXCLUDED.plan_limit,status=EXCLUDED.status,updated_at=now()",
       [normalizeShopDomain(shop), v.mode, v.plan, v.used, v.limit, v.status],
     );
+  }
+  async recordUsage(shop: string, eventKey: string, documents: number) {
+    if (
+      !eventKey ||
+      eventKey.length > 200 ||
+      !Number.isInteger(documents) ||
+      documents < 1 ||
+      documents > 10_000
+    )
+      throw new Error("Document usage event is invalid");
+    const result = await this.pool.query(
+      "INSERT INTO shopify_document_usage_events(shop,event_key,document_count) VALUES($1,$2,$3) ON CONFLICT(shop,event_key) DO NOTHING",
+      [normalizeShopDomain(shop), eventKey, documents],
+    );
+    return result.rowCount === 1;
   }
 }
 const TEMPLATE_SELECT = `SELECT
