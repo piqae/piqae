@@ -25,11 +25,7 @@ describe("Shopify template media", () => {
     }));
 
     await expect(
-      resolveShopifyTemplateImage(
-        admin,
-        "gid://shopify/MediaImage/123",
-        pin,
-      ),
+      resolveShopifyTemplateImage(admin, "gid://shopify/MediaImage/123", pin),
     ).resolves.toEqual({
       asset: {
         id: "gid://shopify/MediaImage/123",
