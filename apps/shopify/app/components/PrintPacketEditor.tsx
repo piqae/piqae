@@ -38,6 +38,10 @@ import { documentHasPageBreak } from "../core/template-model";
 import type { ShopifyPrintTarget } from "../core/shopify-print-targets";
 
 type DesignStock = ShopifyPrintTarget["stock"];
+export type PickedShopifyImage = {
+  resourceKey: string;
+  resource: NonNullable<PrintPacket["resources"]>[string];
+};
 type TableEditorBlock = Extract<Block, { type: "table" }>;
 type DocumentRegion = "body" | "header" | "footer";
 type CanvasSelectionTarget =
@@ -274,6 +278,7 @@ export function PrintPacketEditor({
   stock = null,
   workspaceControls,
   history: sharedHistory,
+  onPickShopifyImage,
   onChange,
 }: {
   value: PrintPacket;
@@ -282,6 +287,7 @@ export function PrintPacketEditor({
   stock?: DesignStock;
   workspaceControls?: ReactNode;
   history?: PrintPacketEditorHistory;
+  onPickShopifyImage?: () => Promise<PickedShopifyImage | null>;
   onChange(document: PrintPacket): void;
 }) {
   const allAuthoringFields = [...AUTHORING_FIELDS, ...customFields];
@@ -550,6 +556,26 @@ export function PrintPacketEditor({
     const inserted = docToBlocks(schema.nodes.doc!.create(null, [node]))[0];
     if (!inserted) return;
     const region = selection?.region ?? activeRegion;
+    if (selection?.path) {
+      const regionBlocks = documentRegionBlocks(latest.current, region);
+      const insertedInCell = insertBlockIntoGridCell(
+        regionBlocks,
+        selection.path,
+        inserted,
+      );
+      if (insertedInCell) {
+        const nextDocument = withDocumentRegionBlocks(
+          latest.current,
+          region,
+          insertedInCell,
+        );
+        latest.current = nextDocument;
+        if (region === "body") syncBodyEditor(nextDocument);
+        setSelection(null);
+        publishEditorDocument(nextDocument);
+        return;
+      }
+    }
     if (
       selection?.path &&
       selection.target?.kind === "table_cell" &&
@@ -720,6 +746,24 @@ export function PrintPacketEditor({
   };
   const insertBlock = (block: Block) =>
     insert(blockNode(nodeTypeForBlock(block), block));
+  const insertShopifyImage = async () => {
+    const picked = await onPickShopifyImage?.();
+    if (!picked || disabled) return;
+    latest.current = {
+      ...latest.current,
+      resources: {
+        ...(latest.current.resources ?? {}),
+        [picked.resourceKey]: picked.resource,
+      },
+    };
+    insertBlock({
+      type: "image",
+      resource: picked.resourceKey,
+      width_mm: insertionScope === "item" ? 16 : 42,
+      height_mm: insertionScope === "item" ? 16 : 18,
+      fit: "contain",
+    });
+  };
   const removeSelected = () => {
     const instance = view.current;
     if (!instance || !selection) return;
@@ -760,6 +804,28 @@ export function PrintPacketEditor({
     setSelection(null);
     instance.focus();
   };
+  useEffect(() => {
+    if (!selection || disabled) return;
+    const removeWithKeyboard = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        (event.key !== "Delete" && event.key !== "Backspace") ||
+        isEditingTarget(event.target)
+      )
+        return;
+      const target = event.target;
+      if (
+        target instanceof Node &&
+        target !== document.body &&
+        !editorRoot.current?.contains(target)
+      )
+        return;
+      event.preventDefault();
+      removeSelected();
+    };
+    document.addEventListener("keydown", removeWithKeyboard);
+    return () => document.removeEventListener("keydown", removeWithKeyboard);
+  }, [disabled, selection]);
   const moveSelected = (direction: -1 | 1) => {
     if (!selection?.path) return;
     const regionBlocks = documentRegionBlocks(latest.current, selection.region);
@@ -1027,12 +1093,13 @@ export function PrintPacketEditor({
             </div>
             <span className="piqae-tool-divider" />
             <div className="piqae-tool-group">
-              <ToolButton
-                icon="image"
-                label="Image"
+              <InsertImageButton
                 disabled={disabled}
-                dragType="image"
-                onClick={() => insertBlock(defaultImage(insertionScope))}
+                canPickShopify={Boolean(onPickShopifyImage)}
+                onInsertDynamic={() =>
+                  insertBlock(defaultImage(insertionScope))
+                }
+                onInsertShopify={insertShopifyImage}
               />
               <ToolButton
                 icon="qr"
@@ -1198,6 +1265,7 @@ export function PrintPacketEditor({
               )
                 return;
               event.preventDefault();
+              event.stopPropagation();
               removeSelected();
             }}
           >
@@ -3363,6 +3431,80 @@ function InsertDataButton({
   );
 }
 
+function InsertImageButton({
+  disabled,
+  canPickShopify,
+  onInsertDynamic,
+  onInsertShopify,
+}: {
+  disabled?: boolean;
+  canPickShopify: boolean;
+  onInsertDynamic(): void;
+  onInsertShopify(): Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const menu = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: PointerEvent) => {
+      if (event.target instanceof Node && !menu.current?.contains(event.target))
+        setOpen(false);
+    };
+    document.addEventListener("pointerdown", close, true);
+    return () => document.removeEventListener("pointerdown", close, true);
+  }, [open]);
+  return (
+    <span ref={menu} className="piqae-tool-menu">
+      <button
+        className="piqae-tool-button"
+        type="button"
+        aria-label="Image"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        data-tooltip="Image"
+        disabled={disabled}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <Icon name="image" />
+      </button>
+      {open ? (
+        <span className="piqae-popover piqae-image-popover" role="menu">
+          <button
+            type="button"
+            role="menuitem"
+            disabled={disabled}
+            onClick={() => {
+              setOpen(false);
+              if (disabled) return;
+              onInsertDynamic();
+            }}
+          >
+            <Icon name="data" />
+            <span>Dynamic Shopify image</span>
+            <small>Product, variant, or shop logo</small>
+          </button>
+          {canPickShopify ? (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={disabled}
+              onClick={() => {
+                setOpen(false);
+                if (disabled) return;
+                void onInsertShopify();
+              }}
+            >
+              <Icon name="image" />
+              <span>Choose from Shopify Files</span>
+              <small>Browse or upload an image</small>
+            </button>
+          ) : null}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 /**
  * Document-wide settings. These belong to the document rather than to any
  * selected block, so the editor surfaces them from the top action bar instead
@@ -3573,6 +3715,13 @@ function SelectionSettings({
       <datalist id={`${listId}-conditions`}>
         {authoringFields
           .filter((field) => field.conditionable)
+          .map((field) => (
+            <option value={field.path} key={field.path} label={field.label} />
+          ))}
+      </datalist>
+      <datalist id={`${listId}-images`}>
+        {authoringFields
+          .filter((field) => field.image)
           .map((field) => (
             <option value={field.path} key={field.path} label={field.label} />
           ))}
@@ -3862,7 +4011,7 @@ function selectionFields({
       <>
         <BarPath
           label="Dynamic image"
-          list={allPaths}
+          list={`${listId}-images`}
           value={authoringExpressionLabel(block.resource, scope)}
           disabled={disabled}
           onChange={(resource) =>
@@ -4100,6 +4249,23 @@ function BarPath({
   disabled?: boolean;
   onChange(value: string): void;
 }) {
+  const [draft, setDraft] = useState(value);
+  const focused = useRef(false);
+  const cancelled = useRef(false);
+  useEffect(() => {
+    if (!focused.current) setDraft(value);
+  }, [value]);
+  const commit = () => {
+    focused.current = false;
+    if (cancelled.current) {
+      cancelled.current = false;
+      setDraft(value);
+      return;
+    }
+    const next = draft.trim();
+    if (next && next !== value) onChange(next);
+    else setDraft(value);
+  };
   return (
     <BarField label={label}>
       <input
@@ -4107,9 +4273,24 @@ function BarPath({
         type="text"
         list={list}
         spellCheck={false}
-        value={value}
+        value={draft}
         disabled={disabled}
-        onChange={(event) => onChange(event.currentTarget.value)}
+        onFocus={() => {
+          focused.current = true;
+          cancelled.current = false;
+        }}
+        onChange={(event) => setDraft(event.currentTarget.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            event.currentTarget.blur();
+          } else if (event.key === "Escape") {
+            cancelled.current = true;
+            setDraft(value);
+            event.currentTarget.blur();
+          }
+        }}
       />
     </BarField>
   );
@@ -4926,6 +5107,55 @@ export function replaceBlockAtPath(
         )
       : block;
   });
+}
+export function blockAtPath(blocks: Block[], path: BlockPath): Block | null {
+  const [part, ...rest] = path;
+  if (!part) return null;
+  const block = blocks[part.index];
+  if (!block) return null;
+  if (!rest.length) return block;
+  const nextPart = rest[0]!;
+  if (nextPart.branch === "root") return null;
+  const nested = blocksInBranch(block, nextPart.branch);
+  return nested ? blockAtPath(nested, rest) : null;
+}
+
+/** Keep toolbar insertion inside the selected grid cell. */
+export function insertBlockIntoGridCell(
+  blocks: Block[],
+  path: BlockPath,
+  inserted: Block,
+): Block[] | null {
+  if (path.length < 2) return null;
+  const cellPart = path.at(-1)!;
+  if (cellPart.branch !== "children") return null;
+  const parent = blockAtPath(blocks, path.slice(0, -1));
+  if (
+    parent?.type !== "grid" ||
+    cellPart.index < 0 ||
+    cellPart.index >= parent.columns.length
+  )
+    return null;
+  const cell = parent.children[cellPart.index];
+  if (!cell) return null;
+  const emptyParagraph =
+    cell.type === "paragraph" &&
+    cell.content.every(
+      (inline) => inline.type === "text" && inline.value.trim() === "",
+    );
+  const replacement: Block = emptyParagraph
+    ? structuredClone(inserted)
+    : cell.type === "stack"
+      ? {
+          ...cell,
+          children: [...cell.children, structuredClone(inserted)],
+        }
+      : {
+          type: "stack",
+          gap_mm: 1,
+          children: [cell, structuredClone(inserted)],
+        };
+  return replaceBlockAtPath(blocks, path, replacement);
 }
 export function insertBlockAfterPath(
   blocks: Block[],

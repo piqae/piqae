@@ -153,6 +153,17 @@ describe("PrintPacket model", () => {
           node.resource.path?.join(".") === "imageResource",
       ),
     ).toMatchObject({ width_mm: 14, height_mm: 14, fit: "contain" });
+    const packingList = allNodes(packing.body).find(
+      (node) => node.type === "data_list",
+    );
+    expect(packingList?.header?.[0]).toMatchObject({
+      type: "grid",
+      columns: [9, 1],
+      children: [
+        { type: "paragraph", content: [{ value: "ITEMS" }] },
+        { type: "paragraph", content: [{ value: "QTY" }] },
+      ],
+    });
     expect(JSON.stringify(invoice)).toContain("BILLING ADDRESS");
     expect(JSON.stringify(invoice)).toContain("Subtotal");
   });

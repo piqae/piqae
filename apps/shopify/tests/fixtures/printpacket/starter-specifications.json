@@ -1255,14 +1255,9 @@
             "header": [
               {
                 "type": "grid",
-                "columns": [1.4, 7.6, 1],
+                "columns": [9, 1],
                 "gap_mm": 1.5,
                 "children": [
-                  {
-                    "type": "paragraph",
-                    "content": [],
-                    "style": {}
-                  },
                   {
                     "type": "paragraph",
                     "content": [

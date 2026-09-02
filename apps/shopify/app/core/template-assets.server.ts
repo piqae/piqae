@@ -74,6 +74,59 @@ export async function fetchTemplateAsset(
   return bytes.slice();
 }
 
+export async function pinShopifyTemplateJpeg(
+  sourceUrl: string,
+  id: string,
+): Promise<ExternalAsset> {
+  const source = new URL(sourceUrl);
+  if (source.origin !== "https://cdn.shopify.com")
+    throw new Error("Template assets require the exact Shopify CDN origin");
+  await assertPublicHost(source.hostname);
+  const response = await fetch(source, {
+    redirect: "error",
+    signal: AbortSignal.timeout(5_000),
+    headers: { accept: "image/jpeg" },
+  });
+  if (
+    !response.ok ||
+    response.headers.get("content-type")?.split(";", 1)[0] !== "image/jpeg"
+  )
+    throw new Error(
+      "The selected Shopify image could not be converted to JPEG",
+    );
+  const announced = Number(response.headers.get("content-length") ?? 0);
+  if (announced > ASSET_LIMITS.maxBytes)
+    throw new Error("The selected image exceeds 2 MiB");
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("The selected Shopify image has no body");
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    length += value.byteLength;
+    if (length > ASSET_LIMITS.maxBytes) {
+      await reader.cancel();
+      throw new Error("The selected image exceeds 2 MiB");
+    }
+    chunks.push(value);
+  }
+  if (length < 1) throw new Error("The selected Shopify image is empty");
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  pruneCache();
+  cache.set(digest, {
+    expiresAt: Date.now() + ASSET_LIMITS.cacheSeconds * 1_000,
+    bytes,
+  });
+  return { id, digest, mediaType: "image/jpeg", bytes: length, sourceUrl };
+}
+
 function pruneCache(): void {
   const now = Date.now();
   for (const [key, value] of cache)

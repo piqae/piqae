@@ -1058,7 +1058,7 @@
   left: 50%;
   display: flex;
   box-sizing: border-box;
-  width: max-content;
+  width: min(72rem, calc(100vw - 1.5rem));
   max-width: min(28rem, 100%);
   flex-wrap: wrap;
   justify-content: center;
@@ -2396,6 +2396,34 @@
 .piqae-popover-list button:hover {
   background: #eaf1ff;
 }
+.piqae-image-popover {
+  width: 18rem;
+  padding: 0.3rem;
+}
+.piqae-image-popover > button {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 1.5rem 1fr;
+  gap: 0.1rem 0.4rem;
+  padding: 0.55rem;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: CanvasText;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.piqae-image-popover > button:hover {
+  background: #f1f2f4;
+}
+.piqae-image-popover .piqae-icon {
+  grid-row: 1 / span 2;
+  align-self: center;
+}
+.piqae-image-popover small {
+  color: #616161;
+}
 .piqae-popover-list small {
   color: #174ea6;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -2426,20 +2454,29 @@
   width: max-content;
   min-height: 2.75rem;
   min-width: 100%;
-  max-width: min(90rem, calc(100vw - 1.5rem));
-  padding: 0.35rem;
+  max-width: calc(100vw - 1.5rem);
+  padding: 0.25rem;
   border-top: 1px solid #e3e3e3;
   border-radius: 0 0 10px 10px;
   background: Canvas;
   box-shadow: 0 8px 18px rgb(26 26 26 / 10%);
   transform: translateX(-50%);
 }
+.piqae-settings-panel[disabled] {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.piqae-editor-form.is-saving .piqae-editor-surface {
+  cursor: progress;
+}
 .piqae-selection-bar {
   display: flex;
   width: 100%;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.4rem 0.7rem;
+  gap: 0.25rem 0.45rem;
   max-width: 100%;
   padding: 0 0.1rem 0 0.4rem;
   color: CanvasText;
@@ -2469,24 +2506,25 @@
 }
 .piqae-bar-fields {
   display: flex;
+  flex: 1 1 28rem;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.35rem 0.6rem;
+  gap: 0.25rem 0.4rem;
 }
 .piqae-bar-field,
 .piqae-bar-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
-  min-height: 2rem;
+  gap: 0.25rem;
+  min-height: 1.75rem;
   color: #616161;
   font-size: 0.75rem;
   white-space: nowrap;
 }
 .piqae-bar-input {
   box-sizing: border-box;
-  height: 2rem;
-  padding: 0 0.5rem;
+  height: 1.75rem;
+  padding: 0 0.4rem;
   border: 1px solid #c9cccf;
   border-radius: 7px;
   background: Canvas;
@@ -2495,18 +2533,18 @@
   font-size: 0.78rem;
 }
 .piqae-bar-path {
-  width: 11rem;
+  width: 9.5rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.72rem;
 }
 .piqae-bar-number {
-  width: 4.2rem;
+  width: 3.75rem;
 }
 .piqae-bar-button {
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
-  min-height: 2rem;
+  min-height: 1.75rem;
   padding: 0 0.55rem;
   border: 1px solid #c9cccf;
   border-radius: 7px;
