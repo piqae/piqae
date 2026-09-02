@@ -103,17 +103,16 @@ physical print. Do not enable autosleep: OAuth callbacks, webhooks, and customer
 document links require an available service.
 
 For a repository-linked deployment, Railway injects
-`RAILWAY_GIT_COMMIT_SHA`. A local-source `railway up` uploads the checkout but
-does **not** refresh that repo-linked value. Before or with every local-source
-production deploy, set the Shopify service variable `PIQAE_RELEASE_SHA` to the
-exact full 40-character reviewed commit SHA, deploy from a clean checkout of
-that commit, wait for terminal `SUCCESS`, and verify that `/healthz` reports the
-same revision. Never use a branch, tag, `latest`, or a locally modified tree as
-release identity. `PIQAE_RELEASE_SHA` takes precedence over Railway's value; if
-the service returns to repo-linked deploys, remove it or update it on every
-deploy so a stale override cannot pass as current evidence. The GitHub deploy
-workflow refuses to update Shopify until `/healthz` equals the reviewed source
-commit.
+`RAILWAY_GIT_COMMIT_SHA`. The Docker build records the resolved revision inside
+the image and `/healthz` reads only that immutable value in production. A
+local-source `railway up` uploads the checkout but does **not** refresh the
+repo-linked value, so before every local-source production deploy set
+`PIQAE_RELEASE_SHA` to the exact full 40-character reviewed commit SHA as a
+Railway build variable. Deploy from a clean checkout of that commit, wait for
+terminal `SUCCESS`, and verify that both active-deployment metadata and
+`/healthz` report the same revision. Never use a branch, tag, `latest`, or a
+locally modified tree as release identity. The GitHub deploy workflow refuses
+to update Shopify until `/healthz` equals the reviewed source commit.
 
 ## One-time Piqae platform setup
 
@@ -158,11 +157,12 @@ only after the aggregate checks pass.
 
 1. Confirm the intended commit is merged to `main` and was tested through
    `shopify app dev` on the Dev Store.
-2. Confirm Railway production has deployed that same commit and `/healthz`
-   reports its exact full SHA. For a local-source `railway up`, set
-   `PIQAE_RELEASE_SHA` to that reviewed SHA before or with the deploy; do not
-   trust `RAILWAY_GIT_COMMIT_SHA` for a local upload. Source changes are
-   backward compatible with the currently released Shopify extensions.
+2. Confirm Railway production has deployed that same commit, active-deployment
+   metadata identifies it, and `/healthz` reports its exact full SHA. For a
+   local-source `railway up`, set `PIQAE_RELEASE_SHA` to that reviewed SHA as a
+   build variable before the deploy; do not trust `RAILWAY_GIT_COMMIT_SHA` for
+   a local upload. Source changes are backward compatible with the currently
+   released Shopify extensions.
 3. Open **Actions → Deploy Shopify app → Run workflow**.
 4. Enter the full 40-character reviewed commit SHA, enter a SemVer such as
    `0.2.0-beta.1`, and type `RELEASE-SHOPIFY`.

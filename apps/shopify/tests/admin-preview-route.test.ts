@@ -44,6 +44,19 @@ describe("admin preview failure classification", () => {
     });
   });
 
+  it("classifies missing product data without referring to orders", () => {
+    expect(
+      classifyAdminPreviewFailure(
+        new Error("Shopify ProductVariant node was unavailable"),
+        "products",
+      ),
+    ).toEqual({
+      code: "order_data",
+      message:
+        "Piqae could not load every selected Shopify product or variant. Refresh the products and try again.",
+    });
+  });
+
   it("surfaces a failed Shopify token migration as an account issue", () => {
     expect(
       classifyAdminPreviewFailure(
