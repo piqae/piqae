@@ -109,6 +109,22 @@ describe("admin preview failure classification", () => {
     ).toEqual({});
   });
 
+  it("identifies PostgreSQL failures without logging queries or values", () => {
+    expect(
+      safeFailureMetadata(
+        Object.assign(new Error("sensitive database detail"), {
+          name: "error",
+          code: "42P01",
+          detail: "merchant@example.test",
+          query: "SELECT private_customer_data",
+        }),
+      ),
+    ).toEqual({
+      upstream: "shopify_database",
+      upstreamCode: "42P01",
+    });
+  });
+
   it("classifies missing product data without referring to orders", () => {
     expect(
       classifyAdminPreviewFailure(

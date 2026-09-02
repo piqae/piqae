@@ -15,6 +15,7 @@ import {
   parseShopifyDataBindings,
   shopifyDocumentInput,
   type AdminGraphql,
+  type ShopifyDocumentWarning,
 } from "./orders.server";
 import { workflows, type WorkflowRepository } from "./workflows.server";
 import { parseTemplateEnvelope } from "./template-model";
@@ -25,6 +26,7 @@ import type { DownloadTokenVault } from "./download-token.server";
 import { orderPrintSequence } from "./print-order";
 import { fetchProductDocumentInput } from "./products.server";
 import { DocumentRenderFailedError } from "./document-render-errors";
+import { safeFailureMetadata } from "./safe-failure-metadata.server";
 
 export type PrintResult =
   | { mode: "direct"; renderId: string; jobId: string }
@@ -57,6 +59,32 @@ export class ShopifyPrintingService {
       throw new Error("PIQAE_ACCOUNT_CREDENTIAL_MISSING");
     return this.clientFactory(this.vault.open(link.encryptedCredential, shop));
   }
+
+  private async recordPreviewUsage(
+    shop: string,
+    eventKey: string,
+    documents: number,
+  ): Promise<ShopifyDocumentWarning[]> {
+    try {
+      await this.workflow.recordUsage(shop, eventKey, documents);
+      return [];
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: "shopify_preview_usage_recording_failed",
+          ...safeFailureMetadata(error),
+        }),
+      );
+      return [
+        {
+          code: "usage_tracking_delayed",
+          message:
+            "Usage tracking is temporarily unavailable. This preview is still available to print or download.",
+        },
+      ];
+    }
+  }
+
   async previewOrders(input: {
     admin: AdminGraphql;
     shop: string;
@@ -115,7 +143,7 @@ export class ShopifyPrintingService {
         completed.failure_code ?? completed.state,
         "document",
       );
-    await this.workflow.recordUsage(
+    const usageWarnings = await this.recordPreviewUsage(
       shop,
       `preview:${completed.id}`,
       orders.length,
@@ -141,7 +169,7 @@ export class ShopifyPrintingService {
       previewImageUrl: previewToken
         ? `${this.appUrl}/api/public/previews/image?token=${encodeURIComponent(previewToken)}`
         : null,
-      warnings: fetched.warnings,
+      warnings: [...fetched.warnings, ...usageWarnings],
     };
   }
 
@@ -203,7 +231,7 @@ export class ShopifyPrintingService {
         completed.failure_code ?? completed.state,
         "product label",
       );
-    await this.workflow.recordUsage(
+    const usageWarnings = await this.recordPreviewUsage(
       shop,
       `product-preview:${completed.id}`,
       productData.documentCount,
@@ -233,7 +261,7 @@ export class ShopifyPrintingService {
       previewImageUrl: previewToken
         ? `${this.appUrl}/api/public/previews/image?token=${encodeURIComponent(previewToken)}`
         : null,
-      warnings: productData.warnings,
+      warnings: [...productData.warnings, ...usageWarnings],
     };
   }
 
