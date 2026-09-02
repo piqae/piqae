@@ -17,11 +17,3 @@ target = "admin.product-index.selection-action.render"
 [[extensions.targeting]]
 module = "./src/VariantAction.jsx"
 target = "admin.product-variant-details.action.render"
-
-[[extensions.targeting]]
-module = "./src/ProductBrowserPrintAction.jsx"
-target = "admin.product-details.print-action.render"
-
-[[extensions.targeting]]
-module = "./src/ProductBulkBrowserPrintAction.jsx"
-target = "admin.product-index.selection-print-action.render"
