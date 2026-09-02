@@ -89,6 +89,7 @@ describe("Shopify product label data", () => {
     ]);
 
     expect(result.documentCount).toBe(2);
+    expect(result.warnings).toEqual([]);
     expect(result.input.shop).toMatchObject({
       name: "Label Shop",
       domain: shop,
@@ -110,6 +111,48 @@ describe("Shopify product label data", () => {
         currency: "NZD",
       },
     ]);
+  });
+
+  it("uses baseline product data with a warning when optional taxonomy is rejected", async () => {
+    const admin = productAdmin();
+    const baseGraphql = admin.graphql as ReturnType<typeof vi.fn>;
+    const original = baseGraphql.getMockImplementation() as (
+      query: string,
+      options?: { variables?: unknown },
+    ) => Promise<Response>;
+    baseGraphql.mockImplementation(
+      async (query: string, options?: { variables?: unknown }) => {
+        if (
+          query.includes("PiqaeProductLabelResource(") &&
+          !query.includes("Baseline")
+        )
+          return Response.json({
+            errors: [
+              {
+                message: "Optional taxonomy field unavailable",
+                extensions: { code: "GRAPHQL_VALIDATION_FAILED" },
+              },
+            ],
+          });
+        return original(query, options);
+      },
+    );
+
+    const result = await fetchProductDocumentInput(admin, shop, [
+      "gid://shopify/Product/7",
+    ]);
+    expect(result.documentCount).toBe(2);
+    expect(result.warnings).toEqual([
+      {
+        code: "optional_product_data_unavailable",
+        message: expect.stringContaining("standard Shopify product data"),
+      },
+    ]);
+    expect(
+      baseGraphql.mock.calls.some(([query]) =>
+        query.includes("PiqaeProductLabelResourceBaseline"),
+      ),
+    ).toBe(true);
   });
 
   it("prints only the selected variant from product-variant and POS actions", async () => {

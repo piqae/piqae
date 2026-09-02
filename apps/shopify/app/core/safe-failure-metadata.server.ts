@@ -1,6 +1,7 @@
 import { PiqaeError } from "@piqae/sdk";
 
 import { DocumentRenderFailedError } from "./document-render-errors";
+import { ShopifyAdminGraphqlError } from "./orders.server";
 
 const SAFE_ERROR_NAMES = new Set([
   "AbortError",
@@ -26,6 +27,8 @@ export function safeFailureMetadata(error: unknown) {
       upstreamRequestId: error.requestId,
       retryable: error.retryable,
     };
+  if (error instanceof ShopifyAdminGraphqlError)
+    return { upstream: "shopify_admin", failureKind: "graphql_query" };
   if (error && typeof error === "object") {
     const status = (error as ShopifyHttpFailure).response?.code;
     if (typeof status === "number")

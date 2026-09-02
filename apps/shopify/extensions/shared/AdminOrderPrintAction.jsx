@@ -588,6 +588,16 @@ function AdminOrderPrintActionContent({
                 </s-button>
               </s-banner>
             )}
+            {previewState === "ready"
+              ? (preview?.warnings ?? []).map((warning, index) => (
+                  <s-banner
+                    key={`${warning.code ?? "preview-warning"}-${index}`}
+                    tone="warning"
+                  >
+                    {warning.message}
+                  </s-banner>
+                ))
+              : null}
             {error && <s-banner tone="critical">{error}</s-banner>}
             {result && <s-banner tone="success">{result}</s-banner>}
             {previewImageState === "loading" ? (

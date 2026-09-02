@@ -7060,7 +7060,9 @@ components:
         artifact_byte_length: { type: [integer, "null"], minimum: 1 }
         artifact_media_type: { type: [string, "null"], enum: [application/pdf, null] }
         page_count: { type: [integer, "null"], minimum: 1, maximum: 100000 }
-        failure_code: { type: [string, "null"] }
+        failure_code:
+          type: [string, "null"]
+          description: Stable machine-readable terminal reason. Renderer compatibility and data failures use renderer_version_unsupported, renderer_feature_unsupported, document_data_missing, document_data_invalid, document_typography_unsupported, document_barcode_invalid, document_render_limit_exceeded, or invalid_document_spec; clients must tolerate additional codes.
         expires_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
@@ -7075,7 +7077,9 @@ components:
         artifact_byte_length: { type: [integer, "null"], minimum: 1 }
         artifact_media_type: { type: [string, "null"], enum: [application/pdf, null] }
         page_count: { type: [integer, "null"], minimum: 1, maximum: 100000 }
-        failure_code: { type: [string, "null"] }
+        failure_code:
+          type: [string, "null"]
+          description: Stable machine-readable terminal reason. Renderer compatibility and data failures use renderer_version_unsupported, renderer_feature_unsupported, document_data_missing, document_data_invalid, document_typography_unsupported, document_barcode_invalid, document_render_limit_exceeded, or invalid_document_spec; clients must tolerate additional codes.
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     PrintPacketPrintRequest:

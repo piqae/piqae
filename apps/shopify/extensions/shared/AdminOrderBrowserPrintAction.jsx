@@ -229,6 +229,16 @@ function AdminOrderBrowserPrintActionContent({
             </s-button>
           </s-banner>
         ) : null}
+        {previewState === "ready"
+          ? (preview?.warnings ?? []).map((warning, index) => (
+              <s-banner
+                key={`${warning.code ?? "preview-warning"}-${index}`}
+                tone="warning"
+              >
+                {warning.message}
+              </s-banner>
+            ))
+          : null}
         {previewState === "ready" && downloadUrl ? (
           <s-button href={downloadUrl} target="_blank" icon="download">
             Download PDF
