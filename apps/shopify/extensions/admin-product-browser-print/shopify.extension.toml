@@ -1,0 +1,15 @@
+api_version = "2026-07"
+
+[[extensions]]
+name = "Print or download product labels"
+handle = "piqae-product-browser-print"
+uid = "8c7397ce-1550-4d9a-9ddd-57df021c0280"
+type = "ui_extension"
+
+[[extensions.targeting]]
+module = "./src/ProductPrintAction.jsx"
+target = "admin.product-details.print-action.render"
+
+[[extensions.targeting]]
+module = "./src/ProductBulkPrintAction.jsx"
+target = "admin.product-index.selection-print-action.render"
