@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   parseTemplateEnvelope,
+  repairLegacyPrintPacket,
   serializeTemplateEnvelope,
+  validateRendererCompatiblePrintPacket,
   validatePrintPacket,
   documentHasPageBreak,
 } from "../app/core/template-model";
@@ -188,6 +190,75 @@ describe("PrintPacket model", () => {
     expect(() => validatePrintPacket(document)).toThrow("12 levels");
   });
 
+  it("repairs legacy row barcodes before renderer validation", () => {
+    const document = structuredClone(starterTemplates[0]!.specification);
+    document.body = [
+      {
+        type: "data_list",
+        items: { type: "path", path: ["orders"] },
+        item: [
+          {
+            type: "barcode",
+            value: { type: "current_path", path: [] },
+            symbology: "code128",
+            width_mm: 16,
+            height_mm: 6,
+          },
+        ],
+      },
+    ];
+
+    const repaired = repairLegacyPrintPacket(document);
+    expect(repaired.warnings).toHaveLength(2);
+    expect((repaired.document.body[0] as any).item[0]).toMatchObject({
+      value: { type: "current_path", path: ["labelCode128"] },
+      width_mm: 20,
+      height_mm: 8,
+    });
+    expect(() =>
+      validateRendererCompatiblePrintPacket(repaired.document),
+    ).not.toThrow();
+  });
+
+  it("reports a precise error for unresolved renderer-incompatible fields", () => {
+    const document = structuredClone(starterTemplates[0]!.specification);
+    document.body = [
+      {
+        type: "qr",
+        value: { type: "current_path", path: [] },
+        size_mm: 20,
+      },
+    ];
+    expect(() => validateRendererCompatiblePrintPacket(document)).toThrow(
+      "QR value must select a data field",
+    );
+  });
+
+  it("repairs legacy barcodes inside line-item repeat scope", () => {
+    const document = structuredClone(starterTemplates[0]!.specification);
+    document.body = [
+      {
+        type: "repeat",
+        items: { type: "current_path", path: ["lineItems"] },
+        children: [
+          {
+            type: "barcode",
+            value: { type: "current_path", path: [] },
+            symbology: "code128",
+            width_mm: 48,
+            height_mm: 16,
+          },
+        ],
+      },
+    ];
+    expect(
+      (
+        (repairLegacyPrintPacket(document).document.body[0] as any)
+          .children[0] as any
+      ).value,
+    ).toEqual({ type: "current_path", path: ["labelCode128"] });
+  });
+
   it("rejects missing media and malformed page regions before traversal", () => {
     const invoice = structuredClone(starterTemplates[0]!.specification);
     expect(() =>
@@ -202,6 +273,31 @@ describe("PrintPacket model", () => {
     expect(() =>
       validatePrintPacket({ ...invoice, body: [null] } as never),
     ).toThrow("Document block is invalid");
+    expect(() =>
+      validatePrintPacket({
+        ...invoice,
+        body: [
+          {
+            type: "data_list",
+            items: { type: "path", path: ["orders"] },
+            item: [null],
+          },
+        ],
+      } as never),
+    ).toThrow("Document block is invalid");
+    expect(() =>
+      validatePrintPacket({
+        ...invoice,
+        body: [
+          {
+            type: "table",
+            items: { type: "path", path: ["orders"] },
+            columns: [],
+            empty: "not-an-array",
+          },
+        ],
+      } as never),
+    ).toThrow("Document table empty state is invalid");
   });
 
   it("rejects nested page breaks on continuous media", () => {

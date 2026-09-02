@@ -18,10 +18,12 @@ variants, while a ProductVariant action remains scoped to that exact variant.
 
 The configuration requests both `read_orders` and Shopify-approved
 `read_all_orders` because historical invoice reprints and exports are core app
-features. Existing installations receive the expanded history only after the
-updated Shopify app version is released and the merchant approves the added
-required scope. The runtime must continue to inspect granted scopes and explain
-the standard 60-day window until that approval is reflected on the installation.
+features. `read_files` lets the native Shopify Files picker resolve merchant
+logos and artwork, including image-type `GenericFile` records used for SVGs.
+Existing installations receive expanded access only after the updated Shopify
+app version is released and the merchant approves the added required scope. The
+runtime must continue to inspect granted scopes and explain the standard 60-day
+order window until that approval is reflected on the installation.
 
 No real Shopify or Piqae credentials are needed for unit tests.
 
@@ -73,6 +75,12 @@ responses are ignored.
 Preview therefore uses the same PrintPacket/PDF semantics as printing. It does
 not mount the visual editor canvas or maintain a second partial evaluator, and
 it never saves, publishes, or otherwise mutates the merchant's current draft.
+
+Shopify Files may supply JPEG, PNG, WebP, GIF, or safe standalone SVG artwork.
+The app bounds and rasterizes the selected source to a
+content-addressed JPEG while preserving its aspect ratio; the renderer still
+receives only the verified JPEG resource declared by PrintPacket. SVG scripts,
+embedded documents, and external network/file references are rejected.
 
 ## Piqae test runtime
 

@@ -24,7 +24,19 @@ export type ExternalAsset = {
   mediaType: "image/jpeg";
   bytes: number;
   sourceUrl?: string;
+  sourceMediaType?: TemplateAssetSourceMediaType;
+  sourceTransform?: "piqae-jpeg-v1";
+  stored?: {
+    piqaeAccountId: string;
+    piqaeEnvironmentId: string | null;
+  };
 };
+export type TemplateAssetSourceMediaType =
+  | "image/jpeg"
+  | "image/png"
+  | "image/webp"
+  | "image/gif"
+  | "image/svg+xml";
 export const ASSET_LIMITS = {
   maxBytes: 2 * 1024 * 1024,
   maxAssets: 20,
@@ -150,12 +162,177 @@ export function validateAssets(assets: ExternalAsset[]) {
       throw new Error("Asset size is invalid");
     if (asset.mediaType !== "image/jpeg")
       throw new Error("Asset type is unsupported");
+    if (
+      (asset.sourceMediaType !== undefined &&
+        ![
+          "image/jpeg",
+          "image/png",
+          "image/webp",
+          "image/gif",
+          "image/svg+xml",
+        ].includes(asset.sourceMediaType)) ||
+      (asset.sourceTransform !== undefined &&
+        asset.sourceTransform !== "piqae-jpeg-v1") ||
+      (asset.sourceMediaType !== undefined &&
+        asset.sourceTransform !== "piqae-jpeg-v1")
+    )
+      throw new Error("Asset source conversion is invalid");
     if (asset.sourceUrl) {
       const url = new URL(asset.sourceUrl);
       if (url.origin !== "https://cdn.shopify.com")
         throw new Error("Asset ingestion requires Shopify CDN HTTPS");
     }
+    if (
+      asset.stored &&
+      (!validPublicationId(asset.stored.piqaeAccountId) ||
+        (asset.stored.piqaeEnvironmentId !== null &&
+          !validPublicationId(asset.stored.piqaeEnvironmentId)))
+    )
+      throw new Error("Stored asset location is invalid");
   }
+}
+
+export function assetIsStoredFor(
+  asset: ExternalAsset,
+  piqaeAccountId: string,
+  piqaeEnvironmentId: string | null,
+): boolean {
+  return (
+    asset.stored?.piqaeAccountId === piqaeAccountId &&
+    asset.stored.piqaeEnvironmentId === piqaeEnvironmentId
+  );
+}
+
+export type PrintPacketCompatibilityRepair = {
+  document: PrintPacket;
+  warnings: string[];
+};
+
+/**
+ * Repairs editor output produced before the renderer started enforcing barcode
+ * paths and its minimum scannable footprint. This is intentionally narrow: it
+ * keeps old merchant drafts usable without hiding unrelated schema errors.
+ */
+export function repairLegacyPrintPacket(
+  value: PrintPacket,
+): PrintPacketCompatibilityRepair {
+  validatePrintPacket(value);
+  const document = structuredClone(value);
+  let repairedValues = 0;
+  let repairedSizes = 0;
+
+  const walk = (blocks: Block[], scope: "order" | "item") => {
+    for (const block of blocks) {
+      if (block.type === "barcode") {
+        if (
+          (block.value.type === "path" ||
+            block.value.type === "current_path") &&
+          block.value.path.length === 0
+        ) {
+          block.value = {
+            type: "current_path",
+            path: [scope === "item" ? "labelCode128" : "referenceCode128"],
+          };
+          repairedValues += 1;
+        }
+        if (!Number.isFinite(block.width_mm) || block.width_mm < 20) {
+          block.width_mm = 20;
+          repairedSizes += 1;
+        }
+        if (!Number.isFinite(block.height_mm) || block.height_mm < 8) {
+          block.height_mm = 8;
+          repairedSizes += 1;
+        }
+      }
+      if ("children" in block) {
+        const childScope =
+          block.type === "repeat" && isLineItemsExpression(block.items)
+            ? "item"
+            : scope;
+        walk(block.children, childScope);
+      }
+      if (block.type === "conditional") {
+        walk(block.then, scope);
+        walk(block.else ?? [], scope);
+      }
+      if (block.type === "data_list") {
+        walk(block.header ?? [], scope);
+        walk(block.item, "item");
+        walk(block.empty ?? [], scope);
+      }
+      if (block.type === "table") walk(block.empty ?? [], scope);
+    }
+  };
+  walk(document.body, "order");
+  for (const blocks of Object.values(document.header ?? {}))
+    walk(blocks, "order");
+  for (const blocks of Object.values(document.footer ?? {}))
+    walk(blocks, "order");
+
+  const warnings: string[] = [];
+  if (repairedValues)
+    warnings.push(
+      `${repairedValues} legacy barcode value${repairedValues === 1 ? " was" : "s were"} repaired for the current data scope.`,
+    );
+  if (repairedSizes)
+    warnings.push(
+      `${repairedSizes} legacy barcode dimension${repairedSizes === 1 ? " was" : "s were"} raised to the minimum printable size.`,
+    );
+  return { document, warnings };
+}
+
+function isLineItemsExpression(expression: Expression): boolean {
+  return (
+    (expression.type === "current_path" &&
+      expression.path[0] === "lineItems") ||
+    (expression.type === "path" &&
+      expression.path.at(-1) === "lineItems" &&
+      expression.path[0] === "order")
+  );
+}
+
+export function validateRendererCompatiblePrintPacket(
+  document: PrintPacket,
+): void {
+  const validateExpressionPath = (expression: Expression, label: string) => {
+    if (
+      (expression.type === "path" || expression.type === "current_path") &&
+      (expression.path.length === 0 ||
+        expression.path.some(
+          (segment) => typeof segment !== "string" || segment.length === 0,
+        ))
+    )
+      throw new Error(`${label} must select a data field`);
+  };
+  const walk = (blocks: Block[]) => {
+    for (const block of blocks) {
+      if (block.type === "barcode") {
+        validateExpressionPath(block.value, "Barcode value");
+        if (
+          !Number.isFinite(block.width_mm) ||
+          !Number.isFinite(block.height_mm) ||
+          block.width_mm < 20 ||
+          block.height_mm < 8
+        )
+          throw new Error("Barcode size must be at least 20 mm by 8 mm");
+      }
+      if (block.type === "qr") validateExpressionPath(block.value, "QR value");
+      if (block.type === "image_value")
+        validateExpressionPath(block.resource, "Dynamic image");
+      if ("children" in block) walk(block.children);
+      if (block.type === "conditional") {
+        walk(block.then);
+        walk(block.else ?? []);
+      }
+      if (block.type === "data_list") {
+        walk(block.header ?? []);
+        walk(block.item);
+        walk(block.empty ?? []);
+      }
+      if (block.type === "table") walk(block.empty ?? []);
+    }
+  };
+  walk(documentRegions(document));
 }
 export function validatePrintPacket(document: PrintPacket): void {
   if (document?.format !== "printpacket/v1" || !Array.isArray(document.body))
@@ -180,6 +357,22 @@ export function validatePrintPacket(document: PrintPacket): void {
           throw new Error("Document conditional branches are invalid");
         walk(block.then, depth + 1);
         walk(block.else ?? [], depth + 1);
+      }
+      if (block.type === "data_list") {
+        if (
+          !Array.isArray(block.header ?? []) ||
+          !Array.isArray(block.item) ||
+          !Array.isArray(block.empty ?? [])
+        )
+          throw new Error("Document data list branches are invalid");
+        walk(block.header ?? [], depth + 1);
+        walk(block.item, depth + 1);
+        walk(block.empty ?? [], depth + 1);
+      }
+      if (block.type === "table") {
+        if (!Array.isArray(block.empty ?? []))
+          throw new Error("Document table empty state is invalid");
+        walk(block.empty ?? [], depth + 1);
       }
     }
   };
@@ -247,8 +440,18 @@ function blocksHavePageBreak(blocks: Block[]): boolean {
   return blocks.some((block) => {
     if (block.type === "page_break") return true;
     if ("children" in block && blocksHavePageBreak(block.children)) return true;
-    return block.type === "conditional"
-      ? blocksHavePageBreak(block.then) || blocksHavePageBreak(block.else ?? [])
+    if (block.type === "conditional")
+      return (
+        blocksHavePageBreak(block.then) || blocksHavePageBreak(block.else ?? [])
+      );
+    if (block.type === "data_list")
+      return (
+        blocksHavePageBreak(block.header ?? []) ||
+        blocksHavePageBreak(block.item) ||
+        blocksHavePageBreak(block.empty ?? [])
+      );
+    return block.type === "table"
+      ? blocksHavePageBreak(block.empty ?? [])
       : false;
   });
 }

@@ -31,14 +31,18 @@ import {
 import { starterTemplates } from "../core/starter-templates";
 import {
   parseTemplateEnvelope,
+  assetIsStoredFor,
+  repairLegacyPrintPacket,
   removeSystemOwnership,
   serializeTemplateEnvelope,
   validatePrintPacket,
+  validateRendererCompatiblePrintPacket,
   type PrintPacket,
   type TemplateEditorMode,
 } from "../core/template-model";
 import { syncTemplateIndex } from "../core/template-index.server";
 import { publishCanonicalTemplate } from "../core/template-publisher.server";
+import { fetchTemplateAsset } from "../core/template-assets.server";
 import { createProductionServices } from "../services.server";
 import { shopifyCustomDocumentFields } from "../core/shopify-document-fields";
 import { importOrderPrinterProTemplate } from "../core/order-printer-pro-import.server";
@@ -192,6 +196,22 @@ export async function action({ request, params }: ActionFunctionArgs) {
         admin,
         bounded(form, "mediaImageId", 100, true),
       );
+      const services = createProductionServices();
+      const link = await services.repository.get(session.shop);
+      if (!link)
+        throw new Error("Connect Piqae before adding an image to a document");
+      const bytes = await fetchTemplateAsset(image.asset);
+      const body = bytes.buffer.slice(
+        bytes.byteOffset,
+        bytes.byteOffset + bytes.byteLength,
+      ) as ArrayBuffer;
+      await services
+        .clientForLink(link)
+        .printPackets.resources.putJpeg(image.asset.digest, body);
+      image.asset.stored = {
+        piqaeAccountId: link.piqaeAccountId,
+        piqaeEnvironmentId: link.piqaeLiveEnvironmentId ?? null,
+      };
       return Response.json({ ok: true, image });
     } catch (error) {
       return Response.json(
@@ -215,7 +235,10 @@ export async function action({ request, params }: ActionFunctionArgs) {
       const envelope = parseTemplateEnvelope(
         validateDocumentSource(bounded(form, "source", 262144, true)),
       );
+      const repair = repairLegacyPrintPacket(envelope.document);
+      envelope.document = repair.document;
       validatePrintPacket(envelope.document);
+      validateRendererCompatiblePrintPacket(envelope.document);
       request.signal.throwIfAborted();
       const services = createProductionServices();
       const link = await services.repository.get(session.shop);
@@ -234,7 +257,14 @@ export async function action({ request, params }: ActionFunctionArgs) {
         shop: session.shop,
         latestOrder,
         specification: envelope.document,
-        assets: envelope.assets,
+        assets: envelope.assets.filter(
+          (asset) =>
+            !assetIsStoredFor(
+              asset,
+              link.piqaeAccountId,
+              link.piqaeLiveEnvironmentId ?? null,
+            ),
+        ),
         requestKey: requestId,
         metafieldAllowlist: settings.metafieldAllowlist,
         client: services.clientForLink(link),
@@ -378,7 +408,16 @@ export async function action({ request, params }: ActionFunctionArgs) {
       envelope.document = document;
       envelope.editor.liquid = canonicalToLiquid(document).source;
     }
+    const repair = repairLegacyPrintPacket(envelope.document);
+    envelope.document = repair.document;
+    if (repair.warnings.length) {
+      envelope.editor.warnings = [
+        ...new Set([...envelope.editor.warnings, ...repair.warnings]),
+      ].slice(-50);
+      envelope.editor.liquid = canonicalToLiquid(envelope.document).source;
+    }
     validatePrintPacket(envelope.document);
+    validateRendererCompatiblePrintPacket(envelope.document);
     const pageSize = pageSizeForDocument(envelope.document);
     const designTargetId = bounded(form, "designTargetId", 128);
     let designSpecificationRevision: string | null = null;
@@ -465,7 +504,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
     await syncTemplateIndex(admin, workflows(), session.shop);
     if (savingFromStarter || !params.templateId || params.templateId === "new")
       return redirect(
-        `/app/templates/${encodeURIComponent(saved.id)}?saved=${intent === "publish" ? "publish" : "draft"}`,
+        `/app/templates/${encodeURIComponent(saved.id)}?saved=${intent === "publish" ? "publish" : "draft"}${repair.warnings.length ? "&repaired=1" : ""}`,
         303,
       );
     return {
@@ -474,6 +513,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
       deleted: false,
       id: saved.id,
       intent: intent === "publish" ? "publish" : "draft",
+      repaired: repair.warnings.length > 0,
     };
   } catch (error) {
     return Response.json(
@@ -807,8 +847,13 @@ export default function TemplateEditor() {
         ? "Published. This revision is now available to printing and automations."
         : "Draft saved. Publish when it is ready for printing and automations.",
     );
+    if (searchParams.get("repaired") === "1")
+      bridge?.toast?.show(
+        "A legacy barcode was updated to the current print format.",
+      );
     const next = new URLSearchParams(searchParams);
     next.delete("saved");
+    next.delete("repaired");
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
   useEffect(() => {
@@ -829,6 +874,10 @@ export default function TemplateEditor() {
         ? "Published. This revision is now available to printing and automations."
         : "Draft saved. Publish when it is ready for printing and automations.",
     );
+    if ("repaired" in result && result.repaired)
+      bridge?.toast?.show(
+        "A legacy barcode was updated to the current print format.",
+      );
   }, [result]);
   useEffect(() => {
     if (navigation.state === "idle") setPendingIntent(null);
@@ -945,7 +994,10 @@ export default function TemplateEditor() {
     }
     try {
       const activity = await intents.invoke("pick:shopify/File", {
-        data: { mediaTypes: ["MediaImage"], multiSelect: false },
+        data: {
+          mediaTypes: ["MediaImage", "GenericFile"],
+          multiSelect: false,
+        },
       });
       const response = await activity.complete;
       if (response.code === "closed") return null;

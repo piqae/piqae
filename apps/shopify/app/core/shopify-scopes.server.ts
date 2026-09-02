@@ -1,5 +1,5 @@
 const DEFAULT_SHOPIFY_SCOPES =
-  "read_orders,read_all_orders,read_draft_orders,read_products,read_customers,read_metaobjects";
+  "read_orders,read_all_orders,read_draft_orders,read_products,read_customers,read_metaobjects,read_files";
 
 export function configuredShopifyScopes(value?: string): string[] {
   const scopes = (value ?? DEFAULT_SHOPIFY_SCOPES)
