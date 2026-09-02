@@ -9,11 +9,3 @@ type = "ui_extension"
 [[extensions.targeting]]
 module = "./src/ProductAction.jsx"
 target = "admin.product-details.action.render"
-
-[[extensions.targeting]]
-module = "./src/ProductBulkAction.jsx"
-target = "admin.product-index.selection-action.render"
-
-[[extensions.targeting]]
-module = "./src/VariantAction.jsx"
-target = "admin.product-variant-details.action.render"

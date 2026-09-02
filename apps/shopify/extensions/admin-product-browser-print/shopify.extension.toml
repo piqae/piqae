@@ -9,7 +9,3 @@ type = "ui_extension"
 [[extensions.targeting]]
 module = "./src/ProductPrintAction.jsx"
 target = "admin.product-details.print-action.render"
-
-[[extensions.targeting]]
-module = "./src/ProductBulkPrintAction.jsx"
-target = "admin.product-index.selection-print-action.render"

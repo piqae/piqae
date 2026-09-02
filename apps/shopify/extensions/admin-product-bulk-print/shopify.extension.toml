@@ -1,0 +1,11 @@
+api_version = "2026-07"
+
+[[extensions]]
+name = "Print selected product labels"
+handle = "piqae-product-bulk-print"
+uid = "3020f56f-1504-4f47-a580-41b9d2545d8a"
+type = "ui_extension"
+
+[[extensions.targeting]]
+module = "./src/PrintAction.jsx"
+target = "admin.product-index.selection-action.render"

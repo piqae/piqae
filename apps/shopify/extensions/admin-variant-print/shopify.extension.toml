@@ -1,0 +1,11 @@
+api_version = "2026-07"
+
+[[extensions]]
+name = "Print variant label"
+handle = "piqae-variant-print"
+uid = "bfb853db-876e-4ec4-9eed-4d6066341c64"
+type = "ui_extension"
+
+[[extensions.targeting]]
+module = "./src/PrintAction.jsx"
+target = "admin.product-variant-details.action.render"
