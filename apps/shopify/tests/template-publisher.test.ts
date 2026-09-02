@@ -140,6 +140,57 @@ describe("template resource publication", () => {
     expect(create).not.toHaveBeenCalled();
   });
 
+  it("uses an already-persisted content-addressed asset after cache loss", async () => {
+    const shop = "persisted-assets.myshopify.com";
+    const shops = new MemoryShopRepository();
+    const vault = new CredentialVault(Buffer.alloc(32, 18));
+    await shops.put({
+      shop,
+      piqaeAccountId: "acct_persisted",
+      encryptedCredential: vault.seal("token", shop),
+      templateRevisionId: "rev_old",
+      createdAt: new Date().toISOString(),
+    });
+    const envelope = parseTemplateEnvelope(starterTemplates[0]!.source);
+    envelope.assets = [
+      {
+        id: "logo",
+        digest: "c".repeat(64),
+        mediaType: "image/jpeg",
+        bytes: 3,
+        stored: {
+          piqaeAccountId: "acct_persisted",
+          piqaeEnvironmentId: null,
+        },
+      },
+    ];
+    const assetFetcher = vi.fn();
+    const putJpeg = vi.fn();
+
+    await publishCanonicalTemplate({
+      shop,
+      name: "Invoice",
+      source: serializeTemplateEnvelope(envelope),
+      shops,
+      vault,
+      baseUrl: "https://unused.example.invalid",
+      assetFetcher,
+      clientFactory: () =>
+        ({
+          printPackets: {
+            resources: { putJpeg },
+            templates: {
+              create: async () => ({ id: "template_persisted" }),
+              publish: async () => ({ id: "revision_persisted" }),
+            },
+          },
+        }) as never,
+    });
+
+    expect(assetFetcher).not.toHaveBeenCalled();
+    expect(putJpeg).not.toHaveBeenCalled();
+  });
+
   it("finishes custom publication before a waiting relink generation", async () => {
     const shop = "publish-first.myshopify.com";
     const shops = new MemoryShopRepository();

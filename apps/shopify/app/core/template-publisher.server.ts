@@ -4,6 +4,7 @@ import type { CredentialVault } from "./credentials.server";
 import {
   parseTemplateEnvelope,
   serializeTemplateEnvelope,
+  assetIsStoredFor,
 } from "./template-model";
 import { templateDigest } from "./template-digest.server";
 import { fetchTemplateAsset } from "./template-assets.server";
@@ -55,7 +56,15 @@ async function publishLocked(input: {
           });
   if (!client) throw new Error("PIQAE_MANAGED_ACCOUNT_NOT_READY");
   const fetchAsset = input.assetFetcher ?? fetchTemplateAsset;
-  await mapWithConcurrency(envelope.assets, 4, async (asset) => {
+  const assetsToUpload = envelope.assets.filter(
+    (asset) =>
+      !assetIsStoredFor(
+        asset,
+        link.piqaeAccountId,
+        link.piqaeLiveEnvironmentId ?? null,
+      ),
+  );
+  await mapWithConcurrency(assetsToUpload, 4, async (asset) => {
     const bytes = await fetchAsset(asset);
     const body = bytes.buffer.slice(
       bytes.byteOffset,

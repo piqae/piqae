@@ -1113,7 +1113,7 @@ export function PrintPacketEditor({
                 label="Barcode"
                 disabled={disabled}
                 dragType="barcode"
-                onClick={() => insertBlock(defaultBarcode())}
+                onClick={() => insertBlock(defaultBarcode(insertionScope))}
               />
             </div>
             <span className="piqae-tool-divider" />
@@ -5691,10 +5691,12 @@ function defaultQrCode(): Block {
     size_mm: 24,
   };
 }
-function defaultBarcode(): Block {
+function defaultBarcode(scope: ShopifyAuthoringScope = "order"): Block {
   return {
     type: "barcode",
-    value: currentPathExpression("name"),
+    value: currentPathExpression(
+      scope === "item" ? "labelCode128" : "referenceCode128",
+    ),
     symbology: "code128",
     width_mm: 48,
     height_mm: 16,
