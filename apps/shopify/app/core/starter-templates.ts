@@ -130,10 +130,9 @@ const packingItems = (): Block => ({
   header: [
     {
       type: "grid",
-      columns: [1.4, 7.6, 1],
+      columns: [9, 1],
       gap_mm: 1.5,
       children: [
-        paragraph([]),
         paragraph([{ type: "text", value: "ITEMS", style: { bold: true } }], {
           font_size_pt: 8,
           color: muted,

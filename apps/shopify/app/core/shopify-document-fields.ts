@@ -13,6 +13,7 @@ export type ShopifyDocumentField = {
     | "Product"
     | "Shopify custom data";
   conditionable?: boolean;
+  image?: boolean;
 };
 
 /**
@@ -20,6 +21,13 @@ export type ShopifyDocumentField = {
  * expressions; the canonical document format remains commerce-platform neutral.
  */
 export const SHOPIFY_DOCUMENT_FIELDS: readonly ShopifyDocumentField[] = [
+  {
+    label: "Shop logo",
+    path: "shop.logo",
+    group: "Shop",
+    conditionable: true,
+    image: true,
+  },
   {
     label: "Shop name",
     path: "shop.name",
@@ -152,6 +160,7 @@ export const SHOPIFY_DOCUMENT_FIELDS: readonly ShopifyDocumentField[] = [
     path: "item.imageResource",
     group: "Item",
     conditionable: true,
+    image: true,
   },
   {
     label: "Item unit price",

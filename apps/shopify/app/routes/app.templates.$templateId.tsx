@@ -5,6 +5,8 @@ import {
   useActionData,
   useFetcher,
   useLoaderData,
+  useNavigation,
+  useSearchParams,
 } from "react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import shopify from "../shopify.server";
@@ -55,6 +57,10 @@ import {
   fetchLatestOrderSummary,
 } from "../core/editor-preview.server";
 import { safeFailureMetadata } from "../core/safe-failure-metadata.server";
+import {
+  resolveShopifyTemplateImage,
+  type ShopifyTemplateImage,
+} from "../core/shopify-template-media.server";
 export type EditorMode = TemplateEditorMode;
 export const liquidCompatibilityNotice = (mode: EditorMode) =>
   mode === "liquid"
@@ -180,6 +186,26 @@ export async function action({ request, params }: ActionFunctionArgs) {
   const { session, admin } = await shopify.authenticate.admin(request);
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "draft");
+  if (intent === "resolve_shopify_image") {
+    try {
+      const image = await resolveShopifyTemplateImage(
+        admin,
+        bounded(form, "mediaImageId", 100, true),
+      );
+      return Response.json({ ok: true, image });
+    } catch (error) {
+      return Response.json(
+        {
+          ok: false,
+          error:
+            error instanceof Error
+              ? error.message
+              : "The Shopify image could not be loaded",
+        },
+        { status: 422 },
+      );
+    }
+  }
   if (intent === "editor_preview") {
     let requestId = "";
     try {
@@ -303,7 +329,10 @@ export async function action({ request, params }: ActionFunctionArgs) {
         revision: 1,
       });
       await syncTemplateIndex(admin, workflows(), session.shop);
-      return redirect(`/app/templates/${encodeURIComponent(saved.id)}`, 303);
+      return redirect(
+        `/app/templates/${encodeURIComponent(saved.id)}?saved=draft`,
+        303,
+      );
     }
     const kind = bounded(form, "kind", 30, true);
     if (
@@ -435,8 +464,17 @@ export async function action({ request, params }: ActionFunctionArgs) {
     if (!saved) throw new Error("Published document activation failed");
     await syncTemplateIndex(admin, workflows(), session.shop);
     if (savingFromStarter || !params.templateId || params.templateId === "new")
-      return redirect(`/app/templates/${encodeURIComponent(saved.id)}`, 303);
-    return { ok: true, error: "", deleted: false, id: saved.id };
+      return redirect(
+        `/app/templates/${encodeURIComponent(saved.id)}?saved=${intent === "publish" ? "publish" : "draft"}`,
+        303,
+      );
+    return {
+      ok: true,
+      error: "",
+      deleted: false,
+      id: saved.id,
+      intent: intent === "publish" ? "publish" : "draft",
+    };
   } catch (error) {
     return Response.json(
       {
@@ -509,10 +547,12 @@ export function parsePrintPacketSource(
 function PrintPacketCodeWorkspace({
   document,
   value,
+  disabled,
   onChange,
 }: {
   document: PrintPacket;
   value: string;
+  disabled?: boolean;
   onChange(value: string): void;
 }) {
   const parsed = useMemo(() => parsePrintPacketSource(value), [value]);
@@ -523,7 +563,7 @@ function PrintPacketCodeWorkspace({
       <div className="piqae-code-tools" role="toolbar" aria-label="Code tools">
         <button
           type="button"
-          disabled={!parsed.ok}
+          disabled={disabled || !parsed.ok}
           onClick={() => {
             if (parsed.ok)
               onChange(`${JSON.stringify(parsed.document, null, 2)}\n`);
@@ -556,6 +596,7 @@ function PrintPacketCodeWorkspace({
               name="printPacketSource"
               aria-label="Canonical PrintPacket JSON"
               maxLength={65536}
+              disabled={disabled}
               spellCheck={false}
               value={value}
               onScroll={() => {
@@ -616,6 +657,9 @@ export type EditorPreviewResponse = {
   noOrder: boolean;
   error?: string;
 };
+type ShopifyImageResponse =
+  | { ok: true; image: ShopifyTemplateImage }
+  | { ok: false; error: string };
 
 export function previewStateForResponse(
   activeRequestId: string,
@@ -645,11 +689,14 @@ export default function TemplateEditor() {
     printTargetError,
   } = useLoaderData<typeof loader>();
   const result = useActionData<typeof action>();
+  const navigation = useNavigation();
+  const [searchParams, setSearchParams] = useSearchParams();
   const initial = parseTemplateEnvelope(
     initialTemplate?.source ?? starterTemplates[0]!.source,
   );
   if (!template) removeSystemOwnership(initial);
   const [document, setDocument] = useState(initial.document);
+  const [assets, setAssets] = useState(initial.assets);
   const [editorHistory] = useState(() =>
     createPrintPacketEditorHistory(initial.document),
   );
@@ -675,7 +722,17 @@ export default function TemplateEditor() {
     initial.editor.mode === "source" ? "source" : "visual",
   );
   const [error, setError] = useState("");
+  const [pendingIntent, setPendingIntent] = useState<
+    "draft" | "publish" | "delete" | null
+  >(null);
+  const saving = navigation.state !== "idle" && pendingIntent !== null;
   const previewFetcher = useFetcher<EditorPreviewResponse>();
+  const imageFetcher = useFetcher<ShopifyImageResponse>();
+  const resolvingImage = imageFetcher.state !== "idle";
+  const editingLocked = saving || resolvingImage;
+  const imageResolver = useRef<
+    ((image: ShopifyTemplateImage | null) => void) | null
+  >(null);
   const activePreviewRequest = useRef("");
   const [pdfPreview, setPdfPreview] = useState<PdfPreviewState>({
     status: "loading",
@@ -690,6 +747,7 @@ export default function TemplateEditor() {
   );
   useEffect(() => {
     setDocument(initial.document);
+    setAssets(initial.assets);
     setMode(initial.editor.mode === "source" ? "source" : "visual");
     setLiquid(initial.editor.liquid);
     setSourceDraft(`${JSON.stringify(initial.document, null, 2)}\n`);
@@ -697,6 +755,31 @@ export default function TemplateEditor() {
     setKind(initialTemplate?.kind ?? "invoice");
     setDesignTargetId(initialTemplate?.designTargetId ?? "");
   }, [initialTemplate?.source]);
+  useEffect(() => {
+    if (!imageFetcher.data || !imageResolver.current) return;
+    const resolve = imageResolver.current;
+    imageResolver.current = null;
+    if (!imageFetcher.data.ok) {
+      setError(imageFetcher.data.error);
+      resolve(null);
+      return;
+    }
+    const image = imageFetcher.data.image;
+    if (
+      !assets.some((asset) => asset.digest === image.asset.digest) &&
+      assets.length >= 20
+    ) {
+      setError("This document already has the maximum of 20 uploaded images.");
+      resolve(null);
+      return;
+    }
+    setError("");
+    setAssets((current) => [
+      ...current.filter((asset) => asset.digest !== image.asset.digest),
+      image.asset,
+    ]);
+    resolve(image);
+  }, [assets, imageFetcher.data]);
   useEffect(() => {
     if (result && "imported" in result && result.imported?.ok) {
       setDocument(result.imported.document);
@@ -710,6 +793,46 @@ export default function TemplateEditor() {
       setWorkspace("visual");
     }
   }, [result]);
+  const toastedResult = useRef<unknown>(null);
+  useEffect(() => {
+    const saved = searchParams.get("saved");
+    if (saved !== "draft" && saved !== "publish") return;
+    const bridge = (
+      window as unknown as {
+        shopify?: { toast?: { show(message: string): void } };
+      }
+    ).shopify;
+    bridge?.toast?.show(
+      saved === "publish"
+        ? "Published. This revision is now available to printing and automations."
+        : "Draft saved. Publish when it is ready for printing and automations.",
+    );
+    const next = new URLSearchParams(searchParams);
+    next.delete("saved");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+  useEffect(() => {
+    if (!result?.ok || result === toastedResult.current) return;
+    toastedResult.current = result;
+    const bridge = (
+      window as unknown as {
+        shopify?: { toast?: { show(message: string): void } };
+      }
+    ).shopify;
+    if ("imported" in result) return;
+    if (result.deleted) {
+      bridge?.toast?.show("Draft deleted");
+      return;
+    }
+    bridge?.toast?.show(
+      "intent" in result && result.intent === "publish"
+        ? "Published. This revision is now available to printing and automations."
+        : "Draft saved. Publish when it is ready for printing and automations.",
+    );
+  }, [result]);
+  useEffect(() => {
+    if (navigation.state === "idle") setPendingIntent(null);
+  }, [navigation.state]);
   const commitSourceDraft = (): boolean => {
     const parsed = parsePrintPacketSource(sourceDraft);
     if (!parsed.ok) {
@@ -726,6 +849,7 @@ export default function TemplateEditor() {
   const source = serializeTemplateEnvelope({
     ...initial,
     document,
+    assets,
     editor: {
       mode,
       liquid,
@@ -759,6 +883,7 @@ export default function TemplateEditor() {
         serializeTemplateEnvelope({
           ...initial,
           document: compilation.document,
+          assets,
           editor: {
             mode,
             liquid: compilation.normalizedLiquid,
@@ -786,6 +911,61 @@ export default function TemplateEditor() {
       setDocument(parsed.document);
     setLiquid(canonicalToLiquid(parsed.document).source);
     setError("");
+  };
+  const pickShopifyImage = async (): Promise<ShopifyTemplateImage | null> => {
+    const intents = (
+      window as unknown as {
+        shopify?: {
+          intents?: {
+            invoke(
+              name: string,
+              options?: { data?: Record<string, unknown> },
+            ):
+              | {
+                  complete: Promise<{
+                    code: "ok" | "closed" | "error";
+                    data?: { ids?: string[] };
+                  }>;
+                }
+              | Promise<{
+                  complete: Promise<{
+                    code: "ok" | "closed" | "error";
+                    data?: { ids?: string[] };
+                  }>;
+                }>;
+          };
+        };
+      }
+    ).shopify?.intents;
+    if (!intents) {
+      setError(
+        "Shopify Files is unavailable. Reload the embedded app and try again.",
+      );
+      return null;
+    }
+    try {
+      const activity = await intents.invoke("pick:shopify/File", {
+        data: { mediaTypes: ["MediaImage"], multiSelect: false },
+      });
+      const response = await activity.complete;
+      if (response.code === "closed") return null;
+      if (response.code !== "ok") {
+        setError("Shopify Files could not complete the selection. Try again.");
+        return null;
+      }
+      const id = response.data?.ids?.[0];
+      if (!id) return null;
+      return await new Promise((resolve) => {
+        imageResolver.current = resolve;
+        const form = new FormData();
+        form.set("intent", "resolve_shopify_image");
+        form.set("mediaImageId", id);
+        imageFetcher.submit(form, { method: "post" });
+      });
+    } catch {
+      setError("Shopify Files could not be opened. Try again.");
+      return null;
+    }
   };
   useEffect(() => {
     if (workspace !== "preview" || !previewSource) {
@@ -825,6 +1005,7 @@ export default function TemplateEditor() {
       return;
     }
     setError("");
+    setPendingIntent(intent);
     intentRef.current.value = intent;
     formRef.current.requestSubmit();
   };
@@ -837,6 +1018,7 @@ export default function TemplateEditor() {
           aria-pressed={workspace === key}
           aria-label={`${label} view`}
           title={`${label} view`}
+          disabled={editingLocked}
           onClick={() => switchWorkspace(key)}
         >
           <Icon name={icon} />
@@ -845,10 +1027,14 @@ export default function TemplateEditor() {
       ))}
     </div>
   );
-  const flowNote = templateFlowNote(template, starter);
   const titleBarActions = editorTitleBarActions(starter);
   return (
-    <Form method="post" ref={formRef} className="piqae-editor-form">
+    <Form
+      method="post"
+      ref={formRef}
+      className={`piqae-editor-form${editingLocked ? " is-saving" : ""}`}
+      aria-busy={editingLocked}
+    >
       <s-page heading={name.trim() || "Untitled document"} inlineSize="large">
         <s-badge slot="accessory" tone="info">
           {templateStateLabel(template, starter)}
@@ -857,6 +1043,12 @@ export default function TemplateEditor() {
           slot="primary-action"
           variant="primary"
           type="button"
+          disabled={editingLocked}
+          loading={
+            saving && pendingIntent === titleBarActions.primary.intent
+              ? true
+              : undefined
+          }
           onClick={() => submitWithIntent(titleBarActions.primary.intent)}
         >
           {titleBarActions.primary.label}
@@ -864,6 +1056,12 @@ export default function TemplateEditor() {
         <s-button
           slot="secondary-actions"
           type="button"
+          disabled={editingLocked}
+          loading={
+            saving && pendingIntent === titleBarActions.secondary.intent
+              ? true
+              : undefined
+          }
           onClick={() => submitWithIntent(titleBarActions.secondary.intent)}
         >
           {titleBarActions.secondary.label}
@@ -872,6 +1070,7 @@ export default function TemplateEditor() {
           slot="secondary-actions"
           type="button"
           icon="settings"
+          disabled={editingLocked}
           commandFor="piqae-document-settings"
           command="--show"
         >
@@ -883,7 +1082,10 @@ export default function TemplateEditor() {
           accessibilityLabel="Document settings"
           size="large"
         >
-          <div className="piqae-settings-panel piqae-settings-modal">
+          <fieldset
+            className="piqae-settings-panel piqae-settings-modal"
+            disabled={editingLocked}
+          >
             <label className="piqae-field piqae-field-wide">
               <span>Document name</span>
               <input
@@ -1118,7 +1320,7 @@ export default function TemplateEditor() {
                 Delete draft
               </button>
             ) : null}
-          </div>
+          </fieldset>
           <s-button
             slot="primary-action"
             variant="primary"
@@ -1131,17 +1333,11 @@ export default function TemplateEditor() {
         </s-modal>
         <s-section padding="none">
           <div className="piqae-editor-surface">
-            {flowNote ? (
-              <p className="piqae-actionbar-note">{flowNote}</p>
-            ) : null}
             <s-stack direction="block" gap="base">
-              {result?.ok ? (
+              {result?.ok && "imported" in result ? (
                 <s-banner tone="success">
-                  {"imported" in result
-                    ? "Template imported into the visual editor. Review highlighted compatibility notes, then save it."
-                    : result.deleted
-                      ? "Draft deleted."
-                      : "Template saved."}
+                  Template imported into the visual editor. Review highlighted
+                  compatibility notes, then save it.
                 </s-banner>
               ) : result?.error ? (
                 <s-banner tone="critical">{result.error}</s-banner>
@@ -1176,10 +1372,11 @@ export default function TemplateEditor() {
               >
                 <PrintPacketEditor
                   value={document}
-                  disabled={false}
+                  disabled={editingLocked}
                   customFields={customFields}
                   stock={selectedTarget?.stock}
                   history={editorHistory}
+                  onPickShopifyImage={pickShopifyImage}
                   workspaceControls={workspaceControls}
                   onChange={setDocument}
                 />
@@ -1197,6 +1394,7 @@ export default function TemplateEditor() {
                   <PrintPacketCodeWorkspace
                     document={document}
                     value={sourceDraft}
+                    disabled={editingLocked}
                     onChange={updateSourceDraft}
                   />
                 </>

@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   insertBlockAfterPath,
   insertBlockAtPath,
+  insertBlockIntoGridCell,
   insertStaticTableRowAt,
   insertTableColumnAt,
   fitTableColumnToContent,
@@ -405,6 +406,46 @@ describe("Shopify document editor layout", () => {
     });
   });
 
+  it("keeps toolbar insertion inside the selected repeating grid cell", () => {
+    const grid: PrintPacket["body"][number] = {
+      type: "grid",
+      columns: [1, 4, 1],
+      children: [
+        { type: "paragraph", content: [] },
+        {
+          type: "paragraph",
+          content: [{ type: "text", value: "Item details" }],
+        },
+        { type: "paragraph", content: [{ type: "text", value: "1" }] },
+      ],
+    };
+    const next = insertBlockIntoGridCell(
+      [grid],
+      [
+        { branch: "root", index: 0 },
+        { branch: "children", index: 0 },
+      ],
+      {
+        type: "image_value",
+        resource: { type: "current_path", path: ["imageResource"] },
+        width_mm: 16,
+        height_mm: 16,
+        fit: "contain",
+      },
+    );
+    expect(next?.[0]).toMatchObject({
+      type: "grid",
+      children: [
+        {
+          type: "image_value",
+          resource: { type: "current_path", path: ["imageResource"] },
+        },
+        { type: "paragraph" },
+        { type: "paragraph" },
+      ],
+    });
+  });
+
   it("inserts a dynamic product image into the selected repeating table cell", async () => {
     const page = await render(
       <StatefulPrintPacketEditor initial={tablePacket} />,
@@ -418,6 +459,9 @@ describe("Shopify document editor layout", () => {
 
     await act(async () => firstCell.click());
     await act(async () => imageButton.click());
+    await act(async () => {
+      page.querySelector<HTMLButtonElement>('button[role="menuitem"]')?.click();
+    });
 
     const output = page.parentElement?.querySelector<HTMLOutputElement>(
       '[data-testid="document-json"]',
@@ -1291,6 +1335,30 @@ describe("Shopify document editor layout", () => {
     expect(toggles.some((label) => label.includes("Show value below"))).toBe(
       true,
     );
+    const valueInput = Array.from(
+      page.querySelectorAll<HTMLInputElement>(".piqae-bar-field input"),
+    ).find((input) =>
+      input.closest("label")?.textContent?.startsWith("Value"),
+    )!;
+    await act(async () => {
+      valueInput.focus();
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set?.call(valueInput, "item.imageResource");
+      valueInput.dispatchEvent(new Event("input", { bubbles: true }));
+      valueInput.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    const output = page.parentElement?.querySelector<HTMLOutputElement>(
+      '[data-testid="document-json"]',
+    );
+    const unchanged = JSON.parse(output?.textContent ?? "null") as PrintPacket;
+    expect(unchanged.body[1]).toMatchObject({
+      type: "barcode",
+      value: { type: "literal", value: "ORDER-1001" },
+    });
   });
 
   it("keeps both toolbar rows keyboard reachable at a narrow viewport", async () => {
