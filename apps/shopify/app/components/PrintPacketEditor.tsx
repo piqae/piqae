@@ -40,6 +40,9 @@ import type { ShopifyPrintTarget } from "../core/shopify-print-targets";
 type DesignStock = ShopifyPrintTarget["stock"];
 type TableEditorBlock = Extract<Block, { type: "table" }>;
 type DocumentRegion = "body" | "header" | "footer";
+type CanvasSelectionTarget =
+  | { kind: "table_cell"; columnIndex: number }
+  | { kind: "table_row" };
 type TableColumnResizeDrag = {
   index: number;
   grabOffsetPx: number;
@@ -323,14 +326,18 @@ export function PrintPacketEditor({
     block: Block;
     path?: BlockPath;
     region: DocumentRegion;
+    target?: CanvasSelectionTarget;
   } | null>(null);
   const selectedRegionBlocks = documentRegionBlocks(
     currentDocument,
     selection?.region ?? activeRegion,
   );
-  const insertionScope = selection?.path
-    ? scopeForBlockPath(selectedRegionBlocks, selection.path)
-    : "order";
+  const insertionScope =
+    selection?.target?.kind === "table_cell"
+      ? "item"
+      : selection?.path
+        ? scopeForBlockPath(selectedRegionBlocks, selection.path)
+        : "order";
   const insertionFields = contextualFieldSuggestions(
     allAuthoringFields,
     insertionScope,
@@ -404,6 +411,25 @@ export function PrintPacketEditor({
     setSelection(null);
     setActiveRegion("body");
   }, [currentDocumentKey, documentHistory]);
+  useEffect(() => {
+    const instance = view.current;
+    if (!instance) return;
+    const nextDocument = blocksToDoc(canonicalBody);
+    if (instance.state.doc.eq(nextDocument)) return;
+    instance.updateState(
+      EditorState.create({
+        schema,
+        doc: nextDocument,
+        plugins: [
+          history(),
+          keymap({ "Mod-z": undo, "Shift-Mod-z": redo }),
+          keymap(baseKeymap),
+        ],
+      }),
+    );
+    setSelection(null);
+    setActiveRegion("body");
+  }, [currentDocumentKey]);
   useEffect(() => {
     if (!selection && activeRegion === "body") return;
     const clearSelectionOnEscape = (event: KeyboardEvent) => {
@@ -524,6 +550,60 @@ export function PrintPacketEditor({
     const inserted = docToBlocks(schema.nodes.doc!.create(null, [node]))[0];
     if (!inserted) return;
     const region = selection?.region ?? activeRegion;
+    if (
+      selection?.path &&
+      selection.target?.kind === "table_cell" &&
+      selection.block.type === "table"
+    ) {
+      const converted = tableToRichDataList(
+        selection.block,
+        selection.target.columnIndex,
+        inserted,
+      );
+      const blocks = replaceBlockAtPath(
+        documentRegionBlocks(latest.current, region),
+        selection.path,
+        converted,
+      );
+      const nextDocument = withDocumentRegionBlocks(
+        latest.current,
+        region,
+        blocks,
+      );
+      latest.current = nextDocument;
+      if (region === "body") syncBodyEditor(nextDocument);
+      setSelection(null);
+      publishEditorDocument(nextDocument);
+      return;
+    }
+    if (
+      selection?.path &&
+      (selection.block.type === "stack" ||
+        selection.block.type === "row" ||
+        selection.block.type === "section" ||
+        selection.block.type === "box" ||
+        selection.block.type === "keep_together")
+    ) {
+      const container = {
+        ...selection.block,
+        children: [...selection.block.children, inserted],
+      } as Block;
+      const blocks = replaceBlockAtPath(
+        documentRegionBlocks(latest.current, region),
+        selection.path,
+        container,
+      );
+      const nextDocument = withDocumentRegionBlocks(
+        latest.current,
+        region,
+        blocks,
+      );
+      latest.current = nextDocument;
+      if (region === "body") syncBodyEditor(nextDocument);
+      setSelection({ ...selection, block: container });
+      publishEditorDocument(nextDocument);
+      return;
+    }
     if (region !== "body") {
       const blocks = documentRegionBlocks(latest.current, region);
       const selectedPath = selection?.region === region ? selection.path : null;
@@ -813,8 +893,8 @@ export function PrintPacketEditor({
             preview={!active}
             mediaKind={value.media.kind}
             authoringFields={allAuthoringFields}
-            onSelect={(block, path) =>
-              setSelection({ position: -1, block, path, region })
+            onSelect={(block, path, target) =>
+              setSelection({ position: -1, block, path, region, target })
             }
             onInsert={(block, path) => insertAtPath(block, path, region)}
             onChange={(block, path) =>
@@ -952,15 +1032,7 @@ export function PrintPacketEditor({
                 label="Image"
                 disabled={disabled}
                 dragType="image"
-                onClick={() =>
-                  insertBlock({
-                    type: "image",
-                    resource: "shop.logo",
-                    width_mm: 42,
-                    height_mm: 18,
-                    fit: "contain",
-                  })
-                }
+                onClick={() => insertBlock(defaultImage(insertionScope))}
               />
               <ToolButton
                 icon="qr"
@@ -1022,7 +1094,11 @@ export function PrintPacketEditor({
             <div className="piqae-selection-bar">
               <span className="piqae-selection-title">
                 <Icon name={blockIcon(selection.block)} />
-                {blockTitle(selection.block)}
+                {selection.target?.kind === "table_cell"
+                  ? `Table cell ${selection.target.columnIndex + 1}`
+                  : selection.target?.kind === "table_row"
+                    ? "Repeating row"
+                    : blockTitle(selection.block)}
               </span>
               <SelectionSettings
                 block={selection.block}
@@ -1147,8 +1223,14 @@ export function PrintPacketEditor({
                   preview={activeRegion !== "body"}
                   mediaKind={value.media.kind}
                   authoringFields={allAuthoringFields}
-                  onSelect={(block, path) =>
-                    setSelection({ position: -1, block, path, region: "body" })
+                  onSelect={(block, path, target) =>
+                    setSelection({
+                      position: -1,
+                      block,
+                      path,
+                      region: "body",
+                      target,
+                    })
                   }
                   onInsert={(block, path) => insertAtPath(block, path, "body")}
                   onChange={(block, path) => {
@@ -1714,7 +1796,7 @@ function DocumentCanvas({
   authoringFields?: readonly ShopifyDocumentField[];
   scope?: ShopifyAuthoringScope;
   insertionSlots?: boolean;
-  onSelect(block: Block, path: BlockPath): void;
+  onSelect(block: Block, path: BlockPath, target?: CanvasSelectionTarget): void;
   onInsert?(block: Block, path: BlockPath): void;
   onChange(block: Block, path: BlockPath): void;
 }) {
@@ -1792,7 +1874,7 @@ function CanvasBlock({
   selected: boolean;
   authoringFields: readonly ShopifyDocumentField[];
   scope: ShopifyAuthoringScope;
-  onSelect(block: Block, path: BlockPath): void;
+  onSelect(block: Block, path: BlockPath, target?: CanvasSelectionTarget): void;
   onInsert?(block: Block, path: BlockPath): void;
   onChange(block: Block, path: BlockPath): void;
 }) {
@@ -1811,7 +1893,13 @@ function CanvasBlock({
   const select = (event: React.MouseEvent) => {
     if (preview || batchPresentation || protectedFraming) return;
     event.stopPropagation();
-    onSelect(block, path);
+    onSelect(
+      block,
+      path,
+      block.type === "grid" && path.at(-1)?.branch === "item"
+        ? { kind: "table_row" }
+        : undefined,
+    );
   };
   if (block.type === "paragraph" || block.type === "heading") {
     const Tag =
@@ -1916,10 +2004,11 @@ function CanvasBlock({
         {protectedFraming ? "Page break between orders" : "Page break"}
       </div>
     );
-  if (block.type === "image")
+  if (block.type === "image" || block.type === "image_value")
     return (
       <div
-        className={`piqae-canvas-image${selectableClass}${selected ? " piqae-canvas-selected" : ""}`}
+        className={`piqae-canvas-image${block.type === "image_value" ? " piqae-canvas-image-dynamic" : ""}${selectableClass}${selected ? " piqae-canvas-selected" : ""}`}
+        data-image-fit={block.fit ?? "contain"}
         style={{
           width: physicalMm(block.width_mm),
           height: physicalMm(block.height_mm),
@@ -1927,7 +2016,11 @@ function CanvasBlock({
         onClick={select}
       >
         <span aria-hidden="true">▧</span>
-        <small>{block.resource}</small>
+        <small>
+          {block.type === "image"
+            ? block.resource
+            : expressionLabel(block.resource)}
+        </small>
       </div>
     );
   if (block.type === "qr")
@@ -2062,6 +2155,17 @@ function CanvasBlock({
                       }
                     >
                       →
+                    </button>
+                    <button
+                      type="button"
+                      title={`Fit ${inlineLabel(column.header)} column to content`}
+                      aria-label={`Fit ${inlineLabel(column.header)} column to content`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onChange(fitTableColumnToContent(block, index), path);
+                      }}
+                    >
+                      ↔
                     </button>
                     <button
                       type="button"
@@ -2269,6 +2373,10 @@ function CanvasBlock({
                   className="piqae-canvas-table-row piqae-canvas-table-static-row"
                   data-table-row-index={rowIndex}
                   key={rowIndex}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (!preview) onSelect(block, path, { kind: "table_row" });
+                  }}
                 >
                   {block.columns.map((column, columnIndex) => {
                     const editablePath = editableStaticCellPath(column.cell);
@@ -2285,7 +2393,14 @@ function CanvasBlock({
                         aria-readonly={!editable || !editablePath}
                         contentEditable={Boolean(editable && editablePath)}
                         suppressContentEditableWarning
-                        onClick={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (!preview)
+                            onSelect(block, path, {
+                              kind: "table_cell",
+                              columnIndex,
+                            });
+                        }}
                         onBlur={(event) => {
                           if (!editable || !editablePath) return;
                           const next = updateStaticTableCell(
@@ -2327,12 +2442,23 @@ function CanvasBlock({
           <div
             className="piqae-canvas-table-row piqae-canvas-table-binding-row"
             aria-label={`Repeating table row from ${expressionLabel(block.items)}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (!preview) onSelect(block, path, { kind: "table_row" });
+            }}
           >
             {block.columns.map((column, index) => (
               <div
                 key={index}
                 style={{ flex: column.width ?? 1, textAlign: column.align }}
-                onClick={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (!preview)
+                    onSelect(block, path, {
+                      kind: "table_cell",
+                      columnIndex: index,
+                    });
+                }}
               >
                 <ExpressionEditor
                   aria-label={`${inlineLabel(column.header)} value`}
@@ -2718,7 +2844,7 @@ function CollectionCanvasBranch({
   selectedPath?: BlockPath;
   authoringFields: readonly ShopifyDocumentField[];
   scope: ShopifyAuthoringScope;
-  onSelect(block: Block, path: BlockPath): void;
+  onSelect(block: Block, path: BlockPath, target?: CanvasSelectionTarget): void;
   onInsert?(block: Block, path: BlockPath): void;
   onChange(block: Block, path: BlockPath): void;
   onAdd(block: Block): void;
@@ -3548,6 +3674,38 @@ function selectionFields({
         />
       </>
     );
+  if (block.type === "data_list")
+    return (
+      <>
+        <BarPath
+          label="Items"
+          list={allPaths}
+          value={authoringExpressionLabel(block.items, scope)}
+          disabled={disabled}
+          onChange={(items) =>
+            onChange({
+              ...block,
+              items: authoringPathExpression(items, scope),
+            })
+          }
+        />
+        <BarToggle
+          label="Repeat header on every page"
+          checked={block.repeat_header ?? true}
+          disabled={disabled}
+          onChange={(repeat_header) => onChange({ ...block, repeat_header })}
+        />
+        <BarNumber
+          label="Row gap"
+          unit="mm"
+          value={block.gap_mm ?? 0}
+          min={0}
+          max={40}
+          disabled={disabled}
+          onChange={(gap_mm) => onChange({ ...block, gap_mm })}
+        />
+      </>
+    );
   if (block.type === "repeat")
     return (
       <>
@@ -3662,6 +3820,57 @@ function selectionFields({
           value={block.resource}
           disabled={disabled}
           onChange={(resource) => onChange({ ...block, resource })}
+        />
+        <BarNumber
+          label="Width"
+          unit="mm"
+          value={block.width_mm}
+          min={1}
+          max={210}
+          disabled={disabled}
+          onChange={(width_mm) => onChange({ ...block, width_mm })}
+        />
+        <BarNumber
+          label="Height"
+          unit="mm"
+          value={block.height_mm}
+          min={1}
+          max={297}
+          disabled={disabled}
+          onChange={(height_mm) => onChange({ ...block, height_mm })}
+        />
+        <BarSelect
+          label="Fit"
+          value={block.fit ?? "contain"}
+          disabled={disabled}
+          options={[
+            ["contain", "Fit inside"],
+            ["fill", "Fill frame"],
+            ["scale_down", "Only scale down"],
+          ]}
+          onChange={(fit) =>
+            onChange({
+              ...block,
+              fit: fit as "contain" | "fill" | "scale_down",
+            })
+          }
+        />
+      </>
+    );
+  if (block.type === "image_value")
+    return (
+      <>
+        <BarPath
+          label="Dynamic image"
+          list={allPaths}
+          value={authoringExpressionLabel(block.resource, scope)}
+          disabled={disabled}
+          onChange={(resource) =>
+            onChange({
+              ...block,
+              resource: authoringPathExpression(resource, scope),
+            })
+          }
         />
         <BarNumber
           label="Width"
@@ -4197,6 +4406,88 @@ export function insertTableColumnAt(
   const columns = [...block.columns];
   columns.splice(index, 0, defaultColumn());
   return { ...block, columns };
+}
+
+/**
+ * Text tables are intentionally compact in PrintPacket/v1. When a merchant
+ * inserts a block (for example a product image) into one of their cells,
+ * promote the table to the richer data-list representation instead of placing
+ * the new block after the table or silently discarding its layout.
+ */
+export function tableToRichDataList(
+  block: TableBlock,
+  requestedColumn: number,
+  inserted: Block,
+): Extract<Block, { type: "data_list" }> {
+  const columnIndex = Math.min(
+    Math.max(Math.trunc(requestedColumn), 0),
+    block.columns.length - 1,
+  );
+  const columns = block.columns.map((column) => column.width ?? 1);
+  const paragraphFor = (
+    content: Inline[],
+    align?: TableColumn["align"],
+  ): Block => ({
+    type: "paragraph",
+    content: structuredClone(content),
+    ...(align ? { style: { align } } : {}),
+  });
+  return {
+    type: "data_list",
+    items: structuredClone(block.items),
+    repeat_header: block.repeat_header ?? false,
+    gap_mm: 0,
+    header: [
+      {
+        type: "grid",
+        columns,
+        gap_mm: 0,
+        children: block.columns.map((column) =>
+          paragraphFor(column.header, column.align),
+        ),
+      },
+      { type: "divider", width_pt: 0.35 },
+    ],
+    item: [
+      {
+        type: "grid",
+        columns,
+        gap_mm: 1.5,
+        children: block.columns.map((column, index) => ({
+          type: "stack" as const,
+          gap_mm: 1,
+          children: [
+            ...(index === columnIndex ? [structuredClone(inserted)] : []),
+            paragraphFor(column.cell, column.align),
+          ],
+        })),
+      },
+      { type: "divider", width_pt: 0.35 },
+    ],
+    empty: structuredClone(block.empty ?? []),
+  };
+}
+
+/** Set a useful content-sized ratio without adding a renderer-version field. */
+export function fitTableColumnToContent(
+  block: TableBlock,
+  columnIndex: number,
+): TableBlock {
+  const target = block.columns[columnIndex];
+  if (!target) return block;
+  const longestLine = Math.max(
+    1,
+    ...[inlineLabel(target.header), inlineLabel(target.cell)]
+      .flatMap((value) => value.split("\n"))
+      .map((value) => value.trim().length),
+  );
+  const fittedWidth = Math.min(4, Math.max(0.65, longestLine / 6));
+  return {
+    ...block,
+    columns: block.columns.map((column, index) =>
+      index === columnIndex ? { ...column, width: fittedWidth } : column,
+    ),
+  };
 }
 
 /** Literal arrays are the PrintPacket/v1 representation of non-repeating rows. */
@@ -4866,6 +5157,7 @@ function blockTitle(block: Block) {
     qr: "QR code",
     barcode: "Barcode",
     image: "Image",
+    image_value: "Dynamic image",
     spacer: "Spacing",
     page_break: "Page break",
     divider: "Divider",
@@ -4888,6 +5180,7 @@ function blockIcon(block: Block): IconName {
     qr: "qr",
     barcode: "barcode",
     image: "image",
+    image_value: "image",
     spacer: "spacer",
     divider: "divider",
     page_break: "divider",
@@ -5137,6 +5430,18 @@ function quickInsertBlock(type: QuickInsertType): Block {
     };
   if (type === "divider") return { type: "divider" };
   return { type: "spacer", height_mm: 6 };
+}
+function defaultImage(scope: ShopifyAuthoringScope): Block {
+  return {
+    type: "image_value",
+    resource:
+      scope === "item"
+        ? currentPathExpression("imageResource")
+        : pathExpression("shop.logo"),
+    width_mm: scope === "item" ? 16 : 42,
+    height_mm: scope === "item" ? 16 : 18,
+    fit: "contain",
+  };
 }
 function quickInsertIcon(type: QuickInsertType): IconName {
   if (type === "paragraph") return "text";

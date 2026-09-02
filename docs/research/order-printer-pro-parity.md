@@ -12,7 +12,7 @@ Shopify owns its editor, Liquid profile, variable catalogue and normalized order
 
 ## Editor
 
-The Shopify editor is a schema-controlled ProseMirror surface with direct text editing, variable chips and semantic PrintPacket blocks. It offers Document, Advanced Liquid and Piqae source views. Supported Liquid compiles into the same typed tree; unsupported executable or presentation constructs fail with stable diagnostics. HTML, CSS, includes, plugins, scripts, filesystem and network access are not execution options.
+The Shopify editor is a schema-controlled ProseMirror surface with direct text editing, variable chips and semantic PrintPacket blocks. Design and Code are two lossless views of the same canonical `printpacket/v1` document; valid Code edits update Design live, while invalid JSON is kept as a draft and blocks the mode switch. The bounded Liquid mapper remains an explicit compatibility/import boundary: supported Liquid compiles into the typed tree, while unsupported executable or presentation constructs fail with stable diagnostics. HTML, CSS, includes, plugins, scripts, filesystem and network access are not execution options.
 
 Four dynamic starters ship initially: Invoice, Packing slip, 80 mm Receipt and Credit note. Each uses collection-backed tables and is tested against empty, small and large line-item collections.
 

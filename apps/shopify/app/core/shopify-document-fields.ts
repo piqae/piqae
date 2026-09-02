@@ -148,6 +148,12 @@ export const SHOPIFY_DOCUMENT_FIELDS: readonly ShopifyDocumentField[] = [
     conditionable: true,
   },
   {
+    label: "Product image",
+    path: "item.imageResource",
+    group: "Item",
+    conditionable: true,
+  },
+  {
     label: "Item unit price",
     path: "item.unitPrice",
     group: "Financial",
