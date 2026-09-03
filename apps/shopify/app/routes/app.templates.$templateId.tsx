@@ -35,6 +35,7 @@ import {
   repairLegacyPrintPacket,
   removeSystemOwnership,
   serializeTemplateEnvelope,
+  templateResourcePreviewUrls,
   validatePrintPacket,
   validateRendererCompatiblePrintPacket,
   type PrintPacket,
@@ -76,6 +77,23 @@ export const canSubmitTemplateMode = (
 ) => document != null;
 export const customizedTemplateName = (name: string) =>
   `${name} — customized`.slice(0, 200);
+export function shouldMakePackingSlipDefault(
+  candidate: MerchantTemplate,
+  currentDefault: MerchantTemplate | null,
+): boolean {
+  if (candidate.kind !== "packing_slip" || !candidate.published) return false;
+  if (!currentDefault || currentDefault.id === candidate.id) return true;
+  if (currentDefault.kind !== "packing_slip") return false;
+  try {
+    return Boolean(
+      parseTemplateEnvelope(
+        currentDefault.published?.source ?? currentDefault.source,
+      ).system?.immutable,
+    );
+  } catch {
+    return false;
+  }
+}
 export const editorTitleBarActions = (starter: boolean) =>
   starter
     ? {
@@ -501,12 +519,49 @@ export async function action({ request, params }: ActionFunctionArgs) {
       });
     }
     if (!saved) throw new Error("Published document activation failed");
-    await syncTemplateIndex(admin, workflows(), session.shop);
-    if (savingFromStarter || !params.templateId || params.templateId === "new")
+    const followUpWarnings: string[] = [];
+    if (intent === "publish") {
+      try {
+        const settings = await workflows().getSettings(session.shop);
+        const currentDefault = settings.defaultTemplateId
+          ? await workflows().getTemplate(
+              session.shop,
+              settings.defaultTemplateId,
+            )
+          : null;
+        if (shouldMakePackingSlipDefault(saved, currentDefault))
+          await workflows().updateSettings(session.shop, {
+            defaultTemplateId: saved.id,
+          });
+      } catch {
+        followUpWarnings.push(
+          "The template was published, but it could not be made the default packing slip yet.",
+        );
+      }
+    }
+    try {
+      await syncTemplateIndex(admin, workflows(), session.shop);
+    } catch {
+      followUpWarnings.push(
+        "The template was saved, but the Shopify print action could not be refreshed yet.",
+      );
+    }
+    if (
+      savingFromStarter ||
+      !params.templateId ||
+      params.templateId === "new"
+    ) {
+      const search = new URLSearchParams({
+        saved: intent === "publish" ? "publish" : "draft",
+      });
+      if (repair.warnings.length) search.set("repaired", "1");
+      if (followUpWarnings.length)
+        search.set("warning", followUpWarnings.join(" "));
       return redirect(
-        `/app/templates/${encodeURIComponent(saved.id)}?saved=${intent === "publish" ? "publish" : "draft"}${repair.warnings.length ? "&repaired=1" : ""}`,
+        `/app/templates/${encodeURIComponent(saved.id)}?${search.toString()}`,
         303,
       );
+    }
     return {
       ok: true,
       error: "",
@@ -514,6 +569,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
       id: saved.id,
       intent: intent === "publish" ? "publish" : "draft",
       repaired: repair.warnings.length > 0,
+      warning: followUpWarnings.join(" "),
     };
   } catch (error) {
     return Response.json(
@@ -785,6 +841,10 @@ export default function TemplateEditor() {
   const selectedTarget = printTargets.find(
     (target) => target.id === designTargetId,
   );
+  const resourcePreviewUrls = useMemo(
+    () => templateResourcePreviewUrls(document, assets),
+    [document.resources, assets],
+  );
   useEffect(() => {
     setDocument(initial.document);
     setAssets(initial.assets);
@@ -851,9 +911,12 @@ export default function TemplateEditor() {
       bridge?.toast?.show(
         "A legacy barcode was updated to the current print format.",
       );
+    const warning = searchParams.get("warning");
+    if (warning) bridge?.toast?.show(warning);
     const next = new URLSearchParams(searchParams);
     next.delete("saved");
     next.delete("repaired");
+    next.delete("warning");
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
   useEffect(() => {
@@ -878,6 +941,8 @@ export default function TemplateEditor() {
       bridge?.toast?.show(
         "A legacy barcode was updated to the current print format.",
       );
+    if ("warning" in result && result.warning)
+      bridge?.toast?.show(result.warning);
   }, [result]);
   useEffect(() => {
     if (navigation.state === "idle") setPendingIntent(null);
@@ -1424,6 +1489,7 @@ export default function TemplateEditor() {
               >
                 <PrintPacketEditor
                   value={document}
+                  resourcePreviewUrls={resourcePreviewUrls}
                   disabled={editingLocked}
                   customFields={customFields}
                   stock={selectedTarget?.stock}

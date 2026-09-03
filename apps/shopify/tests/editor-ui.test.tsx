@@ -27,6 +27,7 @@ import {
 } from "../app/components/PrintPacketEditor";
 import {
   parseTemplateEnvelope,
+  removeSystemOwnership,
   serializeTemplateEnvelope,
   type PrintPacket,
 } from "../app/core/template-model";
@@ -1096,7 +1097,46 @@ describe("Shopify document editor layout", () => {
     expect(page.textContent).toContain(templates[1]!.name);
     expect(page.querySelectorAll("s-table-row")).toHaveLength(2);
     expect(page.textContent).not.toContain("Quick print");
+    expect(page.textContent).not.toContain("Delete");
     expect(page.querySelector('input[value="set-quick-print"]')).toBeNull();
+  });
+
+  it("offers guarded list deletion for merchant drafts", async () => {
+    const starter = starterTemplates[0]!;
+    const envelope = parseTemplateEnvelope(starter.source);
+    removeSystemOwnership(envelope);
+    const draft = {
+      id: "merchant-draft",
+      name: "Packing Slip — customized",
+      kind: "packing_slip",
+      pageSize: "A4",
+      state: "draft" as const,
+      source: serializeTemplateEnvelope(envelope),
+      revision: 1,
+      draftRevision: 1,
+      designTargetId: null,
+      designSpecificationRevision: null,
+      published: null,
+      updatedAt: "2026-09-01T00:00:00Z",
+    };
+    const Stub = createRoutesStub([
+      {
+        path: "/",
+        Component: Templates,
+        HydrateFallback: () => null,
+        loader: () => ({ templates: [draft], hasNodes: true, nodeError: "" }),
+      },
+    ]);
+    const page = await render(<Stub />);
+
+    expect(page.textContent).toContain("Packing Slip — customized");
+    expect(page.textContent).toContain("Delete");
+    expect(
+      page.querySelector('input[name="intent"][value="delete"]'),
+    ).not.toBeNull();
+    expect(
+      page.querySelector('input[name="templateId"][value="merchant-draft"]'),
+    ).not.toBeNull();
   });
 
   it("shows workspace, insert, and changing selection tools in one card", async () => {
@@ -1541,6 +1581,69 @@ describe("Shopify document editor layout", () => {
       true,
     );
     expect(authoredBody(onChange.mock.lastCall?.[0])).toHaveLength(3);
+  });
+
+  it("restores a structurally deleted block when focus returns to the page", async () => {
+    const onChange = vi.fn();
+    const page = await render(
+      <StatefulPrintPacketEditor onChange={onChange} />,
+    );
+    await act(async () => {
+      page
+        .querySelector<HTMLElement>(".piqae-canvas-image")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {
+      document.body.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Delete",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(
+      authoredBody(onChange.mock.lastCall?.[0]).map(({ type }) => type),
+    ).toEqual(["paragraph"]);
+
+    const undo = new KeyboardEvent("keydown", {
+      key: "z",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => document.body.dispatchEvent(undo));
+    expect(undo.defaultPrevented).toBe(true);
+    expect(
+      authoredBody(onChange.mock.lastCall?.[0]).map(({ type }) => type),
+    ).toEqual(["paragraph", "image"]);
+  });
+
+  it("renders a selected Shopify Files image in the design canvas", async () => {
+    const page = await render(
+      <PrintPacketEditor
+        value={packet}
+        resourcePreviewUrls={{
+          "shop.logo": "https://cdn.shopify.com/s/files/store-logo.png",
+        }}
+        onChange={() => undefined}
+      />,
+    );
+    const image = page.querySelector<HTMLImageElement>(
+      ".piqae-canvas-image-resolved img",
+    );
+    expect(image?.getAttribute("src")).toBe(
+      "https://cdn.shopify.com/s/files/store-logo.png",
+    );
+    expect(image?.getAttribute("referrerpolicy")).toBe("no-referrer");
+
+    await act(async () =>
+      image?.dispatchEvent(new Event("error", { bubbles: false })),
+    );
+    expect(page.querySelector(".piqae-canvas-image-resolved")).toBeNull();
+    expect(page.querySelector(".piqae-canvas-image")?.textContent).toContain(
+      "shop.logo",
+    );
   });
 
   it("leaves native text undo alone and clears selection on document undo", async () => {

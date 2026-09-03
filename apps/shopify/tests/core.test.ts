@@ -43,8 +43,13 @@ import {
   mediaForPageSize,
   mediaPresetForDocument,
   pageSizeForDocument,
+  shouldMakePackingSlipDefault,
 } from "../app/routes/app.templates.$templateId";
-import { customizedSystemDraft, templates } from "../app/routes/app.templates";
+import {
+  canDeleteTemplate,
+  customizedSystemDraft,
+  templates,
+} from "../app/routes/app.templates";
 import { selectedOrderIds } from "../app/routes/app.print";
 import { starterTemplates } from "../app/core/starter-templates";
 import { MemoryWorkflowRepository } from "../app/core/workflows.server";
@@ -1607,6 +1612,68 @@ describe("Shopify document experience", () => {
         "again",
       ),
     ).toThrow("Only system documents");
+    const merchantDraft = {
+      ...draft,
+      draftRevision: 1,
+      published: null,
+      updatedAt: "2026-08-10T00:00:00.000Z",
+    };
+    expect(canDeleteTemplate(merchantDraft)).toBe(true);
+    expect(
+      canDeleteTemplate({
+        ...merchantDraft,
+        published: {
+          revision: 1,
+          name: merchantDraft.name,
+          kind: merchantDraft.kind,
+          pageSize: merchantDraft.pageSize,
+          source: merchantDraft.source,
+          designTargetId: null,
+          designSpecificationRevision: null,
+          media: customized.document.media,
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("promotes a published custom packing slip over the starter default", () => {
+    const starter = starterTemplates.find(({ id }) => id === "packing-slip")!;
+    const systemDefault = {
+      id: starter.id,
+      name: starter.name,
+      kind: starter.kind,
+      pageSize: starter.pageSize,
+      state: "published" as const,
+      source: starter.source,
+      revision: 1,
+      draftRevision: 1,
+      published: {
+        revision: 1,
+        name: starter.name,
+        kind: starter.kind,
+        pageSize: starter.pageSize,
+        source: starter.source,
+        designTargetId: null,
+        designSpecificationRevision: null,
+        media: starter.specification.media,
+      },
+      updatedAt: "2026-08-10T00:00:00.000Z",
+    };
+    const custom = {
+      ...systemDefault,
+      id: "custom-packing-slip",
+      name: "Warehouse packing slip",
+      source: customizedSystemDraft(systemDefault, "draft").source,
+      published: {
+        ...systemDefault.published,
+        source: customizedSystemDraft(systemDefault, "published").source,
+      },
+    };
+    expect(shouldMakePackingSlipDefault(custom, systemDefault)).toBe(true);
+    expect(shouldMakePackingSlipDefault(custom, custom)).toBe(true);
+    expect(
+      shouldMakePackingSlipDefault(custom, { ...custom, id: "another-custom" }),
+    ).toBe(false);
   });
 
   it("keeps advanced Liquid explicitly compatibility-gated", () => {

@@ -1607,6 +1607,23 @@
   border-style: dashed;
   background: #fafafa;
 }
+.piqae-canvas-image-resolved {
+  overflow: hidden;
+  border-color: transparent;
+  background: transparent;
+}
+.piqae-canvas-image-resolved img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.piqae-canvas-image-resolved[data-image-fit="fill"] img {
+  object-fit: fill;
+}
+.piqae-canvas-image-resolved[data-image-fit="scale_down"] img {
+  object-fit: scale-down;
+}
 .piqae-canvas-image-dynamic {
   background:
     linear-gradient(135deg, transparent 46%, #d5d7da 47% 53%, transparent 54%),
