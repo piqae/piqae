@@ -41,12 +41,12 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
     "@piqae/sdk": "workspace:*",
-    "zod": "4.4.3"
+    "zod": "4.5.4"
   },
   "devDependencies": {
     "@types/node": "^22.15.30",
-    "prettier": "^3.5.3",
-    "tsx": "^4.20.3",
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.13",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   }
