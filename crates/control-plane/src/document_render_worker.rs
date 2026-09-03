@@ -264,6 +264,7 @@ impl DocumentRenderWorker {
                 &artifact.sha256,
                 byte_length,
                 page_count,
+                &output.warnings,
             )
             .await
             .is_err()
@@ -612,7 +613,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_required_data_has_an_actionable_terminal_code()
+    async fn missing_required_data_completes_with_a_non_fatal_warning()
     -> Result<(), Box<dyn std::error::Error>> {
         let specification = br#"{
           "format":"printpacket/v1",
@@ -632,11 +633,9 @@ mod tests {
         let render = repository
             .get_document_render(workspace, environment, &id)
             .await?;
-        assert_eq!(render.state, "failed_terminal");
-        assert_eq!(
-            render.failure_code.as_deref(),
-            Some("document_data_missing")
-        );
+        assert_eq!(render.state, "completed");
+        assert_eq!(render.failure_code, None);
+        assert_eq!(render.warnings, ["document_data_missing"]);
         Ok(())
     }
 
@@ -831,6 +830,7 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             6,
             1,
+            &[],
         )
         .await?;
         assert!(matches!(
@@ -839,7 +839,8 @@ mod tests {
                 b"key",
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 10,
-                1
+                1,
+                &[],
             )
             .await,
             Err(RepositoryError::ConcurrentStateChange)

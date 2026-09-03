@@ -15,7 +15,10 @@
     clippy::too_many_lines
 )]
 
-use std::{collections::BTreeMap, fmt::Write as _};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
+};
 
 use qrcode::{EcLevel, QrCode};
 use serde::{Deserialize, Serialize};
@@ -678,6 +681,7 @@ struct State<'a> {
     in_region: bool,
     pending_page_break: bool,
     estimated_pdf_bytes: usize,
+    warnings: BTreeSet<&'static str>,
 }
 
 /// Render a validated document and its data into deterministic PDF bytes.
@@ -710,6 +714,8 @@ pub fn render_with_resources(
 pub struct RenderOutput {
     pub pdf: Vec<u8>,
     pub page_count: u32,
+    /// Stable, bounded codes for non-fatal substitutions made while rendering.
+    pub warnings: Vec<String>,
 }
 
 /// Render deterministic bytes and authoritative layout metrics in one pass.
@@ -768,6 +774,7 @@ pub fn render_with_metrics(
                     })?,
             )
             .ok_or(RenderError::Limit("output bytes"))?,
+        warnings: BTreeSet::new(),
     };
     if state.estimated_pdf_bytes > limits.max_output_bytes {
         return Err(RenderError::Limit("output bytes"));
@@ -793,6 +800,7 @@ pub fn render_with_metrics(
     Ok(RenderOutput {
         page_count: u32::try_from(state.pages.len()).map_err(|_| RenderError::Limit("pages"))?,
         pdf,
+        warnings: state.warnings.into_iter().map(str::to_owned).collect(),
     })
 }
 
@@ -1487,11 +1495,15 @@ fn layout_nodes(nodes: &[Node], state: &mut State, depth: usize) -> Result<(), R
                 children,
                 gap_mm,
             } => {
-                let value = eval(items, state.root, &state.current)?;
-                let arr = value
-                    .as_array()
-                    .ok_or(RenderError::Expression("repeat items must be an array"))?
-                    .clone();
+                let value = eval_or_warn(items, state.root, &state.current, &mut state.warnings)?;
+                let arr = if value.is_null() {
+                    Vec::new()
+                } else {
+                    value
+                        .as_array()
+                        .ok_or(RenderError::Expression("repeat items must be an array"))?
+                        .clone()
+                };
                 account_repeat(state, arr.len())?;
                 let old = state.current.clone();
                 for (index, item) in arr.iter().enumerate() {
@@ -1525,7 +1537,12 @@ fn layout_nodes(nodes: &[Node], state: &mut State, depth: usize) -> Result<(), R
                 then,
                 otherwise,
             } => {
-                if truthy(&eval(condition, state.root, &state.current)?) {
+                if truthy(&eval_or_warn(
+                    condition,
+                    state.root,
+                    &state.current,
+                    &mut state.warnings,
+                )?) {
                     layout_nodes(then, state, depth + 1)?
                 } else {
                     layout_nodes(otherwise, state, depth + 1)?
@@ -1594,8 +1611,11 @@ fn layout_nodes(nodes: &[Node], state: &mut State, depth: usize) -> Result<(), R
                 height_mm,
                 fit,
             } => {
-                let resource = value_text(&eval(resource, state.root, &state.current)?);
-                image(&resource, *width_mm, *height_mm, *fit, state)?
+                let resource =
+                    eval_or_warn(resource, state.root, &state.current, &mut state.warnings)?;
+                if !resource.is_null() {
+                    image(&value_text(&resource), *width_mm, *height_mm, *fit, state)?
+                }
             }
             Node::Qr {
                 value,
@@ -1730,10 +1750,15 @@ fn data_list(
     state: &mut State,
     depth: usize,
 ) -> Result<(), RenderError> {
-    let values = eval(items, state.root, &state.current)?
-        .as_array()
-        .ok_or(RenderError::Expression("data-list items must be an array"))?
-        .clone();
+    let value = eval_or_warn(items, state.root, &state.current, &mut state.warnings)?;
+    let values = if value.is_null() {
+        Vec::new()
+    } else {
+        value
+            .as_array()
+            .ok_or(RenderError::Expression("data-list items must be an array"))?
+            .clone()
+    };
     account_repeat(state, values.len())?;
     if values.is_empty() {
         return layout_nodes(empty, state, depth + 1);
@@ -1817,7 +1842,14 @@ fn paragraph(content: &[Inline], style: &TextStyle, state: &mut State) -> Result
     if resolved_style.color.is_none() {
         resolved_style.color = Some(state.doc.theme.text_color);
     }
-    let runs = resolve_runs(content, state.root, &state.current, &resolved_style, size)?;
+    let runs = resolve_runs(
+        content,
+        state.root,
+        &state.current,
+        &resolved_style,
+        size,
+        &mut state.warnings,
+    )?;
     let lines = wrap_runs(runs, state.content_width)?;
     for line in lines {
         let line_h = line
@@ -1874,6 +1906,7 @@ fn resolve_runs(
     current: &Value,
     block: &TextStyle,
     default_size: f32,
+    warnings: &mut BTreeSet<&'static str>,
 ) -> Result<Vec<StyledRun>, RenderError> {
     let mut out = Vec::new();
     for inline in content {
@@ -1898,7 +1931,10 @@ fn resolve_runs(
                 value: Expr::PageCount,
                 style,
             } => (PAGE_COUNT_MARKER.into(), style),
-            Inline::Value { value, style } => (value_text(&eval(value, root, current)?), style),
+            Inline::Value { value, style } => (
+                value_text(&eval_or_warn(value, root, current, warnings)?),
+                style,
+            ),
             Inline::LineBreak => unreachable!(),
         };
         let size = style.font_size_pt.unwrap_or(default_size);
@@ -2051,11 +2087,15 @@ fn table(
     style: &TableStyle,
     state: &mut State,
 ) -> Result<(), RenderError> {
-    let value = eval(items, state.root, &state.current)?;
-    let rows = value
-        .as_array()
-        .ok_or(RenderError::Expression("table items must be an array"))?
-        .clone();
+    let value = eval_or_warn(items, state.root, &state.current, &mut state.warnings)?;
+    let rows = if value.is_null() {
+        Vec::new()
+    } else {
+        value
+            .as_array()
+            .ok_or(RenderError::Expression("table items must be an array"))?
+            .clone()
+    };
     account_repeat(state, rows.len())?;
     if rows.is_empty() {
         return layout_nodes(empty, state, 1);
@@ -2078,6 +2118,7 @@ fn table(
                 &state.current,
                 &header_style,
                 state.doc.theme.font_size_pt,
+                &mut state.warnings,
             )
         })
         .collect::<Result<_, _>>()?;
@@ -2094,6 +2135,7 @@ fn table(
                     row,
                     &default_style,
                     state.doc.theme.font_size_pt,
+                    &mut state.warnings,
                 )
             })
             .collect::<Result<_, _>>()?;
@@ -2227,7 +2269,11 @@ fn draw_table_row(
 }
 
 fn qr(expr: &Expr, size_mm: f32, ec: QrCorrection, state: &mut State) -> Result<(), RenderError> {
-    let text = value_text(&eval(expr, state.root, &state.current)?);
+    let value = eval_or_warn(expr, state.root, &state.current, &mut state.warnings)?;
+    if value.is_null() {
+        return Ok(());
+    }
+    let text = value_text(&value);
     account_text(state, &text)?;
     let size = checked_mm(size_mm, "QR size")?;
     if !(mm(10.0)..=mm(100.0)).contains(&size) {
@@ -2281,7 +2327,11 @@ fn barcode(expr: &Expr, layout: BarcodeLayout, state: &mut State) -> Result<(), 
         padding_mm,
         gap_mm,
     } = layout;
-    let text = value_text(&eval(expr, state.root, &state.current)?);
+    let value = eval_or_warn(expr, state.root, &state.current, &mut state.warnings)?;
+    if value.is_null() {
+        return Ok(());
+    }
+    let text = value_text(&value);
     if text.is_empty() || text.len() > 80 || !text.bytes().all(|b| (32..=126).contains(&b)) {
         return Err(RenderError::InvalidBarcode(
             "Code 128 supports 1-80 printable ASCII characters",
@@ -2628,6 +2678,22 @@ fn eval(expr: &Expr, root: &Value, current: &Value) -> Result<Value, RenderError
         }
     }
 }
+
+fn eval_or_warn(
+    expr: &Expr,
+    root: &Value,
+    current: &Value,
+    warnings: &mut BTreeSet<&'static str>,
+) -> Result<Value, RenderError> {
+    match eval(expr, root, current) {
+        Err(RenderError::MissingPath(_)) => {
+            warnings.insert("document_data_missing");
+            Ok(Value::Null)
+        }
+        result => result,
+    }
+}
+
 fn walk(base: &Value, path: &[String]) -> Result<Value, RenderError> {
     if path.len() > 64 {
         return Err(RenderError::Limit("expression path depth"));
@@ -3492,6 +3558,7 @@ mod tests {
             in_region: false,
             pending_page_break: false,
             estimated_pdf_bytes: 4_096,
+            warnings: BTreeSet::new(),
         }
     }
     fn path(name: &str) -> Expr {
@@ -4607,6 +4674,97 @@ mod tests {
             .unwrap(),
             json!(true)
         );
+    }
+
+    #[test]
+    fn unguarded_missing_values_render_blank_and_report_one_warning() {
+        let missing = Expr::Path {
+            path: vec!["customer".into(), "phone".into()],
+        };
+        let packet = document(vec![
+            Node::Paragraph {
+                content: vec![
+                    Inline::Text {
+                        value: "Phone: ".into(),
+                        style: TextStyle::default(),
+                    },
+                    Inline::Value {
+                        value: missing.clone(),
+                        style: TextStyle::default(),
+                    },
+                ],
+                style: TextStyle::default(),
+            },
+            Node::Barcode {
+                value: missing.clone(),
+                symbology: BarcodeSymbology::Code128,
+                width_mm: 40.0,
+                height_mm: 10.0,
+                human_readable: false,
+                align: TextAlign::Left,
+                padding_mm: 0.0,
+                gap_mm: 0.0,
+            },
+            Node::Repeat {
+                items: missing,
+                children: vec![text("not rendered")],
+                gap_mm: 0.0,
+            },
+        ]);
+
+        let output = render_with_metrics(
+            &packet,
+            &json!({"customer": {}}),
+            &ResolvedResources::default(),
+            RenderLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(output.warnings, ["document_data_missing"]);
+        assert!(
+            !String::from_utf8(output.pdf)
+                .unwrap()
+                .contains("not rendered")
+        );
+    }
+
+    #[test]
+    fn guarded_missing_values_do_not_report_a_warning() {
+        let missing = Expr::Path {
+            path: vec!["customer".into(), "phone".into()],
+        };
+        let packet = document(vec![
+            Node::Paragraph {
+                content: vec![Inline::Value {
+                    value: Expr::Coalesce {
+                        values: vec![
+                            missing.clone(),
+                            Expr::Literal {
+                                value: json!("No phone"),
+                            },
+                        ],
+                    },
+                    style: TextStyle::default(),
+                }],
+                style: TextStyle::default(),
+            },
+            Node::Conditional {
+                condition: Expr::Exists {
+                    value: Box::new(missing),
+                },
+                then: vec![text("phone supplied")],
+                otherwise: Vec::new(),
+            },
+        ]);
+
+        let output = render_with_metrics(
+            &packet,
+            &json!({"customer": {}}),
+            &ResolvedResources::default(),
+            RenderLimits::default(),
+        )
+        .unwrap();
+        assert!(output.warnings.is_empty());
+        assert!(String::from_utf8(output.pdf).unwrap().contains("No phone"));
     }
 
     #[test]

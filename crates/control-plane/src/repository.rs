@@ -240,6 +240,7 @@ pub trait Repository: Send + Sync + 'static {
         artifact_sha256: &str,
         byte_length: i64,
         page_count: i32,
+        warnings: &[String],
     ) -> Result<StoredDocumentRender, RepositoryError>;
     async fn fail_claimed_document_render(
         &self,
@@ -1507,6 +1508,7 @@ impl Repository for PostgresStore {
         artifact_sha256: &str,
         byte_length: i64,
         page_count: i32,
+        warnings: &[String],
     ) -> Result<StoredDocumentRender, RepositoryError> {
         PostgresStore::complete_claimed_document_render(
             self,
@@ -1518,6 +1520,7 @@ impl Repository for PostgresStore {
             artifact_sha256,
             byte_length,
             page_count,
+            warnings,
         )
         .await
         .map_err(Into::into)
@@ -4138,6 +4141,7 @@ impl Repository for MemoryRepository {
         artifact_sha256: &str,
         byte_length: i64,
         page_count: i32,
+        warnings: &[String],
     ) -> Result<StoredDocumentRender, RepositoryError> {
         let mut state = self.state.write().await;
         let (_, _, _, _, render) = state
@@ -4157,6 +4161,7 @@ impl Repository for MemoryRepository {
         render.artifact_media_type = Some("application/pdf".into());
         render.page_count = Some(page_count);
         render.failure_code = None;
+        render.warnings = warnings.to_vec();
         render.lease_token = None;
         render.lease_expires_at = None;
         render.updated_at = Utc::now();
@@ -4305,6 +4310,7 @@ impl Repository for MemoryRepository {
             artifact_media_type: None,
             page_count: None,
             failure_code: None,
+            warnings: Vec::new(),
             created_at: now,
             updated_at: now,
             expires_at: now + chrono::Duration::days(30),
@@ -4370,6 +4376,7 @@ impl Repository for MemoryRepository {
             artifact_media_type: None,
             page_count: None,
             failure_code: None,
+            warnings: Vec::new(),
             created_at: now,
             updated_at: now,
             expires_at,
@@ -9257,6 +9264,7 @@ mod routing_repository_tests {
                 artifact_media_type: Some("application/pdf".into()),
                 page_count: Some(1),
                 failure_code: None,
+                warnings: Vec::new(),
                 created_at: now,
                 updated_at: now,
                 expires_at: now + chrono::Duration::days(30),
@@ -9414,6 +9422,7 @@ mod routing_repository_tests {
                     &"d".repeat(64),
                     10,
                     1,
+                    &[],
                 )
                 .await,
             Err(RepositoryError::ConcurrentStateChange)
@@ -9502,6 +9511,7 @@ mod routing_repository_tests {
             artifact_media_type: Some("application/pdf".into()),
             page_count: Some(1),
             failure_code: None,
+            warnings: Vec::new(),
             created_at: now,
             updated_at: now,
             expires_at: now + chrono::Duration::days(30),

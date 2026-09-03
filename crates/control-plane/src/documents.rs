@@ -519,6 +519,8 @@ struct RenderResponse {
     artifact_media_type: Option<String>,
     page_count: Option<i32>,
     failure_code: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -542,6 +544,7 @@ impl TryFrom<StoredDocumentRender> for RenderResponse {
             artifact_media_type: value.artifact_media_type,
             page_count: value.page_count,
             failure_code: value.failure_code,
+            warnings: value.warnings,
             created_at: value.created_at,
             updated_at: value.updated_at,
         })
@@ -571,6 +574,8 @@ struct PreviewRenderResponse {
     artifact_media_type: Option<String>,
     page_count: Option<i32>,
     failure_code: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
     expires_at: chrono::DateTime<chrono::Utc>,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
@@ -592,6 +597,7 @@ impl TryFrom<StoredDocumentRender> for PreviewRenderResponse {
             artifact_media_type: value.artifact_media_type,
             page_count: value.page_count,
             failure_code: value.failure_code,
+            warnings: value.warnings,
             expires_at: value.expires_at,
             created_at: value.created_at,
             updated_at: value.updated_at,

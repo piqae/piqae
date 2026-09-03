@@ -10,6 +10,14 @@ credentials and object-store locations must not enter a browser or extension.
 The preview artifact endpoint authenticates the tenant and verifies its byte
 length and SHA-256 digest before returning the PDF.
 
+Completed render responses can include a bounded `warnings` array of stable,
+machine-readable codes. `document_data_missing` means an unguarded template
+path was unavailable and its value was rendered blank; the preview and print
+flow remain available so a user can review the result. Templates that use
+`coalesce` or `exists` to handle absent data do not emit that warning. Invalid
+document structure, unsupported renderer capabilities, unsafe resources, and
+other failures that cannot produce a trustworthy PDF remain terminal.
+
 Approval claims a preview, then registers a job through the existing
 idempotent, zero-copy document-artifact path. A retry with the same approval
 key resumes safely after a process failure and returns the same job. Another
