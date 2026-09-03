@@ -38,6 +38,28 @@ type ResolvedPublication = {
   designSpecificationRevision: string | null;
 };
 
+export function rendererWarnings(
+  warningCodes: readonly string[] | undefined,
+): ShopifyDocumentWarning[] {
+  const warnings: ShopifyDocumentWarning[] = [];
+  for (const code of new Set(warningCodes ?? [])) {
+    if (code === "document_data_missing") {
+      warnings.push({
+        code,
+        message:
+          "Some template data was unavailable for this selection. Piqae left those values blank and generated the document.",
+      });
+    } else if (!warnings.some((warning) => warning.code === "render_warning")) {
+      warnings.push({
+        code: "render_warning",
+        message:
+          "Piqae generated this document with a non-blocking renderer warning. Review the preview before printing.",
+      });
+    }
+  }
+  return warnings;
+}
+
 export class ShopifyPrintingService {
   constructor(
     private readonly shops: ShopRepository,
@@ -169,7 +191,11 @@ export class ShopifyPrintingService {
       previewImageUrl: previewToken
         ? `${this.appUrl}/api/public/previews/image?token=${encodeURIComponent(previewToken)}`
         : null,
-      warnings: [...fetched.warnings, ...usageWarnings],
+      warnings: [
+        ...fetched.warnings,
+        ...rendererWarnings(completed.warnings),
+        ...usageWarnings,
+      ],
     };
   }
 
@@ -261,7 +287,11 @@ export class ShopifyPrintingService {
       previewImageUrl: previewToken
         ? `${this.appUrl}/api/public/previews/image?token=${encodeURIComponent(previewToken)}`
         : null,
-      warnings: [...productData.warnings, ...usageWarnings],
+      warnings: [
+        ...productData.warnings,
+        ...rendererWarnings(completed.warnings),
+        ...usageWarnings,
+      ],
     };
   }
 

@@ -50,7 +50,9 @@ export type ShopifyDocumentWarning = {
   code:
     | "optional_order_data_unavailable"
     | "optional_product_data_unavailable"
-    | "usage_tracking_delayed";
+    | "usage_tracking_delayed"
+    | "document_data_missing"
+    | "render_warning";
   message: string;
 };
 

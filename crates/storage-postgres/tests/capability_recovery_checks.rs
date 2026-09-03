@@ -155,7 +155,7 @@ async fn capability_recovery_checks_migrate_fresh_and_0044_with_tenant_fences() 
                 .fetch_one(&pool)
                 .await
                 .expect("latest migration");
-        assert_eq!(latest, 46);
+        assert_eq!(latest, 47);
 
         if mode == "fresh" {
             seed_tenant(&pool, "a", false).await;

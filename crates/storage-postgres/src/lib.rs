@@ -881,6 +881,7 @@ pub struct StoredDocumentRender {
     pub artifact_media_type: Option<String>,
     pub page_count: Option<i32>,
     pub failure_code: Option<String>,
+    pub warnings: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
@@ -10800,11 +10801,12 @@ impl PostgresStore {
         artifact_sha256: &str,
         byte_length: i64,
         page_count: i32,
+        warnings: &[String],
     ) -> Result<StoredDocumentRender, StorageError> {
         let row = sqlx::query(
             "UPDATE document_renders SET state='completed', artifact_object_key_ciphertext=$5,
              artifact_sha256=$6, artifact_byte_length=$7, artifact_media_type='application/pdf',
-             page_count=$8,
+             page_count=$8,warnings=$9,
              failure_code=NULL,last_failure_code=NULL,completed_at=now(),lease_owner=NULL,
              lease_token=NULL,lease_expires_at=NULL,updated_at=now()
              WHERE id=$1 AND workspace_id=$2 AND environment_id=$3 AND state='rendering'
@@ -10818,6 +10820,7 @@ impl PostgresStore {
         .bind(artifact_sha256)
         .bind(byte_length)
         .bind(page_count)
+        .bind(warnings)
         .fetch_optional(&self.pool)
         .await?
         .ok_or(StorageError::ConcurrentStateChange)?;
@@ -11163,6 +11166,7 @@ fn document_render_from_row(row: &PgRow) -> Result<StoredDocumentRender, Storage
         artifact_media_type: row.try_get("artifact_media_type")?,
         page_count: row.try_get("page_count")?,
         failure_code: row.try_get("failure_code")?,
+        warnings: row.try_get("warnings")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
         expires_at: row.try_get("expires_at")?,

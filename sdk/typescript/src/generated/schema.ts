@@ -5009,6 +5009,8 @@ export interface components {
             page_count?: number | null;
             /** @description Stable machine-readable terminal reason. Renderer compatibility and data failures use renderer_version_unsupported, renderer_feature_unsupported, document_data_missing, document_data_invalid, document_typography_unsupported, document_barcode_invalid, document_render_limit_exceeded, or invalid_document_spec; clients must tolerate additional codes. */
             failure_code?: string | null;
+            /** @description Stable machine-readable non-fatal warning codes. A completed render may include document_data_missing when unresolved values were left blank; clients must tolerate additional codes. */
+            warnings?: string[];
             /** Format: date-time */
             expires_at: string;
             /** Format: date-time */
@@ -5028,6 +5030,8 @@ export interface components {
             page_count?: number | null;
             /** @description Stable machine-readable terminal reason. Renderer compatibility and data failures use renderer_version_unsupported, renderer_feature_unsupported, document_data_missing, document_data_invalid, document_typography_unsupported, document_barcode_invalid, document_render_limit_exceeded, or invalid_document_spec; clients must tolerate additional codes. */
             failure_code?: string | null;
+            /** @description Stable machine-readable non-fatal warning codes. A completed render may include document_data_missing when unresolved values were left blank; clients must tolerate additional codes. */
+            warnings?: string[];
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */

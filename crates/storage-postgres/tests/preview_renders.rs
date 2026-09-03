@@ -22,8 +22,9 @@ async fn schema_pool(database_url: &str, schema: &str) -> PgPool {
 }
 
 async fn seed_tenant(pool: &PgPool, workspace: WorkspaceId, environment: EnvironmentId) {
-    sqlx::query("INSERT INTO workspaces (id,name,slug) VALUES ($1,'Preview','preview')")
+    sqlx::query("INSERT INTO workspaces (id,name,slug) VALUES ($1,'Preview',$2)")
         .bind(workspace.to_string())
+        .bind(format!("preview-{workspace}"))
         .execute(pool)
         .await
         .expect("workspace fixture");
@@ -111,7 +112,7 @@ async fn preview_render_migrates_fresh_and_n_minus_one_with_hard_purpose_fences(
             let previous = Migrator {
                 migrations: Cow::Owned(
                     all.iter()
-                        .filter(|migration| migration.version < 46)
+                        .filter(|migration| migration.version < 47)
                         .cloned()
                         .collect(),
                 ),
@@ -119,7 +120,7 @@ async fn preview_render_migrates_fresh_and_n_minus_one_with_hard_purpose_fences(
                 locking: true,
                 no_tx: false,
             };
-            previous.run(&pool).await.expect("apply exact 0045 schema");
+            previous.run(&pool).await.expect("apply exact 0046 schema");
             seed_tenant(&pool, workspace, environment).await;
             insert_printable_fixture(&pool, workspace, environment).await;
         }
@@ -132,7 +133,7 @@ async fn preview_render_migrates_fresh_and_n_minus_one_with_hard_purpose_fences(
                 .fetch_one(&pool)
                 .await
                 .expect("latest migration");
-        assert_eq!(latest, 46);
+        assert_eq!(latest, 47);
         if mode == "fresh" {
             seed_tenant(&pool, workspace, environment).await;
             insert_printable_fixture(&pool, workspace, environment).await;
@@ -144,6 +145,37 @@ async fn preview_render_migrates_fresh_and_n_minus_one_with_hard_purpose_fences(
         .await
         .expect("backfilled printable purpose");
         assert_eq!(printable_purpose, "printable");
+        let printable_warnings: Vec<String> = sqlx::query_scalar(
+            "SELECT warnings FROM document_renders WHERE id='drnd_printable_fixture'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("existing render receives an empty warning list");
+        assert!(printable_warnings.is_empty());
+        let store = PostgresStore::from_pool(pool.clone());
+        let printable_work = store
+            .claim_document_renders("warning-migration-test", 10, 30)
+            .await
+            .expect("claim existing printable render")
+            .into_iter()
+            .find(|work| work.render.id == "drnd_printable_fixture")
+            .expect("printable render is claimable after migration");
+        let artifact_key_ciphertext = vec![8_u8; 32];
+        let completed = store
+            .complete_claimed_document_render(
+                workspace,
+                environment,
+                &printable_work.render.id,
+                printable_work.lease_token,
+                &artifact_key_ciphertext,
+                &"f".repeat(64),
+                32,
+                1,
+                &["document_data_missing".to_owned()],
+            )
+            .await
+            .expect("complete render with a non-fatal warning");
+        assert_eq!(completed.warnings, ["document_data_missing"]);
 
         let ciphertext = vec![9_u8; 32];
         sqlx::query(
@@ -169,16 +201,29 @@ async fn preview_render_migrates_fresh_and_n_minus_one_with_hard_purpose_fences(
         .await
         .expect("live preview fixture");
 
+        let foreign_workspace = WorkspaceId::new();
+        let foreign_environment = EnvironmentId::new();
+        seed_tenant(&pool, foreign_workspace, foreign_environment).await;
         let cross_tenant_count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM document_renders
              WHERE id='dprv_live_fixture' AND workspace_id=$1 AND environment_id=$2",
         )
-        .bind(WorkspaceId::new().to_string())
-        .bind(EnvironmentId::new().to_string())
+        .bind(foreign_workspace.to_string())
+        .bind(foreign_environment.to_string())
         .fetch_one(&pool)
         .await
         .expect("cross-tenant probe");
         assert_eq!(cross_tenant_count, 0);
+        let cross_tenant_warning_update = sqlx::query(
+            "UPDATE document_renders SET warnings=ARRAY['document_data_missing']
+             WHERE id='dprv_live_fixture' AND workspace_id=$1 AND environment_id=$2",
+        )
+        .bind(foreign_workspace.to_string())
+        .bind(foreign_environment.to_string())
+        .execute(&pool)
+        .await
+        .expect("cross-tenant warning update probe");
+        assert_eq!(cross_tenant_warning_update.rows_affected(), 0);
 
         let approval = sqlx::query(
             "INSERT INTO document_previews
@@ -287,7 +332,6 @@ async fn preview_render_migrates_fresh_and_n_minus_one_with_hard_purpose_fences(
         .execute(&pool)
         .await
         .expect("expired preview fixture");
-        let store = PostgresStore::from_pool(pool.clone());
         let claims = store
             .claim_document_renders("preview-test", 100, 30)
             .await

@@ -20,6 +20,7 @@ import {
 import { MemoryShopRepository, normalizeShopDomain } from "../app/core/model";
 import {
   parseRenderCost,
+  rendererWarnings,
   ShopifyPrintingService,
 } from "../app/core/printing.server";
 import { renderShopifyLiquid } from "../app/core/liquid-template.server";
@@ -65,6 +66,29 @@ import { templatesIndexUrl } from "../app/routes/app._index";
 import { configuredShopifyScopes } from "../app/core/shopify-scopes.server";
 
 const shop = "fixture-shop.myshopify.com";
+
+describe("renderer warnings", () => {
+  it("turns missing template data into a non-blocking merchant warning", () => {
+    expect(rendererWarnings(["document_data_missing"])).toEqual([
+      {
+        code: "document_data_missing",
+        message:
+          "Some template data was unavailable for this selection. Piqae left those values blank and generated the document.",
+      },
+    ]);
+  });
+
+  it("deduplicates unknown future warning codes into one safe message", () => {
+    expect(rendererWarnings(["future_one", "future_two"])).toEqual([
+      {
+        code: "render_warning",
+        message:
+          "Piqae generated this document with a non-blocking renderer warning. Review the preview before printing.",
+      },
+    ]);
+  });
+});
+
 const order = {
   id: "gid://shopify/Order/42",
   name: "#1042",
