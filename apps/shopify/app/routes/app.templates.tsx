@@ -53,6 +53,15 @@ export function customizedSystemDraft(
     revision: 1,
   };
 }
+export function canDeleteTemplate(template: MerchantTemplate): boolean {
+  if (template.published) return false;
+  try {
+    return !parseTemplateEnvelope(template.source).system?.immutable;
+  } catch {
+    // A damaged merchant draft must remain removable from the list.
+    return true;
+  }
+}
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await shopify.authenticate.admin(request);
   const services = createProductionServices();
@@ -90,8 +99,20 @@ export async function action({ request }: ActionFunctionArgs) {
         });
       return { ok: true, error: "", connection };
     }
-    if (form.get("intent") !== "customize")
-      throw new Error("Unsupported template action");
+    const intent = form.get("intent");
+    if (intent === "delete") {
+      const templateId = bounded(form, "templateId", 200, true);
+      const existing = await workflows().getTemplate(session.shop, templateId);
+      if (
+        !existing ||
+        !canDeleteTemplate(existing) ||
+        !(await workflows().deleteTemplate(session.shop, templateId))
+      )
+        throw new Error("Only your unpublished drafts can be deleted");
+      await syncTemplateIndex(admin, workflows(), session.shop);
+      return { ok: true, error: "", deleted: true };
+    }
+    if (intent !== "customize") throw new Error("Unsupported template action");
     const templateId = bounded(form, "templateId", 200, true);
     const existing = await workflows().getTemplate(session.shop, templateId);
     if (!existing) throw new Error("System document was not found");
@@ -114,7 +135,11 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 export default function Templates() {
   const data = useLoaderData<typeof loader>();
-  const result = useActionData<{ error: string }>();
+  const result = useActionData<{
+    ok?: boolean;
+    error: string;
+    deleted?: boolean;
+  }>();
   const connector = useFetcher<typeof action>();
   const revalidator = useRevalidator();
   const connectionWindow = useRef<Window | null>(null);
@@ -208,6 +233,8 @@ export default function Templates() {
       <s-section padding="none" accessibilityLabel="Templates table">
         {result?.error ? (
           <s-banner tone="critical">{result.error}</s-banner>
+        ) : result?.deleted ? (
+          <s-banner tone="success">Template deleted.</s-banner>
         ) : null}
         {visibleTemplates.length ? (
           <s-table>
@@ -314,6 +341,37 @@ export default function Templates() {
                             >
                               Duplicate
                             </s-link>
+                            {canDeleteTemplate(template) ? (
+                              <Form
+                                method="post"
+                                onSubmit={(event) => {
+                                  if (
+                                    !window.confirm(
+                                      `Delete “${template.name}”? This cannot be undone.`,
+                                    )
+                                  )
+                                    event.preventDefault();
+                                }}
+                              >
+                                <input
+                                  type="hidden"
+                                  name="intent"
+                                  value="delete"
+                                />
+                                <input
+                                  type="hidden"
+                                  name="templateId"
+                                  value={template.id}
+                                />
+                                <s-button
+                                  type="submit"
+                                  variant="secondary"
+                                  tone="critical"
+                                >
+                                  Delete
+                                </s-button>
+                              </Form>
+                            ) : null}
                           </>
                         )}
                         <s-link

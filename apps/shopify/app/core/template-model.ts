@@ -203,6 +203,34 @@ export function assetIsStoredFor(
   );
 }
 
+/** Resolve static PrintPacket resources to their Shopify Files thumbnails. */
+export function templateResourcePreviewUrls(
+  document: PrintPacket,
+  assets: readonly ExternalAsset[],
+): Record<string, string> {
+  const assetsByDigest = new Map<string, string>();
+  for (const asset of assets) {
+    if (!asset.sourceUrl) continue;
+    try {
+      if (new URL(asset.sourceUrl).origin === "https://cdn.shopify.com")
+        assetsByDigest.set(asset.digest, asset.sourceUrl);
+    } catch {
+      // Invalid legacy metadata retains the normal missing-image placeholder.
+    }
+  }
+  const previews: Record<string, string> = {};
+  for (const [resourceKey, resource] of Object.entries(
+    document.resources ?? {},
+  )) {
+    if (resource.type !== "image") continue;
+    const sourceUrl = assetsByDigest.get(
+      resource.digest.replace(/^sha256:/, ""),
+    );
+    if (sourceUrl) previews[resourceKey] = sourceUrl;
+  }
+  return previews;
+}
+
 export type PrintPacketCompatibilityRepair = {
   document: PrintPacket;
   warnings: string[];

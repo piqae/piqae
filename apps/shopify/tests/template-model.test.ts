@@ -6,6 +6,7 @@ import {
   validateRendererCompatiblePrintPacket,
   validatePrintPacket,
   documentHasPageBreak,
+  templateResourcePreviewUrls,
 } from "../app/core/template-model";
 import { starterTemplates } from "../app/core/starter-templates";
 import starterSpecifications from "./fixtures/printpacket/starter-specifications.json";
@@ -20,6 +21,44 @@ const allNodes = (nodes: any[]): any[] =>
     ...(Array.isArray(node.empty) ? allNodes(node.empty) : []),
   ]);
 describe("PrintPacket model", () => {
+  it("maps only declared static image resources to Shopify media previews", () => {
+    const digest = "a".repeat(64);
+    const document = structuredClone(starterTemplates[0]!.specification);
+    document.resources = {
+      uploaded_logo: {
+        type: "image",
+        digest: `sha256:${digest}`,
+        media_type: "image/jpeg",
+        byte_length: 128,
+      },
+    };
+    expect(
+      templateResourcePreviewUrls(document, [
+        {
+          id: "gid://shopify/MediaImage/1",
+          digest,
+          mediaType: "image/jpeg",
+          bytes: 128,
+          sourceUrl: "https://cdn.shopify.com/s/files/logo.png",
+          sourceMediaType: "image/png",
+          sourceTransform: "piqae-jpeg-v1",
+        },
+      ]),
+    ).toEqual({
+      uploaded_logo: "https://cdn.shopify.com/s/files/logo.png",
+    });
+    expect(
+      templateResourcePreviewUrls(document, [
+        {
+          id: "legacy",
+          digest,
+          mediaType: "image/jpeg",
+          bytes: 128,
+          sourceUrl: "http://127.0.0.1/private.png",
+        },
+      ]),
+    ).toEqual({});
+  });
   it("keeps the checked cross-runtime renderer fixtures identical to every starter", () => {
     expect(
       Object.fromEntries(

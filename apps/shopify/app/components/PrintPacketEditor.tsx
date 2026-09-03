@@ -276,6 +276,7 @@ export function PrintPacketEditor({
   disabled,
   customFields = [],
   stock = null,
+  resourcePreviewUrls = {},
   workspaceControls,
   history: sharedHistory,
   onPickShopifyImage,
@@ -285,6 +286,7 @@ export function PrintPacketEditor({
   disabled?: boolean;
   customFields?: readonly ShopifyDocumentField[];
   stock?: DesignStock;
+  resourcePreviewUrls?: Readonly<Record<string, string>>;
   workspaceControls?: ReactNode;
   history?: PrintPacketEditorHistory;
   onPickShopifyImage?: () => Promise<PickedShopifyImage | null>;
@@ -382,7 +384,9 @@ export function PrintPacketEditor({
   };
   const undoDocument = () => applyHistoryStep("undo");
   const redoDocument = () => applyHistoryStep("redo");
-  const handleHistoryShortcut = (event: React.KeyboardEvent) => {
+  const handleHistoryShortcut = (
+    event: React.KeyboardEvent | KeyboardEvent,
+  ) => {
     if (
       disabled ||
       event.defaultPrevented ||
@@ -407,6 +411,20 @@ export function PrintPacketEditor({
     if (wantsUndo) undoDocument();
     else redoDocument();
   };
+  useEffect(() => {
+    const handleDocumentHistoryShortcut = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (
+        !(target instanceof Node) ||
+        (target !== document.body && !editorRoot.current?.contains(target))
+      )
+        return;
+      handleHistoryShortcut(event);
+    };
+    document.addEventListener("keydown", handleDocumentHistoryShortcut);
+    return () =>
+      document.removeEventListener("keydown", handleDocumentHistoryShortcut);
+  });
   useEffect(() => {
     if (documentHistory.present.key === currentDocumentKey) return;
     const reset = createEditorHistory(currentDocument);
@@ -952,6 +970,7 @@ export function PrintPacketEditor({
         {blocks.length || active ? (
           <DocumentCanvas
             blocks={blocks}
+            resourcePreviewUrls={resourcePreviewUrls}
             selectedPath={
               selection?.region === region ? selection.path : undefined
             }
@@ -1283,6 +1302,7 @@ export function PrintPacketEditor({
               >
                 <DocumentCanvas
                   blocks={canonicalBody}
+                  resourcePreviewUrls={resourcePreviewUrls}
                   insertionSlots={false}
                   selectedPath={
                     selection?.region === "body" ? selection.path : undefined
@@ -1839,6 +1859,7 @@ function MediaRuler({
 
 function DocumentCanvas({
   blocks,
+  resourcePreviewUrls,
   path = [],
   branch = "root",
   editable = true,
@@ -1854,6 +1875,7 @@ function DocumentCanvas({
   onChange,
 }: {
   blocks: Block[];
+  resourcePreviewUrls: Readonly<Record<string, string>>;
   path?: BlockPath;
   branch?: BlockPathPart["branch"];
   editable?: boolean;
@@ -1888,6 +1910,7 @@ function DocumentCanvas({
             ) : null}
             <CanvasBlock
               block={block}
+              resourcePreviewUrls={resourcePreviewUrls}
               path={blockPath}
               editable={editable}
               mediaKind={mediaKind}
@@ -1919,6 +1942,7 @@ function DocumentCanvas({
 
 function CanvasBlock({
   block,
+  resourcePreviewUrls,
   path,
   editable,
   mediaKind,
@@ -1933,6 +1957,7 @@ function CanvasBlock({
   onChange,
 }: {
   block: Block;
+  resourcePreviewUrls: Readonly<Record<string, string>>;
   path: BlockPath;
   editable: boolean;
   mediaKind: PrintPacket["media"]["kind"];
@@ -2074,22 +2099,16 @@ function CanvasBlock({
     );
   if (block.type === "image" || block.type === "image_value")
     return (
-      <div
-        className={`piqae-canvas-image${block.type === "image_value" ? " piqae-canvas-image-dynamic" : ""}${selectableClass}${selected ? " piqae-canvas-selected" : ""}`}
-        data-image-fit={block.fit ?? "contain"}
-        style={{
-          width: physicalMm(block.width_mm),
-          height: physicalMm(block.height_mm),
-        }}
+      <CanvasImage
+        block={block}
+        previewUrl={
+          block.type === "image"
+            ? resourcePreviewUrls[block.resource]
+            : undefined
+        }
+        className={`${selectableClass}${selected ? " piqae-canvas-selected" : ""}`}
         onClick={select}
-      >
-        <span aria-hidden="true">▧</span>
-        <small>
-          {block.type === "image"
-            ? block.resource
-            : expressionLabel(block.resource)}
-        </small>
-      </div>
+      />
     );
   if (block.type === "qr")
     return (
@@ -2577,6 +2596,7 @@ function CanvasBlock({
             {block.empty?.length ? (
               <DocumentCanvas
                 blocks={block.empty}
+                resourcePreviewUrls={resourcePreviewUrls}
                 path={path}
                 branch="empty"
                 editable={editable}
@@ -2620,6 +2640,7 @@ function CanvasBlock({
           </span>
         )}
         <CollectionCanvasBranch
+          resourcePreviewUrls={resourcePreviewUrls}
           label="List header"
           emptyLabel="Add list header"
           blocks={block.header ?? []}
@@ -2637,6 +2658,7 @@ function CanvasBlock({
           onAdd={(child) => onChange({ ...block, header: [child] }, path)}
         />
         <CollectionCanvasBranch
+          resourcePreviewUrls={resourcePreviewUrls}
           label="Representative item"
           emptyLabel="Add item content"
           blocks={block.item}
@@ -2655,6 +2677,7 @@ function CanvasBlock({
         />
         {preview ? null : (
           <CollectionCanvasBranch
+            resourcePreviewUrls={resourcePreviewUrls}
             label="Empty state"
             emptyLabel="Add empty state"
             blocks={block.empty ?? []}
@@ -2695,6 +2718,7 @@ function CanvasBlock({
         {block.then.length ? (
           <DocumentCanvas
             blocks={block.then}
+            resourcePreviewUrls={resourcePreviewUrls}
             path={path}
             branch="then"
             editable={editable}
@@ -2732,6 +2756,7 @@ function CanvasBlock({
             </span>
             <DocumentCanvas
               blocks={block.else}
+              resourcePreviewUrls={resourcePreviewUrls}
               path={path}
               branch="else"
               editable={editable}
@@ -2822,6 +2847,7 @@ function CanvasBlock({
       {children.length ? (
         <DocumentCanvas
           blocks={children}
+          resourcePreviewUrls={resourcePreviewUrls}
           path={path}
           branch="children"
           editable={editable}
@@ -2849,6 +2875,48 @@ function CanvasBlock({
         />
       )}
     </section>
+  );
+}
+
+function CanvasImage({
+  block,
+  previewUrl,
+  className,
+  onClick,
+}: {
+  block: Extract<Block, { type: "image" | "image_value" }>;
+  previewUrl?: string;
+  className: string;
+  onClick(event: React.MouseEvent): void;
+}) {
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const showImage = Boolean(previewUrl && failedUrl !== previewUrl);
+  const label =
+    block.type === "image" ? block.resource : expressionLabel(block.resource);
+  return (
+    <div
+      className={`piqae-canvas-image${block.type === "image_value" ? " piqae-canvas-image-dynamic" : ""}${showImage ? " piqae-canvas-image-resolved" : ""}${className}`}
+      data-image-fit={block.fit ?? "contain"}
+      style={{
+        width: physicalMm(block.width_mm),
+        height: physicalMm(block.height_mm),
+      }}
+      onClick={onClick}
+    >
+      {showImage ? (
+        <img
+          src={previewUrl}
+          alt=""
+          referrerPolicy="no-referrer"
+          onError={() => setFailedUrl(previewUrl ?? null)}
+        />
+      ) : (
+        <>
+          <span aria-hidden="true">▧</span>
+          <small>{label}</small>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -2885,6 +2953,7 @@ function TableRowInsertionBoundary({
 }
 
 function CollectionCanvasBranch({
+  resourcePreviewUrls,
   label,
   emptyLabel,
   blocks,
@@ -2901,6 +2970,7 @@ function CollectionCanvasBranch({
   onChange,
   onAdd,
 }: {
+  resourcePreviewUrls: Readonly<Record<string, string>>;
   label: string;
   emptyLabel: string;
   blocks: Block[];
@@ -2940,6 +3010,7 @@ function CollectionCanvasBranch({
       {blocks.length ? (
         <DocumentCanvas
           blocks={blocks}
+          resourcePreviewUrls={resourcePreviewUrls}
           path={path}
           branch={branch}
           editable={editable}
