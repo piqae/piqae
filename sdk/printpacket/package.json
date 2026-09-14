@@ -30,7 +30,7 @@
     "prepack": "pnpm generate:check && pnpm build && publint"
   },
   "devDependencies": {
-    "publint": "0.3.22",
+    "publint": "0.3.24",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   }
