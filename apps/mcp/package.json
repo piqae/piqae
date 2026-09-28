@@ -39,14 +39,14 @@
     "prepack": "pnpm --filter @piqae/sdk build && pnpm build"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/sdk": "1.30.1",
     "@piqae/sdk": "workspace:*",
-    "zod": "4.4.3"
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "@types/node": "^22.15.30",
-    "prettier": "^3.5.3",
-    "tsx": "^4.20.3",
+    "prettier": "^3.9.9",
+    "tsx": "^4.23.15",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   }
